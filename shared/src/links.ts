@@ -64,7 +64,7 @@ export const SITE_LINKS = {
 
     /** 官方营销站点 */
     website: {
-        dev: 'http://localhost:31264/', // website 应用开发环境端口
+        dev: 'https://hagicode.com/', // 使用生产 URL（跨仓库链接）
         prod: 'https://hagicode.com/',
         external: false,
     } as LinkConfig,
@@ -99,7 +99,7 @@ export const SITE_LINKS = {
 
     /** 桌面应用下载页 */
     desktop: {
-        dev: 'http://localhost:31264/desktop/',
+        dev: 'https://hagicode.com/desktop/', // 使用生产 URL（跨仓库链接）
         prod: 'https://hagicode.com/desktop/',
         external: false,
     } as LinkConfig,
@@ -113,7 +113,7 @@ export const SITE_LINKS = {
 
     /** 容器部署落地页 */
     container: {
-        dev: 'http://localhost:31264/container/',
+        dev: 'https://hagicode.com/container/', // 使用生产 URL（跨仓库链接）
         prod: 'https://hagicode.com/container/',
         external: false,
     } as LinkConfig,
