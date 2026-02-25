@@ -129,6 +129,12 @@ export const SITE_LINKS = {
 /**
  * GLM（智谱 AI）推广链接配置
  * 用于博客广告区域和其他推广位置
+ *
+ * @deprecated 推广链接已迁移到 Presets JSON 配置系统
+ * 请使用 `@/utils/promoConfig` 中的 `getPromoContent()` 函数获取动态配置的推广内容
+ * 此导出仅为向后兼容保留，将在未来版本中移除
+ *
+ * @see {@link ../src/utils/promoConfig.ts}
  */
 export const GLM_PROMO_LINKS = {
     /** 智谱 GLM Coding 订阅链接（带推广码） */
@@ -153,6 +159,12 @@ export const GLM_PROMO_LINKS = {
 /**
  * 阿里云（Aliyun）推广链接配置
  * 用于博客广告区域和其他推广位置
+ *
+ * @deprecated 推广链接已迁移到 Presets JSON 配置系统
+ * 请使用 `@/utils/promoConfig` 中的 `getPromoContent()` 函数获取动态配置的推广内容
+ * 此导出仅为向后兼容保留，将在未来版本中移除
+ *
+ * @see {@link ../src/utils/promoConfig.ts}
  */
 export const ALIYUN_PROMO_LINKS = {
     /** 阿里云千问 Coding Plan 订阅链接（带推广码） */
@@ -167,6 +179,12 @@ export const ALIYUN_PROMO_LINKS = {
 
 /**
  * 获取 GLM Coding 推广链接
+ *
+ * @deprecated 推广链接已迁移到 Presets JSON 配置系统
+ * 请使用 `@/utils/promoConfig` 中的 `getPromoContent()` 函数获取动态配置的推广内容
+ * 此函数仅为向后兼容保留，将在未来版本中移除
+ *
+ * @see {@link ../src/utils/promoConfig.ts}
  * @returns GLM Coding 推广链接 URL
  */
 export function getGlmCodingUrl(): string {
@@ -175,6 +193,12 @@ export function getGlmCodingUrl(): string {
 
 /**
  * 获取阿里云千问 Coding Plan 推广链接
+ *
+ * @deprecated 推广链接已迁移到 Presets JSON 配置系统
+ * 请使用 `@/utils/promoConfig` 中的 `getPromoContent()` 函数获取动态配置的推广内容
+ * 此函数仅为向后兼容保留，将在未来版本中移除
+ *
+ * @see {@link ../src/utils/promoConfig.ts}
  * @returns 阿里云千问 Coding Plan 推广链接 URL
  */
 export function getAliyunPromoUrl(): string {
