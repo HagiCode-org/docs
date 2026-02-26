@@ -117,6 +117,10 @@ export default defineConfig({
           label: "相关软件安装",
           autogenerate: { directory: "related-software-installation" },
         },
+        {
+          label: "功能指南",
+          autogenerate: { directory: "guides" },
+        },
       ],
       customCss: ["./src/styles/starlight-override.css"],
       editLink: {
