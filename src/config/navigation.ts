@@ -2,6 +2,7 @@
  * 导航链接配置
  * 站点导航链接的统一数据源,确保所有组件使用相同的链接配置
  * 使用共享链接库管理站点间跳转和公共链接
+ * 支持中英文双语显示
  */
 import { getLink, getLinkTarget, getLinkRel, type PublicLinkKey } from '@shared/links';
 
@@ -12,6 +13,9 @@ import { getLink, getLinkTarget, getLinkRel, type PublicLinkKey } from '@shared/
 export interface NavLink {
   /** 链接显示文本 */
   label: string;
+
+  /** 英文版显示文本 */
+  labelEn?: string;
 
   /** 链接地址 (支持相对路径和绝对 URL) */
   href: string;
@@ -29,20 +33,24 @@ export interface NavLink {
 /**
  * 站点导航链接配置
  * 使用共享链接库,自动根据环境切换开发/生产链接
+ * 根据语言显示不同的文本
  */
 export const navLinks: NavLink[] = [
   {
     label: "首页",
+    labelEn: "Home",
     href: getLink('website'),
     linkKey: 'website',
   },
   {
     label: "博客",
+    labelEn: "Blog",
     href: getLink('blog'),
     linkKey: 'blog',
   },
   {
     label: "技术支持群",
+    labelEn: "Support Group",
     href: getLink('qqGroup'),
     external: true,
     icon: "comment",

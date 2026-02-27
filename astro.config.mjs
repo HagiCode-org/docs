@@ -88,6 +88,19 @@ export default defineConfig({
       title: "Hagicode Docs",
       description: "Hagicode 项目文档",
       favicon: "/favicon.ico",
+      // i18n configuration - Enable multi-language support
+      // Use "root" for Chinese to serve at / paths (no /zh-cn/ prefix)
+      defaultLocale: "root",
+      locales: {
+        root: {
+          label: "中文",
+          lang: "zh-CN",
+        },
+        en: {
+          label: "English",
+          lang: "en",
+        },
+      },
       social: [
         {
           icon: "github",
@@ -103,22 +116,27 @@ export default defineConfig({
       sidebar: [
         {
           label: "产品概述",
+          translations: { en: "Product Overview" },
           link: "/product-overview",
         },
         {
           label: "快速开始",
+          translations: { en: "Quick Start" },
           autogenerate: { directory: "quick-start" },
         },
         {
           label: "安装指南",
+          translations: { en: "Installation Guide" },
           autogenerate: { directory: "installation" },
         },
         {
           label: "相关软件安装",
+          translations: { en: "Related Software Installation" },
           autogenerate: { directory: "related-software-installation" },
         },
         {
           label: "功能指南",
+          translations: { en: "Guides" },
           autogenerate: { directory: "guides" },
         },
       ],

@@ -2,6 +2,7 @@
  * InstallButton 组件 - 文档站点版本 (React)
  * 支持自动平台检测、下拉菜单选择版本、Docker 版本跳转
  * 用于 Header 导航栏
+ * 支持中英文双语
  */
 import React, { useState, useMemo, useEffect } from 'react';
 import { getLink } from '@shared/links';
@@ -64,6 +65,13 @@ interface InstallButtonProps {
    * - beta: 测试版
    */
   channel?: 'stable' | 'beta';
+
+  /**
+   * 语言区域（默认 'zh'）
+   * - zh: 中文
+   * - en: 英文
+   */
+  locale?: 'zh' | 'en';
 }
 
 /**
@@ -90,12 +98,32 @@ export default function InstallButton({
   initialVersion = null,
   initialPlatforms = [],
   versionError = null,
-  channel = 'stable'
+  channel = 'stable',
+  locale = 'zh'
 }: InstallButtonProps) {
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
   const [version, setVersion] = useState<DesktopVersion | null>(initialVersion);
   const [platforms, setPlatforms] = useState<PlatformGroup[]>(initialPlatforms);
   const [error, setError] = useState<string | null>(versionError);
+
+  // 翻译文本
+  const t = useMemo(() => {
+    return locale === 'en' ? {
+      installNow: 'Install Now',
+      installHagicodeDesktop: 'Install Hagicode Desktop Now',
+      selectOtherVersion: 'Select Other Version',
+      selectDownloadVersion: 'Select Download Version',
+      recommended: 'Recommended',
+      containerDeployment: 'Container Deployment',
+    } : {
+      installNow: '立即安装',
+      installHagicodeDesktop: '立即安装 Hagicode Desktop',
+      selectOtherVersion: '选择其他版本',
+      selectDownloadVersion: '选择下载版本',
+      recommended: '⭐推荐',
+      containerDeployment: '容器部署',
+    };
+  }, [locale]);
 
   // 客户端数据获取（如果服务端没有提供数据）
   useEffect(() => {
@@ -214,7 +242,7 @@ export default function InstallButton({
                 strokeLinejoin="round"
               />
             </svg>
-            <span className="btn-text">立即安装</span>
+            <span className="btn-text">{t.installNow}</span>
           </a>
         </div>
       </div>
@@ -228,7 +256,7 @@ export default function InstallButton({
         <a
           href={currentUrl}
           className="btn-download-main"
-          aria-label="立即安装 Hagicode Desktop"
+          aria-label={t.installHagicodeDesktop}
         >
           <svg className="download-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
             <path
@@ -239,7 +267,7 @@ export default function InstallButton({
               strokeLinejoin="round"
             />
           </svg>
-          <span className="btn-text">立即安装</span>
+          <span className="btn-text">{t.installNow}</span>
         </a>
 
         {/* 下拉切换按钮 */}
@@ -251,7 +279,7 @@ export default function InstallButton({
               aria-expanded={isDropdownOpen}
               aria-controls={`${buttonId}-menu`}
               aria-haspopup="listbox"
-              aria-label="选择其他版本"
+              aria-label={t.selectOtherVersion}
               onClick={handleToggleDropdown}
             >
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -264,7 +292,7 @@ export default function InstallButton({
               className={`dropdown-menu ${isDropdownOpen ? 'dropdown-menu-open' : ''}`}
               id={`${buttonId}-menu`}
               role="listbox"
-              aria-label="选择下载版本"
+              aria-label={t.selectDownloadVersion}
             >
               {platformData.map((platformGroup) => (
                 <React.Fragment key={platformGroup.platform}>
@@ -280,7 +308,7 @@ export default function InstallButton({
                     )}
                   </div>
                   {platformGroup.options.map((option, idx) => {
-                    const archLabel = getArchitectureLabel(option.assetType);
+                    const archLabel = getArchitectureLabel(option.assetType, locale);
                     const fileExt = getFileExtension(option.assetType);
                     const isRecommended = idx === 0;
                     return (
@@ -293,10 +321,10 @@ export default function InstallButton({
                           onClick={handleLinkClick}
                         >
                           <span className="dropdown-item-label">
-                            {getAssetTypeLabel(option.assetType)}
+                            {getAssetTypeLabel(option.assetType, locale)}
                             {archLabel && <span className="arch-label"> ({archLabel})</span>}
                             {fileExt && <span className="file-ext-badge">{fileExt}</span>}
-                            {isRecommended && <span className="recommended-badge">⭐推荐</span>}
+                            {isRecommended && <span className="recommended-badge">{t.recommended}</span>}
                           </span>
                           {option.size && (
                             <span className="dropdown-item-size">{option.size}</span>
@@ -319,7 +347,7 @@ export default function InstallButton({
                   <svg className="docker-icon" viewBox="0 0 24 24" fill="currentColor">
                     <path d="M13.983 11.078h2.119a.186.186 0 00.186-.185V9.006a.186.186 0 00-.186-.186h-2.119a.185.185 0 00-.185.185v1.888c0 .102.083.185.185.185m-2.954-5.43h2.118a.186.186 0 00.186-.186V3.574a.186.186 0 00-.186-.185h-2.118a.185.185 0 00-.185.185v1.888c0 .102.082.185.185.186m0 2.716h2.118a.187.187 0 00.186-.186V6.29a.186.186 0 00-.186-.185h-2.118a.185.185 0 00-.185.185v1.887c0 .102.082.185.185.186m-2.93 0h2.12a.186.186 0 00.184-.186V6.29a.185.185 0 00-.185-.185H8.1a.185.185 0 00-.185.185v1.887c0 .102.083.185.185.186m-2.964 0h2.119a.186.186 0 00.185-.186V6.29a.185.185 0 00-.185-.185H5.136a.186.186 0 00-.186.185v1.887c0 .102.084.185.186.186m5.893 2.715h2.118a.186.186 0 00.186-.185V9.006a.186.186 0 00-.186-.186h-2.118a.185.185 0 00-.185.185v1.888c0 .102.082.185.185.185m-2.93 0h2.12a.185.185 0 00.184-.185V9.006a.185.185 0 00-.184-.186h-2.12a.185.185 0 00-.184.185v1.888c0 .102.083.185.185.185m-2.964 0h2.119a.185.185 0 00.185-.185V9.006a.185.185 0 00-.185-.186h-2.12a.186.186 0 00-.185.186v1.887c0 .102.084.185.186.185m-2.92 0h2.12a.185.185 0 00.184-.185V9.006a.185.185 0 00-.184-.186h-2.12a.185.185 0 00-.184.185v1.888c0 .102.082.185.185.185M23.763 9.89c-.065-.051-.672-.51-1.954-.51-.338.001-.676.03-1.01.087-.248-1.7-1.653-2.53-1.716-2.566l-.344-.199-.226.327c-.284.438-.49.922-.612 1.43-.23.97-.09 1.882.403 2.661-.595.332-1.55.413-1.744.42H.751a.751.751 0 00-.75.748 11.376 11.376 0 00.692 4.062c.545 1.428 1.355 2.48 2.41 3.124 1.18.723 3.1 1.137 5.275 1.137.983.003 1.963-.086 2.93-.266a12.248 12.248 0 003.823-1.389c.98-.567 1.86-1.288 2.61-2.136 1.252-1.418 1.998-2.997 2.553-4.4h.221c1.372 0 2.215-.549 2.68-1.009.309-.293.55-.65.707-1.046l.098-.288z"/>
                   </svg>
-                  <span className="dropdown-item-label">容器部署</span>
+                  <span className="dropdown-item-label">{t.containerDeployment}</span>
                   <svg className="external-icon" viewBox="0 0 24 24" fill="none">
                     <path d="M18 13V19C18 19.5304 17.7893 20.0391 17.4142 20.4142C17.0391 20.7893 16.5304 21 16 21H5C4.46957 21 3.96086 20.7893 3.58579 20.4142C3.21071 20.0391 3 19.5304 3 19V8C3 7.46957 3.21071 6.96086 3.58579 6.58579C3.96086 6.21071 4.46957 6 5 6H11" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
                     <path d="M15 3H21V9" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>

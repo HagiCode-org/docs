@@ -134,8 +134,8 @@ export const PLATFORM_ICONS: Record<string, string> = {
  * @param assetType - 资源类型枚举值
  * @returns 架构标签（如 ARM64、x64）
  */
-export function getArchitectureLabel(assetType: AssetType): string {
-  const archLabels: Record<AssetType, string> = {
+export function getArchitectureLabel(assetType: AssetType, locale: 'zh' | 'en' = 'zh'): string {
+  const archLabelsZh: Record<AssetType, string> = {
     [AssetType.MacOSApple]: 'ARM64',
     [AssetType.MacOSIntel]: 'x64',
     [AssetType.WindowsSetup]: 'x64',
@@ -147,6 +147,21 @@ export function getArchitectureLabel(assetType: AssetType): string {
     [AssetType.Source]: '',
     [AssetType.Unknown]: '',
   };
+
+  const archLabelsEn: Record<AssetType, string> = {
+    [AssetType.MacOSApple]: 'ARM64',
+    [AssetType.MacOSIntel]: 'x64',
+    [AssetType.WindowsSetup]: 'x64',
+    [AssetType.WindowsPortable]: 'x64',
+    [AssetType.WindowsStore]: '',
+    [AssetType.LinuxAppImage]: 'Universal',
+    [AssetType.LinuxDeb]: 'amd64',
+    [AssetType.LinuxTarball]: 'Universal',
+    [AssetType.Source]: '',
+    [AssetType.Unknown]: '',
+  };
+
+  const archLabels = locale === 'en' ? archLabelsEn : archLabelsZh;
   return archLabels[assetType] || '';
 }
 
@@ -174,10 +189,11 @@ export function getFileExtension(assetType: AssetType): string {
 /**
  * 获取资源类型的显示名称
  * @param assetType - 资源类型枚举值
+ * @param locale - 语言区域代码 ('zh' | 'en')
  * @returns 显示名称
  */
-export function getAssetTypeLabel(assetType: AssetType): string {
-  const labels: Record<AssetType, string> = {
+export function getAssetTypeLabel(assetType: AssetType, locale: 'zh' | 'en' = 'zh'): string {
+  const labelsZh: Record<AssetType, string> = {
     [AssetType.WindowsSetup]: "安装程序",
     [AssetType.WindowsPortable]: "便携版",
     [AssetType.WindowsStore]: "Microsoft Store",
@@ -189,7 +205,22 @@ export function getAssetTypeLabel(assetType: AssetType): string {
     [AssetType.Source]: "源代码",
     [AssetType.Unknown]: "其他",
   };
-  return labels[assetType] || "未知";
+
+  const labelsEn: Record<AssetType, string> = {
+    [AssetType.WindowsSetup]: "Installer",
+    [AssetType.WindowsPortable]: "Portable",
+    [AssetType.WindowsStore]: "Microsoft Store",
+    [AssetType.MacOSApple]: "Apple Silicon",
+    [AssetType.MacOSIntel]: "Intel",
+    [AssetType.LinuxAppImage]: "AppImage",
+    [AssetType.LinuxDeb]: "Debian Package",
+    [AssetType.LinuxTarball]: "Tarball",
+    [AssetType.Source]: "Source Code",
+    [AssetType.Unknown]: "Other",
+  };
+
+  const labels = locale === 'en' ? labelsEn : labelsZh;
+  return labels[assetType] || (locale === 'en' ? "Unknown" : "未知");
 }
 
 /**
