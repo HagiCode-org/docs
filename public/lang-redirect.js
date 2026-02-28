@@ -52,6 +52,11 @@
       }
     });
 
+    // Preserve hash fragment
+    if (window.location.hash) {
+      targetUrl.hash = window.location.hash;
+    }
+
     // Redirect to target URL
     window.location.href = targetUrl.toString();
   } catch (e) {

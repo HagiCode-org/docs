@@ -4,27 +4,23 @@
  */
 
 import { defineMiddleware } from 'astro:middleware';
-import {
-  parseLangFromUrl,
-  mapLangToSiteFormat,
-  isValidLanguage,
-  buildTargetPath,
-} from './lib/i18n';
 
 export const onRequest = defineMiddleware((context, next) => {
-  const { request, url } = context;
+  const { url } = context;
 
   // Parse the lang parameter from the URL
-  const lang = parseLangFromUrl(url);
+  const lang = url.searchParams.get('lang');
+
+  console.log('Middleware - url:', url.pathname, 'lang param:', lang);
 
   // If no language parameter, proceed with normal routing
   if (!lang) {
     return next();
   }
 
-  // Validate the language parameter
-  if (!isValidLanguage(lang)) {
-    // Invalid language parameter: remove it and proceed
+  // Validate the language parameter - only support 'en' and 'zh-CN'
+  if (lang !== 'en' && lang !== 'zh-CN') {
+    // Invalid language parameter: remove it and redirect
     const cleanUrl = new URL(url);
     cleanUrl.searchParams.delete('lang');
     return new Response(null, {
@@ -36,52 +32,41 @@ export const onRequest = defineMiddleware((context, next) => {
   }
 
   // Map the language value to the site format
-  const mappedLang = mapLangToSiteFormat(lang);
+  // 'zh-CN' -> 'root' (no prefix), 'en' -> 'en' (with /en/ prefix)
+  const mappedLang = lang === 'en' ? 'en' : 'root';
+  console.log('Middleware - mappedLang:', mappedLang, 'pathname:', url.pathname);
 
-  // Build the target path with language prefix, preserving the original path
-  const targetPath = buildTargetPath(mappedLang, url.pathname);
+  // Build the target path with language prefix
+  let targetPath: string;
+  if (mappedLang === 'en') {
+    // Add /en/ prefix to the path
+    const cleanPath = url.pathname.endsWith('/') ? url.pathname.slice(0, -1) : url.pathname;
+    targetPath = `/en${cleanPath}`;
+  } else {
+    // For root (Chinese), use the original path
+    targetPath = url.pathname;
+  }
 
-  // Preserve other query parameters (excluding lang)
+  console.log('Middleware - targetPath:', targetPath);
+
+  // Preserve other query parameters (excluding lang) and hash
   const targetUrl = new URL(url.origin + targetPath);
   url.searchParams.forEach((value, key) => {
     if (key !== 'lang') {
       targetUrl.searchParams.set(key, value);
     }
   });
+  if (url.hash) {
+    targetUrl.hash = url.hash;
+  }
 
-  // Use 302 redirect for development to avoid caching issues
-  // and include localStorage update via a script tag
-  const htmlContent = `<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <title>Redirecting...</title>
-  <meta http-equiv="refresh" content="0; url=${targetUrl.toString()}">
-  <script>
-    (function() {
-      try {
-        // Set localStorage for Starlight language preference
-        const route = localStorage.getItem('starlight-route');
-        let routeObj = route ? JSON.parse(route) : {};
-        routeObj.lang = '${mappedLang}';
-        localStorage.setItem('starlight-route', JSON.stringify(routeObj));
-      } catch (e) {
-        // Silent fallback when localStorage is unavailable
-      }
-      // Redirect to target URL
-      window.location.href = '${targetUrl.toString()}';
-    })();
-  </script>
-</head>
-<body>
-  <p>Redirecting to <a href="${targetUrl.toString()}">${targetUrl.toString()}</a>...</p>
-</body>
-</html>`;
+  console.log('Middleware - redirecting to:', targetUrl.toString());
 
-  return new Response(htmlContent, {
-    status: 200,
+  // Return HTTP 302 redirect to target URL
+  return new Response(null, {
+    status: 302,
     headers: {
-      'Content-Type': 'text/html; charset=utf-8',
+      Location: targetUrl.toString(),
     },
   });
 });

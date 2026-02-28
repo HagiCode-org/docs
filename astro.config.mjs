@@ -27,8 +27,8 @@ export default defineConfig({
   site: "https://docs.hagicode.com",
   // 文档站点部署路径：独立部署在 docs.hagicode.com，使用根路径
   base: getBasePath(),
-  // 中间件配置 - 用于处理跨站语言参数传递
-  middleware: './src/middleware.ts',
+  // 中间件配置 - 暂时禁用，由页面级别处理重定向
+  // middleware: './src/middleware.ts',
   markdown: {
     syntaxHighlight: {
       type: "shiki",
