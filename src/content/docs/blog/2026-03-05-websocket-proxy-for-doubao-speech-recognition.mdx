@@ -1,0 +1,501 @@
+---
+title: 解决浏览器 WebSocket 认证难题：豆包语音识别的代理方案实践
+date: 2026-03-05
+tags: [websocket, proxy, speech-recognition, authentication, backend]
+---
+
+# 解决浏览器 WebSocket 认证难题：豆包语音识别的代理方案实践
+
+> 浏览器 WebSocket API 不支持自定义 HTTP header，这给需要通过 header 传递认证信息的语音识别服务带来了挑战。本文分享 HagiCode 项目中如何通过后端代理方案解决这个问题，以及从 playground 到生产环境的实践过程。
+
+
+## 背景
+
+其实在做 HagiCode 项目的语音识别功能时，我们也是满怀信心地选择了字节跳动的豆包语音识别服务。刚开始的设计很简单嘛——前端直接连豆包的 WebSocket 服务。这有什么难的？不就是建个连接，传点数据的事儿吗？
+
+可是吧，万万没想到——豆包的 API 要求通过 HTTP header 传递认证信息，什么 accessToken、secretKey 之类的。这下就有点尴尬了，因为浏览器的 WebSocket API 根本不支持设置自定义 header。
+
+你说不支持怎么办嘛？
+
+那时候也是纠结了一阵子的。毕竟摆在面前的两个选择：
+
+1. 把认证信息塞到 URL 查询参数里——简单粗暴
+2. 在后端做一层代理——看起来麻烦一点
+
+第一种方案吧，凭证就直接暴露在前端代码和本地存储里了。这安全吗？反正我是不太敢苟同的。而且有些 API 必须用 header 验证，根本走不通。
+
+最终想了想，还是选了第二种方案——在后端实现一个 WebSocket 代理。说起来也是巧合，这个方案最初是在我们的 playground 试验场里验证的，后来确认稳定了才应用到生产环境。毕竟谁也不想在生产环境当小白鼠嘛，这点儿道理我还是懂的。
+
+## 关于 HagiCode
+
+本文分享的方案来自我们在 [HagiCode](https://github.com/HagiCode-org/site) 项目中的实践经验。
+
+HagiCode 是一个 AI 代码助手项目，支持语音交互功能。怎么说呢，也就是因为需要在前端调用语音识别服务，我们才遇到了这个 WebSocket 认证问题，也才有了后面的解决方案。有时候想想吧，困难这东西也不是完全没有好处，至少让我们学会了用代理，不是吗？
+
+## 技术挑战分析
+
+### 浏览器 WebSocket 的限制
+
+标准 WebSocket API 看起来真的很简单：
+
+```javascript
+const ws = new WebSocket('wss://example.com/ws');
+```
+
+但问题就出在"简单"这两个字上——它只在 URL 里传递参数，没法像 HTTP 请求那样设置 headers：
+
+```javascript
+// 这在 WebSocket API 里是不支持的
+const ws = new WebSocket('wss://example.com/ws', {
+  headers: {
+    'Authorization': 'Bearer token'
+  }
+});
+```
+
+你看看，这找谁说理去？对于豆包语音识别这类需要 header 认证的服务，这个限制简直就是一道迈不过去的坎儿。
+
+罢了罢了，又能怎样呢？
+
+### 架构设计决策
+
+在设计方案的时候，我们也是左思右想，权衡了又权衡。
+
+**决策一：代理模式选择**
+
+我们比较了两种方案：
+
+| 方案 | 优点 | 缺点 | 决策 |
+|------|------|------|------|
+| 原生 WebSocket | 轻量、简单、直接转发 | 需手动处理连接管理 | 选择 |
+| SignalR | 自动重连、强类型 | 过度复杂、额外依赖 | 不选 |
+
+最后选了原生 WebSocket。说实话，也就是因为它最轻量，适合简单的双向二进制流转发。加个 SignalR 吧，确实有点杀鸡用牛刀的感觉，而且会增加延迟——这又何苦呢？
+
+**决策二：连接管理策略**
+
+我们采用了"每连接单会话"模式——每个前端 WebSocket 连接对应一个独立的豆包后端连接。
+
+这样做的好处也是显而易见的：
+- 实现简单，符合典型使用场景
+- 易于调试和故障排查
+- 资源隔离，避免会话间互相干扰
+
+其实说白了也就是——简单粗暴有时候反而是最好的选择。复杂的方案不一定好，简单的不一定差。
+
+**决策三：认证信息存储**
+
+凭证存在后端配置文件（appsettings.yml 或环境变量）里，通过依赖注入加载：
+
+- 配置方式简单，符合现有后端配置模式
+- 敏感信息不暴露给前端
+- 支持多环境配置（开发、测试、生产）
+
+这安全感嘛，总归是要有的。毕竟谁也不想自己的凭证满天飞，不是吗？
+
+### 数据流设计
+
+整体数据流是这样的：
+
+```
+前端 (浏览器)
+  │
+  │ ws://backend/api/voice/ws
+  │ WebSocket (二进制)
+  ▼
+后端 (代理)
+  │
+  │ wss://openspeech.bytedance.com/
+  │ (带认证 header)
+  ▼
+豆包 API
+```
+
+流程倒也不复杂，也就是这么几步：
+1. 前端通过 WebSocket 连接后端代理
+2. 后端代理接收音频数据，用带 header 的方式连接豆包 API
+3. 豆包 API 返回识别结果，代理转发给前端
+4. 全程异步双向流式传输
+
+一切看起来都是那么自然，不是吗？
+
+## 核心组件实现
+
+### 1. WebSocket 端点配置
+
+```csharp
+app.Map("/ws", async context =>
+{
+    if (context.WebSockets.IsWebSocketRequest)
+    {
+        // 从查询参数读取配置
+        var appId = context.Request.Query["appId"];
+        var accessToken = context.Request.Query["accessToken"];
+
+        // 验证必需参数
+        if (string.IsNullOrEmpty(appId) || string.IsNullOrEmpty(accessToken))
+        {
+            context.Response.StatusCode = 400;
+            return;
+        }
+
+        // 接受 WebSocket 连接
+        using var webSocket = await context.WebSockets.AcceptWebSocketAsync();
+
+        // 消息处理循环
+        var buffer = new byte[4096];
+        while (!webSocket.CloseStatus.HasValue)
+        {
+            var result = await webSocket.ReceiveAsync(buffer, CancellationToken.None);
+
+            if (result.MessageType == WebSocketMessageType.Close)
+            {
+                await webSocket.CloseAsync(
+                    result.CloseStatus.Value,
+                    result.CloseStatusDescription,
+                    CancellationToken.None);
+                break;
+            }
+
+            // 处理音频数据
+            await HandleAudioDataAsync(buffer, result.Count);
+        }
+    }
+});
+```
+
+### 2. 会话管理
+
+```csharp
+public class DoubaoSessionManager : IDoubaoSessionManager
+{
+    private readonly ConcurrentDictionary<string, DoubaoSession> _sessions = new();
+
+    public DoubaoSession CreateSession(string connectionId)
+    {
+        var session = new DoubaoSession(connectionId);
+        _sessions[connectionId] = session;
+        return session;
+    }
+
+    public async Task SendAudioAsync(string connectionId, byte[] audioData)
+    {
+        if (_sessions.TryGetValue(connectionId, out var session))
+        {
+            await session.SendAudioAsync(audioData);
+        }
+    }
+
+    public void RemoveSession(string connectionId)
+    {
+        if (_sessions.TryRemove(connectionId, out var session))
+        {
+            session.Dispose();
+        }
+    }
+}
+```
+
+用 ConcurrentDictionary 管理会话，线程安全也就不用操心了。每个连接进来就创建一个 Session，断开时自动清理——这大概就是所谓的"来也匆匆，去也匆匆"罢。
+
+### 3. 配置验证
+
+```csharp
+public class ClientConfigDto
+{
+    public string AppId { get; set; } = null!;
+    public string Access set; } =Token { get; null!;
+    public string? ServiceUrl { get; set; }
+    public string? ResourceId { get; set; }
+    public int? SampleRate { get; set; }
+    public int? BitsPerSample { get; set; }
+    public int? Channels { get; set; }
+
+    public void Validate()
+    {
+        if (string.IsNullOrWhiteSpace(AppId))
+            throw new ArgumentException("AppId is required");
+        if (string.IsNullOrWhiteSpace(AccessToken))
+            throw new ArgumentException("AccessToken is required");
+    }
+}
+```
+
+配置验证嘛，也就是为了在启动时就发现问题，避免运行时出什么幺蛾子。这点儿保障还是要的。
+
+## 消息协议设计
+
+前端和后端之间用 JSON 格式的文本消息做控制，用二进制消息传音频数据。
+
+控制消息示例：
+
+```json
+{
+    "type": "control",
+    "messageId": "msg_123",
+    "timestamp": "2026-03-03T10:00:00Z",
+    "payload": {
+        "command": "StartRecognition",
+        "parameters": {
+            "hotwordId": "hotword1",
+            "boosting_table_id": "table123"
+        }
+    }
+}
+```
+
+识别结果示例：
+
+```json
+{
+    "type": "result",
+    "timestamp": "2026-03-03T10:00:03Z",
+    "payload": {
+        "text": "你好世界",
+        "confidence": 0.95,
+        "duration": 1500,
+        "isFinal": true,
+        "utterances": [
+            {
+                "text": "你好",
+                "startTime": 0,
+                "endTime": 800,
+                "definite": true
+            }
+        ]
+    }
+}
+```
+
+这种设计把控制信号和音频数据分开，处理起来也是更清晰一些。有时候分而治之确实是个不错的办法。
+
+## 前端接入实践
+
+### WebSocket 连接
+
+```javascript
+class DoubaoVoiceClient {
+    constructor(config) {
+        this.config = config;
+        this.ws = null;
+    }
+
+    async connect() {
+        const url = new URL(this.config.wsUrl);
+        // 添加查询参数
+        Object.entries(this.config.params).forEach(([key, value]) => {
+            url.searchParams.set(key, value);
+        });
+
+        this.ws = new WebSocket(url);
+
+        return new Promise((resolve, reject) => {
+            this.ws.onopen = () => {
+                console.log('[DoubaoVoice] Connected');
+                resolve();
+            };
+
+            this.ws.onmessage = (event) => {
+                this._handleMessage(JSON.parse(event.data));
+            };
+
+            this.ws.onerror = reject;
+        });
+    }
+
+    _handleMessage(message) {
+        switch (message.type) {
+            case 'status':
+                this._handleStatus(message.payload);
+                break;
+            case 'result':
+                this.onResult?.(message.payload);
+                break;
+            case 'error':
+                console.error('[DoubaoVoice] Error:', message.payload);
+                break;
+        }
+    }
+}
+
+// 使用示例
+const client = new DoubaoVoiceClient({
+    wsUrl: 'ws://localhost:5000/ws',
+    params: {
+        appId: 'your-app-id',
+        accessToken: 'your-access-token',
+        sampleRate: 16000,
+        bitsPerSample: 16,
+        channels: 1
+    }
+});
+```
+
+### 音频采集与发送
+
+用 AudioWorkletNode 做音频处理，性能也会更好一些：
+
+```javascript
+// audio-worklet.js
+class AudioProcessorWorklet extends AudioWorkletProcessor {
+    process(inputs, outputs, parameters) {
+        const input = inputs[0]?.[0];
+        if (!input) return true;
+
+        // 转换为 16-bit PCM
+        const pcm = new Int16Array(input.length);
+        for (let i = 0; i < input.length; i++) {
+            pcm[i] = Math.max(-32768, Math.min(32767, input[i] * 32767));
+        }
+
+        this.port.postMessage({
+            type: 'audioData',
+            data: pcm.buffer
+        }, [pcm.buffer]);
+
+        return true;
+    }
+}
+
+registerProcessor('audio-processor', AudioProcessorWorklet);
+
+// 主线程代码
+async function startAudioRecording() {
+    const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+            sampleRate: 48000
+        }
+    });
+
+    const audioContext = new AudioContext();
+    const audioSource = audioContext.createMediaStreamSource(stream);
+
+    await audioContext.audioWorklet.addModule('/audio-worklet.js');
+    const audioWorkletNode = new AudioWorkletNode(audioContext, 'audio-processor');
+
+    audioWorkletNode.port.onmessage = (event) => {
+        if (event.data.type === 'audioData' && ws?.readyState === WebSocket.OPEN) {
+            ws.send(event.data.data); // 直接发送二进制数据
+        }
+    };
+
+    audioSource.connect(audioWorkletNode);
+}
+```
+
+AudioWorklet 比 ScriptProcessorNode 性能好很多，不会有音频卡顿的问题。这年代，谁还愿意听那种刺刺拉拉的噪音呢？
+
+## 后端配置
+
+### appsettings.json 示例
+
+```json
+{
+  "Serilog": {
+    "MinimumLevel": {
+      "Default": "Information",
+      "Override": {
+        "Microsoft": "Warning",
+        "System": "Warning"
+      }
+    },
+    "WriteTo": [
+      { "Name": "Console" },
+      {
+        "Name": "File",
+        "Args": { "path": "logs/log-.txt", "rollingInterval": "Day" }
+      }
+    ]
+  },
+  "Kestrel": {
+    "Urls": "http://0.0.0.0:5000"
+  }
+}
+```
+
+日志配置很重要，方便排查问题。Serilog 的 File sink 可以按天滚动，日志文件也不会太大。毕竟有些问题嘛，事后诸葛亮总是要容易一点的。
+
+## 注意事项和最佳实践
+
+### 1. 连接监控
+
+- 定期输出会话状态日志，方便追踪连接生命周期
+- 监控音频段数量和持续时间，识别异常连接
+- 记录与豆包服务的连接状态和重连情况
+
+这些也就是一些基本的操作罢了。
+
+### 2. 错误处理
+
+- 捕获并记录所有 WebSocket 异常
+- 使用 IAsyncDisposable 确保资源清理
+- 实现优雅的连接关闭和超时处理
+
+总而言之，稳字当头。
+
+### 3. 音频格式要求
+
+- 采样率：16000 Hz（推荐）或 8000 Hz
+- 位深度：16-bit
+- 声道：单声道
+- 编码：PCM (raw)
+
+格式不对会导致识别失败或者效果很差。这点儿规矩还是要守的。
+
+### 4. 安全考虑
+
+- 敏感凭证只存在后端配置里
+- 实施连接数限制防止资源耗尽
+- 生产环境用 HTTPS/WSS
+
+安全无小事，且行且珍惜罢。
+
+### 5. 性能优化
+
+- 用异步操作避免阻塞
+- 适当调整缓冲区大小（默认 4096 字节）
+- 考虑连接池和复用策略
+
+这些优化手段，能用上的就用上罢。
+
+## 部署建议
+
+1. **Docker 部署**：把代理服务打包成容器，方便扩展和管理
+2. **负载均衡**：用 Nginx 或 Envoy 做 WebSocket 反向代理
+3. **健康检查**：实现心跳机制监控服务可用性
+4. **日志聚合**：把日志发送到集中式日志系统（如 ELK、Loki）
+
+部署这事儿吧，说简单也简单，说复杂也复杂。也就是因人而异，因地制宜罢。
+
+## 总结
+
+WebSocket 代理方案解决了浏览器 WebSocket API 不支持自定义 header 的根本问题。在 HagiCode 项目中，这个方案从 playground 验证到生产环境部署，证明了它的可行性和稳定性。
+
+关键点总结：
+- 后端代理可以安全地传递认证信息
+- 原生 WebSocket 轻量高效，适合简单场景
+- "每连接单会话"简化了实现和调试
+- 前后端消息协议分离控制信号和音频数据
+
+如果你也在做需要 WebSocket 认证的功能，希望这个方案能给你一些启发。
+
+有什么问题的话，欢迎来讨论。毕竟技术这东西嘛，都是在交流中进步的。
+
+## 参考资料
+
+- [HagiCode 项目仓库](https://github.com/HagiCode-org/site)
+- [MDN Web API - WebSocket](https://developer.mozilla.org/en-US/docs/Web/API/WebSocket)
+- [豆包语音识别文档](https://www.volcengine.com/docs/6561/81958)
+
+---
+
+感谢您的阅读,如果您觉得本文有用,快点击下方点赞按钮👍,让更多的人看到本文。
+
+本内容采用人工智能辅助协作,经本人审核,符合本人观点与立场。
+
+- 本文作者: [newbe36524](https://www.newbe.pro)
+- 本文链接: [https://docs.hagicode.com/blog/2026-03-05-websocket-proxy-for-doubao-speech-recognition/](https://docs.hagicode.com/blog/2026-03-05-websocket-proxy-for-doubao-speech-recognition/)
+- 版权声明: 本博客所有文章除特别声明外,均采用 BY-NC-SA 许可协议。转载请注明出处!
