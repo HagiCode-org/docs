@@ -18,6 +18,33 @@ import {
 import { getDesktopVersionData } from '@shared/version-manager';
 import type { DesktopVersion, PlatformGroup } from '@shared/desktop';
 
+const MAC_DOWNLOAD_DISABLED_NOTICE = '目前 Mac 版本还在开发中';
+
+function parseBooleanFlag(value: string | boolean | undefined, defaultValue: boolean): boolean {
+  if (typeof value === 'boolean') {
+    return value;
+  }
+
+  if (typeof value !== 'string') {
+    return defaultValue;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'true' || normalized === '1' || normalized === 'yes' || normalized === 'on') {
+    return true;
+  }
+  if (normalized === 'false' || normalized === '0' || normalized === 'no' || normalized === 'off') {
+    return false;
+  }
+
+  return defaultValue;
+}
+
+const FEATURE_MAC_DOWNLOAD_ENABLED = parseBooleanFlag(
+  import.meta.env.VITE_FEATURE_MAC_DOWNLOAD_ENABLED,
+  false
+);
+
 interface DownloadOption {
   label: string;
   url: string;
@@ -115,6 +142,7 @@ export default function InstallButton({
       selectDownloadVersion: 'Select Download Version',
       recommended: 'Recommended',
       containerDeployment: 'Container Deployment',
+      macInDevelopmentNotice: MAC_DOWNLOAD_DISABLED_NOTICE,
     } : {
       installNow: '立即安装',
       installHagicodeDesktop: '立即安装 Hagicode Desktop',
@@ -122,6 +150,7 @@ export default function InstallButton({
       selectDownloadVersion: '选择下载版本',
       recommended: '⭐推荐',
       containerDeployment: '容器部署',
+      macInDevelopmentNotice: MAC_DOWNLOAD_DISABLED_NOTICE,
     };
   }, [locale]);
 
@@ -164,10 +193,23 @@ export default function InstallButton({
   const buttonId = useMemo(() => `install-button-${Math.random().toString(36).substring(2, 11)}`, []);
 
   // 转换平台数据格式
-  const platformData = useMemo(() => {
+  const allPlatformData = useMemo(() => {
     if (!platforms || platforms.length === 0) return [];
     return convertPlatformGroups(platforms);
   }, [platforms]);
+
+  const platformData = useMemo(() => {
+    if (FEATURE_MAC_DOWNLOAD_ENABLED) {
+      return allPlatformData;
+    }
+
+    return allPlatformData.filter((platform) => platform.platform !== 'macos');
+  }, [allPlatformData]);
+
+  const macPlatform = useMemo(
+    () => allPlatformData.find((platform) => platform.platform === 'macos') || null,
+    [allPlatformData]
+  );
 
   // 根据用户系统设置默认下载链接
   const currentUrl = useMemo(() => {
@@ -176,6 +218,11 @@ export default function InstallButton({
     }
 
     const userOS = detectOS();
+
+    if (!FEATURE_MAC_DOWNLOAD_ENABLED && userOS === 'macos') {
+      return getLink('desktop');
+    }
+
     const userPlatform = platformData.find(p => p.platform === userOS);
 
     if (userPlatform) {
@@ -335,6 +382,30 @@ export default function InstallButton({
                   })}
                 </React.Fragment>
               ))}
+              {!FEATURE_MAC_DOWNLOAD_ENABLED && macPlatform && (
+                <>
+                  <div
+                    className={`dropdown-group-label platform--${macPlatform.platform}`}
+                    role="presentation"
+                  >
+                    <span className="platform-icon">{PLATFORM_ICONS[macPlatform.platform]}</span>
+                    <span className="platform-name">{macPlatform.platformLabel}</span>
+                    {version?.version && (
+                      <span className="version-tag">{version.version}</span>
+                    )}
+                  </div>
+                  <li role="none">
+                    <span
+                      className="dropdown-item dropdown-item-disabled"
+                      role="option"
+                      aria-disabled="true"
+                    >
+                      <span className="dropdown-item-label">macOS</span>
+                      <span className="dropdown-item-disabled-notice">{t.macInDevelopmentNotice}</span>
+                    </span>
+                  </li>
+                </>
+              )}
               {/* Docker 版本选项 - 带分隔线 */}
               <li role="separator" className="dropdown-separator" />
               <li role="none">
