@@ -30,6 +30,7 @@ const BLOG_PLUGIN_CONFIG = {
   postCount: 20,
   prefix: "blog",
   title: {
+    root: "博客",
     "zh-CN": "博客",
     en: "Blog",
   },
