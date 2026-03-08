@@ -153,16 +153,16 @@ function verifyAdVisibility() {
 
     runCheck('ad_container_presence', route, () => {
       assert(
-        html.includes('blog-header-ad-container') || html.includes('blog-footer-ad'),
+        html.includes('blog-header-promo-container') || html.includes('blog-footer-promo'),
         'Blog post is missing ad containers (header/footer).',
         route
       );
     });
 
     runCheck('ad_header_text', route, () => {
-      const adTitle = extractByClass(html, 'ad-title');
-      const adDescription = extractByClass(html, 'ad-description');
-      const adButton = extractByClass(html, 'ad-button');
+      const adTitle = extractByClass(html, 'promo-title');
+      const adDescription = extractByClass(html, 'promo-description');
+      const adButton = extractByClass(html, 'promo-button');
 
       assert(hasNonEmptyText(adTitle), 'Blog header ad title text is empty in build output.', route);
       assert(
@@ -174,9 +174,9 @@ function verifyAdVisibility() {
     });
 
     runCheck('ad_footer_text', route, () => {
-      const linkTitle = extractByClass(html, 'link-title');
-      const linkDesc = extractByClass(html, 'link-desc');
-      const linkButton = extractByClass(html, 'link-button');
+      const linkTitle = extractByClass(html, 'promo-link-title');
+      const linkDesc = extractByClass(html, 'promo-link-desc');
+      const linkButton = extractByClass(html, 'promo-link-button');
 
       assert(hasNonEmptyText(linkTitle), 'Blog footer ad title text is empty in build output.', route);
       assert(hasNonEmptyText(linkDesc), 'Blog footer ad description text is empty in build output.', route);
