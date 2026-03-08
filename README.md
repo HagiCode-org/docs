@@ -91,6 +91,8 @@ npm run preview
 
 ```bash
 npm run build:verify-blog-i18n
+# 或仅验证已构建产物
+npm run verify:blog-sidebar-i18n
 ```
 
 ### StarlightAd 线上可见性故障排查
