@@ -113,3 +113,59 @@ export function buildTargetPath(mappedLang: string, originalPath = '/'): string 
   // For root (Chinese), return the original path
   return originalPath;
 }
+
+/**
+ * Docs locale used by Starlight.
+ * - root: Chinese content without URL prefix
+ * - en: English content with /en prefix
+ */
+export type DocsLocale = 'root' | 'en';
+
+/**
+ * Normalize various locale inputs to Docs locale.
+ * Accepts both Starlight locale (`root`/`en`) and language tags (`zh`, `zh-CN`, `en`).
+ */
+export function normalizeDocsLocale(lang: string | null | undefined): DocsLocale {
+  if (!lang) {
+    return 'root';
+  }
+
+  const normalized = lang.trim().toLowerCase();
+  if (normalized === 'en' || normalized.startsWith('en-')) {
+    return 'en';
+  }
+
+  if (normalized === 'root' || normalized === 'zh' || normalized === 'zh-cn' || normalized.startsWith('zh-')) {
+    return 'root';
+  }
+
+  return 'root';
+}
+
+/**
+ * Resolve locale using a priority chain and fallback to root.
+ */
+export function resolveDocsLocale(...candidates: Array<string | null | undefined>): DocsLocale {
+  for (const candidate of candidates) {
+    if (!candidate) {
+      continue;
+    }
+
+    const locale = normalizeDocsLocale(candidate);
+    if (locale === 'en') {
+      return 'en';
+    }
+    if (locale === 'root') {
+      return 'root';
+    }
+  }
+
+  return 'root';
+}
+
+/**
+ * Map Docs locale to InstallButton locale prop.
+ */
+export function toInstallButtonLocale(locale: DocsLocale): 'zh' | 'en' {
+  return locale === 'en' ? 'en' : 'zh';
+}

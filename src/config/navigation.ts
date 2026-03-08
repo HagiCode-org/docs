@@ -5,6 +5,7 @@
  * 支持中英文双语显示
  */
 import { getLink, getLinkTarget, getLinkRel, type PublicLinkKey } from '@shared/links';
+import { resolveDocsLocale, type DocsLocale } from '@/lib/i18n';
 
 /**
  * 导航链接接口
@@ -28,6 +29,11 @@ export interface NavLink {
 
   /** 链接键名 (用于从共享库获取环境相关链接) */
   linkKey?: PublicLinkKey;
+}
+
+export interface LocalizedNavLink extends NavLink {
+  /** 当前 locale 最终渲染文案 */
+  displayLabel: string;
 }
 
 /**
@@ -57,6 +63,31 @@ export const navLinks: NavLink[] = [
     linkKey: 'qqGroup',
   },
 ];
+
+/**
+ * 按 locale 解析导航显示文案，缺失时回退到中文标签。
+ */
+export function getNavLinkLabel(link: NavLink, locale: DocsLocale): string {
+  if (locale === 'en' && link.labelEn) {
+    return link.labelEn;
+  }
+  return link.label || link.labelEn || '';
+}
+
+/**
+ * 获取已本地化的导航配置（用于渲染层）。
+ */
+export function getLocalizedNavLinks(localeInput?: string | null): LocalizedNavLink[] {
+  const locale = resolveDocsLocale(localeInput);
+  return navLinks.map((link) => ({
+    ...link,
+    href:
+      link.linkKey === 'blog'
+        ? (locale === 'en' ? '/en/blog/' : '/blog/')
+        : link.href,
+    displayLabel: getNavLinkLabel(link, locale),
+  }));
+}
 
 /**
  * 获取链接的完整属性

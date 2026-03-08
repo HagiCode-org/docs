@@ -1,5 +1,6 @@
 import rss from '@astrojs/rss';
 import { getCollection } from 'astro:content';
+import type { APIContext } from 'astro';
 
 // 获取 base 路径的函数（与 astro.config.mjs 中的逻辑一致）
 function getBasePath(): string {
@@ -8,12 +9,15 @@ function getBasePath(): string {
   return '/';
 }
 
-export async function GET(context) {
+type BlogEntry = Awaited<ReturnType<typeof getCollection<'docs'>>>[number];
+type BlogEntryWithDate = BlogEntry & { data: BlogEntry['data'] & { date: Date } };
+
+export async function GET(context: APIContext) {
   const blog = await getCollection('docs');
 
   // 过滤出博客文章（有 date 字段的）
   const posts = blog
-    .filter(post => post.data.date)
+    .filter((post): post is BlogEntryWithDate => post.data.date instanceof Date)
     .sort((a, b) => b.data.date.valueOf() - a.data.date.valueOf())
     .slice(0, 20); // 只显示最新的 20 篇
 
