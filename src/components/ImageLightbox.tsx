@@ -14,6 +14,7 @@
  */
 import { useEffect, useState, useCallback, useRef } from 'react';
 import Lightbox from 'yet-another-react-lightbox';
+import type { SlotStyles } from 'yet-another-react-lightbox';
 import Captions from 'yet-another-react-lightbox/plugins/captions';
 import Fullscreen from 'yet-another-react-lightbox/plugins/fullscreen';
 import Counter from 'yet-another-react-lightbox/plugins/counter';
@@ -60,7 +61,7 @@ function useImageDetection(options: DetectionOptions = {}): Slide[] {
   } = options;
 
   const [slides, setSlides] = useState<Slide[]>([]);
-  const debounceRef = useRef<NodeJS.Timeout>();
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   /**
    * Extract image metadata from an IMG element
@@ -281,17 +282,14 @@ export default function ImageLightbox({
   /**
    * Custom styles for Starlight theme integration
    */
-  const lightboxStyles = {
+  const lightboxStyles: SlotStyles = {
     container: {
       backgroundColor: 'var(--sl-color-bg, rgba(0, 0, 0, 0.9))',
-      '--yarl-color-base': 'var(--sl-color-text, #ffffff)',
-      '--yarl-color-disabled': 'var(--sl-color-text-low, #666666)',
-      '--yarl-color-root': 'var(--sl-color-bg, #000000)',
-    } as React.CSSProperties,
+    },
     button: {
       color: 'var(--sl-color-text, #ffffff)',
       backgroundColor: 'var(--sl-color-bg-accent, rgba(255, 255, 255, 0.1))',
-    } as React.CSSProperties,
+    },
   };
 
   // Don't render if no slides

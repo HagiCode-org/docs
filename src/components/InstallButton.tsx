@@ -16,7 +16,7 @@ import {
   getFileExtension
 } from '@shared/desktop-utils';
 import { getDesktopVersionData } from '@shared/version-manager';
-import type { DesktopVersion, PlatformGroup } from '@shared/desktop';
+import type { AssetType, DesktopVersion, PlatformGroup } from '@shared/desktop';
 
 const MAC_DOWNLOAD_DISABLED_NOTICE = '目前 Mac 版本还在开发中';
 
@@ -49,7 +49,7 @@ interface DownloadOption {
   label: string;
   url: string;
   size?: string;
-  assetType: string;
+  assetType: AssetType;
 }
 
 interface PlatformDownloads {
