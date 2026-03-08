@@ -195,10 +195,12 @@ export default defineConfig({
           name: "docs-blog-zhcn-i18n-compat",
           hooks: {
             "i18n:setup": ({ injectTranslations }) => {
-              // Starlight normalizes lang tags to lowercase (e.g. zh-cn). Inject
-              // a lowercase map so starlight-blog keys do not leak to UI.
+              // Starlight can resolve root Chinese routes with different lang tags
+              // across environments. Inject all known variants to avoid key leaks.
               injectTranslations({
+                "zh-CN": BLOG_UI_TRANSLATIONS_ZH_CN,
                 "zh-cn": BLOG_UI_TRANSLATIONS_ZH_CN,
+                zh: BLOG_UI_TRANSLATIONS_ZH_CN,
               });
             },
             "config:setup": () => {},
