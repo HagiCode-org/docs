@@ -36,6 +36,30 @@ const BLOG_PLUGIN_CONFIG = {
   },
 };
 
+const BLOG_UI_TRANSLATIONS_ZH_CN = {
+  "starlightBlog.authors.count_one": "{{count}} 篇文章 by {{author}}",
+  "starlightBlog.authors.count_other": "{{count}} 篇文章 by {{author}}",
+  "starlightBlog.metrics.readingTime.minutes": " - {{count}} 分钟阅读",
+  "starlightBlog.metrics.words_one": " - {{count}} 字",
+  "starlightBlog.metrics.words_other": " - {{count}} 字",
+  "starlightBlog.pagination.prev": "更新的文章",
+  "starlightBlog.pagination.next": "更早的文章",
+  "starlightBlog.post.date": "{{date, datetime(dateStyle: medium)}}",
+  "starlightBlog.post.lastUpdate":
+    ' - 最后更新: <time datetime="{{isoDate}}">{{date, datetime(dateStyle: medium)}}</time>',
+  "starlightBlog.post.draft": "草稿",
+  "starlightBlog.post.featured": "推荐",
+  "starlightBlog.post.tags": "标签:",
+  "starlightBlog.sidebar.all": "所有文章",
+  "starlightBlog.sidebar.featured": "推荐文章",
+  "starlightBlog.sidebar.recent": "最新文章",
+  "starlightBlog.sidebar.tags": "标签",
+  "starlightBlog.sidebar.authors": "作者",
+  "starlightBlog.sidebar.rss": "RSS",
+  "starlightBlog.tags.count_one": '{{count}} 篇包含标签 "{{tag}}" 的文章',
+  "starlightBlog.tags.count_other": '{{count}} 篇包含标签 "{{tag}}" 的文章',
+};
+
 const shouldRenderMermaid = process.env.SKIP_MERMAID_RENDER !== "true";
 
 // 获取 base 路径：文档站点独立部署在 docs.hagicode.com，开发和生产都使用根路径
@@ -167,6 +191,19 @@ export default defineConfig({
         baseUrl: "https://github.com/HagiCode-org/site/edit/main/",
       },
       plugins: [
+        {
+          name: "docs-blog-zhcn-i18n-compat",
+          hooks: {
+            "i18n:setup": ({ injectTranslations }) => {
+              // Starlight normalizes lang tags to lowercase (e.g. zh-cn). Inject
+              // a lowercase map so starlight-blog keys do not leak to UI.
+              injectTranslations({
+                "zh-cn": BLOG_UI_TRANSLATIONS_ZH_CN,
+              });
+            },
+            "config:setup": () => {},
+          },
+        },
         starlightBlog(BLOG_PLUGIN_CONFIG),
       ],
     }),

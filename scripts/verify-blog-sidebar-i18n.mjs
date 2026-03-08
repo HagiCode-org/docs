@@ -54,6 +54,10 @@ function hasLabelText(html, label) {
   return pattern.test(html);
 }
 
+function hasUnresolvedBlogI18nKey(html) {
+  return /starlightBlog\.[a-zA-Z0-9._-]+/.test(html);
+}
+
 function pickLatestBlogPostDir(prefix) {
   const blogDir = path.join(distDir, prefix, 'blog');
   if (!fs.existsSync(blogDir)) {
@@ -122,6 +126,22 @@ function verifyNavigation() {
       enRoute
     );
   });
+
+  runCheck('zh_sidebar_i18n_keys_resolved', zhRoute, () => {
+    assert(
+      !hasUnresolvedBlogI18nKey(zhBlogIndex),
+      'Chinese blog index still contains unresolved starlight-blog i18n keys.',
+      zhRoute
+    );
+  });
+
+  runCheck('en_sidebar_i18n_keys_resolved', enRoute, () => {
+    assert(
+      !hasUnresolvedBlogI18nKey(enBlogIndex),
+      'English blog index still contains unresolved starlight-blog i18n keys.',
+      enRoute
+    );
+  });
 }
 
 function verifyAdVisibility() {
@@ -161,6 +181,14 @@ function verifyAdVisibility() {
       assert(hasNonEmptyText(linkTitle), 'Blog footer ad title text is empty in build output.', route);
       assert(hasNonEmptyText(linkDesc), 'Blog footer ad description text is empty in build output.', route);
       assert(hasNonEmptyText(linkButton), 'Blog footer ad button text is empty in build output.', route);
+    });
+
+    runCheck('post_i18n_keys_resolved', route, () => {
+      assert(
+        !hasUnresolvedBlogI18nKey(html),
+        'Blog post page still contains unresolved starlight-blog i18n keys.',
+        route
+      );
     });
   }
 }
