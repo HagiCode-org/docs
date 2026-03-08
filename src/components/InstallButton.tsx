@@ -18,7 +18,8 @@ import {
 import { getDesktopVersionData } from '@shared/version-manager';
 import type { AssetType, DesktopVersion, PlatformGroup } from '@shared/desktop';
 
-const MAC_DOWNLOAD_DISABLED_NOTICE = '目前 Mac 版本还在开发中';
+const MAC_DOWNLOAD_DISABLED_NOTICE = '建议安装 Docker 版本';
+const MAC_DOWNLOAD_DISABLED_NOTICE_EN = 'Recommended: Install Docker version';
 
 function parseBooleanFlag(value: string | boolean | undefined, defaultValue: boolean): boolean {
   if (typeof value === 'boolean') {
@@ -142,7 +143,8 @@ export default function InstallButton({
       selectDownloadVersion: 'Select Download Version',
       recommended: 'Recommended',
       containerDeployment: 'Container Deployment',
-      macInDevelopmentNotice: MAC_DOWNLOAD_DISABLED_NOTICE,
+      macInDevelopmentNotice: MAC_DOWNLOAD_DISABLED_NOTICE_EN,
+      macContainerCta: 'Go to Container page',
     } : {
       installNow: '立即安装',
       installHagicodeDesktop: '立即安装 Hagicode Desktop',
@@ -151,8 +153,12 @@ export default function InstallButton({
       recommended: '⭐推荐',
       containerDeployment: '容器部署',
       macInDevelopmentNotice: MAC_DOWNLOAD_DISABLED_NOTICE,
+      macContainerCta: '前往 Container 页面',
     };
   }, [locale]);
+  const containerLink = useMemo(() => (
+    locale === 'en' ? 'https://hagicode.com/en/container/' : getLink('container')
+  ), [locale]);
 
   // 客户端数据获取（如果服务端没有提供数据）
   useEffect(() => {
@@ -404,13 +410,23 @@ export default function InstallButton({
                       <span className="dropdown-item-disabled-notice">{t.macInDevelopmentNotice}</span>
                     </span>
                   </li>
+                  <li role="none">
+                    <a
+                      href={containerLink}
+                      className="dropdown-item"
+                      role="option"
+                      onClick={handleLinkClick}
+                    >
+                      <span className="dropdown-item-label">{t.macContainerCta}</span>
+                    </a>
+                  </li>
                 </>
               )}
               {/* Docker 版本选项 - 带分隔线 */}
               <li role="separator" className="dropdown-separator" />
               <li role="none">
                 <a
-                  href={getLink('container')}
+                  href={containerLink}
                   className="dropdown-item dropdown-item-docker"
                   role="option"
                   onClick={handleLinkClick}

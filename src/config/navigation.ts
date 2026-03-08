@@ -71,7 +71,17 @@ export function getNavLinkLabel(link: NavLink, locale: DocsLocale): string {
   if (locale === 'en' && link.labelEn) {
     return link.labelEn;
   }
-  return link.label || link.labelEn || '';
+
+  if (link.label) {
+    return link.label;
+  }
+
+  if (link.labelEn) {
+    return link.labelEn;
+  }
+
+  // Keep navigation labels non-empty even when upstream config is incomplete.
+  return locale === 'en' ? 'Link' : '链接';
 }
 
 /**
