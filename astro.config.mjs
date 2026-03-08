@@ -14,6 +14,29 @@ import rehypeMermaid from "rehype-mermaid";
 // import rehypeRaw from "rehype-raw";
 import rehypeExternalLinks from "rehype-external-links";
 
+const DOCS_LOCALES = {
+  root: {
+    label: "中文",
+    lang: "zh-CN",
+  },
+  en: {
+    label: "English",
+    lang: "en",
+  },
+};
+
+const BLOG_PLUGIN_CONFIG = {
+  rss: false,
+  postCount: 20,
+  prefix: "blog",
+  title: {
+    "zh-CN": "博客",
+    en: "Blog",
+  },
+};
+
+const shouldRenderMermaid = process.env.SKIP_MERMAID_RENDER !== "true";
+
 // 获取 base 路径：文档站点独立部署在 docs.hagicode.com，开发和生产都使用根路径
 const getBasePath = () => {
   // 文档站点现在独立部署在 docs.hagicode.com
@@ -37,7 +60,7 @@ export default defineConfig({
     rehypePlugins: [
       // rehypeRaw 暂时禁用，可能与 MDX 处理冲突
       // rehypeRaw,
-      rehypeMermaid,
+      ...(shouldRenderMermaid ? [rehypeMermaid] : []),
       [
         rehypeExternalLinks,
         {
@@ -93,16 +116,7 @@ export default defineConfig({
       // i18n configuration - Enable multi-language support
       // Use "root" for Chinese to serve at / paths (no /zh-cn/ prefix)
       defaultLocale: "root",
-      locales: {
-        root: {
-          label: "中文",
-          lang: "zh-CN",
-        },
-        en: {
-          label: "English",
-          lang: "en",
-        },
-      },
+      locales: DOCS_LOCALES,
       social: [
         {
           icon: "github",
@@ -141,16 +155,18 @@ export default defineConfig({
           translations: { en: "Guides" },
           autogenerate: { directory: "guides" },
         },
+        {
+          label: "大模型指南",
+          translations: { en: "LLM Guide" },
+          autogenerate: { directory: "llm-guide" },
+        },
       ],
       customCss: ["./src/styles/starlight-override.css"],
       editLink: {
         baseUrl: "https://github.com/HagiCode-org/site/edit/main/",
       },
       plugins: [
-        starlightBlog({
-          rss: false,
-          postCount: 20,
-        }),
+        starlightBlog(BLOG_PLUGIN_CONFIG),
       ],
     }),
     sitemap(),
