@@ -185,6 +185,11 @@ export default defineConfig({
           translations: { en: "LLM Guide" },
           autogenerate: { directory: "llm-guide" },
         },
+        {
+          label: "AI 服务订阅网站",
+          translations: { en: "AI Service Subscriptions" },
+          autogenerate: { directory: "ai-service-subscriptions" },
+        },
       ],
       customCss: ["./src/styles/starlight-override.css"],
       editLink: {
