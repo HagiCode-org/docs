@@ -137,6 +137,7 @@ npm run preview                # Serves built site locally
 - **Blog posts**: Place in `src/content/docs/blog/` with YYYY-MM-DD prefixes
 - **Navigation**: Configure in `src/content/config.ts`
 - **Illustrations**: Follow guidelines in `illustration-management.md`
+- **Managed screenshots**: Follow `SCREENSHOT_METADATA_WORKFLOW.md` for screenshot staging, metadata generation, and manifest-backed references
 
 ## Specific Conventions
 
@@ -175,5 +176,6 @@ AI assistants should NOT suggest:
 - **Root AGENTS.md**: `/AGENTS.md` at monorepo root
 - **Monorepo CLAUDE.md**: See root directory for monorepo-wide conventions
 - **OpenSpec Workflow**: Proposal-driven development happens at monorepo root level (`/openspec/`)
+- **Screenshot metadata workflow**: `SCREENSHOT_METADATA_WORKFLOW.md`
 - **Starlight docs**: Official Astro Starlight documentation
 - **Astro docs**: Official Astro framework documentation

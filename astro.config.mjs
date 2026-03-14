@@ -161,6 +161,11 @@ export default defineConfig({
           link: "/product-overview",
         },
         {
+          label: "冒险团队",
+          translations: { en: "Adventure Team" },
+          link: "/adventure-team-introduction",
+        },
+        {
           label: "快速开始",
           translations: { en: "Quick Start" },
           autogenerate: { directory: "quick-start" },
