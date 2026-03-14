@@ -47,6 +47,62 @@ npm run build
 
 构建输出将生成在 `dist/` 目录。
 
+### 管理文档截图 metadata
+
+产品截图统一通过 `screenshot-staging/` 入库到 `src/content/docs/img/screenshots/`，避免手工拼接路径和散落的描述信息。
+仓库会保留 `screenshot-staging/.gitkeep` 以确保初始 staging 目录可以提交；成功入库的截图源文件会自动从 staging 目录移除，失败项会保留以便重试。
+
+推荐的 staging 布局：
+
+```text
+repos/docs/
+├── screenshot-staging/
+│   ├── installation/
+│   │   └── desktop-start.png
+│   └── shared/
+│       └── settings-license-success.png
+└── src/content/docs/img/screenshots/
+    └── manifest.json
+```
+
+执行同步命令：
+
+```bash
+npm run screenshots:sync -- --input ./screenshot-staging
+```
+
+常用参数：
+
+- `--input <dir>`：指定截图 staging 根目录
+- `--library-root <dir>`：指定受管截图根目录，默认 `src/content/docs/img/screenshots`
+- `--manifest <path>`：指定 manifest 输出文件，默认 `src/content/docs/img/screenshots/manifest.json`
+- `--imgbin <path>`：显式指定 imgbin CLI；未提供时默认尝试 `../imgbin/dist/cli.js`
+- `--category <name>`：强制所有截图使用同一个分类
+- `--dry-run`：只预览扫描和目标路径，不写入任何文件
+- `--reindex`：导入后执行一次 imgbin 搜索索引重建
+
+环境变量：
+
+```bash
+IMGBIN_EXECUTABLE=/absolute/or/relative/path/to/imgbin/dist/cli.js
+SCREENSHOT_STAGING_DIR=./screenshot-staging
+SCREENSHOT_LIBRARY_ROOT=./src/content/docs/img/screenshots
+SCREENSHOT_MANIFEST_PATH=./src/content/docs/img/screenshots/manifest.json
+SCREENSHOT_ANALYSIS_PROMPT=./prompts/custom-analysis-prompt.txt
+```
+
+行为约定：
+
+1. 支持 `png`、`jpg`、`jpeg`、`webp` 四种截图格式。
+2. 默认根据 staging 子目录推导分类；若截图直接放在 staging 根目录，则会进入 `shared/` 分类。
+3. 文件名会被归一化为稳定 slug；如果同一分类下出现重名截图，会自动追加基于相对路径的哈希后缀，确保重复执行不产生歧义目录。
+4. 已存在的受管截图目录会被复用并刷新 `original.*` 与 `metadata.json`，不会生成无控制的 `-2`、`-3` 重复目录。
+5. 成功处理的截图会自动从 staging 目录移除；失败的截图会保留在原位置，方便排查和重试。
+6. 批处理时单个截图失败不会回滚已经成功的导入；命令会继续处理剩余文件，并以非零退出码报告失败数量，方便 CI/CD 检测。
+7. 每次成功运行都会重建 `src/content/docs/img/screenshots/manifest.json`；manifest 只包含识别成功的截图条目，因此修复环境后直接重试即可恢复引用。
+
+文档侧引用可以通过 `src/utils/screenshot-manifest.js` 读取 manifest，再根据当前文档路径生成 Markdown/MDX 可用的相对图片地址。
+
 ### 预览构建结果
 
 ```bash
