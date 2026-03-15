@@ -62,6 +62,14 @@ export const navLinks: NavLink[] = [
     icon: "comment",
     linkKey: 'qqGroup',
   },
+  {
+    label: "Discord",
+    labelEn: "Discord",
+    href: getLink('discord'),
+    external: true,
+    icon: "comment",
+    linkKey: 'discord',
+  },
 ];
 
 /**
