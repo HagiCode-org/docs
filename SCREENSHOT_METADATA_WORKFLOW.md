@@ -4,12 +4,24 @@ This guide documents the maintainer workflow for importing documentation screens
 
 ## Purpose
 
+Use `npm run screenshots:scan-metadata` when you want to:
+
+- recursively inventory a screenshot folder without moving files
+- capture width, height, timestamps, size, extension, and MIME type in a stable JSON report
+- preflight a batch before running the heavier `screenshots:sync` import path
+- diagnose whether a staging batch contains corrupted or unsupported image files
+
 Use this workflow when you want to:
 
 - import an existing docs screenshot into the managed screenshot library
 - generate `metadata.json` with ImgBin analysis results
 - rebuild `src/content/docs/img/screenshots/manifest.json`
 - switch Markdown or MDX content to use managed screenshot paths
+
+In short:
+
+- `screenshots:scan-metadata` = read-only inventory and progress-visible preflight
+- `screenshots:sync` = managed import, analysis, manifest rebuild, and staging cleanup
 
 ## Historical Backlog Scope
 
@@ -61,18 +73,43 @@ Remaining follow-up items after this backlog pass:
 ## Preconditions
 
 - Run commands from `repos/docs`
-- Ensure `repos/imgbin/dist/cli.js` exists
+- Ensure `@hagicode/imgbin` is installed in `repos/docs` (recommended), or `repos/imgbin/dist/cli.js` exists as a fallback
 - Ensure the `claude` CLI is installed and available in `PATH`
-- Ensure `repos/imgbin/.env` contains valid analysis settings
+- Ensure `repos/docs/.env` contains valid analysis settings
+- Ensure the checked-in ImgBin analysis context file exists at `repos/docs/prompts/screenshot-analysis-context.txt`, unless you plan to override it explicitly
 
-Recommended `repos/imgbin/.env` keys:
+Recommended `repos/docs/.env` keys:
 
 ```bash
 IMGBIN_ANALYSIS_CLI_PATH=claude
 IMGBIN_ANALYSIS_API_MODEL=glm-5
 ANTHROPIC_MODEL=glm-5
 IMGBIN_ANALYSIS_TIMEOUT_MS=180000
+SCREENSHOT_ANALYSIS_CONTEXT_FILE=./prompts/screenshot-analysis-context.txt
 ```
+
+## Analysis Context File Contract
+
+`screenshots:sync` always resolves an analysis context file before it launches ImgBin recognition. The precedence is deterministic:
+
+1. `--analysis-context-file <path>`
+2. `SCREENSHOT_ANALYSIS_CONTEXT_FILE`
+3. the checked-in default `./prompts/screenshot-analysis-context.txt`
+
+The command validates the resolved file before any import or refresh work begins. If the file is missing or empty after trimming whitespace, the run fails immediately instead of letting ImgBin fail later in the batch.
+
+Keep the context file focused on durable screenshot semantics:
+
+- common docs screenshot domains such as installation, settings, sessions, project setup, confirmations, and editor-like panels
+- bilingual UI clues that remain stable across many screenshots
+- evidence-first instructions that tell recognition to trust visible pixels over assumptions
+
+Do not put one-off guidance into the shared context file:
+
+- ticket-specific debugging notes
+- temporary campaign wording or branch-specific UI guesses
+- assumptions that only apply to one screenshot batch
+- model-specific hacks that are likely to become stale
 
 ## Directory Layout
 
@@ -98,19 +135,84 @@ Generated manifest:
 
 Keep `screenshot-staging/.gitkeep` committed so the default staging directory exists even when the queue is empty.
 
-## Recommended Command
+## Metadata Scan Preflight
 
-There is a known cross-filesystem move issue during first-time imports, so use a workspace-local `TMPDIR` for now:
+Run this before sync when you only need a quick inventory or when you want to confirm the batch is healthy before ImgBin analysis:
 
 ```bash
-mkdir -p .tmp
-set -a
-source ../imgbin/.env
-set +a
-export IMGBIN_ANALYSIS_TIMEOUT_MS=180000
-export TMPDIR="$PWD/.tmp"
-IMGBIN_EXECUTABLE=../imgbin/dist/cli.js npm run screenshots:sync -- --input ./screenshot-staging
+npm run screenshots:scan-metadata -- --input ./screenshot-staging --output ./artifacts/screenshot-report.json
 ```
+
+Report shape:
+
+```json
+{
+  "summary": {
+    "generatedAt": "2026-03-14T09:30:00.000Z",
+    "inputDirectory": "screenshot-staging",
+    "outputPath": "artifacts/screenshot-report.json",
+    "supportedExtensions": [".jpg", ".jpeg", ".png", ".webp"],
+    "scannedFileCount": 3,
+    "successCount": 3,
+    "failureCount": 0
+  },
+  "entries": [
+    {
+      "relativePath": "ai-compose-commit/trigger-button.png",
+      "fileName": "trigger-button.png",
+      "extension": ".png",
+      "mimeType": "image/png",
+      "sizeBytes": 290816,
+      "createdAt": "2026-03-14T09:00:00.000Z",
+      "modifiedAt": "2026-03-14T09:00:00.000Z",
+      "width": 1440,
+      "height": 900
+    }
+  ],
+  "failures": []
+}
+```
+
+Expected progress log example:
+
+```text
+[screenshots:scan-metadata] starting scan
+[screenshots:scan-metadata] input: ./screenshot-staging
+[screenshots:scan-metadata] discovered 3 supported screenshot files
+[screenshots:scan-metadata] [1/3] scanning ai-compose-commit/trigger-button.png
+[screenshots:scan-metadata] [1/3] ok 1440x900 284 KB
+[screenshots:scan-metadata] [2/3] scanning ai-compose-commit/confirm-dialog.png
+[screenshots:scan-metadata] [2/3] ok 1440x900 301 KB
+[screenshots:scan-metadata] [3/3] scanning monospecs/select-repository.png
+[screenshots:scan-metadata] [3/3] ok 1728x1117 512 KB
+[screenshots:scan-metadata] wrote report to ./artifacts/screenshot-report.json
+[screenshots:scan-metadata] completed: 3 succeeded, 0 failed
+```
+
+## Recommended Command
+
+If `repos/docs/.env` is configured, the sync command now loads it automatically and creates a workspace-local `.tmp` directory when `TMPDIR`, `TMP`, and `TEMP` are not already set:
+
+```bash
+npm run screenshots:sync
+```
+
+The command resolves ImgBin in this order:
+
+1. `--imgbin`
+2. `IMGBIN_EXECUTABLE` from `repos/docs/.env` or the shell
+3. installed `repos/docs/node_modules/@hagicode/imgbin`
+4. fallback `../imgbin/dist/cli.js`
+
+The command resolves the analysis context in this order:
+
+1. `--analysis-context-file`
+2. `SCREENSHOT_ANALYSIS_CONTEXT_FILE`
+3. `./prompts/screenshot-analysis-context.txt`
+
+At startup, `screenshots:sync` prints the resolved analysis context file so CI logs can confirm which file was actually used.
+
+After a successful sync, the docs screenshot library also refreshes its ImgBin search index so future `imgbin search` runs can immediately match recognized titles, tags, descriptions, and imported source paths.
 
 ## Minimal Import Steps
 
@@ -160,13 +262,7 @@ cp src/content/docs/img/quick-start/create-project/step1-click-new-project-butto
 Run the import:
 
 ```bash
-mkdir -p .tmp
-set -a
-source ../imgbin/.env
-set +a
-export IMGBIN_ANALYSIS_TIMEOUT_MS=180000
-export TMPDIR="$PWD/.tmp"
-IMGBIN_EXECUTABLE=../imgbin/dist/cli.js npm run screenshots:sync -- --input ./screenshot-staging
+npm run screenshots:sync
 ```
 
 ## Success Criteria
@@ -255,29 +351,41 @@ npm run screenshots:sync -- --help
 Preview without writing:
 
 ```bash
-IMGBIN_EXECUTABLE=../imgbin/dist/cli.js npm run screenshots:sync -- --input ./screenshot-staging --dry-run
+npm run screenshots:sync -- --dry-run
+```
+
+Scan metadata only:
+
+```bash
+npm run screenshots:scan-metadata -- --input ./screenshot-staging --output ./artifacts/screenshot-report.json
 ```
 
 Force one category:
 
 ```bash
-IMGBIN_EXECUTABLE=../imgbin/dist/cli.js npm run screenshots:sync -- --input ./screenshot-staging --category quick-start
+npm run screenshots:sync -- --category quick-start
 ```
 
 Reindex after import:
 
 ```bash
-IMGBIN_EXECUTABLE=../imgbin/dist/cli.js npm run screenshots:sync -- --input ./screenshot-staging --reindex
+npm run screenshots:sync -- --reindex
+```
+
+Override the analysis context for one run:
+
+```bash
+npm run screenshots:sync -- --analysis-context-file ./prompts/experimental-context.txt
 ```
 
 ## Troubleshooting
 
 ### `Claude CLI analysis timed out after 60000ms`
 
-Increase the timeout:
+Increase the timeout in `repos/docs/.env` or your shell environment:
 
 ```bash
-export IMGBIN_ANALYSIS_TIMEOUT_MS=180000
+IMGBIN_ANALYSIS_TIMEOUT_MS=180000
 ```
 
 ### `ImgBin executable not found`
@@ -285,22 +393,32 @@ export IMGBIN_ANALYSIS_TIMEOUT_MS=180000
 Verify:
 
 - `../imgbin/dist/cli.js` exists
-- `IMGBIN_EXECUTABLE=../imgbin/dist/cli.js` is set
+- or `@hagicode/imgbin` is installed in `repos/docs`
+- or `IMGBIN_EXECUTABLE` points to a valid executable
+
+### `Analysis context file not found` or `Analysis context file is empty`
+
+Verify:
+
+- `repos/docs/prompts/screenshot-analysis-context.txt` exists and is not blank
+- or `SCREENSHOT_ANALYSIS_CONTEXT_FILE` points to a real non-empty file
+- or your `--analysis-context-file` override path is correct
+
+If this is a one-off batch, prefer a CLI override. If the missing file should be the repository default, restore or fix `repos/docs/prompts/screenshot-analysis-context.txt` so CI and local runs stay aligned.
 
 ### `Claude analysis model is not configured`
 
-Verify `repos/imgbin/.env` contains either:
+Verify `repos/docs/.env` contains either:
 
 - `IMGBIN_ANALYSIS_API_MODEL`
 - `ANTHROPIC_MODEL`
 
 ### `EXDEV: cross-device link not permitted`
 
-This is the known first-import issue. Use:
+The sync command now auto-creates `.tmp` and exports `TMPDIR` / `TMP` / `TEMP` to that workspace-local directory by default. If you still need to override it, set one of these values in `repos/docs/.env` or your shell:
 
 ```bash
-mkdir -p .tmp
-export TMPDIR="$PWD/.tmp"
+TMPDIR=/custom/workspace/tmp
 ```
 
 ### Manifest entry missing
@@ -310,6 +428,21 @@ Check `metadata.json`:
 - `status.recognition` must be `succeeded`
 
 Failed recognition results do not enter the manifest.
+
+### `screenshots:sync` printed startup output but progress feels stalled
+
+This usually means the sync command has moved into ImgBin analysis, import, or another batch step that does not emit per-file logs as frequently as the lightweight scanner.
+
+Use this preflight path first:
+
+1. Run `npm run screenshots:scan-metadata -- --input ./screenshot-staging --output ./artifacts/screenshot-report.json`
+2. Confirm the scan reports the expected file count, dimensions, and timestamps
+3. Fix any corrupted files reported in `failures` before retrying `screenshots:sync`
+4. Re-run `screenshots:sync` only after the scan output looks healthy
+
+The metadata scan command is intentionally the faster, more observable command for confirming that the batch itself is sane; the sync command still owns managed import, AI analysis, and manifest rebuild.
+
+Also check the startup line that reports `analysis context:`. If it points at the wrong file, fix the CLI flag or environment override before retrying.
 
 ### Historical backlog item failed during sync
 
@@ -341,4 +474,4 @@ Validated in this repository:
 
 Current limitation:
 
-- first-time imports still need the `TMPDIR="$PWD/.tmp"` workaround until the cross-filesystem move issue is fixed in code
+- if you override the temp directory, it still needs to live on a filesystem that permits the import move/rename flow
