@@ -104,5 +104,5 @@ This directory was cleaned up as part of the astro-image-migration proposal. See
 
 ---
 
-**Last Updated**: 2025-02-17
+**Last Updated**: 2026-03-15
 **Migration**: astro-image-migration
