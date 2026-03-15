@@ -20,6 +20,8 @@ import Fullscreen from 'yet-another-react-lightbox/plugins/fullscreen';
 import Counter from 'yet-another-react-lightbox/plugins/counter';
 import Zoom from 'yet-another-react-lightbox/plugins/zoom';
 import 'yet-another-react-lightbox/styles.css';
+import 'yet-another-react-lightbox/plugins/captions.css';
+import 'yet-another-react-lightbox/plugins/counter.css';
 
 /**
  * Slide interface for lightbox images
@@ -178,6 +180,8 @@ interface ImageLightboxProps {
   debounceDelay?: number;
 }
 
+const LIGHTBOX_ROOT_CLASS = 'docs-image-lightbox';
+
 /**
  * Main ImageLightbox component
  *
@@ -280,15 +284,60 @@ export default function ImageLightbox({
   }, []);
 
   /**
-   * Custom styles for Starlight theme integration
+   * Route lightbox chrome through docs theme tokens so an open portal
+   * stays in sync with Starlight light/dark theme changes.
    */
   const lightboxStyles: SlotStyles = {
     container: {
-      backgroundColor: 'var(--sl-color-bg, rgba(0, 0, 0, 0.9))',
+      backgroundColor: 'var(--docs-lightbox-overlay-bg)',
+    },
+    toolbar: {
+      gap: '0.5rem',
+      padding: 'var(--docs-lightbox-toolbar-padding)',
     },
     button: {
-      color: 'var(--sl-color-text, #ffffff)',
-      backgroundColor: 'var(--sl-color-bg-accent, rgba(255, 255, 255, 0.1))',
+      color: 'var(--docs-lightbox-button-color)',
+      backgroundColor: 'var(--docs-lightbox-button-bg)',
+      border: '1px solid var(--docs-lightbox-button-border)',
+      borderRadius: 'var(--docs-lightbox-control-radius)',
+      boxShadow: 'var(--docs-lightbox-control-shadow)',
+      backdropFilter: 'blur(18px)',
+      WebkitBackdropFilter: 'blur(18px)',
+      transition: 'background-color 160ms ease, border-color 160ms ease, color 160ms ease, box-shadow 160ms ease, transform 160ms ease',
+    },
+    navigationPrev: {
+      marginInlineStart: '0.75rem',
+    },
+    navigationNext: {
+      marginInlineEnd: '0.75rem',
+    },
+    captionsTitleContainer: {
+      backgroundColor: 'var(--docs-lightbox-surface-bg)',
+      border: '1px solid var(--docs-lightbox-surface-border)',
+      borderRadius: 'var(--docs-lightbox-surface-radius)',
+      boxShadow: 'var(--docs-lightbox-surface-shadow)',
+      color: 'var(--docs-lightbox-text-color)',
+      maxWidth: 'min(34rem, calc(100% - 1.5rem))',
+      backdropFilter: 'blur(18px)',
+      WebkitBackdropFilter: 'blur(18px)',
+    },
+    captionsTitle: {
+      color: 'var(--docs-lightbox-text-color)',
+      fontWeight: 600,
+    },
+    captionsDescriptionContainer: {
+      backgroundColor: 'var(--docs-lightbox-surface-bg)',
+      border: '1px solid var(--docs-lightbox-surface-border)',
+      borderRadius: 'var(--docs-lightbox-surface-radius)',
+      boxShadow: 'var(--docs-lightbox-surface-shadow)',
+      color: 'var(--docs-lightbox-text-color)',
+      maxWidth: 'min(42rem, calc(100% - 1.5rem))',
+      backdropFilter: 'blur(18px)',
+      WebkitBackdropFilter: 'blur(18px)',
+    },
+    captionsDescription: {
+      color: 'var(--docs-lightbox-muted-color)',
+      lineHeight: 1.5,
     },
   };
 
@@ -299,7 +348,7 @@ export default function ImageLightbox({
 
   return (
     <>
-      {/* Global styles for hover effect and caption positioning */}
+      {/* Keep document images discoverable as interactive entry points. */}
       <style>{`
         article img,
         .sl-markdown-content img,
@@ -318,24 +367,20 @@ export default function ImageLightbox({
             transform: none;
           }
         }
-        /* Move captions below the image */
-        .yarl__caption {
-          order: 1;
-        }
-        .yarl__container {
-          flex-direction: column;
-        }
-        .yarl__slide {
-          order: 0;
-        }
       `}</style>
 
       <Lightbox
+        className={LIGHTBOX_ROOT_CLASS}
         open={isOpen}
         close={handleClose}
         index={currentIndex}
         slides={slides}
         plugins={[Captions, Fullscreen, Counter, Zoom]}
+        counter={{
+          container: {
+            className: `${LIGHTBOX_ROOT_CLASS}__counter`,
+          },
+        }}
         carousel={{
           finite: slides.length === 1,
           preload: 2,
