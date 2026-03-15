@@ -83,6 +83,13 @@ export const SITE_LINKS = {
         external: true,
     } as LinkConfig,
 
+    /** Discord 社区 */
+    discord: {
+        dev: 'https://discord.gg/qY662sJK',
+        prod: 'https://discord.gg/qY662sJK',
+        external: true,
+    } as LinkConfig,
+
     /** 博客页面（相对于文档站点） */
     blog: {
         dev: 'http://localhost:31265/blog/',

@@ -150,8 +150,10 @@ export default defineConfig({
         },
       ],
       components: {
+        Head: "./src/components/StarlightHead.astro",
         Header: "./src/components/StarlightHeader.astro",
         Footer: "./src/components/StarlightFooter.astro",
+        LanguageSelect: "./src/components/StarlightLanguageSelect.astro",
         MarkdownContent: './src/components/MarkdownContent.astro',
       },
       sidebar: [
@@ -159,11 +161,6 @@ export default defineConfig({
           label: "产品概述",
           translations: { en: "Product Overview" },
           link: "/product-overview",
-        },
-        {
-          label: "冒险团队",
-          translations: { en: "Adventure Team" },
-          link: "/adventure-team-introduction",
         },
         {
           label: "快速开始",

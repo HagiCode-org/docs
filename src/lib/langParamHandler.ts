@@ -1,64 +1,153 @@
 /**
- * Client-side language parameter detection and localStorage update
- * This script runs on the docs site to handle ?lang parameter from cross-site links
+ * Client-side landing route resolution for docs entry pages.
+ *
+ * Rule priority:
+ * - landing (`/`): `query > stored preference > client language > default en`
+ * - docs/blog root paths: `query > stored preference > default en`
  */
 
-export function handleLanguageParameter() {
-  if (typeof window === 'undefined') return;
+import {
+  buildDocsRoutePath,
+  DOCS_LANGUAGE_STORAGE_KEY,
+  getStoredDocsLocale,
+  isEnglishDocsPath,
+  isLandingRoutePath,
+  parseLangFromUrl,
+  resolveDocsEntryLocale,
+  serializeStoredDocsLocale,
+  type DocsLocale,
+} from './i18n';
 
-  const urlParams = new URLSearchParams(window.location.search);
-  const langParam = urlParams.get('lang');
+export interface LandingRouteResolution {
+  currentPath: string;
+  targetPath: string;
+  targetUrl: string;
+  resolvedLocale: DocsLocale;
+  requestedLang: string | null;
+  storedLocale: DocsLocale | null;
+  isLandingPath: boolean;
+  shouldPersist: boolean;
+  shouldRedirect: boolean;
+}
 
-  if (!langParam) return;
+function getClientLanguages(win: Window): string[] {
+  const languages = Array.isArray(win.navigator?.languages)
+    ? win.navigator.languages
+    : [];
 
-  // Map language parameter to Starlight format
-  const langMapping: Record<string, string> = {
-    'zh-CN': 'root',
-    'en': 'en',
-  };
-
-  const targetLang = langMapping[langParam];
-
-  if (!targetLang) {
-    // Invalid language parameter, remove it and reload
-    const cleanUrl = new URL(window.location.href);
-    cleanUrl.searchParams.delete('lang');
-    window.location.href = cleanUrl.toString();
-    return;
+  if (languages.length > 0) {
+    return languages.filter((language): language is string => typeof language === 'string');
   }
 
-  // Set localStorage for Starlight language preference
-  try {
-    const route = localStorage.getItem('starlight-route');
-    let routeObj = route ? JSON.parse(route) : {};
-    routeObj.lang = targetLang;
-    localStorage.setItem('starlight-route', JSON.stringify(routeObj));
+  return typeof win.navigator?.language === 'string' ? [win.navigator.language] : [];
+}
 
-    // Get current path without language prefix
-    let currentPath = window.location.pathname;
+function buildTargetUrl(currentUrl: URL, targetPath: string): URL {
+  const targetUrl = new URL(targetPath, currentUrl.origin);
 
-    // Remove existing language prefix if present
-    if (currentPath.startsWith('/en/')) {
-      currentPath = currentPath.slice(3);
-    } else if (currentPath === '/en') {
-      currentPath = '/';
+  currentUrl.searchParams.forEach((value, key) => {
+    if (key !== 'lang') {
+      targetUrl.searchParams.set(key, value);
     }
+  });
 
-    // Build target path with correct language prefix
-    const targetPath = targetLang === 'en' ? `/en${currentPath || '/'}` : (currentPath || '/');
+  targetUrl.hash = currentUrl.hash;
+  return targetUrl;
+}
 
-    // Preserve other query parameters (excluding lang)
-    const targetUrl = new URL(targetPath, window.location.origin);
-    urlParams.forEach((value, key) => {
-      if (key !== 'lang') {
-        targetUrl.searchParams.set(key, value);
-      }
+export function resolveDocsLandingRoute(
+  currentUrl: URL,
+  storedRouteValue: string | null | undefined,
+  clientLanguages: Array<string | null | undefined> = [],
+): LandingRouteResolution {
+  const requestedLang = parseLangFromUrl(currentUrl);
+  const storedLocale = getStoredDocsLocale(storedRouteValue);
+  const currentPath = currentUrl.pathname || '/';
+  const isLandingPath = isLandingRoutePath(currentPath);
+
+  let resolvedLocale: DocsLocale;
+  let shouldPersist = false;
+
+  if (requestedLang !== null) {
+    resolvedLocale = resolveDocsEntryLocale({
+      requestedLang,
+      storedLocale,
     });
-
-    // Redirect to target URL
-    window.location.href = targetUrl.toString();
-  } catch (e) {
-    // Silent fallback when localStorage is unavailable
-    console.error('Failed to set language preference:', e);
+    shouldPersist = true;
+  } else if (isLandingPath && !isEnglishDocsPath(currentPath)) {
+    resolvedLocale = resolveDocsEntryLocale({
+      storedLocale,
+      clientLanguages,
+    });
+    shouldPersist = true;
+  } else if (isEnglishDocsPath(currentPath)) {
+    resolvedLocale = 'en';
+  } else if (storedLocale === 'root') {
+    // Non-landing root docs/blog paths stay Chinese only after an explicit Chinese choice was saved.
+    resolvedLocale = 'root';
+  } else {
+    // Default root docs/blog paths should flow to the English-prefixed route.
+    resolvedLocale = 'en';
   }
+
+  const shouldResolvePath =
+    requestedLang !== null || isLandingPath || (!isEnglishDocsPath(currentPath) && resolvedLocale === 'en');
+  const targetPath = shouldResolvePath
+    ? buildDocsRoutePath(resolvedLocale, currentPath)
+    : currentPath;
+  const targetUrl = buildTargetUrl(currentUrl, targetPath);
+
+  return {
+    currentPath,
+    targetPath,
+    targetUrl: targetUrl.toString(),
+    resolvedLocale,
+    requestedLang,
+    storedLocale,
+    isLandingPath,
+    shouldPersist,
+    shouldRedirect: targetUrl.toString() !== currentUrl.toString(),
+  };
+}
+
+export function handleLanguageParameter(win?: Window): LandingRouteResolution | null {
+  if (!win && typeof window === 'undefined') {
+    return null;
+  }
+
+  const browserWindow = win ?? window;
+
+  let storedRouteValue: string | null = null;
+  try {
+    storedRouteValue = browserWindow.localStorage.getItem(DOCS_LANGUAGE_STORAGE_KEY);
+  } catch {
+    storedRouteValue = null;
+  }
+
+  const resolution = resolveDocsLandingRoute(
+    new URL(browserWindow.location.href),
+    storedRouteValue,
+    getClientLanguages(browserWindow),
+  );
+
+  if (resolution.shouldPersist) {
+    try {
+      browserWindow.localStorage.setItem(
+        DOCS_LANGUAGE_STORAGE_KEY,
+        serializeStoredDocsLocale(storedRouteValue, resolution.resolvedLocale),
+      );
+    } catch {
+      // Ignore storage failures so the route still resolves for this visit.
+    }
+  }
+
+  if (resolution.shouldRedirect) {
+    if (typeof browserWindow.location.replace === 'function') {
+      browserWindow.location.replace(resolution.targetUrl);
+    } else {
+      browserWindow.location.href = resolution.targetUrl;
+    }
+  }
+
+  return resolution;
 }

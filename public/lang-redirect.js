@@ -1,66 +1,254 @@
-/**
- * Client-side script for handling cross-site language parameter
- * Run this in browser to detect ?lang parameter and redirect
- */
-(function() {
-  const urlParams = new URLSearchParams(window.location.search);
-  const langParam = urlParams.get('lang');
-
-  if (!langParam) return;
-
-  // Map language parameter to Starlight format
-  const langMapping = {
-    'zh-CN': 'root',
-    'en': 'en',
-  };
-
-  const targetLang = langMapping[langParam];
-
-  if (!targetLang) {
-    // Invalid language parameter, remove it and reload
-    const cleanUrl = new URL(window.location.href);
-    cleanUrl.searchParams.delete('lang');
-    window.location.href = cleanUrl.toString();
+(function () {
+  if (typeof window === 'undefined') {
     return;
   }
 
-  // Set localStorage for Starlight language preference
-  try {
-    const route = localStorage.getItem('starlight-route');
-    let routeObj = route ? JSON.parse(route) : {};
-    routeObj.lang = targetLang;
-    localStorage.setItem('starlight-route', JSON.stringify(routeObj));
+  var DOCS_LANGUAGE_STORAGE_KEY = 'starlight-route';
+  var DEFAULT_DOCS_ENTRY_LOCALE = 'en';
 
-    // Get current path without language prefix
-    let currentPath = window.location.pathname;
-
-    // Remove existing language prefix if present
-    if (currentPath.startsWith('/en/')) {
-      currentPath = currentPath.slice(3);
-    } else if (currentPath === '/en') {
-      currentPath = '/';
+  function parseDocsLocale(value) {
+    if (!value) {
+      return null;
     }
 
-    // Build target path with correct language prefix
-    const targetPath = targetLang === 'en' ? `/en${currentPath || '/'}` : (currentPath || '/');
+    var normalized = String(value).trim().toLowerCase();
+    if (!normalized) {
+      return null;
+    }
 
-    // Preserve other query parameters (excluding lang)
-    const targetUrl = new URL(targetPath, window.location.origin);
-    urlParams.forEach((value, key) => {
+    if (normalized === 'en' || normalized.indexOf('en-') === 0) {
+      return 'en';
+    }
+
+    if (
+      normalized === 'root' ||
+      normalized === 'zh' ||
+      normalized === 'zh-cn' ||
+      normalized.indexOf('zh-') === 0
+    ) {
+      return 'root';
+    }
+
+    return null;
+  }
+
+  function parseLangFromUrl(url) {
+    return url.searchParams.get('lang');
+  }
+
+  function stripDocsLocalePrefix(pathname) {
+    if (!pathname || pathname === '/en') {
+      return '/';
+    }
+
+    if (pathname.indexOf('/en/') === 0) {
+      return pathname.slice(3) || '/';
+    }
+
+    return pathname;
+  }
+
+  function isEnglishDocsPath(pathname) {
+    return pathname === '/en' || pathname.indexOf('/en/') === 0;
+  }
+
+  function isLandingRoutePath(pathname) {
+    return stripDocsLocalePrefix(pathname) === '/';
+  }
+
+  function buildDocsRoutePath(locale, originalPath) {
+    var normalizedPath = stripDocsLocalePrefix(originalPath || '/');
+
+    if (locale === 'en') {
+      return normalizedPath === '/' ? '/en/' : '/en' + normalizedPath;
+    }
+
+    return normalizedPath || '/';
+  }
+
+  function getStoredDocsLocale(storageValue) {
+    if (!storageValue) {
+      return null;
+    }
+
+    try {
+      var parsed = JSON.parse(storageValue);
+      return parseDocsLocale(parsed.lang);
+    } catch (_error) {
+      return null;
+    }
+  }
+
+  function serializeStoredDocsLocale(storageValue, locale) {
+    var routeObj = {};
+
+    if (storageValue) {
+      try {
+        routeObj = JSON.parse(storageValue);
+      } catch (_error) {
+        routeObj = {};
+      }
+    }
+
+    routeObj.lang = locale;
+    return JSON.stringify(routeObj);
+  }
+
+  function resolveDocsEntryLocale(requestedLang, storedLocale, clientLanguages) {
+    if (requestedLang !== null && requestedLang !== undefined) {
+      return parseDocsLocale(requestedLang) || DEFAULT_DOCS_ENTRY_LOCALE;
+    }
+
+    return (
+      parseDocsLocale(storedLocale) ||
+      resolveClientDocsLocale(clientLanguages || []) ||
+      DEFAULT_DOCS_ENTRY_LOCALE
+    );
+  }
+
+  function resolveClientDocsLocale(clientLanguages) {
+    if (!Array.isArray(clientLanguages)) {
+      return null;
+    }
+
+    for (var index = 0; index < clientLanguages.length; index += 1) {
+      var locale = parseDocsLocale(clientLanguages[index]);
+      if (locale) {
+        return locale;
+      }
+    }
+
+    return null;
+  }
+
+  function getClientLanguages(win) {
+    if (win.navigator && Array.isArray(win.navigator.languages) && win.navigator.languages.length > 0) {
+      return win.navigator.languages.filter(function (language) {
+        return typeof language === 'string';
+      });
+    }
+
+    if (win.navigator && typeof win.navigator.language === 'string') {
+      return [win.navigator.language];
+    }
+
+    return [];
+  }
+
+  function buildTargetUrl(currentUrl, targetPath) {
+    var targetUrl = new URL(targetPath, currentUrl.origin);
+
+    currentUrl.searchParams.forEach(function (value, key) {
       if (key !== 'lang') {
         targetUrl.searchParams.set(key, value);
       }
     });
 
-    // Preserve hash fragment
-    if (window.location.hash) {
-      targetUrl.hash = window.location.hash;
+    targetUrl.hash = currentUrl.hash;
+    return targetUrl;
+  }
+
+  function resolveDocsLandingRoute(currentUrl, storedRouteValue, clientLanguages) {
+    var requestedLang = parseLangFromUrl(currentUrl);
+    var storedLocale = getStoredDocsLocale(storedRouteValue);
+    var currentPath = currentUrl.pathname || '/';
+    var landingPath = isLandingRoutePath(currentPath);
+    var resolvedLocale;
+    var shouldPersist = false;
+
+    if (requestedLang !== null) {
+      resolvedLocale = resolveDocsEntryLocale(requestedLang, storedLocale);
+      shouldPersist = true;
+    } else if (landingPath && !isEnglishDocsPath(currentPath)) {
+      resolvedLocale = resolveDocsEntryLocale(null, storedLocale, clientLanguages);
+      shouldPersist = true;
+    } else if (isEnglishDocsPath(currentPath)) {
+      resolvedLocale = 'en';
+    } else if (storedLocale === 'root') {
+      resolvedLocale = 'root';
+    } else {
+      resolvedLocale = 'en';
     }
 
-    // Redirect to target URL
-    window.location.href = targetUrl.toString();
-  } catch (e) {
-    // Silent fallback when localStorage is unavailable
-    console.error('Failed to set language preference:', e);
+    var shouldResolvePath =
+      requestedLang !== null || landingPath || (!isEnglishDocsPath(currentPath) && resolvedLocale === 'en');
+    var targetPath = shouldResolvePath
+      ? buildDocsRoutePath(resolvedLocale, currentPath)
+      : currentPath;
+    var targetUrl = buildTargetUrl(currentUrl, targetPath);
+
+    return {
+      currentPath: currentPath,
+      targetPath: targetPath,
+      targetUrl: targetUrl.toString(),
+      resolvedLocale: resolvedLocale,
+      requestedLang: requestedLang,
+      storedLocale: storedLocale,
+      isLandingPath: landingPath,
+      shouldPersist: shouldPersist,
+      shouldRedirect: targetUrl.toString() !== currentUrl.toString(),
+    };
   }
+
+  function getStoredRouteValue(win) {
+    try {
+      return win.localStorage.getItem(DOCS_LANGUAGE_STORAGE_KEY);
+    } catch (_error) {
+      return null;
+    }
+  }
+
+  function persistResolvedLocale(win, previousValue, locale) {
+    try {
+      win.localStorage.setItem(
+        DOCS_LANGUAGE_STORAGE_KEY,
+        serializeStoredDocsLocale(previousValue, locale),
+      );
+    } catch (_error) {
+      // Ignore storage failures so navigation still works for this visit.
+    }
+  }
+
+  function navigate(win, targetUrl) {
+    if (win.location && typeof win.location.replace === 'function') {
+      win.location.replace(targetUrl);
+      return;
+    }
+
+    win.location.href = targetUrl;
+  }
+
+  var api = {
+    DOCS_LANGUAGE_STORAGE_KEY: DOCS_LANGUAGE_STORAGE_KEY,
+    DEFAULT_DOCS_ENTRY_LOCALE: DEFAULT_DOCS_ENTRY_LOCALE,
+    buildDocsRoutePath: buildDocsRoutePath,
+    isLandingRoutePath: isLandingRoutePath,
+    parseDocsLocale: parseDocsLocale,
+    resolveDocsLandingRoute: resolveDocsLandingRoute,
+    lastResolution: null,
+    applyEntryRouting: function applyEntryRouting(win) {
+      var browserWindow = win || window;
+      var storedRouteValue = getStoredRouteValue(browserWindow);
+      var resolution = resolveDocsLandingRoute(
+        new URL(browserWindow.location.href),
+        storedRouteValue,
+        getClientLanguages(browserWindow),
+      );
+
+      api.lastResolution = resolution;
+
+      if (resolution.shouldPersist) {
+        persistResolvedLocale(browserWindow, storedRouteValue, resolution.resolvedLocale);
+      }
+
+      if (resolution.shouldRedirect) {
+        navigate(browserWindow, resolution.targetUrl);
+      }
+
+      return resolution;
+    },
+  };
+
+  window.__HAGICODE_DOCS_ENTRY__ = api;
+  api.applyEntryRouting(window);
 })();
