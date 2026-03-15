@@ -47,6 +47,24 @@ npm run build
 
 构建输出将生成在 `dist/` 目录。
 
+### 外链缓存校验
+
+`npm run build` 仍然会校验内部链接和静态资源；只有在 `CI=true` 时，构建才会额外启用 `.tmp/link-check-cache/` 下的外部链接结果缓存。
+
+- 成功且未过期的外链缓存会直接复用，避免对相同 URL 重复发起网络请求。
+- 新链接、过期记录、schema 不兼容记录，以及上次失败的 URL 都会重新执行实时校验并刷新缓存。
+- 当前默认 TTL 为 48 小时，可通过 `DOCS_LINK_CHECK_CACHE_TTL_HOURS` 覆盖；缓存 schema 升级时会自动忽略旧记录并重新生成。
+- GitHub Actions 会在 docs build 前恢复 `.tmp/link-check-cache/`，构建后再以滚动 key 保存新的快照；该目录保持在本地临时目录中，不进入版本控制。
+
+本地如果要模拟 CI 外链检查并验证日志摘要，推荐使用：
+
+```bash
+CI=true NODE_ENV=production npm run build
+npm run test:link-check-cache
+```
+
+若需要强制丢弃旧缓存，可删除 `repos/docs/.tmp/link-check-cache/`，或在实现变更时提升缓存 schema 版本。
+
 ### 首页与 docs/blog 默认路径语言规则
 
 - 默认访问 `https://docs.hagicode.com/` 时，会根据 `query > 已保存偏好 > 客户端语言 > 默认英文` 解析首页入口语言。
@@ -178,6 +196,28 @@ SCREENSHOT_ANALYSIS_PROMPT=./prompts/custom-analysis-prompt.txt
 
 如果这些变量已经写入 `repos/docs/.env`，那么 `npm run screenshots:sync` 会自动读取它们，并在没有显式设置 `TMPDIR`、`TMP`、`TEMP` 时自动创建 `.tmp` 作为导入中转目录。默认情况下，命令会优先调用 `repos/docs` 中已安装的 `@hagicode/imgbin`，并自动加载 `./prompts/screenshot-analysis-context.txt`。
 
+### 自动图片压缩
+
+`repos/docs` 已启用仓库级 GitHub Actions 图片压缩 workflow。只要提交或合并中包含以下位图格式，仓库就会在提交后自动尝试压缩：
+
+- `png`
+- `jpg`
+- `jpeg`
+- `webp`
+
+该自动化覆盖 docs 仓库里的常见图片目录，包括：
+
+- `src/content/docs/img/**`
+- `src/content/docs/img/screenshots/**`
+- `public/img/**`
+
+行为说明：
+
+- `pull_request`、推送到 `main`、手动触发和定时任务都会运行 `Compress images` workflow
+- 压缩发生在 GitHub Actions 中，不是 `npm run build` 前必须执行的本地步骤
+- `svg`、`gif`、JSON metadata、prompt 文件等非目标格式继续按现有流程手动维护
+- 非 PR 事件如果检测到可压缩结果，会自动创建 `Auto Compress Images` PR 回流仓库
+
 维护 `screenshot-analysis-context.txt` 时，建议只写“长期稳定、跨多张截图都成立”的语义，例如页面类型、常见按钮形态、双语界面线索、安装/配置/会话/确认成功等工作流语义。不要把一次性排障备注、某个工单的临时说明、只对单张截图成立的猜测、模型供应商特定 hack 或版本号清单塞进这个文件；这些内容更适合留在单次命令参数、变更说明或单独的实验 prompt 里。
 
 行为约定：
@@ -269,6 +309,8 @@ npm run verify:blog-sidebar-i18n
 
 - 推送到 `main` 分支会触发部署
 - Pull Requests 会触发构建验证
+- 图片相关的 `png`、`jpg`、`jpeg`、`webp` 变更还会触发独立的 `Compress images` workflow
+- 该 workflow 在仓库内提交后执行压缩，不替代本地截图 metadata 或文档构建流程
 
 ## 相关资源
 

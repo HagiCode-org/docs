@@ -71,18 +71,32 @@ Reference these using absolute paths:
 
 ## Supported Formats
 
-Common image formats are supported:
-- PNG (.png)
-- JPEG (.jpg, .jpeg)
-- GIF (.gif)
-- SVG (.svg)
-- WebP (.webp)
+Formats served by Astro from `public/img/` remain the same, but only part of them participate in the repository's automatic compression workflow.
+
+### Automatically compressed after commit
+
+The docs repository runs a GitHub Actions workflow after supported bitmap files are committed. In `public/img/`, the following formats are auto-compressed when they change:
+
+- PNG (`.png`)
+- JPEG (`.jpg`, `.jpeg`)
+- WebP (`.webp`)
+
+This workflow runs in GitHub, not during local `npm run build`.
+
+### Still maintained manually
+
+These formats stay on the existing manual maintenance path:
+
+- GIF (`.gif`)
+- SVG (`.svg`)
+- any non-image support files such as README or metadata documents
 
 ## Best Practices
 
-1. **Optimize images** - Compress images before adding them
+1. **Optimize images** - Supported bitmap formats will be compressed again by GitHub Actions after commit, but you should still avoid obviously oversized assets
 2. **Use descriptive names** - Name files clearly (e.g., `installation-screenshot.png`)
 3. **Choose the right location** - Documentation images → `src/content/docs/img/`, site assets → `public/img/`
+4. **Keep manual-only formats intentional** - Continue reviewing `svg` and `gif` assets manually because the workflow does not rewrite them
 
 ## Migration Info
 

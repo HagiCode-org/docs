@@ -214,6 +214,23 @@ At startup, `screenshots:sync` prints the resolved analysis context file so CI l
 
 After a successful sync, the docs screenshot library also refreshes its ImgBin search index so future `imgbin search` runs can immediately match recognized titles, tags, descriptions, and imported source paths.
 
+## Repository Compression Follow-up
+
+After screenshot files are imported, the repository-level `Compress images` GitHub Actions workflow may further optimize supported bitmap files on commit.
+
+- Target formats: `png`, `jpg`, `jpeg`, `webp`
+- Typical affected paths: `src/content/docs/img/**`, including `src/content/docs/img/screenshots/**`
+- Out of scope for the workflow: `metadata.json`, `manifest.json`, prompt files, slug directories, and other non-bitmap assets
+
+This follow-up compression does not replace the responsibilities of `screenshots:sync`. Maintainers still need `screenshots:sync` to:
+
+- create or refresh managed screenshot directories
+- generate `metadata.json`
+- rebuild `src/content/docs/img/screenshots/manifest.json`
+- preserve the slug and category layout used by docs references
+
+In other words, `screenshots:sync` manages screenshot identity and metadata, while the repository workflow may only shrink the binary image payload afterward.
+
 ## Minimal Import Steps
 
 1. Copy the screenshot into `screenshot-staging/<category>/...`
@@ -223,6 +240,59 @@ After a successful sync, the docs screenshot library also refreshes its ImgBin s
 5. Verify `metadata.json` and `manifest.json`
 6. Confirm the successfully processed staging file was removed
 7. Update docs content to reference the managed screenshot path
+
+## Authoring feature docs from managed screenshots
+
+When a screenshot batch is already imported, treat the checked-in metadata as the primary source for page planning instead of re-reading the image manually every time.
+
+### Recommended authoring order
+
+1. Find the candidate assets in `src/content/docs/img/screenshots/manifest.json` or the nearby `metadata.json` files.
+2. Record a route plan before writing prose:
+   - Chinese route, for example `/adventure-team-introduction`
+   - English mirror route, for example `/en/adventure-team-introduction`
+   - section name that owns each screenshot
+3. Write the MDX page with the managed screenshot path, usually `.../original.png`.
+4. Keep the screenshot-to-section mapping in maintainer notes, change artifacts, or planning docs instead of the published page when the public docs should stay reader-focused.
+5. Add related links only after the page body is stable, so navigation changes stay minimal and reviewable.
+
+### Minimum traceability fields
+
+Each screenshot-backed feature doc should still preserve the same five mapping fields somewhere reviewable for maintainers, even if they do not appear in the published page:
+
+- `slug`
+- `title`
+- `relativeSourcePath`
+- `section`
+- `route`
+
+These fields are enough for a maintainer to jump from a rendered page back to:
+
+- the managed asset directory under `src/content/docs/img/screenshots/**`
+- the checked-in `metadata.json`
+- the original staging filename recorded by `relativeSourcePath`
+
+### When to use ImgBin search results
+
+Use checked-in metadata first. Fall back to existing ImgBin search results only when one of these is true:
+
+- the screenshot title is too generic to decide which page owns it
+- multiple screenshots appear to describe the same feature and you need extra semantic clues
+- a maintainer is triaging a screenshot that has not been wired into docs yet
+
+If you use ImgBin search as a fallback, copy the conclusion back into planning notes, the related OpenSpec change, or another checked-in maintainer artifact so the next maintainer does not need to repeat the search.
+
+### Example route and section planning
+
+Before writing, create a small inventory like this in your notes or change proposal:
+
+| `slug` | Intended page | `section` | Why |
+| --- | --- | --- | --- |
+| `screenshot-a1e8035a` | `/adventure-team-introduction` | `成员与编组面板` | Hero roster grid and loadout details explain the roster workspace |
+| `screenshot-11d59f8f` | `/adventure-team-introduction` | `协作流程与副本推进` | Dungeon proposal cards and roster editor show the team workflow |
+| `screenshot-01d8d001` | `/guides/initialization-wizard` | `步骤 1：职业管理` | Sidebar steps and profession cards anchor the first wizard step |
+
+This keeps feature pages bilingual, screenshot-backed, and easy to maintain when metadata changes later.
 
 ## Batch Execution for Historical Screenshots
 
