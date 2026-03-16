@@ -43,7 +43,7 @@ function parseBooleanFlag(value: string | boolean | undefined, defaultValue: boo
 
 const FEATURE_MAC_DOWNLOAD_ENABLED = parseBooleanFlag(
   import.meta.env.VITE_FEATURE_MAC_DOWNLOAD_ENABLED,
-  false
+  true
 );
 
 interface DownloadOption {
