@@ -264,6 +264,7 @@ npm run preview
 1. 在 `src/content/docs/blog/` 创建新文件
 2. 使用日期前缀命名（例如：`2026-02-21-my-post.mdx`）
 3. 添加 frontmatter 元数据
+4. 将 frontmatter `title` 作为唯一页面级 H1，正文从 `##`/`###` 开始，不要在文章正文中再写 Markdown `#` 标题。
 
 ### 添加静态资源
 
@@ -281,9 +282,9 @@ npm run preview
 推荐使用以下命令执行构建后验证：
 
 ```bash
-npm run build:verify-blog-i18n
+npm run build:verify-blog
 # 或仅验证已构建产物
-npm run verify:blog-sidebar-i18n
+npm run verify:blog
 ```
 
 ### StarlightAd 线上可见性故障排查

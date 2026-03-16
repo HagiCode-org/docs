@@ -236,6 +236,7 @@ Documentation content is located in the `src/content/docs/` directory. After edi
 1. Create new file in `src/content/docs/blog/`
 2. Use date prefix naming (e.g., `2026-02-21-my-post.mdx`)
 3. Add frontmatter metadata
+4. Treat frontmatter `title` as the only page-level H1; start the body at `##`/`###` and do not add Markdown `#` headings inside the article body.
 
 ### Adding Static Assets
 
@@ -253,9 +254,9 @@ When adjusting `src/components/StarlightHeader.astro`, `src/components/MarkdownC
 Recommended to run post-build validation:
 
 ```bash
-npm run build:verify-blog-i18n
+npm run build:verify-blog
 # Or only verify built artifacts
-npm run verify:blog-sidebar-i18n
+npm run verify:blog
 ```
 
 ### StarlightAd Online Visibility Troubleshooting
