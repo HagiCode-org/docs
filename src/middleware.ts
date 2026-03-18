@@ -24,16 +24,7 @@ export const onRequest = defineMiddleware((context, next) => {
 
   if (url.pathname === TRAFFIC_ENTRY_ROUTE_PATH) {
     const resolution = resolveTrafficEntryRequest(url);
-
-    if (resolution.valid) {
-      return redirect(resolution.redirectUrl, 302);
-    }
-
-    if (resolution.hasTrafficEntryParams) {
-      return new Response('Not Found', { status: 404 });
-    }
-
-    return next();
+    return redirect(resolution.redirectUrl, 302);
   }
 
   const lang = url.searchParams.get('lang');
