@@ -34,7 +34,6 @@ export function getAllProviderConfigs(): ProviderConfig[] {
       '../../public/presets/claude-code/providers/*.json',
       {
         eager: true,
-        query: '?object',
       }
     );
 
