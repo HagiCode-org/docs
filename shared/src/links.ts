@@ -131,6 +131,13 @@ export const SITE_LINKS = {
         prod: 'https://docs.hagicode.com/blog/rss.xml',
         external: false,
     } as LinkConfig,
+
+    /** 成本计算器 */
+    costCalculator: {
+        dev: 'https://cost.hagicode.com',
+        prod: 'https://cost.hagicode.com',
+        external: true,
+    } as LinkConfig,
 } as const;
 
 /**
