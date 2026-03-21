@@ -3,7 +3,7 @@ import { promises as fs } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 import pc from 'picocolors';
-import { checkLinks, extractLinksFromHtml } from 'astro-link-validator';
+import { checkLinks, extractLinksFromHtml } from './link-validator-compat.js';
 
 import {
   createCacheRecord,
