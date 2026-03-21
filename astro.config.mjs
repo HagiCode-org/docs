@@ -9,7 +9,7 @@ import react from "@astrojs/react";
 
 import mermaidInjector from "./src/integrations/mermaid-injector.ts";
 import cachedLinkValidator from "./src/integrations/link-check-result-cache.js";
-import rehypeMermaid from "rehype-mermaid";
+import rehypeMermaidPre from "./src/integrations/rehype-mermaid-pre.js";
 // rehype-raw 暂时禁用，可能与 MDX 处理冲突
 // import rehypeRaw from "rehype-raw";
 import rehypeExternalLinks from "rehype-external-links";
@@ -92,7 +92,7 @@ export default defineConfig({
     rehypePlugins: [
       // rehypeRaw 暂时禁用，可能与 MDX 处理冲突
       // rehypeRaw,
-      ...(shouldRenderMermaid ? [rehypeMermaid] : []),
+      ...(shouldRenderMermaid ? [rehypeMermaidPre] : []),
       [
         rehypeExternalLinks,
         {
