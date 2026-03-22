@@ -14,7 +14,7 @@
  */
 import { useEffect, useState, useCallback, useRef } from 'react';
 import Lightbox from 'yet-another-react-lightbox';
-import type { SlotStyles } from 'yet-another-react-lightbox';
+import type { SlotStyles, ZoomRef } from 'yet-another-react-lightbox';
 import Captions from 'yet-another-react-lightbox/plugins/captions';
 import Fullscreen from 'yet-another-react-lightbox/plugins/fullscreen';
 import Counter from 'yet-another-react-lightbox/plugins/counter';
@@ -196,6 +196,8 @@ export default function ImageLightbox({
   const [isOpen, setIsOpen] = useState(false);
   const [currentIndex, setCurrentIndex] = useState(0);
   const triggerRef = useRef<HTMLElement | null>(null);
+  const zoomRef = useRef<ZoomRef | null>(null);
+  const zoomFrameRef = useRef<number | null>(null);
 
   const slides = useImageDetection({ contentSelector, excludeDecorative, debounceDelay });
 
@@ -280,6 +282,26 @@ export default function ImageLightbox({
     if (triggerRef.current) {
       triggerRef.current.focus();
       triggerRef.current = null;
+    }
+  }, []);
+
+  const handleView = useCallback(() => {
+    if (zoomFrameRef.current !== null) {
+      window.cancelAnimationFrame(zoomFrameRef.current);
+    }
+
+    // Wait until the active slide has been painted before applying the 2x default zoom.
+    zoomFrameRef.current = window.requestAnimationFrame(() => {
+      zoomFrameRef.current = window.requestAnimationFrame(() => {
+        zoomRef.current?.changeZoom(2);
+        zoomFrameRef.current = null;
+      });
+    });
+  }, []);
+
+  useEffect(() => () => {
+    if (zoomFrameRef.current !== null) {
+      window.cancelAnimationFrame(zoomFrameRef.current);
     }
   }, []);
 
@@ -392,6 +414,7 @@ export default function ImageLightbox({
           closeOnPullUp: true,
         }}
         zoom={{
+          ref: zoomRef,
           scrollToZoom: true,
           minZoom: 1,
           maxZoomPixelRatio: 4,
@@ -406,6 +429,7 @@ export default function ImageLightbox({
           buttonNext: slides.length <= 1 ? () => null : undefined,
         }}
         on={{
+          view: handleView,
           entered: () => {
             // Announce to screen readers
             const announcement = document.createElement('div');
