@@ -1,0 +1,422 @@
+---
+title: HagiCode Skill 系统技术解析：如何打造可扩展的 AI 技能管理平台
+date: 2026-03-24
+tags: [HagiCode, Skill, AI, Orleans, TanStack, 技术架构]
+---
+
+## HagiCode Skill 系统技术解析：如何打造可扩展的 AI 技能管理平台
+
+> 本文深入解析 HagiCode 项目中 Skill（技能）管理系统的架构设计与实现方案，涵盖本地全局管理、市场搜索、智能推荐、授信提供者管理四大核心功能的技术实现细节。
+
+## 背景
+
+在 AI 代码助手这个领域，如何扩展 AI 的能力边界，其实一直是个核心课题。Claude Code 本身的代码辅助能力是挺强的，只是不同开发团队、不同技术栈，往往需要针对特定场景的专业能力——比如处理 Docker 部署、数据库优化、前端组件生成之类的。这时候，Skill（技能）系统就显得尤为重要了。
+
+HagiCode 项目在开发过程中也遇到了类似的挑战：怎么让 Claude Code 能够像人一样「学会」新的专业技能，同时保持良好的用户体验和工程可维护性？毕竟这个问题，说难也难，说简单也简单。围绕这个问题，我们设计并实现了一套完整的 Skill 管理系统。
+
+本文将详细解析这个系统的技术架构和核心实现，适合对 AI 扩展性、命令行工具集成感兴趣的开发者阅读。或许对你有用，也或许没用，但总归是写出来了。
+
+## 关于 HagiCode
+
+本文分享的方案来自我们在 [HagiCode](https://hagicode.com) 项目中的实践经验。HagiCode 是一个开源的 AI 代码助手项目，旨在帮助开发团队提升研发效率。项目的技术栈涵盖 ASP.NET Core、Orleans 分布式框架、TanStack Start + React 前端，以及本文要介绍的 Skill 管理子系统。
+
+项目的 GitHub 地址是 [HagiCode-org/site](https://github.com/HagiCode-org/site)，如果你觉得本文介绍的技术方案有价值，欢迎给个 Star。毕竟Star多了，心情也会好一些。
+
+## 系统架构概览
+
+Skill 系统采用前后端分离的架构设计，说起来也没什么特别的。
+
+**前端部分** 使用 TanStack Start + React 构建用户界面，通过 Redux Toolkit 管理状态，四个主要功能分别对应四个 Tab 组件：本地技能、市场画廊、智能推荐、授信提供者。这样设计，其实也是为了用户体验罢了。
+
+**后端部分** 基于 ASP.NET Core + ABP Framework，使用 Orleans Grain 实现分布式状态管理。在线 API 客户端封装了 `IOnlineApiClient` 接口，用于与远程技能目录服务通信。
+
+整体架构的设计原则是「命令执行与业务逻辑分离」，通过适配器模式将 npm/npx 命令执行的细节屏蔽在独立模块中。毕竟谁愿意看到一堆命令行散落在代码各处呢？
+
+## 核心功能一：本地全局管理
+
+本地全局管理是最基础的功能模块，负责列出已安装的技能并支持卸载操作。也没什么复杂的，就是把事情做好而已。
+
+### 技术方案
+
+实现位置在 `LocalSkillsTab.tsx` 和 `LocalSkillCommandAdapter.cs`。核心思路是封装 `npx skills` 命令，解析其 JSON 输出，转换为内部数据结构。说起来简单，做起来其实也简单。
+
+```csharp
+public async Task<IReadOnlyList<LocalSkillInventoryResponseDto>> GetLocalSkillsAsync(
+    CancellationToken cancellationToken = default)
+{
+    var result = await _commandAdapter.ListGlobalSkillsAsync(cancellationToken);
+    return result.Skills.Select(skill => new LocalSkillInventoryResponseDto
+    {
+        Name = skill.Name,
+        Version = skill.Version,
+        Source = skill.Source,
+        InstalledPath = skill.InstalledPath,
+        Description = skill.Description
+    }).ToList();
+}
+```
+
+数据流非常清晰：前端发起请求 → SkillGalleryAppService 接收 → LocalSkillCommandAdapter 执行 npx 命令 → 解析 JSON 结果 → 返回 DTO 对象。一环扣一环，也没什么好说的。
+
+卸载技能使用 `npx skills remove -g <skillName> -y` 命令，系统会自动处理依赖关系和清理工作。安装元数据存储在技能目录的 `managed-install.json` 中，记录了安装时间、来源版本等信息，便于后续更新和审计。毕竟有些东西，记下来总是好的。
+
+### 安装流程详解
+
+技能安装涉及多个步骤的协调，怎么说呢，其实也不算太复杂：
+
+```csharp
+public async Task<SkillInstallResultDto> InstallAsync(
+    SkillInstallRequestDto request,
+    CancellationToken cancellationToken = default)
+{
+    // 1. 规范化安装引用
+    var normalized = _referenceNormalizer.Normalize(
+        request.SkillId,
+        request.Source,
+        request.SkillSlug,
+        request.Version);
+
+    // 2. 检查先决条件
+    await _prerequisiteChecker.CheckAsync(cancellationToken);
+
+    // 3. 获取安装锁
+    using var installLock = await _lockProvider.AcquireAsync(normalized.SkillId);
+
+    // 4. 执行安装命令
+    var result = await _installCommandRunner.ExecuteAsync(
+        new SkillInstallCommandExecutionRequest
+        {
+            Command = $"npx skills add {normalized.FullReference} -g -y",
+            Timeout = TimeSpan.FromMinutes(4)
+        },
+        cancellationToken);
+
+    // 5. 持久化安装元数据
+    await _metadataStore.WriteAsync(normalized.SkillPath, request);
+
+    return new SkillInstallResultDto { Success = result.Success };
+}
+```
+
+这里用到了几个关键的设计模式：**引用规范化器** 负责将各种输入格式（如 `tanweai/pua`、`@opencode/docker-skill`）转换为统一的内部表示；**安装锁机制** 确保同一技能同时只有一个安装操作在进行；**流式输出** 通过 Server-Sent Events 向前端实时推送安装进度，用户可以看到类似终端的实时日志。
+
+这些设计模式，说到底，也还是为了让事情变得简单罢了。
+
+## 核心功能二：市场搜索
+
+市场搜索让用户能够发现和安装来自社区的技能。毕竟一个人的能力是有限的，众人的智慧才是无穷的。
+
+### 技术方案
+
+搜索功能依赖在线 API `https://api.hagicode.com/v1/skills/search`。为了提升响应速度，系统实现了缓存机制。缓存这东西，就像记忆一样，有些东西记住了，下次就不用再费劲去想。
+
+```csharp
+private async Task<IReadOnlyList<SkillGallerySkillDto>> SearchCatalogAsync(
+    string query,
+    CancellationToken cancellationToken,
+    IReadOnlySet<string>? allowedSources = null)
+{
+    var cacheKey = $"skill_search:{query}:{string.Join(",", allowedSources ?? Array.Empty<string>())}";
+
+    if (_memoryCache.TryGetValue(cacheKey, out var cached))
+        return (IReadOnlyList<SkillGallerySkillDto>)cached!;
+
+    var response = await _onlineApiClient.SearchAsync(
+        new SearchSkillsRequest
+        {
+            Query = query,
+            Limit = _options.LimitPerQuery,
+        },
+        cancellationToken);
+
+    var results = response.Skills
+        .Where(skill => allowedSources is null || allowedSources.Contains(skill.Source))
+        .Select(skill => new SkillGallerySkillDto { ... })
+        .ToList();
+
+    _memoryCache.Set(cacheKey, results, TimeSpan.FromMinutes(10));
+    return results;
+}
+```
+
+搜索结果支持按授信来源过滤，只显示用户信任的技能源。预置的种子查询用于初始化目录，比如「popular」、「recent」等，让用户在首次打开时就能看到推荐的热门技能。毕竟第一印象还是重要的。
+
+## 核心功能三：智能推荐
+
+智能推荐是系统中最复杂的功能，它能根据用户当前项目的情况，自动推荐最适合的技能。复杂归复杂，但做出来还是值得的。
+
+### 推荐流程
+
+整个推荐流程分为五个阶段：
+
+```
+1. 构建项目上下文
+   ↓
+2. AI 生成搜索查询
+   ↓
+3. 并行搜索在线目录
+   ↓
+4. AI 对候选进行排名
+   ↓
+5. 返回推荐列表
+```
+
+首先，系统分析项目的技术栈、编程语言、域名结构等特征，构建一个「项目画像」。这个画像，就像一个人的简历一样，记录着所有的特征。
+
+然后，使用 AI Grain 生成针对性的搜索查询。这里的设计其实挺有意思——不是直接问 AI「推荐什么技能」，而是让它先思考「什么样的搜索词能找到相关技能」。毕竟有时候，问问题的方法比答案本身更重要：
+
+```csharp
+var queryGeneration = await aiGrain.GenerateSkillRecommendationQueriesAsync(
+    projectContext,      // 项目上下文
+    locale,              // 用户语言偏好
+    maxQueries,           // 最大查询数量
+    effectiveSearchHero); // AI 模型选择
+```
+
+接着，并行执行这些搜索查询，获取候选技能列表。并行处理，说到底也是为了节省时间罢了。
+
+最后，使用另一个 AI Grain 对候选技能进行排名。这一步会综合考虑技能与项目的相关性、授信状态、用户历史偏好等因素：
+
+```csharp
+var ranking = await aiGrain.RankSkillRecommendationsAsync(
+    projectContext,
+    candidates,
+    installedSkillNames,
+    locale,
+    maxRecommendations,
+    effectiveRankingHero);
+
+response.Items = MergeRecommendations(projectContext, candidates, ranking, maxRecommendations);
+```
+
+### 回退机制
+
+AI 模型可能出现响应慢或暂时不可用的情况。毕竟再好的系统，也有掉链子的时候。为此，系统设计了确定性回退机制：当 AI 服务不可用时，使用基于规则启发式算法生成推荐，比如根据 package.json 中的依赖推断可能需要的技能。
+
+这个回退机制，说穿了，也就是给系统留了一条后路罢了。
+
+## 核心功能四：授信提供者管理
+
+授信提供者管理允许用户控制哪些技能源是可信的。毕竟信任这东西，还是要自己把握的。
+
+### 匹配规则
+
+授信提供者支持两种匹配规则：**精确匹配**（exact）和**前缀匹配**（prefix）。
+
+```csharp
+public static TrustedSkillProviderResolutionSnapshot Resolve(
+    TrustedSkillProviderSnapshot snapshot,
+    string source)
+{
+    var normalizedSource = Normalize(source);
+
+    foreach (var entry in snapshot.Entries.OrderBy(e => e.SortOrder))
+    {
+        if (!entry.IsEnabled) continue;
+
+        foreach (var rule in entry.MatchRules)
+        {
+            bool isMatch = rule.MatchType switch
+            {
+                TrustedSkillProviderMatchRuleType.Exact
+                    => string.Equals(normalizedSource, Normalize(rule.Value),
+                        StringComparison.OrdinalIgnoreCase),
+                TrustedSkillProviderMatchRuleType.Prefix
+                    => normalizedSource.StartsWith(Normalize(rule.Value) + "/",
+                        StringComparison.OrdinalIgnoreCase),
+                _ => false
+            };
+
+            if (isMatch)
+                return new TrustedSkillProviderResolutionSnapshot
+                {
+                    IsTrustedSource = true,
+                    ProviderId = entry.ProviderId,
+                    DisplayName = entry.DisplayName
+                };
+        }
+    }
+
+    return new TrustedSkillProviderResolutionSnapshot { IsTrustedSource = false };
+}
+```
+
+预置的授信提供者包括 Vercel、Azure、anthropics、Microsoft、browser-use 等知名组织和项目。自定义提供者可以通过配置文件添加，指定提供者 ID、显示名称、徽章标签、匹配规则等。毕竟世界那么大，不可能只有几家是可信的。
+
+### 持久化实现
+
+授信配置使用 Orleans Grain 持久化存储：
+
+```csharp
+public class TrustedSkillProviderGrain : Grain<TrustedSkillProviderState>,
+    ITrustedSkillProviderGrain
+{
+    public async Task UpdateConfigurationAsync(TrustedSkillProviderSnapshot snapshot)
+    {
+        State.Snapshot = snapshot;
+        await WriteStateAsync();
+    }
+
+    public Task<TrustedSkillProviderSnapshot> GetConfigurationAsync()
+    {
+        return Task.FromResult(State.Snapshot);
+    }
+}
+```
+
+这种方式的好处是配置变更会自动同步到所有节点，无需手动刷新缓存。毕竟自动化，说到底也是为了让人少操心罢了。
+
+## 关键技术设计
+
+### 命令执行适配器模式
+
+Skill 系统需要执行各种 npx 命令，如果把这些逻辑散落在各处，代码会变得难以维护。因此我们设计了适配器接口。设计模式这东西，说到底，也还是为了让代码更好维护而已：
+
+```csharp
+public interface ISkillInstallCommandRunner
+{
+    Task<SkillInstallCommandExecutionResult> ExecuteAsync(
+        SkillInstallCommandExecutionRequest request,
+        CancellationToken cancellationToken = default);
+}
+```
+
+不同的命令有不同的执行器实现，全部实现同一个接口，便于测试和替换。
+
+### SSE 流式输出
+
+安装进度通过 Server-Sent Events 实时推送到前端：
+
+```csharp
+public async Task InstallWithProgressAsync(
+    SkillInstallRequestDto request,
+    IServerStreamWriter<SkillInstallProgressEventDto> stream,
+    CancellationToken cancellationToken)
+{
+    var process = new Process
+    {
+        StartInfo = new ProcessStartInfo
+        {
+            FileName = "npx",
+            Arguments = $"skills add {request.FullReference} -g -y",
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false
+        }
+    };
+
+    process.OutputDataReceived += async (sender, e) =>
+    {
+        await stream.WriteAsync(new SkillInstallProgressEventDto
+        {
+            EventType = "output",
+            Data = e.Data ?? string.Empty
+        });
+    };
+
+    process.Start();
+    process.BeginOutputReadLine();
+    await process.WaitForExitAsync(cancellationToken);
+}
+```
+
+用户在前端可以看到类似终端的实时输出，体验非常直观。毕竟实时反馈，让人安心。
+
+## 实践指南
+
+### 安装社区技能
+
+以安装 `pua` 技能为例（这是一个流行的社区技能）：
+
+1. 打开 Skills 抽屉，切换到「Skill Gallery」标签
+2. 输入「pua」进行搜索
+3. 点击搜索结果查看技能详情
+4. 点击「Install」按钮安装
+5. 切换到「Local Skills」标签确认安装成功
+
+安装命令是 `npx skills add tanweai/pua -g -y`，系统会自动处理所有细节。其实也没那么多步骤，一步步来就是了。
+
+### 添加自定义授信来源
+
+如果你的团队有自己的技能仓库，可以添加为授信来源：
+
+```yaml
+providerId: "my-team"
+displayName: "My Team Skills"
+badgeLabel: "MyTeam"
+isEnabled: true
+sortOrder: 100
+matchRules:
+  - matchType: "prefix"
+    value: "my-team/"
+  - matchType: "exact"
+    value: "my-team/special-skill"
+```
+
+这样来自你团队的所有技能都会显示授信徽章，用户可以更放心地安装。毕竟有标记的东西，总是让人安心一些。
+
+### 技能开发基础
+
+创建自定义技能需要遵循以下结构：
+
+```
+my-skill/
+├── SKILL.md          # 技能元数据（YAML front matter）
+├── index.ts          # 技能入口
+├── agents/           # 支持的代理配置
+└── references/       # 参考资源
+```
+
+`SKILL.md` 的格式示例：
+
+```yaml
+---
+name: my-skill
+description: A brief description of what this skill does
+---
+
+# My Skill
+
+Detailed documentation...
+```
+
+## 注意事项
+
+1. **网络要求**：技能搜索和安装需要能访问 `api.hagicode.com` 和 npm registry
+2. **Node.js 版本**：建议使用 Node.js 18 或更高版本
+3. **权限要求**：需要全局 npm 安装权限
+4. **并发控制**：同一技能同时只能有一个安装或卸载操作在执行
+5. **超时设置**：安装操作默认超时时间为 4 分钟，复杂场景可能需要调整
+
+这些注意事项，说到底，也还是为了让事情顺利进行罢了。
+
+## 总结
+
+本文介绍了 HagiCode 项目中 Skill 管理系统的完整实现。这个系统通过前后端分离的架构、适配器模式、Orleans 分布式状态管理等技术手段，实现了：
+
+- **本地全局管理**：通过封装 npx skills 命令，提供统一的技能管理接口
+- **市场搜索**：利用在线 API 和缓存机制，快速发现社区技能
+- **智能推荐**：结合 AI 能力，根据项目上下文推荐最合适的技能
+- **授信管理**：灵活的配置系统，让用户掌控信任边界
+
+这套设计思路不仅适用于 Skill 管理，对于任何需要集成命令行工具、兼顾本地存储和在线服务的场景，都有参考价值。
+
+如果本文对你有帮助，欢迎来 GitHub 给个 Star：[github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)。也可以访问官网了解更多：[hagicode.com](https://hagicode.com)。
+
+或许你也会觉得，这套系统设计得还行，或许你不会。但这都罢了，毕竟代码写出来，总有人会用，也总有人不会用......
+
+## 参考资料
+
+- HagiCode 项目地址：[github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- HagiCode 官网：[hagicode.com](https://hagicode.com)
+- Claude Code 官方技能文档：[docs.anthropic.com](https://docs.anthropic.com)
+- Orleans 框架文档：[dotnet.github.io/orleans](https://dotnet.github.io/orleans)
+- TanStack Start：[tanstack.com/start](https://tanstack.com/start)
+
+## 版权说明
+
+感谢您的阅读,如果您觉得本文有用,欢迎点赞、收藏和分享支持。
+本内容采用人工智能辅助协作,最终内容由作者审核并确认。
+- 本文作者: [newbe36524](https://www.newbe.pro)
+- 原文链接: [https://docs.hagicode.com/blog/2026-03-24-hagicode-skill-system-technical-analysis/](https://docs.hagicode.com/blog/2026-03-24-hagicode-skill-system-technical-analysis/)
+- 版权声明: 本博客所有文章除特别声明外,均采用 BY-NC-SA 许可协议。转载请注明出处!
