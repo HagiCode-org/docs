@@ -33,6 +33,11 @@ npm run preview
 
 The local docs server runs on `http://localhost:31265` by default.
 
+## Desktop version data
+
+Desktop download data is fetched at runtime from the public desktop index endpoints.
+The checked-in `public/version-index.json` snapshot remains an offline fallback detail only, not a docs-maintained freshness workflow.
+
 ## Ecosystem role
 
 Use this repository when the goal is end-user education and public documentation. Product storytelling lives in `repos/site`, while application behavior lives in `repos/web`, `repos/hagicode-desktop`, and `repos/hagicode-core`.

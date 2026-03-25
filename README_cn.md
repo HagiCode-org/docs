@@ -33,6 +33,11 @@ npm run preview
 
 本地文档站默认运行在 `http://localhost:31265`。
 
+## Desktop 版本数据
+
+Desktop 下载数据以运行时从公开 desktop 索引端点拉取为主。
+仓库内保留的 `public/version-index.json` 仅作为离线 fallback 细节存在，不代表 docs 仓库需要维护版本新鲜度工作流。
+
 ## 在生态中的角色
 
 当目标是面向用户的说明文档与教学内容时，应优先查看本仓库；产品品牌叙事主要位于 `repos/site`，应用实现则位于 `repos/web`、`repos/hagicode-desktop` 与 `repos/hagicode-core`。
