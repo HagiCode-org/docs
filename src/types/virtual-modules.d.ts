@@ -14,7 +14,7 @@ declare module 'virtual:starlight/user-images' {
   };
 }
 
-declare module 'virtual:starlight-blog-config' {
+declare module 'virtual:starlight-blog/config' {
   const config: {
     prefix: string;
     postCount: number;
@@ -25,7 +25,7 @@ declare module 'virtual:starlight-blog-config' {
   export default config;
 }
 
-declare module 'virtual:starlight-blog-context' {
+declare module 'virtual:starlight-blog/context' {
   const context: {
     srcDir: string;
     rootDir: string;
