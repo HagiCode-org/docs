@@ -1,72 +1,65 @@
 /**
  * Desktop 版本数据管理器
  *
- * 提供单例模式的版本数据管理，支持服务端注入和客户端获取
- * 用于统一管理 Desktop 版本信息，避免重复请求
+ * 提供单例模式的版本数据管理，支持服务端注入和客户端获取。
+ * 运行时结果会保留数据来源、降级链路和并发请求复用状态。
  */
 
+import type { DesktopIndexResponse, DesktopVersion, PlatformGroup } from './types/desktop';
 import type {
-  DesktopIndexResponse,
-  DesktopVersion,
-  PlatformGroup,
-  ChannelInfo,
-} from './types/desktop';
+  DesktopVersionFetchAttempt,
+  DesktopVersionSource,
+} from './desktop-utils';
 import {
-  fetchDesktopVersions,
+  DesktopVersionFetchError,
+  fetchDesktopVersionResult,
   groupAssetsByPlatform,
 } from './desktop-utils';
 
+export type DesktopVersionState = 'ready' | 'degraded' | 'local_snapshot' | 'fatal';
+
 /**
  * 版本数据接口
- * 包含最新版本、平台分组、错误信息和渠道数据
+ * 包含最新版本、平台分组、错误信息、渠道数据和来源状态。
  */
 export interface DesktopVersionData {
   /** 最新版本信息 */
   latest: DesktopVersion | null;
   /** 按平台分组的下载资源 */
   platforms: PlatformGroup[];
-  /** 错误信息 */
+  /** 致命错误信息 */
   error: string | null;
+  /** 当前返回数据的来源 */
+  source: DesktopVersionSource | null;
+  /** 当前返回数据的状态 */
+  status: DesktopVersionState;
+  /** 本次获取过程中发生过的失败尝试 */
+  attempts: DesktopVersionFetchAttempt[];
   /** 渠道信息 */
   channels: {
-    /** 稳定版渠道 */
     stable: {
-      /** 最新版本 */
       latest: DesktopVersion | null;
-      /** 所有版本 */
       all: DesktopVersion[];
     };
-    /** 测试版渠道 */
     beta: {
-      /** 最新版本 */
       latest: DesktopVersion | null;
-      /** 所有版本 */
       all: DesktopVersion[];
     };
   };
 }
 
-/**
- * 版本管理器类
- * 单例模式，确保全局只有一个实例
- */
 class VersionManager {
   private static instance: VersionManager | null = null;
   private data: DesktopVersionData | null = null;
-  private initialized: boolean = false;
-  private fetching: boolean = false;
+  private initialized = false;
+  private fetching = false;
   private pendingPromises: Array<{
     resolve: (data: DesktopVersionData) => void;
     reject: (error: Error) => void;
   }> = [];
 
-  private constructor() {
-    // 私有构造函数，防止直接实例化
-  }
+  private constructor() {}
 
-  /**
-   * 获取单例实例
-   */
   static getInstance(): VersionManager {
     if (!VersionManager.instance) {
       VersionManager.instance = new VersionManager();
@@ -75,67 +68,55 @@ class VersionManager {
   }
 
   /**
-   * 设置服务端注入的数据（用于 SSR）
-   * 在 Astro 页面的服务端调用此方法，将版本数据注入到客户端
-   *
-   * @param data - 从服务端获取的版本数据
+   * 设置服务端注入的数据（用于 SSR）。
+   * 服务端注入的数据本质上等价于本地快照。
    */
   setServerData(data: DesktopIndexResponse): void {
-    const versionData = this.transformToVersionData(data);
+    const versionData = this.transformToVersionData(data, 'local', []);
     this.data = versionData;
     this.initialized = true;
 
-    // 解析所有等待的 Promise
     for (const { resolve } of this.pendingPromises) {
       resolve(versionData);
     }
     this.pendingPromises = [];
   }
 
-  /**
-   * 获取版本数据
-   * 如果数据已初始化，直接返回缓存数据
-   * 否则发起请求获取数据
-   *
-   * @returns 版本数据
-   */
   async getVersionData(): Promise<DesktopVersionData> {
-    // 如果数据已初始化，直接返回
     if (this.initialized && this.data) {
       return this.data;
     }
 
-    // 检查是否有服务端注入的全局数据
-    if (typeof window !== 'undefined' && (window as any).__DESKTOP_VERSION_DATA__) {
-      const serverData = (window as any).__DESKTOP_VERSION_DATA__;
+    if (typeof window !== 'undefined' && (window as { __DESKTOP_VERSION_DATA__?: DesktopIndexResponse }).__DESKTOP_VERSION_DATA__) {
+      const serverData = (window as { __DESKTOP_VERSION_DATA__?: DesktopIndexResponse }).__DESKTOP_VERSION_DATA__;
       if (serverData) {
-        const versionData = this.transformToVersionData(serverData);
+        const versionData = this.transformToVersionData(serverData, 'local', []);
         this.data = versionData;
         this.initialized = true;
-        // 清除全局数据以避免内存泄漏
-        delete (window as any).__DESKTOP_VERSION_DATA__;
+        delete (window as { __DESKTOP_VERSION_DATA__?: DesktopIndexResponse }).__DESKTOP_VERSION_DATA__;
         return versionData;
       }
     }
 
-    // 如果正在获取数据，等待结果
     if (this.fetching) {
       return new Promise((resolve, reject) => {
         this.pendingPromises.push({ resolve, reject });
       });
     }
 
-    // 开始获取数据
     this.fetching = true;
 
     try {
-      const responseData = await fetchDesktopVersions();
-      const versionData = this.transformToVersionData(responseData);
+      const responseData = await fetchDesktopVersionResult();
+      const versionData = this.transformToVersionData(
+        responseData.data,
+        responseData.source,
+        responseData.attempts,
+      );
 
       this.data = versionData;
       this.initialized = true;
 
-      // 解析所有等待的 Promise
       for (const { resolve } of this.pendingPromises) {
         resolve(versionData);
       }
@@ -143,107 +124,96 @@ class VersionManager {
 
       return versionData;
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-      const errorData: DesktopVersionData = {
-        latest: null,
-        platforms: [],
-        error: errorMessage,
-        channels: {
-          stable: { latest: null, all: [] },
-          beta: { latest: null, all: [] },
-        },
-      };
+      const errorData = this.createErrorData(error);
 
-      // 拒绝所有等待的 Promise
-      for (const { reject } of this.pendingPromises) {
-        reject(error instanceof Error ? error : new Error(errorMessage));
+      for (const { resolve } of this.pendingPromises) {
+        resolve(errorData);
       }
       this.pendingPromises = [];
 
-      throw error;
+      this.data = null;
+      this.initialized = false;
+
+      return errorData;
     } finally {
       this.fetching = false;
     }
   }
 
-  /**
-   * 获取指定渠道的版本数据
-   *
-   * @param channel - 渠道名称 ('stable' | 'beta')
-   * @returns 渠道版本数据
-   */
   async getChannelVersionData(
-    channel: 'stable' | 'beta'
+    channel: 'stable' | 'beta',
   ): Promise<{
     latest: DesktopVersion | null;
     all: DesktopVersion[];
     platforms: PlatformGroup[];
     error: string | null;
+    source: DesktopVersionSource | null;
+    status: DesktopVersionState;
+    attempts: DesktopVersionFetchAttempt[];
   }> {
     const data = await this.getVersionData();
+    const latest = data.channels[channel].latest;
 
     return {
-      latest: data.channels[channel].latest,
+      latest,
       all: data.channels[channel].all,
-      platforms: data.platforms,
+      platforms: latest ? groupAssetsByPlatform(latest.files) : [],
       error: data.error,
+      source: data.source,
+      status: data.status,
+      attempts: data.attempts,
     };
   }
 
-  /**
-   * 检查是否已初始化
-   *
-   * @returns 是否已初始化
-   */
   isInitialized(): boolean {
     return this.initialized;
   }
 
-  /**
-   * 清除缓存
-   * 主要用于测试或手动刷新场景
-   */
   clearCache(): void {
     this.data = null;
     this.initialized = false;
     this.fetching = false;
 
-    // 拒绝所有等待的 Promise
     for (const { reject } of this.pendingPromises) {
       reject(new Error('Cache cleared'));
     }
     this.pendingPromises = [];
   }
 
-  /**
-   * 将 DesktopIndexResponse 转换为 DesktopVersionData
-   *
-   * @param data - 原始版本数据响应
-   * @returns 转换后的版本数据
-   */
+  private createErrorData(error: unknown): DesktopVersionData {
+    const attempts = error instanceof DesktopVersionFetchError ? error.attempts : [];
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+
+    return {
+      latest: null,
+      platforms: [],
+      error: errorMessage,
+      source: null,
+      status: 'fatal',
+      attempts,
+      channels: {
+        stable: { latest: null, all: [] },
+        beta: { latest: null, all: [] },
+      },
+    };
+  }
+
   private transformToVersionData(
-    data: DesktopIndexResponse
+    data: DesktopIndexResponse,
+    source: DesktopVersionSource,
+    attempts: DesktopVersionFetchAttempt[],
   ): DesktopVersionData {
-    // 优先使用 stable 渠道的最新版本作为默认 latest
     let latest: DesktopVersion | null = null;
 
-    if (data.channels && data.channels.stable && data.channels.stable.latest) {
-      // 如果有 channels.stable.latest，使用它
-      const stableLatestVersion = data.channels.stable.latest;
-      latest = data.versions.find(v => v.version === stableLatestVersion) || null;
+    if (data.channels?.stable?.latest) {
+      latest = data.versions.find((version) => version.version === data.channels?.stable?.latest) || null;
     }
 
-    // 如果没有找到 stable 版本，则使用最新的版本
     if (!latest && data.versions.length > 0) {
       latest = data.versions[0];
     }
 
-    // 获取平台分组（基于 latest 版本）
-    const platforms = latest
-      ? groupAssetsByPlatform(latest.files)
-      : [];
-
-    // 处理渠道数据
+    const platforms = latest ? groupAssetsByPlatform(latest.files) : [];
     const channels = {
       stable: this.processChannel(data, 'stable'),
       beta: this.processChannel(data, 'beta'),
@@ -253,33 +223,40 @@ class VersionManager {
       latest,
       platforms,
       error: null,
+      source,
+      status: this.mapSourceToStatus(source),
+      attempts,
       channels,
     };
   }
 
-  /**
-   * 处理单个渠道的数据
-   *
-   * @param data - 原始版本数据响应
-   * @param channel - 渠道名称
-   * @returns 渠道版本数据
-   */
+  private mapSourceToStatus(source: DesktopVersionSource): DesktopVersionState {
+    if (source === 'primary') {
+      return 'ready';
+    }
+
+    if (source === 'backup') {
+      return 'degraded';
+    }
+
+    return 'local_snapshot';
+  }
+
   private processChannel(
     data: DesktopIndexResponse,
-    channel: 'stable' | 'beta'
+    channel: 'stable' | 'beta',
   ): { latest: DesktopVersion | null; all: DesktopVersion[] } {
     if (!data.channels || !data.channels[channel]) {
       return { latest: null, all: [] };
     }
 
     const channelInfo = data.channels[channel];
-    const channelVersions = data.versions.filter((v) =>
-      channelInfo.versions.includes(v.version)
+    const channelVersions = data.versions.filter((version) =>
+      channelInfo.versions.includes(version.version),
     );
 
-    // 查找最新版本
     const latestVersion =
-      channelVersions.find((v) => v.version === channelInfo.latest) || null;
+      channelVersions.find((version) => version.version === channelInfo.latest) || null;
 
     return {
       latest: latestVersion,
@@ -288,12 +265,10 @@ class VersionManager {
   }
 }
 
-// 导出单例获取方法
 export const getVersionManager = (): VersionManager => {
   return VersionManager.getInstance();
 };
 
-// 导出便捷方法
 export const setDesktopServerData = (data: DesktopIndexResponse): void => {
   getVersionManager().setServerData(data);
 };
@@ -303,12 +278,15 @@ export const getDesktopVersionData = (): Promise<DesktopVersionData> => {
 };
 
 export const getDesktopChannelData = (
-  channel: 'stable' | 'beta'
+  channel: 'stable' | 'beta',
 ): Promise<{
   latest: DesktopVersion | null;
   all: DesktopVersion[];
   platforms: PlatformGroup[];
   error: string | null;
+  source: DesktopVersionSource | null;
+  status: DesktopVersionState;
+  attempts: DesktopVersionFetchAttempt[];
 }> => {
   return getVersionManager().getChannelVersionData(channel);
 };

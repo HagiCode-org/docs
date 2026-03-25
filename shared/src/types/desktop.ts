@@ -1,6 +1,6 @@
 /**
  * Hagicode Desktop 相关类型定义
- * 基于 desktop.dl.hagicode.com/index.json 的实际数据结构
+ * 兼容主索引站、备用下载站和本地离线快照的实际数据结构
  */
 
 /**
@@ -31,8 +31,8 @@ export interface DesktopAsset {
   path: string;
   /** 文件大小 (字节) */
   size: number;
-  /** 最后修改时间 (Unix 时间戳) */
-  lastModified: number | null;
+  /** 最后修改时间 (Unix 时间戳或 ISO 时间戳字符串) */
+  lastModified: number | string | null;
 }
 
 /**
