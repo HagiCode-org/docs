@@ -1,0 +1,257 @@
+---
+title: Docker 容器中运行 AI CLI 工具：用户隔离与持久化卷实战指南
+date: 2026-03-26
+tags: [Docker, AI CLI, HagiCode, 用户隔离, 持久化卷, 容器化部署, Claude Code, Codex]
+---
+
+## Docker 容器中运行 AI CLI 工具：用户隔离与持久化卷实战指南
+
+> 在容器化环境中集成 Claude Code、Codex、OpenCode 等 AI 编程工具，听起来简单，实则暗藏玄机。本文将深入解析 HagiCode 项目在 Docker 部署中如何解决用户权限、配置持久化、版本管理等核心挑战，带你避坑避雷。
+
+## 背景
+
+当我们决定在 Docker 容器内运行 AI 编程 CLI 工具时，最直觉的想法可能是："容器不就是 root 吗，直接装不就完事了？"其实啊，这想法看似简单，背后却藏着几个必须解决的核心问题。
+
+首先，**安全限制是第一道坎**。以 Claude CLI 为例，它明确禁止以 root 用户运行——这是强制性的安全检查，检测到 root 直接拒绝启动。你可能会想，那我用 `USER` 指令切换一下不就行了？事情没那么简单，容器的非 root 用户和宿主机的用户权限之间还存在映射问题。毕竟，这世间的事，哪有那么简单的呢？
+
+其次，**状态持久化是第二个坑**。Claude Code 需要登录，Codex 有自己的配置，OpenCode 也有缓存目录。如果每次容器重启都重新配置，那这个"自动化"就毫无意义了。我们需要让这些配置在容器生命周期之外持久存在。配置这东西，就像记忆一样，说没就没，那也挺让人郁闷的。
+
+第三个问题就是**权限一致性**。宿主机用户创建的配置文件，容器内的进程能不能访问？UID/GID 不匹配会导致文件权限报错，这在实际部署中非常常见。这问题说起来也挺无奈的，可是没辙。
+
+这些问题看似独立，实际上环环相扣。HagiCode 项目在开发过程中逐步摸索出了一套可行的解决方案，接下来我会详细分享其中的技术细节和踩坑经历。
+
+## 关于 HagiCode
+
+本文分享的方案来自我们在 [HagiCode](https://hagicode.com) 项目中的实践经验。HagiCode 是一个开源的 AI 辅助编程平台，集成了多个主流的 AI 代码助手，包括 Claude Code、Codex、OpenCode 等。作为一个需要跨平台、高可用部署的项目，HagiCode 必须解决容器化部署的各种挑战。
+
+如果你觉得本文分享的技术方案有价值，说明 HagiCode 在工程实践上还是有点东西的——那么 [HagiCode 官网](https://hagicode.com) 和 [GitHub 仓库](https://github.com/HagiCode-org/site) 值得关注关注。毕竟，好东西值得分享，不是吗？
+
+## 为什么不能简单用 root？
+
+这里有个常见的误解：Docker 容器默认以 root 运行，那我就直接用 root 装工具呗。这么想的话，Claude CLI 会毫不客气地给你一个下马威。
+
+```bash
+# 直接以 root 运行 Claude CLI？不行
+docker run --rm -it --user root myimage claude
+# 输出: Error: This command cannot be run as root user
+```
+
+这是 Claude CLI 的硬性安全限制。原因很简单：这些 CLI 工具会读写用户的敏感配置，包括 API Token、本地缓存、甚至可能执行用户编写的脚本。以 root 权限运行这些工具，潜在风险太大。毕竟，安全这东西，怎么谨慎都不为过。
+
+那么问题来了：怎么才能既满足 CLI 的安全要求，又保持容器管理的灵活性？我们需要换个思路——**不是在运行时切换用户，而是从镜像构建阶段就创建专用用户**。有时候啊，换个角度看问题，答案就自然浮现了。
+
+## 创建专用用户：不止是换个名字
+
+你可能会想，那我直接在 Dockerfile 里加一行 `USER` 指令不就得了？这确实是最简单的方案，但不够健壮。简单的东西往往不够优雅，不是吗？
+
+### 静态创建 vs 动态映射
+
+HagiCode 的方案是创建一个 UID 1000 的 `hagicode` 用户，这个 UID 通常匹配大多数宿主机的默认用户：
+
+```dockerfile
+RUN groupadd -o -g 1000 hagicode && \
+    useradd -o -u 1000 -g 1000 -s /bin/bash -m hagicode && \
+    mkdir -p /home/hagicode/.claude && \
+    chown -R hagicode:hagicode /home/hagicode
+```
+
+但这只解决了镜像内置用户的问题。如果宿主机用户是 UID 1001 呢？容器启动时还需要支持动态映射。
+
+docker-entrypoint.sh 中的关键逻辑：
+
+```bash
+if [ -n "$PUID" ] && [ -n "$PGID" ]; then
+    if ! id hagicode >/dev/null 2>&1; then
+        groupadd -g "$PGID" hagicode
+        useradd -u "$PUID" -g "$PGID" -s /bin/bash -m hagicode
+    fi
+fi
+```
+
+这样设计的好处是：**镜像构建时使用默认的 UID 1000，运行时可以通过环境变量 PUID/PGID 动态调整**。无论宿主机用户是什么 UID，配置文件的所有权都不会出问题。这设计说起来也挺自然的，毕竟，灵活性和默认值之间需要找到一个平衡点罢了。
+
+## 持久化卷的设计哲学
+
+每个 AI CLI 工具都有自己偏好的配置目录，这需要一一对应：
+
+| CLI 工具 | 容器内路径 | 命名卷 |
+|---------|-----------|--------|
+| Claude | `/home/hagicode/.claude` | `claude-data` |
+| Codex | `/home/hagicode/.codex` | `codex-data` |
+| OpenCode | `/home/hagicode/.config/opencode` | `opencode-config-data` |
+
+为什么用命名卷而不是绑定挂载？三个原因：
+
+1. **简化管理**：命名卷由 Docker 自动管理生命周期，不需要手动创建宿主机目录
+2. **权限隔离**：卷的初始内容由容器内用户创建，避免宿主机权限冲突
+3. **独立迁移**：卷可以独立于容器存在，升级镜像时数据不会丢失
+
+docker-compose-builder-web 会自动生成对应的卷配置：
+
+```yaml
+volumes:
+  claude-data:
+  codex-data:
+  opencode-config-data:
+
+services:
+  hagicode:
+    volumes:
+      - claude-data:/home/hagicode/.claude
+      - codex-data:/home/hagicode/.codex
+      - opencode-config-data:/home/hagicode/.config/opencode
+    user: "${PUID:-1000}:${PGID:-1000}"
+```
+
+注意这里的 `user` 字段：通过环境变量注入 PUID/PGID，确保容器进程以匹配宿主机的用户身份运行。这细节说起来挺重要的，毕竟，权限问题一旦出现，排查起来也挺让人头疼的。
+
+## 版本管理：烘焙版本与运行时覆盖
+
+Docker 镜像的版本固定是保证可重现性的关键。但在实际开发中，我们经常需要测试新版本，或者紧急修复一个 bug。如果每次都要重新构建镜像，那效率也太低了。
+
+HagiCode 的策略是**固定版本作为默认值，运行时覆盖作为扩展能力**。这也算是工程实践中的一种妥协吧，稳定性和灵活性之间总要有个取舍。
+
+Dockerfile.template 中固定版本：
+
+```dockerfile
+USER hagicode
+WORKDIR /home/hagicode
+
+# 配置 npm 全局安装路径
+RUN mkdir -p /home/hagicode/.npm-global && \
+    npm config set prefix '/home/hagicode/.npm-global'
+
+# 安装 CLI 工具（使用固定版本）
+RUN npm install -g @anthropic-ai/claude-code@2.1.71 && \
+    npm install -g @openai/codex@0.112.0 && \
+    npm install -g opencode-ai@1.2.25 && \
+    npm cache clean --force
+```
+
+docker-entrypoint.sh 中支持运行时覆盖：
+
+```bash
+install_cli_override_if_needed() {
+    local package_name="$2"
+    local override_version="$5"
+
+    if [ -n "$override_version" ]; then
+        gosu hagicode npm install -g "${package_name}@${override_version}"
+    fi
+}
+
+# 使用示例
+install_cli_override_if_needed "" "@anthropic-ai/claude-code" "" "" "${CLAUDE_CODE_CLI_VERSION}"
+```
+
+这样，在不重新构建镜像的情况下，可以通过环境变量测试新版本：
+
+```bash
+docker run -e CLAUDE_CODE_CLI_VERSION=2.2.0 myimage
+```
+
+这设计说起来也挺实用的，毕竟，谁愿意每次测试新功能都要重新构建镜像呢？
+
+## 自动配置注入
+
+除了手动配置 CLI 工具，有些场景下还需要自动注入配置。最典型的就是 API Token。
+
+```bash
+if [ -n "$ANTHROPIC_AUTH_TOKEN" ]; then
+    mkdir -p /home/hagicode/.claude
+    cat > /home/hagicode/.claude/settings.json <<EOF
+{
+  "env": {
+    "ANTHROPIC_AUTH_TOKEN": "${ANTHROPIC_AUTH_TOKEN}"
+  }
+}
+EOF
+    chown -R hagicode:hagicode /home/hagicode/.claude
+fi
+```
+
+这里需要注意两点：**敏感信息通过环境变量传入，不要硬编码到镜像中**；配置文件的所有权要正确设置，否则 CLI 工具无法读取。这事儿说起来挺基础的，可是做错的人还真不少。
+
+## 最佳实践与避坑指南
+
+### 权限不匹配问题
+
+这是最容易踩的坑。宿主机用户的 UID 是 1001，容器内是 1000，创建的文件互相访问不了。
+
+```bash
+# 正确做法：让容器匹配宿主机用户
+docker run \
+    -e PUID=$(id -u) \
+    -e PGID=$(id -g) \
+    myimage
+```
+
+这问题说起来也挺常见的，可是第一次遇到的时候，还是挺让人郁闷的。
+
+### 容器重启后配置丢失
+
+如果你发现每次重启都要重新登录，检查一下是不是忘记挂载持久化卷了：
+
+```yaml
+volumes:
+  - claude-data:/home/hagicode/.claude
+```
+
+配置这东西，辛辛苦苦设置好了，说没就没了，那感觉，怎么说呢，挺让人崩溃的。
+
+### 版本升级的正确姿势
+
+不要直接在运行的容器里执行 `npm install -g`。正确做法是：
+
+1. 设置环境变量触发覆盖安装
+2. 或者重新构建镜像
+
+```bash
+# 方式一：运行时覆盖
+docker run -e CLAUDE_CODE_CLI_VERSION=2.2.0 myimage
+
+# 方式二：重新构建
+docker build -t myimage:v2 .
+```
+
+条条大路通罗马，只是有的路好走一点，有的路稍微曲折一点罢了。
+
+### 安全加固清单
+
+- API Token 通过环境变量传入，不写入镜像
+- 配置文件设置 600 权限
+- 始终以非 root 用户运行应用
+- 定期更新 CLI 版本，修复安全漏洞
+
+安全这东西，说起来挺重要，可是真正落实的时候，又有多少人能做得好呢？
+
+## 扩展新 CLI 工具
+
+如果以后要支持新的 CLI 工具，只需要三步：
+
+1. **Dockerfile.template**：添加安装步骤
+2. **docker-entrypoint.sh**：添加版本覆盖逻辑
+3. **docker-compose-builder-web**：添加持久化卷映射
+
+模板化的设计让扩展变得简单，不需要改动核心逻辑。这也算是过来人的一点心得，不是什么大道理，只是踩过的坑罢了。
+
+## 总结
+
+Docker 容器中运行 AI CLI 工具，核心挑战在于**用户权限、配置持久化、版本管理**三个维度。HagiCode 项目通过创建专用用户、命名卷隔离、环境变量覆盖的组合方案，实现了既安全又灵活的部署架构。
+
+关键设计要点：
+
+- **用户隔离**：从镜像构建阶段创建专用用户，运行时支持 PUID/PGID 动态映射
+- **持久化策略**：每个 CLI 工具对应独立的命名卷，容器重启不影响配置
+- **版本灵活性**：固定默认值确保可重现性，运行时覆盖提供测试能力
+- **自动化配置**：支持通过环境变量自动注入敏感配置
+
+这套方案在 HagiCode 项目中已经稳定运行了一段时间，希望能给有类似需求的开发者一些参考。其实也没那么复杂，不过是些工程实践罢了。
+
+## 版权说明
+
+感谢您的阅读,如果您觉得本文有用,欢迎点赞、收藏和分享支持。
+本内容采用人工智能辅助协作,最终内容由作者审核并确认。
+- 本文作者: [newbe36524](https://www.newbe.pro)
+- 原文链接: [https://docs.hagicode.com/blog/2026-03-26-docker-ai-cli-user-isolation-guide/](https://docs.hagicode.com/blog/2026-03-26-docker-ai-cli-user-isolation-guide/)
+- 版权声明: 本博客所有文章除特别声明外,均采用 BY-NC-SA 许可协议。转载请注明出处!
