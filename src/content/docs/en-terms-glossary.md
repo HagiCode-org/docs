@@ -141,7 +141,7 @@ const createSession = async (data: SessionData) => {
 ### Link Handling
 - Update internal links to include `/en/` prefix
 - Preserve external link URLs unchanged
-- Example: `/quick-start/create-first-project` → `/en/quick-start/create-first-project`
+- Example: `/quick-start/wizard-setup` → `/en/quick-start/wizard-setup`
 
 ---
 
