@@ -35,8 +35,8 @@ The local docs server runs on `http://localhost:31265` by default.
 
 ## Desktop version data
 
-Desktop download data is fetched at runtime from the public desktop index endpoints.
-The checked-in `public/version-index.json` snapshot remains an offline fallback detail only, not a docs-maintained freshness workflow.
+Desktop download data is fetched at runtime from the canonical index endpoint published by `repos/index`.
+This repository does not maintain a local desktop version snapshot or fallback refresh workflow.
 
 ## Ecosystem role
 

@@ -35,8 +35,8 @@ npm run preview
 
 ## Desktop 版本数据
 
-Desktop 下载数据以运行时从公开 desktop 索引端点拉取为主。
-仓库内保留的 `public/version-index.json` 仅作为离线 fallback 细节存在，不代表 docs 仓库需要维护版本新鲜度工作流。
+Desktop 下载数据在运行时直接读取 `repos/index` 发布的 canonical index 端点。
+本仓库不再维护本地 desktop 版本快照，也不承担 fallback 刷新工作流。
 
 ## 在生态中的角色
 
