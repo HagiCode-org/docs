@@ -1,7 +1,7 @@
 /**
  * InstallButton 组件 - 文档站点版本 (React)
  * 支持自动平台检测、下拉菜单选择版本、Docker 版本跳转。
- * 在运行时会展示实时源、降级源、本地快照和失败状态。
+ * 运行时仅消费 canonical index，并展示加载/可用/失败状态。
  */
 import React, { useEffect, useId, useMemo, useState } from 'react';
 
@@ -108,31 +108,6 @@ export function getInstallButtonStatusDescriptor({
   error,
   locale,
 }: InstallButtonStatusInput): InstallButtonStatusDescriptor | null {
-  if (runtimeState === 'degraded') {
-    return {
-      tone: 'warning',
-      message:
-        locale === 'en'
-          ? 'Primary index unavailable. Using the backup source.'
-          : '主索引暂时不可用，当前已切换到备用源。',
-      detail: null,
-    };
-  }
-
-  if (runtimeState === 'local_snapshot') {
-    return {
-      tone: 'warning',
-      message:
-        locale === 'en'
-          ? 'Showing an offline snapshot because both remote sources are unavailable.'
-          : '主索引和备用源暂时不可用，当前显示离线快照。',
-      detail:
-        locale === 'en'
-          ? 'The displayed version may be stale.'
-          : '当前显示的版本可能不是最新版本。',
-    };
-  }
-
   if (runtimeState === 'fatal' || error) {
     return {
       tone: 'error',
@@ -225,7 +200,7 @@ export default function InstallButton({
         }
 
         const latest = selectLatestForChannel(data, channel);
-        const nextPlatforms = latest ? groupAssetsByPlatform(latest.files) : [];
+        const nextPlatforms = latest ? groupAssetsByPlatform(latest.assets) : [];
 
         setRuntimeData(data);
         setVersion(latest);
