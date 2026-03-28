@@ -23,6 +23,11 @@ import 'yet-another-react-lightbox/styles.css';
 import 'yet-another-react-lightbox/plugins/captions.css';
 import 'yet-another-react-lightbox/plugins/counter.css';
 
+import {
+  DOCS_CONTENT_LAYOUT_ATTRIBUTE,
+  DOCS_CONTENT_LAYOUT_WIDE,
+} from '../lib/docs-content-layout.mjs';
+
 /**
  * Slide interface for lightbox images
  */
@@ -182,6 +187,10 @@ interface ImageLightboxProps {
 
 const LIGHTBOX_ROOT_CLASS = 'docs-image-lightbox';
 
+function isWideDocsContentLayout(root: Element | null = document.documentElement): boolean {
+  return root?.getAttribute(DOCS_CONTENT_LAYOUT_ATTRIBUTE) === DOCS_CONTENT_LAYOUT_WIDE;
+}
+
 /**
  * Main ImageLightbox component
  *
@@ -288,6 +297,11 @@ export default function ImageLightbox({
   const handleView = useCallback(() => {
     if (zoomFrameRef.current !== null) {
       window.cancelAnimationFrame(zoomFrameRef.current);
+    }
+
+    if (isWideDocsContentLayout()) {
+      zoomFrameRef.current = null;
+      return;
     }
 
     // Wait until the active slide has been painted before applying the 2x default zoom.
