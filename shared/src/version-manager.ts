@@ -2,7 +2,7 @@
  * Desktop 版本数据管理器
  *
  * 提供单例模式的版本数据管理，支持服务端注入和客户端获取。
- * 运行时结果会保留数据来源、降级链路和并发请求复用状态。
+ * 文档站仅消费 canonical index，并复用并发中的同一请求结果。
  */
 
 import type { DesktopIndexResponse, DesktopVersion, PlatformGroup } from './types/desktop';
@@ -16,7 +16,7 @@ import {
   groupAssetsByPlatform,
 } from './desktop-utils';
 
-export type DesktopVersionState = 'ready' | 'degraded' | 'local_snapshot' | 'fatal';
+export type DesktopVersionState = 'ready' | 'fatal';
 
 /**
  * 版本数据接口
@@ -69,17 +69,11 @@ class VersionManager {
 
   /**
    * 设置服务端注入的数据（用于 SSR）。
-   * 服务端注入的数据本质上等价于本地快照。
+   * 服务端注入的数据视为已解析的 canonical snapshot。
    */
   setServerData(data: DesktopIndexResponse): void {
-    const versionData = this.transformToVersionData(data, 'local', []);
-    this.data = versionData;
-    this.initialized = true;
-
-    for (const { resolve } of this.pendingPromises) {
-      resolve(versionData);
-    }
-    this.pendingPromises = [];
+    const versionData = this.transformToVersionData(data, 'server', []);
+    this.setResolvedData(versionData);
   }
 
   async getVersionData(): Promise<DesktopVersionData> {
@@ -90,7 +84,7 @@ class VersionManager {
     if (typeof window !== 'undefined' && (window as { __DESKTOP_VERSION_DATA__?: DesktopIndexResponse }).__DESKTOP_VERSION_DATA__) {
       const serverData = (window as { __DESKTOP_VERSION_DATA__?: DesktopIndexResponse }).__DESKTOP_VERSION_DATA__;
       if (serverData) {
-        const versionData = this.transformToVersionData(serverData, 'local', []);
+        const versionData = this.transformToVersionData(serverData, 'server', []);
         this.data = versionData;
         this.initialized = true;
         delete (window as { __DESKTOP_VERSION_DATA__?: DesktopIndexResponse }).__DESKTOP_VERSION_DATA__;
@@ -114,26 +108,11 @@ class VersionManager {
         responseData.attempts,
       );
 
-      this.data = versionData;
-      this.initialized = true;
-
-      for (const { resolve } of this.pendingPromises) {
-        resolve(versionData);
-      }
-      this.pendingPromises = [];
-
+      this.setResolvedData(versionData);
       return versionData;
     } catch (error) {
       const errorData = this.createErrorData(error);
-
-      for (const { resolve } of this.pendingPromises) {
-        resolve(errorData);
-      }
-      this.pendingPromises = [];
-
-      this.data = null;
-      this.initialized = false;
-
+      this.setResolvedData(errorData);
       return errorData;
     } finally {
       this.fetching = false;
@@ -157,7 +136,7 @@ class VersionManager {
     return {
       latest,
       all: data.channels[channel].all,
-      platforms: latest ? groupAssetsByPlatform(latest.files) : [],
+      platforms: latest ? groupAssetsByPlatform(latest.assets) : [],
       error: data.error,
       source: data.source,
       status: data.status,
@@ -176,6 +155,16 @@ class VersionManager {
 
     for (const { reject } of this.pendingPromises) {
       reject(new Error('Cache cleared'));
+    }
+    this.pendingPromises = [];
+  }
+
+  private setResolvedData(versionData: DesktopVersionData): void {
+    this.data = versionData;
+    this.initialized = true;
+
+    for (const { resolve } of this.pendingPromises) {
+      resolve(versionData);
     }
     this.pendingPromises = [];
   }
@@ -213,7 +202,7 @@ class VersionManager {
       latest = data.versions[0];
     }
 
-    const platforms = latest ? groupAssetsByPlatform(latest.files) : [];
+    const platforms = latest ? groupAssetsByPlatform(latest.assets) : [];
     const channels = {
       stable: this.processChannel(data, 'stable'),
       beta: this.processChannel(data, 'beta'),
@@ -231,15 +220,11 @@ class VersionManager {
   }
 
   private mapSourceToStatus(source: DesktopVersionSource): DesktopVersionState {
-    if (source === 'primary') {
+    if (source === 'primary' || source === 'server') {
       return 'ready';
     }
 
-    if (source === 'backup') {
-      return 'degraded';
-    }
-
-    return 'local_snapshot';
+    return 'fatal';
   }
 
   private processChannel(
