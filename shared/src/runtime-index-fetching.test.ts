@@ -1,10 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import {
-  BACKUP_INDEX_JSON_URL,
-  LOCAL_VERSION_INDEX,
-  PRIMARY_INDEX_JSON_URL,
-} from './desktop-utils';
+import { PRIMARY_INDEX_JSON_URL } from './desktop-utils';
 import {
   clearDesktopVersionCache,
   getDesktopVersionData,
@@ -15,7 +11,7 @@ const desktopIndexFixture = {
   versions: [
     {
       version: 'v1.2.3',
-      files: [
+      assets: [
         {
           name: 'Hagicode.Desktop.Setup.1.2.3.exe',
           path: 'v1.2.3/Hagicode.Desktop.Setup.1.2.3.exe',
@@ -34,6 +30,11 @@ const desktopIndexFixture = {
           size: 1048576,
           lastModified: null,
         },
+      ],
+      files: [
+        'v1.2.3/Hagicode.Desktop.Setup.1.2.3.exe',
+        'v1.2.3/Hagicode.Desktop-1.2.3-arm64.dmg',
+        'v1.2.3/Hagicode.Desktop-1.2.3.AppImage',
       ],
     },
   ],
@@ -83,59 +84,27 @@ describe('docs runtime index fetching', () => {
     expect(first.platforms).toHaveLength(3);
   });
 
-  it('falls back to the backup source when the primary payload is invalid', async () => {
+  it('returns a fatal state when the primary payload is invalid', async () => {
     const fetchMock = vi.fn().mockImplementation(async (url: string) => {
       if (url === PRIMARY_INDEX_JSON_URL) {
         return createJsonResponse({ updatedAt: '2026-03-24T00:00:00Z' });
       }
 
-      if (url === BACKUP_INDEX_JSON_URL) {
-        return createJsonResponse(structuredClone(desktopIndexFixture));
-      }
-
       throw new Error(`Unexpected fetch: ${url}`);
     });
     vi.stubGlobal('fetch', fetchMock);
 
     const data = await getDesktopVersionData();
 
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(data.source).toBe('backup');
-    expect(data.status).toBe('degraded');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(data.source).toBeNull();
+    expect(data.status).toBe('fatal');
+    expect(data.latest).toBeNull();
+    expect(data.platforms).toEqual([]);
     expect(data.attempts).toEqual([
       expect.objectContaining({ source: 'primary' }),
     ]);
-    expect(data.error).toBeNull();
-  });
-
-  it('falls back to the local snapshot after both remote sources fail', async () => {
-    const fetchMock = vi.fn().mockImplementation(async (url: string) => {
-      if (url === PRIMARY_INDEX_JSON_URL) {
-        throw new Error('primary down');
-      }
-
-      if (url === BACKUP_INDEX_JSON_URL) {
-        return createJsonResponse({}, { ok: false, status: 503, statusText: 'Service Unavailable' });
-      }
-
-      if (url === LOCAL_VERSION_INDEX) {
-        return createJsonResponse(structuredClone(desktopIndexFixture));
-      }
-
-      throw new Error(`Unexpected fetch: ${url}`);
-    });
-    vi.stubGlobal('fetch', fetchMock);
-
-    const data = await getDesktopVersionData();
-
-    expect(fetchMock).toHaveBeenCalledTimes(3);
-    expect(data.source).toBe('local');
-    expect(data.status).toBe('local_snapshot');
-    expect(data.attempts).toEqual([
-      expect.objectContaining({ source: 'primary', error: 'primary down' }),
-      expect.objectContaining({ source: 'backup' }),
-    ]);
-    expect(data.latest?.version).toBe('v1.2.3');
+    expect(data.error).toContain('Failed to load desktop versions');
   });
 
   it('returns a fatal state when every source fails', async () => {
@@ -146,17 +115,18 @@ describe('docs runtime index fetching', () => {
 
     const data = await getDesktopVersionData();
 
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(data.status).toBe('fatal');
     expect(data.source).toBeNull();
     expect(data.latest).toBeNull();
     expect(data.platforms).toEqual([]);
     expect(data.error).toContain('Failed to load desktop versions');
-    expect(data.attempts).toHaveLength(3);
+    expect(data.attempts).toHaveLength(1);
 
     const second = await getDesktopVersionData();
-    expect(fetchMock).toHaveBeenCalledTimes(6);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(second.status).toBe('fatal');
+    expect(second).toBe(data);
   });
 
   it('deduplicates concurrent in-flight requests', async () => {

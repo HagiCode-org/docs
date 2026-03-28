@@ -24,7 +24,7 @@ function createVersionData(overrides: Partial<DesktopVersionData> = {}): Desktop
   return {
     latest: {
       version: 'v1.2.3',
-      files: [
+      assets: [
         {
           name: 'Hagicode.Desktop.Setup.1.2.3.exe',
           path: 'v1.2.3/Hagicode.Desktop.Setup.1.2.3.exe',
@@ -48,7 +48,7 @@ function createVersionData(overrides: Partial<DesktopVersionData> = {}): Desktop
       stable: {
         latest: {
           version: 'v1.2.3',
-          files: [
+          assets: [
             {
               name: 'Hagicode.Desktop.Setup.1.2.3.exe',
               path: 'v1.2.3/Hagicode.Desktop.Setup.1.2.3.exe',
@@ -98,19 +98,14 @@ describe('InstallButton runtime states', () => {
     });
   });
 
-  it('shows a degraded warning when the backup source is used', async () => {
+  it('keeps download available when canonical data is ready', async () => {
     vi.mocked(versionManager.getDesktopVersionData).mockResolvedValue(
-      createVersionData({
-        source: 'backup',
-        status: 'degraded',
-        attempts: [{ source: 'primary', error: 'primary down' }],
-      }),
+      createVersionData(),
     );
 
     render(<InstallButton variant="full" locale="en" />);
 
-    expect(await screen.findByText('Primary index unavailable. Using the backup source.')).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'Install Hagicode Desktop Now' })).toHaveAttribute(
+    expect(await screen.findByRole('link', { name: 'Install Hagicode Desktop Now' })).toHaveAttribute(
       'href',
       expect.stringContaining('Hagicode.Desktop.Setup.1.2.3.exe'),
     );
@@ -126,7 +121,7 @@ describe('InstallButton runtime states', () => {
         },
         source: null,
         status: 'fatal',
-        error: 'Failed to load desktop versions: primary=down; backup=down; local=down',
+        error: 'Failed to load desktop versions: primary=down',
       }),
     );
 
@@ -134,7 +129,7 @@ describe('InstallButton runtime states', () => {
 
     const alert = await screen.findByRole('alert');
     expect(alert).toHaveTextContent('Unable to load a valid desktop version right now');
-    expect(alert).toHaveTextContent('primary=down; backup=down; local=down');
+    expect(alert).toHaveTextContent('primary=down');
     expect(screen.getByRole('button', { name: 'Unavailable' })).toBeDisabled();
     expect(screen.queryByRole('link', { name: 'Install Hagicode Desktop Now' })).not.toBeInTheDocument();
   });
