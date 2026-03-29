@@ -133,10 +133,10 @@ const createSession = async (data: SessionData) => {
 }
 ```
 
-### Mermaid Diagram Handling
-- Translate node and edge labels to English
-- Preserve diagram structure and syntax
-- Use terminology from this dictionary for labels
+### Workflow and Visual Aid Handling
+- Translate step titles, labels, and decision text to English
+- Preserve the original workflow logic when rewriting it as lists, tables, or cards
+- Use terminology from this dictionary for all visual labels and captions
 
 ### Link Handling
 - Update internal links to include `/en/` prefix
