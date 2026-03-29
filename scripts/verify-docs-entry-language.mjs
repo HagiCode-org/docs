@@ -35,10 +35,35 @@ function createLocalStorage(initialValue) {
   };
 }
 
-function createMockWindow(href, storedRouteValue, navigatorConfig = {}) {
+function createMockDocument(landingTargetPath = null) {
+  return {
+    querySelector(selector) {
+      if (
+        selector === 'meta[name="hagicode-docs-landing-target"]' &&
+        landingTargetPath
+      ) {
+        return {
+          getAttribute(name) {
+            return name === 'content' ? landingTargetPath : null;
+          },
+        };
+      }
+
+      return null;
+    },
+  };
+}
+
+function createMockWindow(
+  href,
+  storedRouteValue,
+  navigatorConfig = {},
+  landingTargetPath = null,
+) {
   let currentUrl = new URL(href);
   const redirects = [];
   const localStorage = createLocalStorage(storedRouteValue);
+  const document = createMockDocument(landingTargetPath);
 
   const location = {
     get href() {
@@ -70,6 +95,7 @@ function createMockWindow(href, storedRouteValue, navigatorConfig = {}) {
     window: {
       location,
       localStorage,
+      document,
       navigator: {
         language: navigatorConfig.language ?? 'en-US',
         languages: navigatorConfig.languages ?? [navigatorConfig.language ?? 'en-US'],
@@ -88,11 +114,18 @@ function evaluateEntryScript(
   href,
   storedRouteValue = null,
   navigatorConfig = {},
+  landingTargetPath = null,
 ) {
-  const mock = createMockWindow(href, storedRouteValue, navigatorConfig);
+  const mock = createMockWindow(
+    href,
+    storedRouteValue,
+    navigatorConfig,
+    landingTargetPath,
+  );
   const context = vm.createContext({
     URL,
     console,
+    document: mock.window.document,
     window: mock.window,
   });
 
@@ -112,6 +145,7 @@ function verifyScenario(scriptContent, scenario) {
     scenario.href,
     scenario.storedRouteValue,
     scenario.navigator,
+    scenario.landingTargetPath,
   );
 
   assert.equal(result.api.lastResolution.resolvedLocale, scenario.expectedLocale, `${scenario.name}: resolved locale`);
@@ -133,13 +167,15 @@ async function main() {
   ]);
 
   assertIncludes(rootHtml, 'name="hagicode-docs-default-entry" content="en"', 'root landing should advertise the English default entry');
-  assertIncludes(rootHtml, '<html lang="zh-CN"', 'root landing should keep Chinese metadata for explicit Chinese visits');
-  assertIncludes(rootHtml, '/product-overview/', 'root landing CTA should stay on the Chinese overview route');
+  assertIncludes(rootHtml, '<html lang="zh-CN"', 'root landing should keep Chinese metadata');
+  assertIncludes(rootHtml, 'name="hagicode-docs-landing-target" content="/product-overview/"', 'root landing should point directly to the product overview route');
+  assertIncludes(rootHtml, 'http-equiv="refresh"', 'root landing should expose a non-JS redirect fallback');
   assertIncludes(rootHtml, '/lang-redirect.js', 'root landing should load the entry route resolver');
 
   assertIncludes(enHtml, 'name="hagicode-docs-default-entry" content="en"', 'English landing should advertise the English default entry');
   assertIncludes(enHtml, '<html lang="en"', 'English landing should expose English metadata');
-  assertIncludes(enHtml, '/en/product-overview/', 'English landing CTA should stay on the English overview route');
+  assertIncludes(enHtml, 'name="hagicode-docs-landing-target" content="/product-overview/"', 'English landing should point directly to the product overview route');
+  assertIncludes(enHtml, 'http-equiv="refresh"', 'English landing should expose a non-JS redirect fallback');
   assertIncludes(enHtml, '/lang-redirect.js', 'English landing should load the entry route resolver');
 
   const [rootDocsHtml, rootBlogHtml, enDocsHtml, enBlogHtml] = await Promise.all([
@@ -156,31 +192,33 @@ async function main() {
 
   const scenarios = [
     {
-      name: 'first-time English browser redirects to /en/',
+      name: 'first-time English browser redirects to English product overview',
       href: 'https://docs.hagicode.com/',
       storedRouteValue: null,
       navigator: {
         language: 'en-US',
         languages: ['en-US', 'en'],
       },
+      landingTargetPath: '/product-overview/',
       expectedLocale: 'en',
-      expectedTargetUrl: 'https://docs.hagicode.com/en/',
-      expectedFinalUrl: 'https://docs.hagicode.com/en/',
+      expectedTargetUrl: 'https://docs.hagicode.com/en/product-overview/',
+      expectedFinalUrl: 'https://docs.hagicode.com/en/product-overview/',
       expectRedirect: true,
       expectedStoredLang: 'en',
     },
     {
-      name: 'first-time Chinese browser keeps root landing',
+      name: 'first-time Chinese browser redirects to Chinese product overview',
       href: 'https://docs.hagicode.com/',
       storedRouteValue: null,
       navigator: {
         language: 'zh-CN',
         languages: ['zh-CN', 'zh'],
       },
+      landingTargetPath: '/product-overview/',
       expectedLocale: 'root',
-      expectedTargetUrl: 'https://docs.hagicode.com/',
-      expectedFinalUrl: 'https://docs.hagicode.com/',
-      expectRedirect: false,
+      expectedTargetUrl: 'https://docs.hagicode.com/product-overview/',
+      expectedFinalUrl: 'https://docs.hagicode.com/product-overview/',
+      expectRedirect: true,
       expectedStoredLang: 'root',
     },
     {
@@ -191,38 +229,41 @@ async function main() {
         language: 'en-US',
         languages: ['en-US', 'en'],
       },
+      landingTargetPath: '/product-overview/',
       expectedLocale: 'root',
-      expectedTargetUrl: 'https://docs.hagicode.com/',
-      expectedFinalUrl: 'https://docs.hagicode.com/',
+      expectedTargetUrl: 'https://docs.hagicode.com/product-overview/',
+      expectedFinalUrl: 'https://docs.hagicode.com/product-overview/',
       expectRedirect: true,
       expectedStoredLang: 'root',
     },
     {
-      name: 'invalid language falls back to English landing',
+      name: 'invalid language falls back to English product overview',
       href: 'https://docs.hagicode.com/?lang=fr',
       storedRouteValue: null,
       navigator: {
         language: 'zh-CN',
         languages: ['zh-CN', 'zh'],
       },
+      landingTargetPath: '/product-overview/',
       expectedLocale: 'en',
-      expectedTargetUrl: 'https://docs.hagicode.com/en/',
-      expectedFinalUrl: 'https://docs.hagicode.com/en/',
+      expectedTargetUrl: 'https://docs.hagicode.com/en/product-overview/',
+      expectedFinalUrl: 'https://docs.hagicode.com/en/product-overview/',
       expectRedirect: true,
       expectedStoredLang: 'en',
     },
     {
-      name: 'stored Chinese preference keeps root landing stable',
+      name: 'stored Chinese preference keeps root redirect in Chinese',
       href: 'https://docs.hagicode.com/',
       storedRouteValue: JSON.stringify({ lang: 'root' }),
       navigator: {
         language: 'en-US',
         languages: ['en-US', 'en'],
       },
+      landingTargetPath: '/product-overview/',
       expectedLocale: 'root',
-      expectedTargetUrl: 'https://docs.hagicode.com/',
-      expectedFinalUrl: 'https://docs.hagicode.com/',
-      expectRedirect: false,
+      expectedTargetUrl: 'https://docs.hagicode.com/product-overview/',
+      expectedFinalUrl: 'https://docs.hagicode.com/product-overview/',
+      expectRedirect: true,
       expectedStoredLang: 'root',
     },
     {
@@ -280,17 +321,18 @@ async function main() {
       expectedStoredLang: 'en',
     },
     {
-      name: 'English landing remains stable even with stored Chinese preference',
+      name: 'English landing redirects to English product overview even with stored Chinese preference',
       href: 'https://docs.hagicode.com/en/',
       storedRouteValue: JSON.stringify({ lang: 'root' }),
       navigator: {
         language: 'zh-CN',
         languages: ['zh-CN', 'zh'],
       },
+      landingTargetPath: '/product-overview/',
       expectedLocale: 'en',
-      expectedTargetUrl: 'https://docs.hagicode.com/en/',
-      expectedFinalUrl: 'https://docs.hagicode.com/en/',
-      expectRedirect: false,
+      expectedTargetUrl: 'https://docs.hagicode.com/en/product-overview/',
+      expectedFinalUrl: 'https://docs.hagicode.com/en/product-overview/',
+      expectRedirect: true,
       expectedStoredLang: 'root',
     },
   ];
@@ -300,12 +342,12 @@ async function main() {
   }
 
   console.log('Docs entry language verification passed.');
-  console.log('- first-time visitors follow the browser language before falling back to English');
+  console.log('- landing routes now redirect directly to product overview');
+  console.log('- first-time visitors still follow the browser language before falling back to English');
   console.log('- root docs/blog paths default to English unless Chinese was explicitly chosen');
-  console.log('- explicit zh-CN keeps the Chinese landing on /');
+  console.log('- explicit zh-CN keeps the Chinese redirect target');
   console.log('- invalid lang values cleanly fall back to English');
-  console.log('- /en/ remains a stable English landing route');
-  console.log('- follow-up: a future change can revisit whether non-landing root docs routes should invert locale ownership');
+  console.log('- /en/ also redirects directly to the English product overview');
 }
 
 main().catch((error) => {

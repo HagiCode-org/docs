@@ -257,7 +257,7 @@ test('buildScreenshotManifest preserves metadata fields and helper resolves mark
   const reference = helpers.resolveReference({
     category: 'installation',
     slug: 'desktop-start',
-    fromDocument: 'quick-start/conversation-session.mdx'
+    fromDocument: 'quick-start/proposal-session.mdx'
   });
 
   assert.equal(reference.markdownImagePath, '../img/screenshots/installation/desktop-start/original.png');

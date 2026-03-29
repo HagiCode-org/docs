@@ -7,9 +7,7 @@ import partytown from "@astrojs/partytown";
 import robotsTxt from "astro-robots-txt";
 import react from "@astrojs/react";
 
-import mermaidInjector from "./src/integrations/mermaid-injector.ts";
 import cachedLinkValidator from "./src/integrations/link-check-result-cache.js";
-import rehypeMermaidPre from "./src/integrations/rehype-mermaid-pre.js";
 // rehype-raw 暂时禁用，可能与 MDX 处理冲突
 // import rehypeRaw from "rehype-raw";
 import rehypeExternalLinks from "rehype-external-links";
@@ -60,7 +58,6 @@ const BLOG_UI_TRANSLATIONS_ZH_CN = {
   "starlightBlog.tags.count_other": '{{count}} 篇包含标签 "{{tag}}" 的文章',
 };
 
-const shouldRenderMermaid = process.env.SKIP_MERMAID_RENDER !== "true";
 const docsLinkCheckCacheTtlHours = Number.parseInt(
   process.env.DOCS_LINK_CHECK_CACHE_TTL_HOURS ?? "48",
   10,
@@ -87,12 +84,11 @@ export default defineConfig({
   markdown: {
     syntaxHighlight: {
       type: "shiki",
-      excludeLangs: ["mermaid", "math"],
+      excludeLangs: ["math"],
     },
     rehypePlugins: [
       // rehypeRaw 暂时禁用，可能与 MDX 处理冲突
       // rehypeRaw,
-      ...(shouldRenderMermaid ? [rehypeMermaidPre] : []),
       [
         rehypeExternalLinks,
         {
@@ -226,7 +222,6 @@ export default defineConfig({
     sitemap(),
     partytown(),
     react(),
-    mermaidInjector(),
     cachedLinkValidator({
       // 仅在 CI 环境中启用外部链接检查，避免本地构建时间过长
       checkExternal: process.env.CI === "true",
@@ -244,6 +239,5 @@ export default defineConfig({
       exclude: [],
     }),
   ],
-  // 添加 Mermaid 渲染脚本到所有页面
   scopedStyleStrategy: "where",
 });
