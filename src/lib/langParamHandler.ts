@@ -42,6 +42,25 @@ function getClientLanguages(win: Window): string[] {
   return typeof win.navigator?.language === 'string' ? [win.navigator.language] : [];
 }
 
+function normalizeLandingTargetPath(pathname: string | null | undefined): string | null {
+  if (!pathname) {
+    return null;
+  }
+
+  const trimmed = pathname.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const withLeadingSlash = trimmed.startsWith('/') ? trimmed : `/${trimmed}`;
+  return withLeadingSlash.endsWith('/') ? withLeadingSlash : `${withLeadingSlash}/`;
+}
+
+function getLandingTargetPath(doc?: Document): string | null {
+  const meta = doc?.querySelector('meta[name="hagicode-docs-landing-target"]');
+  return normalizeLandingTargetPath(meta?.getAttribute('content'));
+}
+
 function buildTargetUrl(currentUrl: URL, targetPath: string): URL {
   const targetUrl = new URL(targetPath, currentUrl.origin);
 
@@ -59,6 +78,7 @@ export function resolveDocsLandingRoute(
   currentUrl: URL,
   storedRouteValue: string | null | undefined,
   clientLanguages: Array<string | null | undefined> = [],
+  landingTargetPath: string | null = null,
 ): LandingRouteResolution {
   const requestedLang = parseLangFromUrl(currentUrl);
   const storedLocale = getStoredDocsLocale(storedRouteValue);
@@ -92,8 +112,10 @@ export function resolveDocsLandingRoute(
 
   const shouldResolvePath =
     requestedLang !== null || isLandingPath || (!isEnglishDocsPath(currentPath) && resolvedLocale === 'en');
+  const targetBasePath =
+    landingTargetPath && isLandingPath ? landingTargetPath : currentPath;
   const targetPath = shouldResolvePath
-    ? buildDocsRoutePath(resolvedLocale, currentPath)
+    ? buildDocsRoutePath(resolvedLocale, targetBasePath)
     : currentPath;
   const targetUrl = buildTargetUrl(currentUrl, targetPath);
 
@@ -128,6 +150,7 @@ export function handleLanguageParameter(win?: Window): LandingRouteResolution | 
     new URL(browserWindow.location.href),
     storedRouteValue,
     getClientLanguages(browserWindow),
+    getLandingTargetPath(browserWindow.document),
   );
 
   if (resolution.shouldPersist) {

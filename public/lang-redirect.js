@@ -135,6 +135,35 @@
     return [];
   }
 
+  function normalizeLandingTargetPath(pathname) {
+    if (!pathname) {
+      return null;
+    }
+
+    var trimmed = String(pathname).trim();
+    if (!trimmed) {
+      return null;
+    }
+
+    var withLeadingSlash = trimmed.charAt(0) === '/' ? trimmed : '/' + trimmed;
+    return withLeadingSlash.charAt(withLeadingSlash.length - 1) === '/'
+      ? withLeadingSlash
+      : withLeadingSlash + '/';
+  }
+
+  function getLandingTargetPath(doc) {
+    if (!doc || typeof doc.querySelector !== 'function') {
+      return null;
+    }
+
+    var meta = doc.querySelector('meta[name="hagicode-docs-landing-target"]');
+    if (!meta || typeof meta.getAttribute !== 'function') {
+      return null;
+    }
+
+    return normalizeLandingTargetPath(meta.getAttribute('content'));
+  }
+
   function buildTargetUrl(currentUrl, targetPath) {
     var targetUrl = new URL(targetPath, currentUrl.origin);
 
@@ -148,7 +177,7 @@
     return targetUrl;
   }
 
-  function resolveDocsLandingRoute(currentUrl, storedRouteValue, clientLanguages) {
+  function resolveDocsLandingRoute(currentUrl, storedRouteValue, clientLanguages, landingTargetPath) {
     var requestedLang = parseLangFromUrl(currentUrl);
     var storedLocale = getStoredDocsLocale(storedRouteValue);
     var currentPath = currentUrl.pathname || '/';
@@ -172,8 +201,9 @@
 
     var shouldResolvePath =
       requestedLang !== null || landingPath || (!isEnglishDocsPath(currentPath) && resolvedLocale === 'en');
+    var targetBasePath = landingTargetPath && landingPath ? landingTargetPath : currentPath;
     var targetPath = shouldResolvePath
-      ? buildDocsRoutePath(resolvedLocale, currentPath)
+      ? buildDocsRoutePath(resolvedLocale, targetBasePath)
       : currentPath;
     var targetUrl = buildTargetUrl(currentUrl, targetPath);
 
@@ -229,10 +259,12 @@
     applyEntryRouting: function applyEntryRouting(win) {
       var browserWindow = win || window;
       var storedRouteValue = getStoredRouteValue(browserWindow);
+      var landingTargetPath = getLandingTargetPath(browserWindow.document);
       var resolution = resolveDocsLandingRoute(
         new URL(browserWindow.location.href),
         storedRouteValue,
         getClientLanguages(browserWindow),
+        landingTargetPath,
       );
 
       api.lastResolution = resolution;
