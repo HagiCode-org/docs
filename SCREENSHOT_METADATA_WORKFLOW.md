@@ -287,7 +287,7 @@ Before writing, create a small inventory like this in your notes or change propo
 | --- | --- | --- | --- |
 | `screenshot-a1e8035a` | `/adventure-team-introduction` | `成员与编组面板` | Hero roster grid and loadout details explain the roster workspace |
 | `screenshot-11d59f8f` | `/adventure-team-introduction` | `协作流程与副本推进` | Dungeon proposal cards and roster editor show the team workflow |
-| `screenshot-01d8d001` | `/guides/initialization-wizard` | `步骤 1：职业管理` | Sidebar steps and profession cards anchor the first wizard step |
+| `guide1-language` | `/quick-start/wizard-setup` | `步骤 1：语言` | Language settings and sidebar progress anchor the first wizard step |
 
 This keeps feature pages bilingual, screenshot-backed, and easy to maintain when metadata changes later.
 
