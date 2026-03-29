@@ -195,6 +195,11 @@ export default defineConfig({
           translations: { en: "AI Service Subscriptions" },
           autogenerate: { directory: "ai-service-subscriptions" },
         },
+        {
+          label: "变更日志",
+          translations: { en: "Changelog" },
+          autogenerate: { directory: "changelog" },
+        },
       ],
       customCss: ["./src/styles/starlight-override.css"],
       editLink: {
