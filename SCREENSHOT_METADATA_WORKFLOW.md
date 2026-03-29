@@ -28,7 +28,6 @@ In short:
 The `screenshot-management-optimization` change uses this existing workflow to absorb legacy screenshots into `src/content/docs/img/screenshots/`.
 
 - In scope for this backlog pass:
-  - `quick-start/create-normal-session` (`8` screenshots)
   - `quick-start/create-project` (`6` screenshots)
   - `quick-start/create-proposal-session` (`26` screenshots)
   - `installation/install-desktop` (`14` screenshots, including `1` currently unreferenced legacy file)
@@ -36,14 +35,12 @@ The `screenshot-management-optimization` change uses this existing workflow to a
   - `ai-compose-commit` (`3` screenshots)
   - `monospecs` (`3` screenshots)
 - Affected docs pages to re-check after sync:
-  - `src/content/docs/quick-start/conversation-session.mdx`
   - `src/content/docs/quick-start/create-first-project.mdx`
   - `src/content/docs/quick-start/proposal-session.mdx`
   - `src/content/docs/installation/desktop.mdx`
   - `src/content/docs/related-software-installation/postgresql/install-on-windows.mdx`
   - `src/content/docs/guides/ai-compose-commit.mdx`
   - `src/content/docs/guides/monospecs.mdx`
-  - `src/content/docs/en/quick-start/conversation-session.mdx`
   - `src/content/docs/en/quick-start/create-first-project.mdx`
   - `src/content/docs/en/quick-start/proposal-session.mdx`
   - `src/content/docs/en/installation/desktop.mdx`
@@ -300,7 +297,7 @@ When processing a large legacy backlog, split the work into small, reviewable ba
 
 Recommended batches for this repository:
 
-1. `quick-start/create-normal-session` + `quick-start/create-project`
+1. `quick-start/create-project`
 2. `quick-start/create-proposal-session`
 3. `installation/install-desktop` + `installation/install-postgres-windows`
 4. `ai-compose-commit` + `monospecs`

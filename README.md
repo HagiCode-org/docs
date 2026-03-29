@@ -36,7 +36,9 @@ The local docs server runs on `http://localhost:31265` by default.
 ## Desktop version data
 
 Desktop download data is fetched at runtime from the canonical index endpoint published by `repos/index`.
-This repository does not maintain a local desktop version snapshot or fallback refresh workflow.
+When runtime loading reaches terminal failure, docs falls back to the Index Desktop history page at `https://index.hagicode.com/desktop/history/`.
+`repos/index` remains a referenced dependency only; the stable fallback surface is `https://index.hagicode.com/desktop/history/` plus `https://index.hagicode.com/desktop/index.json`.
+This repository still serves `public/version-index.json` as a local snapshot for offline fallback, but maintainers should investigate the runtime fetch chain and the index deployment before changing docs UI behavior.
 
 ## Ecosystem role
 
