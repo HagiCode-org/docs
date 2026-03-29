@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { PRIMARY_INDEX_JSON_URL } from './desktop-utils';
+import {
+  BACKUP_INDEX_JSON_URL,
+  LOCAL_VERSION_INDEX,
+  PRIMARY_INDEX_JSON_URL,
+} from './desktop-utils';
 import {
   clearDesktopVersionCache,
   getDesktopVersionData,
@@ -80,14 +84,19 @@ describe('docs runtime index fetching', () => {
     expect(first.source).toBe('primary');
     expect(first.status).toBe('ready');
     expect(first.attempts).toEqual([]);
+    expect(first.fallbackTarget).toBeNull();
     expect(first.latest?.version).toBe('v1.2.3');
     expect(first.platforms).toHaveLength(3);
   });
 
-  it('returns a fatal state when the primary payload is invalid', async () => {
+  it('falls back to the backup source when the primary payload is invalid', async () => {
     const fetchMock = vi.fn().mockImplementation(async (url: string) => {
       if (url === PRIMARY_INDEX_JSON_URL) {
         return createJsonResponse({ updatedAt: '2026-03-24T00:00:00Z' });
+      }
+
+      if (url === BACKUP_INDEX_JSON_URL) {
+        return createJsonResponse(structuredClone(desktopIndexFixture));
       }
 
       throw new Error(`Unexpected fetch: ${url}`);
@@ -96,15 +105,45 @@ describe('docs runtime index fetching', () => {
 
     const data = await getDesktopVersionData();
 
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(data.source).toBeNull();
-    expect(data.status).toBe('fatal');
-    expect(data.latest).toBeNull();
-    expect(data.platforms).toEqual([]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(data.source).toBe('backup');
+    expect(data.status).toBe('degraded');
+    expect(data.latest?.version).toBe('v1.2.3');
+    expect(data.platforms).toHaveLength(3);
     expect(data.attempts).toEqual([
       expect.objectContaining({ source: 'primary' }),
     ]);
-    expect(data.error).toContain('Failed to load desktop versions');
+    expect(data.error).toBeNull();
+  });
+
+  it('falls back to the local snapshot after primary and backup failures', async () => {
+    const fetchMock = vi.fn().mockImplementation(async (url: string) => {
+      if (url === PRIMARY_INDEX_JSON_URL) {
+        throw new Error('primary down');
+      }
+
+      if (url === BACKUP_INDEX_JSON_URL) {
+        return createJsonResponse({}, { ok: false, status: 503, statusText: 'Service Unavailable' });
+      }
+
+      if (url === LOCAL_VERSION_INDEX) {
+        return createJsonResponse(structuredClone(desktopIndexFixture));
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const data = await getDesktopVersionData();
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(data.status).toBe('local_snapshot');
+    expect(data.source).toBe('local');
+    expect(data.latest?.version).toBe('v1.2.3');
+    expect(data.attempts).toEqual([
+      expect.objectContaining({ source: 'primary', error: 'primary down' }),
+      expect.objectContaining({ source: 'backup' }),
+    ]);
   });
 
   it('returns a fatal state when every source fails', async () => {
@@ -115,16 +154,18 @@ describe('docs runtime index fetching', () => {
 
     const data = await getDesktopVersionData();
 
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(data.status).toBe('fatal');
     expect(data.source).toBeNull();
     expect(data.latest).toBeNull();
     expect(data.platforms).toEqual([]);
     expect(data.error).toContain('Failed to load desktop versions');
-    expect(data.attempts).toHaveLength(1);
+    expect(data.attempts).toHaveLength(3);
+    expect(data.fallbackTarget).toBe('https://index.hagicode.com/desktop/history/');
+    expect(data.failedAttemptSummary).toContain('primary=');
 
     const second = await getDesktopVersionData();
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(second.status).toBe('fatal');
     expect(second).toBe(data);
   });

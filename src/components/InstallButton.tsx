@@ -3,7 +3,7 @@
  * 支持自动平台检测、下拉菜单选择版本、Docker 版本跳转。
  * 运行时仅消费 canonical index，并展示加载/可用/失败状态。
  */
-import React, { useEffect, useId, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useId, useMemo, useState } from 'react';
 
 import type { AssetType, DesktopVersion, PlatformGroup } from '@shared/desktop';
 import {
@@ -15,6 +15,8 @@ import {
   PLATFORM_ICONS,
 } from '@shared/desktop-utils';
 import {
+  clearDesktopVersionCache,
+  DESKTOP_HISTORY_FALLBACK_URL,
   getDesktopVersionData,
 } from '@shared/version-manager';
 import type {
@@ -81,9 +83,11 @@ export interface InstallButtonStatusDescriptor {
 }
 
 interface InstallButtonStatusInput {
-  isLoading: boolean;
   runtimeState: DesktopVersionState | null;
   error: string | null;
+  failedAttemptSummary: string | null;
+  historyFallbackTarget: string | null;
+  variant: 'full' | 'compact';
   locale: 'zh' | 'en';
 }
 
@@ -103,19 +107,49 @@ function convertPlatformGroups(platforms: PlatformGroup[]): PlatformDownloads[] 
 }
 
 export function getInstallButtonStatusDescriptor({
-  isLoading,
   runtimeState,
   error,
+  failedAttemptSummary,
+  historyFallbackTarget,
+  variant,
   locale,
 }: InstallButtonStatusInput): InstallButtonStatusDescriptor | null {
+  const detail = failedAttemptSummary || error;
+
   if (runtimeState === 'fatal' || error) {
     return {
       tone: 'error',
       message:
         locale === 'en'
-          ? 'Unable to load a valid desktop version right now.'
-          : '暂时无法获取可用的桌面端版本。',
-      detail: error,
+          ? variant === 'full' && historyFallbackTarget
+            ? 'Unable to load desktop packages. Redirecting to version history...'
+            : 'Unable to load desktop packages. Open version history or retry.'
+          : variant === 'full' && historyFallbackTarget
+            ? '暂时无法加载桌面端安装包，正在跳转到版本历史页。'
+            : '暂时无法加载桌面端安装包，可打开版本历史页或重试。',
+      detail,
+    };
+  }
+
+  if (runtimeState === 'local_snapshot') {
+    return {
+      tone: 'warning',
+      message:
+        locale === 'en'
+          ? 'Primary sources are unavailable. Showing the local snapshot, which may be stale.'
+          : '主版本源暂不可用，当前显示站内快照，信息可能滞后。',
+      detail,
+    };
+  }
+
+  if (runtimeState === 'degraded') {
+    return {
+      tone: 'warning',
+      message:
+        locale === 'en'
+          ? 'Primary source is unavailable. Showing the backup index.'
+          : '主版本源暂不可用，当前显示备用索引数据。',
+      detail,
     };
   }
 
@@ -167,6 +201,8 @@ export default function InstallButton({
           macInDevelopmentNotice: MAC_DOWNLOAD_DISABLED_NOTICE_EN,
           macContainerCta: 'Go to Container page',
           unavailable: 'Unavailable',
+          retry: 'Retry',
+          openVersionHistory: 'Open version history',
         }
       : {
           installNow: '立即安装',
@@ -178,6 +214,8 @@ export default function InstallButton({
           macInDevelopmentNotice: MAC_DOWNLOAD_DISABLED_NOTICE,
           macContainerCta: '前往 Container 页面',
           unavailable: '暂不可用',
+          retry: '重试',
+          openVersionHistory: '打开版本历史页',
         };
   }, [locale]);
 
@@ -185,12 +223,9 @@ export default function InstallButton({
     locale === 'en' ? 'https://hagicode.com/en/container/' : getLink('container')
   ), [locale]);
 
-  useEffect(() => {
-    if (initialVersion || initialPlatforms.length > 0 || versionError) {
-      return;
-    }
-
+  const loadRuntimeVersionData = useCallback(() => {
     let mounted = true;
+
     setIsLoading(true);
 
     getDesktopVersionData()
@@ -220,6 +255,8 @@ export default function InstallButton({
           source: null,
           status: 'fatal',
           attempts: [],
+          fallbackTarget: DESKTOP_HISTORY_FALLBACK_URL,
+          failedAttemptSummary: message,
           channels: {
             stable: { latest: null, all: [] },
             beta: { latest: null, all: [] },
@@ -238,7 +275,15 @@ export default function InstallButton({
     return () => {
       mounted = false;
     };
-  }, [channel, initialPlatforms.length, initialVersion, versionError]);
+  }, [channel]);
+
+  useEffect(() => {
+    if (initialVersion || initialPlatforms.length > 0 || versionError) {
+      return;
+    }
+
+    return loadRuntimeVersionData();
+  }, [initialPlatforms.length, initialVersion, loadRuntimeVersionData, versionError]);
 
   const buttonId = useId();
 
@@ -329,10 +374,46 @@ export default function InstallButton({
     setIsDropdownOpen(false);
   };
 
+  const handleRetry = useCallback(() => {
+    clearDesktopVersionCache();
+    setRuntimeData(null);
+    setVersion(null);
+    setPlatforms([]);
+    setError(null);
+    if (!initialVersion && initialPlatforms.length === 0 && !versionError) {
+      loadRuntimeVersionData();
+    }
+  }, [initialPlatforms.length, initialVersion, loadRuntimeVersionData, versionError]);
+
+  const historyFallbackTarget =
+    runtimeData?.fallbackTarget ?? (versionError ? DESKTOP_HISTORY_FALLBACK_URL : null);
+  const failedAttemptSummary = runtimeData?.failedAttemptSummary ?? error;
+  const shouldAutoRedirect =
+    variant === 'full' &&
+    !isLoading &&
+    (runtimeData?.status === 'fatal' || !!versionError) &&
+    !!historyFallbackTarget;
+
+  useEffect(() => {
+    if (!shouldAutoRedirect || typeof window === 'undefined' || !historyFallbackTarget) {
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      window.location.assign(historyFallbackTarget);
+    }, 1200);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [historyFallbackTarget, shouldAutoRedirect]);
+
   const statusDescriptor = getInstallButtonStatusDescriptor({
-    isLoading,
     runtimeState: runtimeData?.status ?? (versionError ? 'fatal' : null),
     error,
+    failedAttemptSummary,
+    historyFallbackTarget,
+    variant,
     locale,
   });
 
@@ -498,7 +579,7 @@ export default function InstallButton({
       </div>
 
       {statusDescriptor && (
-        <p
+        <div
           className={`install-button-status install-button-status--${statusDescriptor.tone}`}
           role={statusDescriptor.tone === 'error' ? 'alert' : 'status'}
         >
@@ -506,7 +587,24 @@ export default function InstallButton({
           {statusDescriptor.detail && (
             <span className="install-button-status-detail">{statusDescriptor.detail}</span>
           )}
-        </p>
+          {historyFallbackTarget && statusDescriptor.tone === 'error' && (
+            <span className="install-button-actions">
+              <a
+                href={historyFallbackTarget}
+                className="install-button-action-link"
+              >
+                {t.openVersionHistory}
+              </a>
+              <button
+                type="button"
+                className="install-button-action-button"
+                onClick={handleRetry}
+              >
+                {t.retry}
+              </button>
+            </span>
+          )}
+        </div>
       )}
     </div>
   );

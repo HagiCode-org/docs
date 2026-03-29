@@ -17,10 +17,12 @@ import type {
 import { AssetType } from './types/desktop';
 
 export const PRIMARY_INDEX_JSON_URL = 'https://index.hagicode.com/desktop/index.json';
+export const BACKUP_INDEX_JSON_URL = 'https://docs.hagicode.com/version-index.json';
+export const LOCAL_VERSION_INDEX = '/version-index.json';
 const DOWNLOAD_BASE_URL = 'https://desktop.dl.hagicode.com/';
 const TIMEOUT_MS = 30000;
 
-export type DesktopVersionSource = 'primary' | 'server';
+export type DesktopVersionSource = 'primary' | 'backup' | 'local' | 'server';
 
 export interface DesktopVersionFetchAttempt {
   source: DesktopVersionSource;
@@ -43,8 +45,10 @@ export class DesktopVersionFetchError extends Error {
   }
 }
 
-const SOURCE_CONFIGS: Array<{ source: DesktopVersionSource; url: string }> = [
+const SOURCE_CONFIGS: Array<{ source: Exclude<DesktopVersionSource, 'server'>; url: string }> = [
   { source: 'primary', url: PRIMARY_INDEX_JSON_URL },
+  { source: 'backup', url: BACKUP_INDEX_JSON_URL },
+  { source: 'local', url: LOCAL_VERSION_INDEX },
 ];
 
 /**
@@ -109,6 +113,49 @@ function isValidChannelInfo(channel: unknown): boolean {
   return typeof maybeChannel.latest === 'string' && Array.isArray(maybeChannel.versions);
 }
 
+function normalizeDesktopVersionEntry(version: unknown): DesktopVersion {
+  if (!version || typeof version !== 'object') {
+    throw new Error('Invalid desktop index payload: malformed version entry');
+  }
+
+  const candidate = version as DesktopVersion & {
+    files?: DesktopAsset[] | string[];
+  };
+
+  const rawAssets = Array.isArray(candidate.assets)
+    ? candidate.assets
+    : Array.isArray(candidate.files) && candidate.files.every((item) => item && typeof item === 'object')
+      ? candidate.files as DesktopAsset[]
+      : null;
+
+  if (typeof candidate.version !== 'string' || !rawAssets) {
+    throw new Error('Invalid desktop index payload: malformed version entry');
+  }
+
+  for (const asset of rawAssets) {
+    if (
+      !asset ||
+      typeof asset.name !== 'string' ||
+      typeof asset.path !== 'string' ||
+      typeof asset.size !== 'number'
+    ) {
+      throw new Error('Invalid desktop index payload: malformed asset entry');
+    }
+  }
+
+  const normalizedFiles = Array.isArray(candidate.files)
+    ? candidate.files
+        .map((item) => (typeof item === 'string' ? item : item.path))
+        .filter((item): item is string => typeof item === 'string')
+    : undefined;
+
+  return {
+    version: candidate.version,
+    assets: rawAssets.map((asset) => ({ ...asset })),
+    files: normalizedFiles,
+  };
+}
+
 function normalizeDesktopIndexPayload(payload: unknown): DesktopIndexResponse {
   if (!payload || typeof payload !== 'object') {
     throw new Error('Invalid desktop index payload: expected object');
@@ -119,26 +166,7 @@ function normalizeDesktopIndexPayload(payload: unknown): DesktopIndexResponse {
     throw new Error('Invalid desktop index payload: missing versions array');
   }
 
-  for (const version of data.versions) {
-    if (!version || typeof version.version !== 'string' || !Array.isArray(version.assets)) {
-      throw new Error('Invalid desktop index payload: malformed version entry');
-    }
-
-    if (version.files && !Array.isArray(version.files)) {
-      throw new Error('Invalid desktop index payload: malformed file path list');
-    }
-
-    for (const asset of version.assets) {
-      if (
-        !asset ||
-        typeof asset.name !== 'string' ||
-        typeof asset.path !== 'string' ||
-        typeof asset.size !== 'number'
-      ) {
-        throw new Error('Invalid desktop index payload: malformed asset entry');
-      }
-    }
-  }
+  const normalizedVersions = data.versions.map((version) => normalizeDesktopVersionEntry(version));
 
   if (data.channels) {
     if (!isValidChannelInfo(data.channels.stable) || !isValidChannelInfo(data.channels.beta)) {
@@ -148,12 +176,7 @@ function normalizeDesktopIndexPayload(payload: unknown): DesktopIndexResponse {
 
   return {
     ...data,
-    versions: [...data.versions]
-      .map((version) => ({
-        ...version,
-        assets: [...version.assets],
-        files: Array.isArray(version.files) ? [...version.files] : undefined,
-      }))
+    versions: normalizedVersions
       .sort((a, b) => compareVersions(b.version, a.version)),
     channels: data.channels
       ? {
