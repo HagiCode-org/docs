@@ -33,6 +33,20 @@ npm run preview
 
 本地文档站默认运行在 `http://localhost:31265`。
 
+## 多仓库 Changelog 数据
+
+文档站现于 `src/data/changelog/` 维护 `core`、`web`、`desktop` 三份静态 changelog 数据。
+这些文件由 `scripts/generate-multi-repo-changelog.mjs` 从 `repos/hagicode-core`、`repos/web`、`repos/hagicode-desktop` 的相邻 Git tag 区间生成。
+
+```bash
+npm run changelog:generate
+npm run verify:repo-changelog
+```
+
+第三数据源刻意采用 `desktop`，而非 `site`。
+此假设遵循 OpenSpec 变更正文，同时保留脚本内仓库映射可配置，以便后续切换。
+生成器只写入 `repos/docs/src/data/changelog/`；参考仓库始终保持只读输入，不承担页面渲染逻辑。
+
 ## Desktop 版本数据
 
 Desktop 下载数据在运行时直接读取 `repos/index` 发布的 canonical index 端点。
