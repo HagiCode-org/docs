@@ -2,6 +2,7 @@ import fallbackPayload from '@/data/live-broadcast.snapshot.json';
 
 export const LIVE_BROADCAST_URL = 'https://index.hagicode.com/live-broadcast.json';
 export const LIVE_BROADCAST_QR_IMAGE_URL = '/live/douyin-qrcode.png';
+export const LIVE_BROADCAST_PROFILE_URL = 'https://www.douyin.com/user/MS4wLjABAAAAl8kX-Ok9ITtNF4Xx2UHbq5g9ed49nBDIdvxbOURN0t85Am4M_eTEWJQQsIobcrxQ';
 export const BEIJING_TIME_ZONE = 'Asia/Shanghai';
 export const LIVE_BROADCAST_REFRESH_MS = 60_000;
 
