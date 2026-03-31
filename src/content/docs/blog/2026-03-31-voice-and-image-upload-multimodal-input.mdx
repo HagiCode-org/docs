@@ -1,0 +1,309 @@
+---
+title: 打字不如说话，说话不如截图——AI 代码助手的多模态输入实践
+date: 2026-03-31
+tags: [WebSocket, 语音识别, 图片上传, 多模态交互]
+---
+
+## 打字不如说话，说话不如截图——AI 代码助手的多模态输入实践
+
+> 其实写代码这事儿，打字再快也有个上限。有时候说一句话的事，非得敲半天键盘；有时候一张图就能说明白，却得用一堆文字去描述。本文聊聊我们在做 [HagiCode](https://hagicode.com) 时遇到的那些事儿——语音识别也好，图片上传也罢，反正就是想让 AI 代码助手变得好用一点，罢了。
+
+## 背景
+
+在做 HagiCode 的时候，我们发现了一个问题——或者说，用户们用得多了，自然就显现出来的问题：光靠打字，有时候挺累的。
+
+你想啊，用户和 Agent 交互，这可是核心场景。可是每次都得坐在键盘上噼里啪啦地敲，怎么说呢，效率确实不太高：
+
+1. **打字太慢了**：有些复杂的问题，什么报错啊、界面上的事儿啊，打字说出来得耗上半分钟，嘴上可能十秒就说完了。这时间差，挺让人难受的。
+
+2. **图片更直接**：有时候界面报错了，或者想对比一下设计稿，又或者想展示代码结构……"一图胜千言"这话虽老，可理儿不假。让 AI 直接"看"到问题，比描述半天要清楚得多。
+
+3. **交互就该自然点**：现在的 AI 助手，应该支持文字、语音、图片这些方式吧？用户想用什么就用什么，这才叫自然，不是吗？
+
+所以啊，我们就想，不如给 HagiCode 加上语音识别和图片上传的功能，让 Agent 操作变得方便些。毕竟，能让用户少敲几个字，也是好的。
+
+## 关于 HagiCode
+
+本文分享的这些方案，来自我们在 [HagiCode](https://hagicode.com) 项目中的实践——或者说，是在不断踩坑中摸索出来的经验。
+
+HagiCode 是个开源的 AI 代码助手项目，想法很简单：用 AI 技术提升开发效率。做着做着就发现，用户对多模态输入的需求其实挺强烈的——有时候说一句话比打一堆字快，有时候一张截图比描述半天清楚。
+
+这些需求推着我们往前走，最后也就有了语音识别和图片上传这些功能。用户可以用最自然的方式和 AI 交互，这感觉，挺好的。
+
+## 分析
+
+### 语音识别的技术挑战
+
+做语音识别功能的时候，我们遇到了一个挺棘手的问题：**浏览器的 WebSocket API 不支持自定义 HTTP header**。
+
+而我们选的语音识别服务，是字节跳动的豆包语音识别 API。这个 API 偏偏要求通过 HTTP header 传递认证信息，什么 `accessToken`、`secretKey` 之类的。这下好了，技术矛盾来了：
+
+```javascript
+// 浏览器 WebSocket API 不支持以下方式
+const ws = new WebSocket('wss://api.com/ws', {
+  headers: {
+    'Authorization': 'Bearer token'  // 不支持
+  }
+});
+```
+
+摆在我们面前的方案，大概有两个：
+
+1. **URL 查询参数方案**：把认证信息放在 URL 里
+   - 优点是，实现起来简单
+   - 缺点是，凭证暴露在前端，安全性差；而且有些 API 强制要求 header 验证
+
+2. **后端代理方案**：在后端实现 WebSocket 代理
+   - 优点是，凭证安全存储在后端；完全兼容 API 要求
+   - 缺点是，实现起来稍微复杂一点
+
+最后我们还是选了**后端代理方案**。毕竟啊，安全性这东西，是不能妥协的底线——这一点，谁也别想糊弄过去。
+
+### 图片上传的功能需求
+
+图片上传功能嘛，我们的需求其实也挺简单的：
+
+1. **多种上传方式**：点击选文件、拖拽上传、剪贴板粘贴，总得有吧？
+2. **文件验证**：类型限制（PNG、JPG、WebP、GIF）、大小限制（5-10MB），这些是基本操作
+3. **用户体验**：上传进度、预览、错误提示，总得让人知道发生了什么
+4. **安全性**：服务端验证、防止恶意文件上传，这可是大事
+
+## 解决方案
+
+### 语音识别：WebSocket 代理架构
+
+我们设计了一个三层架构的语音识别方案，怎么说呢，算是找到了一条路：
+
+```
+Browser WebSocket
+       |
+       | ws://backend/api/voice/ws
+       | (binary audio)
+       v
+Backend Proxy
+       |
+       | wss://openspeech.bytedance.com/ (with auth header)
+       v
+Doubao API
+```
+
+**核心组件实现**：
+
+1. **前端 AudioWorklet 处理器**：
+
+```javascript
+class AudioProcessorWorklet extends AudioWorkletProcessor {
+  process(inputs, outputs, parameters) {
+    const input = inputs[0]?.[0];
+    if (!input) return true;
+
+    // 重采样到 16kHz（豆包 API 要求）
+    const samples = this.resampleAudio(input, 48000, 16000);
+
+    // 累积样本到 500ms 块
+    this.accumulatedSamples.push(...samples);
+
+    if (this.accumulatedSamples.length >= 8000) {
+      // 转换为 16-bit PCM 并发送
+      const pcm = this.floatToPcm16(this.accumulatedSamples);
+      this.port.postMessage({ type: 'audioData', data: pcm.buffer }, [pcm.buffer]);
+      this.accumulatedSamples = [];
+    }
+    return true;
+  }
+}
+```
+
+2. **后端 WebSocket 处理器**（C#）：
+
+```csharp
+[HttpGet("ws")]
+public async Task GetWebSocket()
+{
+    if (HttpContext.WebSockets.IsWebSocketRequest)
+    {
+        await _webSocketHandler.HandleAsync(HttpContext);
+    }
+}
+```
+
+3. **前端 VoiceTextArea 组件**：
+
+```tsx
+export const VoiceTextArea = forwardRef<HTMLTextAreaElement, VoiceTextAreaProps>(
+  ({ value, onChange, onTextRecognized, maxDuration }, ref) => {
+    const { isRecording, interimText, volume, duration, startRecording, stopRecording } =
+      useVoiceRecording({ onTextRecognized, maxDuration });
+
+    return (
+      <div className="flex gap-2">
+        {/* 语音按钮 */}
+        <button onClick={handleButtonClick}>
+          {isRecording ? <VolumeWaveform volume={volume} /> : <Mic />}
+        </button>
+        {/* 文本输入框 */}
+        <textarea value={displayValue} onChange={handleChange} />
+      </div>
+    );
+  }
+);
+```
+
+### 图片上传：多方式上传组件
+
+我们做了一个功能完整的图片上传组件，三种上传方式都支持，怎么说呢，算是把用户常用的场景都覆盖到了。
+
+**核心特性**：
+
+1. **三种上传方式**：
+
+```tsx
+// 点击上传
+const handleClick = () => fileInputRef.current?.click();
+
+// 拖拽上传
+const handleDrop = (e: React.DragEvent) => {
+  const file = e.dataTransfer.files?.[0];
+  if (file) uploadFile(file);
+};
+
+// 剪贴板粘贴
+const handlePaste = (e: ClipboardEvent) => {
+  for (const item of Array.from(e.clipboardData?.items || [])) {
+    if (item.type.startsWith('image/')) {
+      const file = item.getAsFile();
+      if (file) uploadFile(file);
+    }
+  }
+};
+```
+
+2. **前端验证**：
+
+```tsx
+const validateFile = (file: File): { valid: boolean; error?: string } => {
+  if (!acceptedTypes.includes(file.type)) {
+    return { valid: false, error: 'Only PNG, JPG, JPEG, WebP, and GIF images are allowed' };
+  }
+  if (file.size > maxSize) {
+    return { valid: false, error: `Maximum file size is ${(maxSize / 1024 / 1024).toFixed(1)}MB` };
+  }
+  return { valid: true };
+};
+```
+
+3. **后端上传处理**（TypeScript）：
+
+```typescript
+export const Route = createFileRoute('/api/upload')({
+  server: {
+    handlers: {
+      POST: async ({ request }) => {
+        const formData = await request.formData();
+        const file = formData.get('file') as File;
+
+        // 验证
+        const validation = validateFile(file);
+        if (!validation.isValid) {
+          return Response.json({ error: validation.error }, { status: 400 });
+        }
+
+        // 保存文件
+        const uuid = uuidv4();
+        const filePath = join(uploadDir, `${uuid}${extension}`);
+        await writeFile(filePath, buffer);
+
+        return Response.json({ url: `/uploaded/${today}/${uuid}${extension}` });
+      }
+    }
+  }
+});
+```
+
+## 实践指南
+
+### 如何使用语音识别
+
+1. **配置语音识别服务**：
+   - 进入语音识别设置页面
+   - 配置豆包语音的 `AppId` 和 `AccessToken`
+   - （可选）配置热词以提升专业术语识别准确率
+
+2. **在输入框中使用**：
+   - 点击输入框左侧的麦克风图标
+   - 看到波形动画后开始说话
+   - 再次点击图标停止录音
+   - 识别结果会自动插入到光标位置
+
+3. **热词配置示例**：
+
+```text
+TypeScript
+React
+useState
+useEffect
+```
+
+### 如何使用图片上传
+
+1. **上传方式**：
+   - 点击上传按钮选择文件
+   - 直接拖拽图片到上传区域
+   - 使用 `Ctrl+V` 粘贴剪贴板中的截图
+
+2. **支持的格式**：PNG、JPG、JPEG、WebP、GIF
+3. **大小限制**：默认 5MB（可配置）
+
+### 注意事项
+
+1. **语音识别**：
+   - 需要麦克风权限
+   - 建议在安静环境下使用
+   - 支持的最大录音时长为 300 秒（可配置）
+
+2. **图片上传**：
+   - 仅支持常见图片格式
+   - 注意文件大小限制
+   - 上传后的图片会自动生成预览 URL
+
+3. **安全考虑**：
+   - 语音识别凭证存储在后端
+   - 图片上传有严格的服务端验证
+   - 生产环境建议使用 HTTPS/WSS
+
+## 总结
+
+加上语音识别和图片上传之后，HagiCode 的用户体验确实提升了不少。用户现在可以用更自然的方式和 AI 交互——说话代替打字，截图代替描述。这种感觉，怎么说呢，就像是终于找到了一种更舒服的沟通方式。
+
+做这个功能的时候，我们遇到了浏览器 WebSocket 不支持自定义 header 的问题，最后还是通过后端代理方案搞定了。这个方案不仅保证了安全性，也为后续集成其他需要认证的 WebSocket 服务打下了基础——也算是个意外收获吧。
+
+图片上传组件也是，用了多种上传方式，让用户可以根据场景选择最方便的那一个。点击也好，拖拽也罢，或者直接粘贴，都能快速完成上传。条条大路通罗马，只是有的路好走一点，有的路稍微曲折一点罢了。
+
+"打字不如说话，说话不如截图"，这话放在这里，倒也贴切。如果你也在做类似的 AI 助手产品，希望这些经验能对你有所帮助，哪怕只是一点点。
+
+## 参考资料
+
+- [HagiCode GitHub 仓库](https://github.com/HagiCode-org/site)
+- [HagiCode 官网](https://hagicode.com)
+- [豆包语音识别 API 文档](https://www.volcengine.com/docs/6561/79829)
+- [Web Audio API](https://developer.mozilla.org/en-US/docs/Web/API/Web_Audio_API)
+- [WebSocket API](https://developer.mozilla.org/en-US/docs/Web/API/WebSocket)
+
+---
+
+如果本文对你有帮助：
+- 点个赞让更多人看到
+- 来 GitHub 给个 Star：[github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- 访问官网了解更多：[hagicode.com](https://hagicode.com)
+- 观看 30 分钟实战演示：[www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)
+- 一键安装体验：[docs.hagicode.com/installation/docker-compose](https://docs.hagicode.com/installation/docker-compose)
+- Desktop 桌面端快速安装：[hagicode.com/desktop/](https://hagicode.com/desktop/)
+- 公测已开始，欢迎安装体验
+
+## 版权说明
+
+感谢您的阅读,如果您觉得本文有用,欢迎点赞、收藏和分享支持。
+本内容采用人工智能辅助协作,最终内容由作者审核并确认。
+- 本文作者: [newbe36524](https://www.newbe.pro)
+- 原文链接: [https://docs.hagicode.com/blog/2026-03-31-voice-and-image-upload-multimodal-input/](https://docs.hagicode.com/blog/2026-03-31-voice-and-image-upload-multimodal-input/)
+- 版权声明: 本博客所有文章除特别声明外,均采用 BY-NC-SA 许可协议。转载请注明出处!
