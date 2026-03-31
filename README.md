@@ -47,6 +47,24 @@ The third source is intentionally `desktop`, not `site`.
 That assumption follows the OpenSpec change text, while keeping the source mapping configurable in the generator for future switches.
 The generator only writes inside `repos/docs/src/data/changelog/`; the source repositories remain read-only inputs.
 
+For release automation, the same generator also supports an explicit single-dataset mode.
+Use it when you need to refresh one changelog JSON for a specific version without rebuilding all datasets:
+
+```bash
+node ./scripts/generate-multi-repo-changelog.mjs \
+  --repo-key desktop \
+  --target-version v0.1.34 \
+  --source-ref v0.1.34
+```
+
+Optional flags:
+
+- `--previous-tag <tag>` pins the lower boundary instead of auto-resolving it.
+- `--docs-root <path>` and `--monorepo-root <path>` let release automation run from a different working directory.
+
+Explicit mode only rewrites the selected dataset, for example `desktop.json`, and replaces the existing bucket for the same version key instead of appending a duplicate block.
+If the target version has no previous tag yet, the generator still emits a valid first release bucket with `previousTag: null`.
+
 ## Desktop version data
 
 Desktop download data is fetched at runtime from the canonical index endpoint published by `repos/index`.
