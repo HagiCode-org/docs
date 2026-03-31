@@ -125,6 +125,13 @@ export const SITE_LINKS = {
         external: false,
     } as LinkConfig,
 
+    /** 官方 About 页面 */
+    about: {
+        dev: 'https://hagicode.com/about/',
+        prod: 'https://hagicode.com/about/',
+        external: false,
+    } as LinkConfig,
+
     /** 博客 RSS 订阅（相对于文档站点） */
     rss: {
         dev: 'http://localhost:31265/blog/rss.xml',
