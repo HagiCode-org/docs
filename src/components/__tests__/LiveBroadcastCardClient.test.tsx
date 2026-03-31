@@ -2,7 +2,12 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 
-import type { LiveBroadcastData, LiveBroadcastRuntime } from '@/lib/live-broadcast';
+import {
+  LIVE_BROADCAST_PROFILE_URL,
+  LIVE_BROADCAST_QR_IMAGE_URL,
+  type LiveBroadcastData,
+  type LiveBroadcastRuntime,
+} from '@/lib/live-broadcast';
 import LiveBroadcastCardClient, { LiveBroadcastCardBody } from '../LiveBroadcastCardClient';
 
 const data: LiveBroadcastData = {
@@ -47,12 +52,12 @@ const data: LiveBroadcastData = {
       },
       stateCopy: {
         upcoming: '今晚 20:00 开播，18:00 起会显示直播提醒。',
-        live: '直播已开始，扫码即可进入抖音直播间。',
+        live: 'Hagicode 现场直播正在进行。扫码观看最新系统 AI 实战演示，现场交流。',
         offline: '当前不在直播窗口，页面会自动显示下一场时间。',
       },
       reminder: {
         preview: '直播即将开始',
-        live: '正在直播，扫码观看',
+        live: 'Hagicode 现场直播正在进行。扫码观看最新系统 AI 实战演示，现场交流。',
         cta: '打开二维码',
       },
       time: {
@@ -115,6 +120,8 @@ describe('LiveBroadcastCardBody markup', () => {
 
     expect(markup).toContain('Daily Hagi Live Coding Room');
     expect(markup).not.toContain('Open QR');
+    expect(markup.split(LIVE_BROADCAST_QR_IMAGE_URL)).toHaveLength(4);
+    expect(markup).toContain(LIVE_BROADCAST_PROFILE_URL);
   });
 
   it('degrades to a QR placeholder without dropping the live card', () => {
@@ -128,7 +135,7 @@ describe('LiveBroadcastCardBody markup', () => {
     );
 
     expect(markup).toContain('Daily Hagi Live Coding Room');
-    expect(markup).toContain('QR image unavailable');
+    expect(markup.split('QR image unavailable')).toHaveLength(3);
     expect(markup).not.toContain('Open QR');
     expect(markup).toContain('data-docs-live-reminder="live"');
   });

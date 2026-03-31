@@ -25,6 +25,8 @@ interface LiveBroadcastCardBodyProps {
   onQrError?: () => void;
 }
 
+const LIVE_ZH_COPY = 'Hagicode 现场直播正在进行。扫码观看最新系统 AI 实战演示，现场交流。';
+
 export function LiveBroadcastCardBody({
   data,
   locale,
@@ -33,8 +35,11 @@ export function LiveBroadcastCardBody({
   onQrError,
 }: LiveBroadcastCardBodyProps) {
   const bundle = data.locales[locale];
+  const liveCopy = locale === 'zh-CN' ? LIVE_ZH_COPY : bundle.reminder.live;
   const stateCopy = runtime.todayIsExcluded
     ? `${bundle.stateCopy.offline} ${bundle.time.thursdayNote}`
+    : runtime.state === 'live' && locale === 'zh-CN'
+      ? LIVE_ZH_COPY
     : bundle.stateCopy[runtime.state];
 
   return (
@@ -89,7 +94,11 @@ export function LiveBroadcastCardBody({
         locale={locale}
         state={runtime.state}
         previewCopy={bundle.reminder.preview}
-        liveCopy={bundle.reminder.live}
+        liveCopy={liveCopy}
+        qrAlt={data.qrCode.alt[locale]}
+        qrFallbackLabel={data.qrCode.fallbackLabel[locale]}
+        qrAvailable={qrAvailable}
+        onQrError={onQrError}
       />
     </>
   );
