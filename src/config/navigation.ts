@@ -55,20 +55,11 @@ export const navLinks: NavLink[] = [
     linkKey: 'blog',
   },
   {
-    label: "技术支持群",
-    labelEn: "Support Group",
-    href: getLink('qqGroup'),
-    external: true,
+    label: "获取技术支持",
+    labelEn: "Get Support",
+    href: getLink('about'),
     icon: "comment",
-    linkKey: 'qqGroup',
-  },
-  {
-    label: "Discord",
-    labelEn: "Discord",
-    href: getLink('discord'),
-    external: true,
-    icon: "comment",
-    linkKey: 'discord',
+    linkKey: 'about',
   },
 ];
 
