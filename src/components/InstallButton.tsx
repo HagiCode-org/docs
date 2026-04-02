@@ -24,34 +24,10 @@ import type {
   DesktopVersionState,
 } from '@shared/version-manager';
 import { getLink } from '@shared/links';
+import { FEATURE_MAC_DOWNLOAD_ENABLED } from '@/config/features';
 
 const MAC_DOWNLOAD_DISABLED_NOTICE = '建议安装 Docker 版本';
 const MAC_DOWNLOAD_DISABLED_NOTICE_EN = 'Recommended: Install Docker version';
-
-function parseBooleanFlag(value: string | boolean | undefined, defaultValue: boolean): boolean {
-  if (typeof value === 'boolean') {
-    return value;
-  }
-
-  if (typeof value !== 'string') {
-    return defaultValue;
-  }
-
-  const normalized = value.trim().toLowerCase();
-  if (normalized === 'true' || normalized === '1' || normalized === 'yes' || normalized === 'on') {
-    return true;
-  }
-  if (normalized === 'false' || normalized === '0' || normalized === 'no' || normalized === 'off') {
-    return false;
-  }
-
-  return defaultValue;
-}
-
-const FEATURE_MAC_DOWNLOAD_ENABLED = parseBooleanFlag(
-  import.meta.env.VITE_FEATURE_MAC_DOWNLOAD_ENABLED,
-  true,
-);
 
 interface DownloadOption {
   label: string;
