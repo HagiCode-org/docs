@@ -3,7 +3,6 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 
 import {
-  LIVE_BROADCAST_PROFILE_URL,
   LIVE_BROADCAST_QR_IMAGE_URL,
   type LiveBroadcastData,
   type LiveBroadcastRuntime,
@@ -115,13 +114,21 @@ const offlineRuntime: LiveBroadcastRuntime = {
 };
 
 describe('LiveBroadcastCardBody markup', () => {
-  it('renders the docs live card statically when initial data is present', () => {
+  it('stays hidden by default when the live broadcast feature flag is disabled', () => {
     const markup = renderToStaticMarkup(<LiveBroadcastCardClient locale="en" initialData={data} />);
+
+    expect(markup).toBe('');
+  });
+
+  it('renders the docs live card statically when the feature flag is explicitly enabled', () => {
+    const markup = renderToStaticMarkup(
+      <LiveBroadcastCardClient locale="en" enabled={true} initialData={data} />,
+    );
 
     expect(markup).toContain('Daily Hagi Live Coding Room');
     expect(markup).not.toContain('Open QR');
-    expect(markup.split(LIVE_BROADCAST_QR_IMAGE_URL)).toHaveLength(4);
-    expect(markup).toContain(LIVE_BROADCAST_PROFILE_URL);
+    expect(markup).toContain(LIVE_BROADCAST_QR_IMAGE_URL);
+    expect(markup).toContain('data-docs-live-state=');
   });
 
   it('degrades to a QR placeholder without dropping the live card', () => {

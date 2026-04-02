@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 
+import { FEATURE_LIVE_BROADCAST_ENABLED } from '@/config/features';
 import {
   LIVE_BROADCAST_REFRESH_MS,
   LIVE_BROADCAST_QR_IMAGE_URL,
@@ -14,6 +15,7 @@ import styles from './LiveBroadcastCard.module.css';
 
 interface LiveBroadcastCardClientProps {
   locale: LiveBroadcastLocale;
+  enabled?: boolean;
   initialData?: LiveBroadcastData | null;
 }
 
@@ -104,14 +106,25 @@ export function LiveBroadcastCardBody({
   );
 }
 
-export default function LiveBroadcastCardClient({ locale, initialData = null }: LiveBroadcastCardClientProps) {
-  const [data, setData] = useState<LiveBroadcastData | null>(initialData);
+export default function LiveBroadcastCardClient({
+  locale,
+  enabled = FEATURE_LIVE_BROADCAST_ENABLED,
+  initialData = null,
+}: LiveBroadcastCardClientProps) {
+  const [data, setData] = useState<LiveBroadcastData | null>(enabled ? initialData : null);
   const [runtime, setRuntime] = useState<LiveBroadcastRuntime | null>(
-    initialData ? getLiveBroadcastRuntime(initialData, locale) : null,
+    enabled && initialData ? getLiveBroadcastRuntime(initialData, locale) : null,
   );
   const [qrAvailable, setQrAvailable] = useState(true);
 
   useEffect(() => {
+    if (!enabled) {
+      setData(null);
+      setRuntime(null);
+      setQrAvailable(true);
+      return;
+    }
+
     let cancelled = false;
     let intervalId: number | undefined;
 
@@ -151,9 +164,9 @@ export default function LiveBroadcastCardClient({ locale, initialData = null }: 
         window.clearInterval(intervalId);
       }
     };
-  }, [initialData, locale]);
+  }, [enabled, initialData, locale]);
 
-  if (!data || !runtime) {
+  if (!enabled || !data || !runtime) {
     return null;
   }
 
