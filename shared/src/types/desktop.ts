@@ -3,6 +3,20 @@
  * 基于 index.hagicode.com/desktop/index.json 的实际数据结构
  */
 
+export enum CpuArchitecture {
+  X64 = "x64",
+  ARM64 = "arm64",
+  Unknown = "unknown",
+}
+
+export type DesktopPlatform = "windows" | "macos" | "linux";
+
+export type DesktopStructuredSourceKind = "official" | "github-release";
+
+export type DownloadSourceKind = DesktopStructuredSourceKind | "torrent" | "legacy";
+
+export type GithubReachabilityState = "unknown" | "probing" | "reachable" | "unreachable";
+
 /**
  * 资源类型枚举
  * 从文件名推断的平台和类型
@@ -14,8 +28,11 @@ export enum AssetType {
   MacOSApple = "macos-apple", // macOS Apple Silicon (推荐)
   MacOSIntel = "macos-intel", // macOS Intel/通用
   LinuxAppImage = "linux-appimage", // Linux AppImage (推荐)
+  LinuxArm64AppImage = "linux-arm64-appimage", // Linux AppImage ARM64
   LinuxDeb = "linux-deb", // Linux Debian 包
+  LinuxArm64Deb = "linux-arm64-deb", // Linux Debian 包 ARM64
   LinuxTarball = "linux-tarball", // Linux 压缩包
+  LinuxArm64Tarball = "linux-arm64-tarball", // Linux 压缩包 ARM64
   Source = "source", // 源代码
   Unknown = "unknown",
 }
@@ -35,6 +52,22 @@ export interface DesktopAsset {
   lastModified: number | string | null;
   /** index 站可选提供的直链地址 */
   directUrl?: string;
+  /** 种子下载地址 */
+  torrentUrl?: string;
+  /** 可选信息哈希 */
+  infoHash?: string;
+  /** hybrid 元数据中的 WebSeed */
+  webSeeds?: string[];
+  /** 结构化下载源 */
+  downloadSources?: DesktopDownloadSource[];
+}
+
+export interface DesktopDownloadSource {
+  kind?: string;
+  label?: string;
+  url?: string;
+  primary?: boolean;
+  webSeed?: boolean;
 }
 
 /**
@@ -82,7 +115,7 @@ export interface DesktopIndexResponse {
  * 从文件名推断并格式化后的数据
  */
 export interface PlatformDownload {
-  /** 完整下载链接 */
+  /** 安全回退下载链接（优先官方 / legacy） */
   url: string;
   /** 格式化的文件大小 */
   size: string;
@@ -90,6 +123,25 @@ export interface PlatformDownload {
   filename: string;
   /** 资源类型 */
   assetType: AssetType;
+  /** CPU 架构 */
+  architecture: CpuArchitecture;
+  /** 同一资产下的显式来源动作 */
+  sourceActions: DownloadAction[];
+}
+
+export interface DownloadAction {
+  /** 来源类型 */
+  kind: DownloadSourceKind;
+  /** 展示标签 */
+  label: string;
+  /** 下载地址 */
+  url: string;
+  /** 是否由结构化来源显式提供 */
+  isStructured: boolean;
+  /** 是否来自 legacy fallback */
+  isLegacyFallback: boolean;
+  /** 是否被源数据标记为 primary */
+  isPrimary: boolean;
 }
 
 /**
@@ -98,9 +150,11 @@ export interface PlatformDownload {
  */
 export interface PlatformGroup {
   /** 平台名称 */
-  platform: "windows" | "macos" | "linux";
+  platform: DesktopPlatform;
   /** 该平台的下载资源列表 */
   downloads: PlatformDownload[];
+  /** 可用架构 */
+  architectures: CpuArchitecture[];
 }
 
 /**

@@ -8,19 +8,35 @@
 import semver from 'semver';
 
 import type {
+  DownloadAction,
   DesktopAsset,
   DesktopIndexResponse,
+  DesktopPlatform,
+  DesktopStructuredSourceKind,
+  DownloadSourceKind,
+  GithubReachabilityState,
   PlatformDownload,
   PlatformGroup,
   DesktopVersion,
 } from './types/desktop';
-import { AssetType } from './types/desktop';
+import { AssetType, CpuArchitecture } from './types/desktop';
 
 export const PRIMARY_INDEX_JSON_URL = 'https://index.hagicode.com/desktop/index.json';
 export const BACKUP_INDEX_JSON_URL = 'https://docs.hagicode.com/version-index.json';
 export const LOCAL_VERSION_INDEX = '/version-index.json';
 const DOWNLOAD_BASE_URL = 'https://desktop.dl.hagicode.com/';
 const TIMEOUT_MS = 30000;
+const GITHUB_PROBE_TIMEOUT_MS = 1800;
+const SOURCE_ACTION_ORDER: Record<DownloadSourceKind, number> = {
+  official: 0,
+  legacy: 1,
+  'github-release': 2,
+  torrent: 3,
+};
+
+let githubProbeState: GithubReachabilityState = 'unknown';
+let githubProbePromise: Promise<GithubReachabilityState> | null = null;
+let githubProbeTarget: string | null = null;
 
 export type DesktopVersionSource = 'primary' | 'backup' | 'local' | 'server';
 
@@ -55,7 +71,7 @@ const SOURCE_CONFIGS: Array<{ source: Exclude<DesktopVersionSource, 'server'>; u
  * 平台推荐配置
  */
 export const PLATFORM_RECOMMENDATIONS: Record<
-  'windows' | 'macos' | 'linux',
+  DesktopPlatform,
   { recommendedType: AssetType; label: string; icon: string }
 > = {
   windows: {
@@ -74,6 +90,288 @@ export const PLATFORM_RECOMMENDATIONS: Record<
     icon: 'seti:linux',
   },
 };
+
+function isKnownStructuredSourceKind(kind: string): kind is DesktopStructuredSourceKind {
+  return kind === 'official' || kind === 'github-release';
+}
+
+function normalizeKnownSourceKind(kind: string | undefined): DesktopStructuredSourceKind | null {
+  const normalizedKind = typeof kind === 'string' ? kind.trim().toLowerCase() : '';
+  return isKnownStructuredSourceKind(normalizedKind) ? normalizedKind : null;
+}
+
+function resolveAbsoluteUrl(urlValue: string): string | null {
+  const trimmed = urlValue.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  try {
+    return new URL(trimmed).toString();
+  } catch {
+    if (trimmed.startsWith('./') || trimmed.startsWith('../')) {
+      try {
+        return new URL(trimmed, PRIMARY_INDEX_JSON_URL).toString();
+      } catch {
+        return null;
+      }
+    }
+
+    return new URL(trimmed.replace(/^\/+/, ''), DOWNLOAD_BASE_URL).toString();
+  }
+}
+
+function resolveLegacyAssetUrl(asset: DesktopAsset): string | null {
+  if (typeof asset.directUrl === 'string') {
+    return resolveAbsoluteUrl(asset.directUrl);
+  }
+
+  if (typeof asset.path === 'string' && asset.path.trim().length > 0) {
+    return resolveAbsoluteUrl(asset.path);
+  }
+
+  return null;
+}
+
+function createDownloadAction(
+  kind: DownloadSourceKind,
+  url: string,
+  options?: Partial<Pick<DownloadAction, 'label' | 'isPrimary' | 'isStructured' | 'isLegacyFallback'>>,
+): DownloadAction {
+  return {
+    kind,
+    url,
+    label: options?.label?.trim() || kind,
+    isPrimary: options?.isPrimary === true,
+    isStructured: options?.isStructured === true,
+    isLegacyFallback: options?.isLegacyFallback === true,
+  };
+}
+
+export function getDownloadActionLabel(
+  kind: DownloadSourceKind,
+  locale: 'zh' | 'en' = 'zh',
+): string {
+  const zhLabels: Record<DownloadSourceKind, string> = {
+    official: '官方下载',
+    legacy: '官方下载',
+    'github-release': 'GitHub Release',
+    torrent: '种子下载',
+  };
+  const enLabels: Record<DownloadSourceKind, string> = {
+    official: 'Official Download',
+    legacy: 'Official Download',
+    'github-release': 'GitHub Release',
+    torrent: 'Torrent',
+  };
+
+  return (locale === 'en' ? enLabels : zhLabels)[kind];
+}
+
+export function normalizeDownloadActions(asset: DesktopAsset): DownloadAction[] {
+  const actions: DownloadAction[] = [];
+  const seen = new Set<string>();
+
+  const addAction = (action: DownloadAction | null) => {
+    if (!action) {
+      return;
+    }
+
+    const key = `${action.kind}:${action.url.toLowerCase()}`;
+    if (seen.has(key)) {
+      return;
+    }
+
+    seen.add(key);
+    actions.push(action);
+  };
+
+  const structuredSources = Array.isArray(asset.downloadSources)
+    ? asset.downloadSources
+        .map((source) => {
+          const kind = normalizeKnownSourceKind(source?.kind);
+          const url = typeof source?.url === 'string' ? resolveAbsoluteUrl(source.url) : null;
+          if (!kind || !url) {
+            return null;
+          }
+
+          return createDownloadAction(kind, url, {
+            label: source?.label,
+            isPrimary: source?.primary === true,
+            isStructured: true,
+          });
+        })
+        .filter((source): source is DownloadAction => Boolean(source))
+    : [];
+
+  const legacyUrl = resolveLegacyAssetUrl(asset);
+  const hasStructuredSources = structuredSources.length > 0;
+  const officialStructured = structuredSources.find((source) => source.kind === 'official') ?? null;
+  const githubStructured = structuredSources.find((source) => source.kind === 'github-release') ?? null;
+
+  if (officialStructured) {
+    addAction(officialStructured);
+  } else if (legacyUrl) {
+    addAction(
+      createDownloadAction(hasStructuredSources ? 'official' : 'legacy', legacyUrl, {
+        label: hasStructuredSources ? 'official' : 'legacy',
+        isPrimary: !githubStructured,
+        isLegacyFallback: true,
+      }),
+    );
+  }
+
+  if (githubStructured) {
+    addAction(githubStructured);
+  }
+
+  const torrentUrl =
+    typeof asset.torrentUrl === 'string' ? resolveAbsoluteUrl(asset.torrentUrl) : null;
+  if (torrentUrl) {
+    addAction(
+      createDownloadAction('torrent', torrentUrl, {
+        label: 'torrent',
+      }),
+    );
+  }
+
+  actions.sort((left, right) => {
+    const priorityDiff = SOURCE_ACTION_ORDER[left.kind] - SOURCE_ACTION_ORDER[right.kind];
+    if (priorityDiff !== 0) {
+      return priorityDiff;
+    }
+
+    if (left.isPrimary !== right.isPrimary) {
+      return left.isPrimary ? -1 : 1;
+    }
+
+    return left.label.localeCompare(right.label);
+  });
+
+  return actions;
+}
+
+export function getDownloadAction(
+  download: Pick<PlatformDownload, 'sourceActions'> | null | undefined,
+  kind: DownloadSourceKind,
+): DownloadAction | null {
+  if (!download) {
+    return null;
+  }
+
+  return download.sourceActions.find((action) => action.kind === kind) ?? null;
+}
+
+function getSafeFallbackAction(
+  download: Pick<PlatformDownload, 'sourceActions'> | null | undefined,
+): DownloadAction | null {
+  return (
+    getDownloadAction(download, 'official') ??
+    getDownloadAction(download, 'legacy') ??
+    (download?.sourceActions[0] ?? null)
+  );
+}
+
+export function resolvePrimaryDownloadAction(
+  download: Pick<PlatformDownload, 'sourceActions'> | null | undefined,
+  githubState: GithubReachabilityState,
+): DownloadAction | null {
+  if (!download) {
+    return null;
+  }
+
+  const githubAction = getDownloadAction(download, 'github-release');
+  if (githubState === 'reachable' && githubAction) {
+    return githubAction;
+  }
+
+  return getSafeFallbackAction(download) ?? githubAction ?? null;
+}
+
+export function findFirstGithubReleaseUrl(platformGroups: PlatformGroup[] | undefined): string | null {
+  if (!platformGroups) {
+    return null;
+  }
+
+  for (const platformGroup of platformGroups) {
+    for (const download of platformGroup.downloads) {
+      const githubAction = getDownloadAction(download, 'github-release');
+      if (githubAction) {
+        return githubAction.url;
+      }
+    }
+  }
+
+  return null;
+}
+
+function normalizeGithubProbeUrl(urlValue?: string | null): string {
+  if (typeof urlValue === 'string' && urlValue.trim().length > 0) {
+    try {
+      const parsed = new URL(urlValue);
+      if (parsed.hostname.endsWith('github.com')) {
+        return new URL('/favicon.ico', parsed.origin).toString();
+      }
+    } catch {
+      // ignore invalid values and fall back to the default target
+    }
+  }
+
+  return 'https://github.com/favicon.ico';
+}
+
+export function getCachedGithubReachabilityState(): GithubReachabilityState {
+  return githubProbeState;
+}
+
+export function resetGithubReachabilityProbeCache(): void {
+  githubProbeState = 'unknown';
+  githubProbePromise = null;
+  githubProbeTarget = null;
+}
+
+export async function ensureGithubReachabilityProbe(
+  probeUrl?: string | null,
+): Promise<GithubReachabilityState> {
+  if (typeof window === 'undefined' || typeof fetch === 'undefined') {
+    return 'unknown';
+  }
+
+  if (githubProbeState === 'reachable' || githubProbeState === 'unreachable') {
+    return githubProbeState;
+  }
+
+  const normalizedTarget = normalizeGithubProbeUrl(probeUrl);
+  if (githubProbePromise && githubProbeTarget === normalizedTarget) {
+    return githubProbePromise;
+  }
+
+  githubProbeState = 'probing';
+  githubProbeTarget = normalizedTarget;
+  githubProbePromise = (async () => {
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), GITHUB_PROBE_TIMEOUT_MS);
+
+    try {
+      await fetch(normalizedTarget, {
+        method: 'GET',
+        mode: 'no-cors',
+        cache: 'no-store',
+        signal: controller.signal,
+      });
+      githubProbeState = 'reachable';
+      return githubProbeState;
+    } catch {
+      githubProbeState = 'unreachable';
+      return githubProbeState;
+    } finally {
+      window.clearTimeout(timeoutId);
+      githubProbePromise = null;
+    }
+  })();
+
+  return githubProbePromise;
+}
 
 function compareVersions(v1: string, v2: string): number {
   const cleaned1 = v1.replace(/^v/, '');
@@ -144,7 +442,7 @@ function normalizeDesktopVersionEntry(version: unknown): DesktopVersion {
   }
 
   const normalizedFiles = Array.isArray(candidate.files)
-    ? candidate.files
+    ? (candidate.files as Array<DesktopAsset | string>)
         .map((item) => (typeof item === 'string' ? item : item.path))
         .filter((item): item is string => typeof item === 'string')
     : undefined;
@@ -288,17 +586,46 @@ export function inferAssetType(filename: string): AssetType {
     return AssetType.MacOSIntel;
   }
 
+  if (name.includes('arm64') && name.endsWith('.appimage')) {
+    return AssetType.LinuxArm64AppImage;
+  }
   if (name.endsWith('.appimage')) {
     return AssetType.LinuxAppImage;
   }
+  if (name.includes('arm64') && name.includes('.deb')) {
+    return AssetType.LinuxArm64Deb;
+  }
   if (name.includes('_amd64.deb')) {
     return AssetType.LinuxDeb;
+  }
+  if (name.includes('arm64') && name.includes('.tar.gz')) {
+    return AssetType.LinuxArm64Tarball;
   }
   if (name.includes('.tar.gz')) {
     return AssetType.LinuxTarball;
   }
 
   return AssetType.Unknown;
+}
+
+export function inferArchitecture(assetType: AssetType): CpuArchitecture {
+  switch (assetType) {
+    case AssetType.MacOSApple:
+    case AssetType.LinuxArm64AppImage:
+    case AssetType.LinuxArm64Deb:
+    case AssetType.LinuxArm64Tarball:
+      return CpuArchitecture.ARM64;
+    case AssetType.WindowsSetup:
+    case AssetType.WindowsPortable:
+    case AssetType.WindowsStore:
+    case AssetType.MacOSIntel:
+    case AssetType.LinuxAppImage:
+    case AssetType.LinuxDeb:
+    case AssetType.LinuxTarball:
+      return CpuArchitecture.X64;
+    default:
+      return CpuArchitecture.Unknown;
+  }
 }
 
 export function formatFileSize(bytes: number): string {
@@ -324,8 +651,11 @@ export function getArchitectureLabel(assetType: AssetType, locale: 'zh' | 'en' =
     [AssetType.WindowsPortable]: 'x64',
     [AssetType.WindowsStore]: '',
     [AssetType.LinuxAppImage]: '通用',
+    [AssetType.LinuxArm64AppImage]: 'ARM64',
     [AssetType.LinuxDeb]: 'amd64',
+    [AssetType.LinuxArm64Deb]: 'ARM64',
     [AssetType.LinuxTarball]: '通用',
+    [AssetType.LinuxArm64Tarball]: 'ARM64',
     [AssetType.Source]: '',
     [AssetType.Unknown]: '',
   };
@@ -337,8 +667,11 @@ export function getArchitectureLabel(assetType: AssetType, locale: 'zh' | 'en' =
     [AssetType.WindowsPortable]: 'x64',
     [AssetType.WindowsStore]: '',
     [AssetType.LinuxAppImage]: 'Universal',
+    [AssetType.LinuxArm64AppImage]: 'ARM64',
     [AssetType.LinuxDeb]: 'amd64',
+    [AssetType.LinuxArm64Deb]: 'ARM64',
     [AssetType.LinuxTarball]: 'Universal',
+    [AssetType.LinuxArm64Tarball]: 'ARM64',
     [AssetType.Source]: '',
     [AssetType.Unknown]: '',
   };
@@ -355,8 +688,11 @@ export function getFileExtension(assetType: AssetType): string {
     [AssetType.MacOSApple]: '.dmg',
     [AssetType.MacOSIntel]: '.dmg',
     [AssetType.LinuxAppImage]: '.AppImage',
+    [AssetType.LinuxArm64AppImage]: '.AppImage',
     [AssetType.LinuxDeb]: '.deb',
+    [AssetType.LinuxArm64Deb]: '.deb',
     [AssetType.LinuxTarball]: '.tar.gz',
+    [AssetType.LinuxArm64Tarball]: '.tar.gz',
     [AssetType.Source]: '.zip',
     [AssetType.Unknown]: '',
   };
@@ -371,8 +707,11 @@ export function getAssetTypeLabel(assetType: AssetType, locale: 'zh' | 'en' = 'z
     [AssetType.MacOSApple]: 'Apple Silicon',
     [AssetType.MacOSIntel]: 'Intel 版',
     [AssetType.LinuxAppImage]: 'AppImage',
+    [AssetType.LinuxArm64AppImage]: 'AppImage (ARM64)',
     [AssetType.LinuxDeb]: 'Debian 包',
+    [AssetType.LinuxArm64Deb]: 'Debian 包 (ARM64)',
     [AssetType.LinuxTarball]: '压缩包',
+    [AssetType.LinuxArm64Tarball]: '压缩包 (ARM64)',
     [AssetType.Source]: '源代码',
     [AssetType.Unknown]: '其他',
   };
@@ -384,8 +723,11 @@ export function getAssetTypeLabel(assetType: AssetType, locale: 'zh' | 'en' = 'z
     [AssetType.MacOSApple]: 'Apple Silicon',
     [AssetType.MacOSIntel]: 'Intel',
     [AssetType.LinuxAppImage]: 'AppImage',
+    [AssetType.LinuxArm64AppImage]: 'AppImage (ARM64)',
     [AssetType.LinuxDeb]: 'Debian Package',
+    [AssetType.LinuxArm64Deb]: 'Debian Package (ARM64)',
     [AssetType.LinuxTarball]: 'Tarball',
+    [AssetType.LinuxArm64Tarball]: 'Tarball (ARM64)',
     [AssetType.Source]: 'Source Code',
     [AssetType.Unknown]: 'Other',
   };
@@ -436,7 +778,8 @@ export function groupAssetsByPlatform(
     return [];
   }
 
-  const platformGroups = new Map<string, PlatformDownload[]>();
+  const platformGroups = new Map<DesktopPlatform, PlatformDownload[]>();
+  const architectures = new Map<DesktopPlatform, Set<CpuArchitecture>>();
 
   for (const asset of assets) {
     const assetType = inferAssetType(asset.name);
@@ -444,7 +787,7 @@ export function groupAssetsByPlatform(
       continue;
     }
 
-    let platform: 'windows' | 'macos' | 'linux' | null = null;
+    let platform: DesktopPlatform | null = null;
     switch (assetType) {
       case AssetType.WindowsSetup:
       case AssetType.WindowsPortable:
@@ -456,29 +799,44 @@ export function groupAssetsByPlatform(
         platform = 'macos';
         break;
       case AssetType.LinuxAppImage:
+      case AssetType.LinuxArm64AppImage:
       case AssetType.LinuxDeb:
+      case AssetType.LinuxArm64Deb:
       case AssetType.LinuxTarball:
+      case AssetType.LinuxArm64Tarball:
         platform = 'linux';
         break;
       default:
         continue;
     }
 
+    const architecture = inferArchitecture(assetType);
+
     if (!platformGroups.has(platform)) {
       platformGroups.set(platform, []);
+      architectures.set(platform, new Set());
+    }
+
+    const sourceActions = normalizeDownloadActions(asset);
+    const safeAction = getSafeFallbackAction({ sourceActions }) ?? sourceActions[0];
+    if (!safeAction) {
+      continue;
     }
 
     platformGroups.get(platform)?.push({
-      url: asset.directUrl || `${DOWNLOAD_BASE_URL}${asset.path}`,
+      url: safeAction.url,
       size: formatFileSize(asset.size),
       filename: asset.name,
       assetType,
+      architecture,
+      sourceActions,
     });
+    architectures.get(platform)?.add(architecture);
   }
 
   const result: PlatformGroup[] = [];
   for (const [platform, downloads] of platformGroups.entries()) {
-    const recommendation = PLATFORM_RECOMMENDATIONS[platform as 'windows' | 'macos' | 'linux'];
+    const recommendation = PLATFORM_RECOMMENDATIONS[platform];
 
     downloads.sort((a, b) => {
       if (a.assetType === recommendation.recommendedType) return -1;
@@ -487,8 +845,9 @@ export function groupAssetsByPlatform(
     });
 
     result.push({
-      platform: platform as 'windows' | 'macos' | 'linux',
+      platform,
       downloads,
+      architectures: Array.from(architectures.get(platform) ?? []),
     });
   }
 
@@ -496,7 +855,7 @@ export function groupAssetsByPlatform(
 }
 
 export function getRecommendedDownload(
-  platform: 'windows' | 'macos' | 'linux',
+  platform: DesktopPlatform,
   downloads: PlatformDownload[],
 ): PlatformDownload | null {
   const recommendation = PLATFORM_RECOMMENDATIONS[platform];
