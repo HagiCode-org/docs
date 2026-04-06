@@ -5,14 +5,25 @@
  */
 import React, { useCallback, useEffect, useId, useMemo, useState } from 'react';
 
-import type { AssetType, DesktopVersion, PlatformGroup } from '@shared/desktop';
+import type {
+  AssetType,
+  DesktopVersion,
+  DownloadAction,
+  GithubReachabilityState,
+  PlatformGroup,
+} from '@shared/desktop';
 import {
+  ensureGithubReachabilityProbe,
   detectOS,
+  findFirstGithubReleaseUrl,
+  getCachedGithubReachabilityState,
+  getDownloadActionLabel,
   getArchitectureLabel,
   getAssetTypeLabel,
   getFileExtension,
   groupAssetsByPlatform,
   PLATFORM_ICONS,
+  resolvePrimaryDownloadAction,
 } from '@shared/desktop-utils';
 import {
   clearDesktopVersionCache,
@@ -34,12 +45,19 @@ interface DownloadOption {
   url: string;
   size?: string;
   assetType: AssetType;
+  sourceActions: DownloadAction[];
 }
 
 interface PlatformDownloads {
   platform: 'windows' | 'macos' | 'linux';
   platformLabel: string;
   options: DownloadOption[];
+}
+
+interface InstallButtonPrimaryTarget {
+  href: string | null;
+  option: DownloadOption | null;
+  action: DownloadAction | null;
 }
 
 interface InstallButtonProps {
@@ -67,6 +85,26 @@ interface InstallButtonStatusInput {
   locale: 'zh' | 'en';
 }
 
+function prioritizeCurrentPlatform<T extends { platform: 'windows' | 'macos' | 'linux' }>(
+  platforms: T[],
+  currentOS: 'windows' | 'macos' | 'linux' | 'unknown',
+): T[] {
+  if (platforms.length <= 1 || currentOS === 'unknown') {
+    return platforms;
+  }
+
+  const currentIndex = platforms.findIndex((platform) => platform.platform === currentOS);
+  if (currentIndex <= 0) {
+    return platforms;
+  }
+
+  return [
+    platforms[currentIndex],
+    ...platforms.slice(0, currentIndex),
+    ...platforms.slice(currentIndex + 1),
+  ];
+}
+
 function convertPlatformGroups(platforms: PlatformGroup[]): PlatformDownloads[] {
   const platformLabels = { windows: 'Windows', macos: 'macOS', linux: 'Linux' };
 
@@ -78,8 +116,36 @@ function convertPlatformGroups(platforms: PlatformGroup[]): PlatformDownloads[] 
       url: download.url,
       size: download.size,
       assetType: download.assetType,
+      sourceActions: download.sourceActions,
     })),
   }));
+}
+
+export function resolveDocsInstallPrimaryTarget(
+  platformData: PlatformDownloads[],
+  githubState: GithubReachabilityState,
+  userOS: 'windows' | 'macos' | 'linux' | 'unknown',
+): InstallButtonPrimaryTarget {
+  if (platformData.length === 0) {
+    return {
+      href: null,
+      option: null,
+      action: null,
+    };
+  }
+
+  const userPlatform = platformData.find((platform) => platform.platform === userOS);
+  const preferredPlatform = userPlatform ?? platformData[0];
+  const preferredOption = preferredPlatform.options[0] ?? null;
+  const action = preferredOption
+    ? resolvePrimaryDownloadAction({ sourceActions: preferredOption.sourceActions }, githubState)
+    : null;
+
+  return {
+    href: action?.url ?? preferredOption?.url ?? null,
+    option: preferredOption,
+    action,
+  };
 }
 
 export function getInstallButtonStatusDescriptor({
@@ -161,6 +227,9 @@ export default function InstallButton({
   const [platforms, setPlatforms] = useState<PlatformGroup[]>(initialPlatforms);
   const [error, setError] = useState<string | null>(versionError);
   const [runtimeData, setRuntimeData] = useState<DesktopVersionData | null>(null);
+  const [githubReachabilityState, setGithubReachabilityState] = useState<GithubReachabilityState>(
+    () => getCachedGithubReachabilityState(),
+  );
   const [isLoading, setIsLoading] = useState(
     !initialVersion && initialPlatforms.length === 0 && !versionError,
   );
@@ -262,6 +331,7 @@ export default function InstallButton({
   }, [initialPlatforms.length, initialVersion, loadRuntimeVersionData, versionError]);
 
   const buttonId = useId();
+  const currentOS = useMemo(() => detectOS(), []);
 
   const allPlatformData = useMemo(() => {
     if (!platforms || platforms.length === 0) {
@@ -279,40 +349,59 @@ export default function InstallButton({
     return allPlatformData.filter((platform) => platform.platform !== 'macos');
   }, [allPlatformData]);
 
+  const orderedPlatformData = useMemo(
+    () => prioritizeCurrentPlatform(platformData, currentOS),
+    [currentOS, platformData],
+  );
+
   const macPlatform = useMemo(
     () => allPlatformData.find((platform) => platform.platform === 'macos') || null,
     [allPlatformData],
   );
+  const showMacDisabledFirst = !FEATURE_MAC_DOWNLOAD_ENABLED && !!macPlatform && currentOS === 'macos';
 
   const canDownload = !isLoading && !error && !!version && platformData.length > 0;
 
-  const currentUrl = useMemo(() => {
+  useEffect(() => {
+    const probeUrl = findFirstGithubReleaseUrl(platforms);
+    const cachedState = getCachedGithubReachabilityState();
+    setGithubReachabilityState(cachedState);
+
+    if (!probeUrl || (cachedState !== 'unknown' && cachedState !== 'probing')) {
+      return;
+    }
+
+    let mounted = true;
+    void ensureGithubReachabilityProbe(probeUrl).then((state) => {
+      if (mounted) {
+        setGithubReachabilityState(state);
+      }
+    });
+
+    return () => {
+      mounted = false;
+    };
+  }, [platforms]);
+
+  const primaryTarget = useMemo(() => {
     if (!canDownload) {
-      return null;
+      return {
+        href: null,
+        option: null,
+        action: null,
+      };
     }
 
-    const userOS = detectOS();
-
-    if (!FEATURE_MAC_DOWNLOAD_ENABLED && userOS === 'macos') {
-      return null;
+    if (!FEATURE_MAC_DOWNLOAD_ENABLED && currentOS === 'macos') {
+      return {
+        href: null,
+        option: null,
+        action: null,
+      };
     }
 
-    const userPlatform = platformData.find((platform) => platform.platform === userOS);
-
-    if (userPlatform) {
-      const recommended = userPlatform.options.find((option) => {
-        const label = option.label.toLowerCase();
-        if (userOS === 'windows') return label.includes('setup');
-        if (userOS === 'macos') return label.includes('arm64');
-        if (userOS === 'linux') return label.includes('appimage');
-        return false;
-      });
-
-      return recommended ? recommended.url : userPlatform.options[0].url;
-    }
-
-    return platformData[0]?.options[0]?.url ?? null;
-  }, [canDownload, platformData]);
+    return resolveDocsInstallPrimaryTarget(orderedPlatformData, githubReachabilityState, currentOS);
+  }, [canDownload, currentOS, githubReachabilityState, orderedPlatformData]);
 
   useEffect(() => {
     const handleClickOutside = () => {
@@ -393,14 +482,49 @@ export default function InstallButton({
     locale,
   });
 
+  const macDisabledSection = !FEATURE_MAC_DOWNLOAD_ENABLED && macPlatform ? (
+    <>
+      <div
+        className={`dropdown-group-label platform--${macPlatform.platform}`}
+        role="presentation"
+      >
+        <span className="platform-icon">{PLATFORM_ICONS[macPlatform.platform]}</span>
+        <span className="platform-name">{macPlatform.platformLabel}</span>
+        {version?.version && (
+          <span className="version-tag">{version.version}</span>
+        )}
+      </div>
+      <li role="none">
+        <span
+          className="dropdown-item dropdown-item-disabled"
+          role="presentation"
+          aria-disabled="true"
+        >
+          <span className="dropdown-item-label">macOS</span>
+          <span className="dropdown-item-disabled-notice">{t.macInDevelopmentNotice}</span>
+        </span>
+      </li>
+      <li role="none">
+        <a
+          href={containerLink}
+          className="dropdown-item"
+          role="menuitem"
+          onClick={handleLinkClick}
+        >
+          <span className="dropdown-item-label">{t.macContainerCta}</span>
+        </a>
+      </li>
+    </>
+  ) : null;
+
   return (
     <div className={`install-button-wrapper install-button-wrapper--${variant} ${className}`}>
       <div className="split-button-container">
-        {canDownload && currentUrl ? (
+        {canDownload && primaryTarget.href ? (
           <a
-            href={currentUrl}
+            href={primaryTarget.href}
             className="btn-download-main"
-            aria-label={t.installHagicodeDesktop}
+            aria-label={`${t.installHagicodeDesktop}${primaryTarget.action ? ` (${getDownloadActionLabel(primaryTarget.action.kind, locale)})` : ''}`}
           >
             <svg className="download-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
               <path
@@ -441,7 +565,7 @@ export default function InstallButton({
               type="button"
               aria-expanded={isDropdownOpen}
               aria-controls={`${buttonId}-menu`}
-              aria-haspopup="listbox"
+              aria-haspopup="menu"
               aria-label={t.selectOtherVersion}
               onClick={handleToggleDropdown}
             >
@@ -453,10 +577,11 @@ export default function InstallButton({
             <ul
               className={`dropdown-menu ${isDropdownOpen ? 'dropdown-menu-open' : ''}`}
               id={`${buttonId}-menu`}
-              role="listbox"
+              role="menu"
               aria-label={t.selectDownloadVersion}
             >
-              {platformData.map((platformGroup) => (
+              {showMacDisabledFirst && macDisabledSection}
+              {orderedPlatformData.map((platformGroup) => (
                 <React.Fragment key={platformGroup.platform}>
                   <div
                     className={`dropdown-group-label platform--${platformGroup.platform}`}
@@ -472,70 +597,59 @@ export default function InstallButton({
                     const archLabel = getArchitectureLabel(option.assetType, locale);
                     const fileExt = getFileExtension(option.assetType);
                     const isRecommended = index === 0;
+                    const resolvedAction = resolvePrimaryDownloadAction(
+                      { sourceActions: option.sourceActions },
+                      githubReachabilityState,
+                    );
                     return (
                       <li key={option.url} role="none">
-                        <a
-                          href={option.url}
-                          className={`dropdown-item ${isRecommended ? 'dropdown-item-recommended' : ''}`}
-                          role="option"
-                          download
-                          onClick={handleLinkClick}
-                        >
-                          <span className="dropdown-item-label">
-                            {getAssetTypeLabel(option.assetType, locale)}
-                            {archLabel && <span className="arch-label"> ({archLabel})</span>}
-                            {fileExt && <span className="file-ext-badge">{fileExt}</span>}
-                            {isRecommended && <span className="recommended-badge">{t.recommended}</span>}
-                          </span>
-                          {option.size && (
-                            <span className="dropdown-item-size">{option.size}</span>
-                          )}
-                        </a>
+                        <div className={`dropdown-item dropdown-item-multi-source ${isRecommended ? 'dropdown-item-recommended' : ''}`}>
+                          <div className="dropdown-item-meta">
+                            <span className="dropdown-item-label">
+                              {getAssetTypeLabel(option.assetType, locale)}
+                              {archLabel && <span className="arch-label"> ({archLabel})</span>}
+                              {fileExt && <span className="file-ext-badge">{fileExt}</span>}
+                              {isRecommended && <span className="recommended-badge">{t.recommended}</span>}
+                            </span>
+                            {option.size && (
+                              <span className="dropdown-item-size">{option.size}</span>
+                            )}
+                          </div>
+                          <div className="dropdown-source-actions">
+                            {option.sourceActions.map((action) => {
+                              const isSmartDefault = resolvedAction?.kind === action.kind;
+                              return (
+                                <a
+                                  key={`${option.url}-${action.kind}`}
+                                  href={action.url}
+                                  className={`dropdown-source-action ${isSmartDefault ? 'dropdown-source-action-default' : ''}`}
+                                  role="menuitem"
+                                  download
+                                  onClick={handleLinkClick}
+                                >
+                                  <span>{getDownloadActionLabel(action.kind, locale)}</span>
+                                  {isSmartDefault && (
+                                    <span className="dropdown-source-action-badge">
+                                      {locale === 'en' ? 'Default' : '默认'}
+                                    </span>
+                                  )}
+                                </a>
+                              );
+                            })}
+                          </div>
+                        </div>
                       </li>
                     );
                   })}
                 </React.Fragment>
               ))}
-              {!FEATURE_MAC_DOWNLOAD_ENABLED && macPlatform && (
-                <>
-                  <div
-                    className={`dropdown-group-label platform--${macPlatform.platform}`}
-                    role="presentation"
-                  >
-                    <span className="platform-icon">{PLATFORM_ICONS[macPlatform.platform]}</span>
-                    <span className="platform-name">{macPlatform.platformLabel}</span>
-                    {version?.version && (
-                      <span className="version-tag">{version.version}</span>
-                    )}
-                  </div>
-                  <li role="none">
-                    <span
-                      className="dropdown-item dropdown-item-disabled"
-                      role="option"
-                      aria-disabled="true"
-                    >
-                      <span className="dropdown-item-label">macOS</span>
-                      <span className="dropdown-item-disabled-notice">{t.macInDevelopmentNotice}</span>
-                    </span>
-                  </li>
-                  <li role="none">
-                    <a
-                      href={containerLink}
-                      className="dropdown-item"
-                      role="option"
-                      onClick={handleLinkClick}
-                    >
-                      <span className="dropdown-item-label">{t.macContainerCta}</span>
-                    </a>
-                  </li>
-                </>
-              )}
+              {!showMacDisabledFirst && macDisabledSection}
               <li role="separator" className="dropdown-separator" />
               <li role="none">
                 <a
                   href={containerLink}
                   className="dropdown-item dropdown-item-docker"
-                  role="option"
+                  role="menuitem"
                   onClick={handleLinkClick}
                 >
                   <svg className="docker-icon" viewBox="0 0 24 24" fill="currentColor">
