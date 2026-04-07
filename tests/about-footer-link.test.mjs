@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 
 const testDir = path.dirname(fileURLToPath(import.meta.url));
 const docsRoot = path.resolve(testDir, '..');
+const monorepoRoot = path.resolve(docsRoot, '..', '..');
 
 function resolveDocsPath(relativePath) {
   return path.join(docsRoot, relativePath);
@@ -25,7 +26,10 @@ test('docs footer exposes the local about link entry without importing the site 
   const footerSource = await readFile(resolveDocsPath('src/components/StarlightFooter.astro'), 'utf8');
 
   assert.match(footerSource, /const aboutLink = getLink\('about'\);/);
-  assert.match(footerSource, /<a href=\{aboutLink\} class="unified-footer-link">关于 HagiCode<\/a>/);
+  assert.match(footerSource, /const relatedSiteLinks = resolveDocsFooterSiteLinks/);
+  assert.match(footerSource, /<h3 class="unified-footer-section-title">生态站点<\/h3>/);
+  assert.match(footerSource, /<span class="unified-footer-link-title">\{link\.title\}<\/span>/);
+  assert.match(footerSource, /<span class="unified-footer-link-description">\{link\.description\}<\/span>/);
   assert.equal(footerSource.includes('@/components/home/Footer'), false);
   assert.equal(footerSource.includes('repos/site'), false);
 });
@@ -39,4 +43,18 @@ test('docs header navigation reuses the shared about link registry and keeps dis
   assert.equal(navigationSource.includes('https://hagicode.com/about/'), false);
   assert.match(footerSource, /const discordLink = getLink\('discord'\);/);
   assert.match(footerSource, /<a href=\{discordLink\} class="unified-footer-link" target=\{discordTarget\} rel=\{discordRel\}>Discord<\/a>/);
+});
+
+test('docs snapshot artifact stays aligned with the canonical sites catalog for footer destinations', async () => {
+  const canonical = JSON.parse(
+    await readFile(path.join(monorepoRoot, 'repos/index/src/data/public/sites.json'), 'utf8'),
+  );
+  const bundled = JSON.parse(
+    await readFile(resolveDocsPath('src/data/footer-sites.snapshot.json'), 'utf8'),
+  );
+
+  assert.deepEqual(
+    bundled.entries.map((entry) => ({ id: entry.id, url: entry.url })),
+    canonical.entries.map((entry) => ({ id: entry.id, url: entry.url })),
+  );
 });
