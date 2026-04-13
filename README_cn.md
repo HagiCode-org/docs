@@ -33,26 +33,13 @@ npm run preview
 
 本地文档站默认运行在 `http://localhost:31265`。
 
-## 多仓库 Changelog 数据
-
-文档站现于 `src/data/changelog/` 维护 `core`、`web`、`desktop` 三份静态 changelog 数据。
-这些文件由 `scripts/generate-multi-repo-changelog.mjs` 从 `repos/hagicode-core`、`repos/web`、`repos/hagicode-desktop` 的相邻 Git tag 区间生成。
-
-```bash
-npm run changelog:generate
-npm run verify:repo-changelog
-```
-
-第三数据源刻意采用 `desktop`，而非 `site`。
-此假设遵循 OpenSpec 变更正文，同时保留脚本内仓库映射可配置，以便后续切换。
-生成器只写入 `repos/docs/src/data/changelog/`；参考仓库始终保持只读输入，不承担页面渲染逻辑。
-
 ## Desktop 版本数据
 
 Desktop 下载数据在运行时直接读取 `repos/index` 发布的 canonical index 端点。
 当运行时加载最终失败时，docs 会回退到 Index Desktop 版本历史页：`https://index.hagicode.com/desktop/history/`。
 `repos/index` 在此仅作为被引用依赖；稳定 fallback surface 为 `https://index.hagicode.com/desktop/history/` 与 `https://index.hagicode.com/desktop/index.json`。
 本仓库仍提供 `public/version-index.json` 作为离线 fallback 快照，但维护者应先排查运行时拉取链路与 index 部署结果，而非在 docs 内新增第二套版本历史页。
+按仓库拆分的更新详情页已不再由 docs 托管；后续版本信息入口会在未来的单独变更中重新引入。
 
 ## 在生态中的角色
 
