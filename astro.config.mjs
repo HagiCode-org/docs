@@ -8,6 +8,7 @@ import robotsTxt from "astro-robots-txt";
 import react from "@astrojs/react";
 
 import cachedLinkValidator from "./src/integrations/link-check-result-cache.js";
+import { DOCS_SIDEBAR } from "./src/config/sidebar.ts";
 // rehype-raw 暂时禁用，可能与 MDX 处理冲突
 // import rehypeRaw from "rehype-raw";
 import rehypeExternalLinks from "rehype-external-links";
@@ -159,48 +160,7 @@ export default defineConfig({
         LanguageSelect: "./src/components/StarlightLanguageSelect.astro",
         MarkdownContent: './src/components/MarkdownContent.astro',
       },
-      sidebar: [
-        {
-          label: "产品概述",
-          translations: { en: "Product Overview" },
-          link: "/product-overview",
-        },
-        {
-          label: "版本更新说明",
-          translations: { en: "Release Notes" },
-          link: "/release-notes",
-        },
-        {
-          label: "快速开始",
-          translations: { en: "Quick Start" },
-          autogenerate: { directory: "quick-start" },
-        },
-        {
-          label: "安装指南",
-          translations: { en: "Installation Guide" },
-          autogenerate: { directory: "installation" },
-        },
-        {
-          label: "相关软件安装",
-          translations: { en: "Related Software Installation" },
-          autogenerate: { directory: "related-software-installation" },
-        },
-        {
-          label: "功能指南",
-          translations: { en: "Guides" },
-          autogenerate: { directory: "guides" },
-        },
-        {
-          label: "大模型指南",
-          translations: { en: "LLM Guide" },
-          autogenerate: { directory: "llm-guide" },
-        },
-        {
-          label: "AI 服务订阅网站",
-          translations: { en: "AI Service Subscriptions" },
-          autogenerate: { directory: "ai-service-subscriptions" },
-        },
-      ],
+      sidebar: DOCS_SIDEBAR,
       customCss: ["./src/styles/starlight-override.css"],
       editLink: {
         baseUrl: "https://github.com/HagiCode-org/site/edit/main/",
