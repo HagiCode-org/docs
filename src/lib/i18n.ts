@@ -11,6 +11,7 @@ export type DocsLanguageParam = 'zh-CN' | 'en';
 
 export const DOCS_LANGUAGE_STORAGE_KEY = 'starlight-route';
 export const DEFAULT_DOCS_ENTRY_LOCALE: DocsLocale = 'en';
+export const RELEASE_NOTES_ROUTE_PREFIX = '/release-notes';
 export const DOCS_ENTRY_PATHS: Record<DocsLocale, string> = {
   root: '/',
   en: '/en/',
@@ -135,6 +136,18 @@ export function isEnglishDocsPath(pathname = '/'): boolean {
  */
 export function isLandingRoutePath(pathname = '/'): boolean {
   return stripDocsLocalePrefix(pathname) === '/';
+}
+
+/**
+ * Returns true when the route is within the release-notes tree for either locale.
+ */
+export function isReleaseNotesRoutePath(pathname = '/'): boolean {
+  const normalizedPath = stripDocsLocalePrefix(pathname);
+  return (
+    normalizedPath === RELEASE_NOTES_ROUTE_PREFIX
+    || normalizedPath === `${RELEASE_NOTES_ROUTE_PREFIX}/`
+    || normalizedPath.startsWith(`${RELEASE_NOTES_ROUTE_PREFIX}/`)
+  );
 }
 
 /**

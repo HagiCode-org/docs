@@ -5,6 +5,7 @@
 
   var DOCS_LANGUAGE_STORAGE_KEY = 'starlight-route';
   var DEFAULT_DOCS_ENTRY_LOCALE = 'en';
+  var RELEASE_NOTES_ROUTE_PREFIX = '/release-notes';
 
   function parseDocsLocale(value) {
     if (!value) {
@@ -54,6 +55,15 @@
 
   function isLandingRoutePath(pathname) {
     return stripDocsLocalePrefix(pathname) === '/';
+  }
+
+  function isReleaseNotesRoutePath(pathname) {
+    var normalizedPath = stripDocsLocalePrefix(pathname);
+    return (
+      normalizedPath === RELEASE_NOTES_ROUTE_PREFIX ||
+      normalizedPath === RELEASE_NOTES_ROUTE_PREFIX + '/' ||
+      normalizedPath.indexOf(RELEASE_NOTES_ROUTE_PREFIX + '/') === 0
+    );
   }
 
   function buildDocsRoutePath(locale, originalPath) {
@@ -182,6 +192,7 @@
     var storedLocale = getStoredDocsLocale(storedRouteValue);
     var currentPath = currentUrl.pathname || '/';
     var landingPath = isLandingRoutePath(currentPath);
+    var releaseNotesPath = isReleaseNotesRoutePath(currentPath);
     var resolvedLocale;
     var shouldPersist = false;
 
@@ -193,6 +204,8 @@
       shouldPersist = true;
     } else if (isEnglishDocsPath(currentPath)) {
       resolvedLocale = 'en';
+    } else if (releaseNotesPath) {
+      resolvedLocale = 'root';
     } else if (storedLocale === 'root') {
       resolvedLocale = 'root';
     } else {
@@ -200,7 +213,9 @@
     }
 
     var shouldResolvePath =
-      requestedLang !== null || landingPath || (!isEnglishDocsPath(currentPath) && resolvedLocale === 'en');
+      requestedLang !== null ||
+      landingPath ||
+      (!isEnglishDocsPath(currentPath) && !releaseNotesPath && resolvedLocale === 'en');
     var targetBasePath = landingTargetPath && landingPath ? landingTargetPath : currentPath;
     var targetPath = shouldResolvePath
       ? buildDocsRoutePath(resolvedLocale, targetBasePath)

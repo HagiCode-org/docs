@@ -12,11 +12,12 @@ import {
   getStoredDocsLocale,
   isEnglishDocsPath,
   isLandingRoutePath,
+  isReleaseNotesRoutePath,
   parseLangFromUrl,
   resolveDocsEntryLocale,
   serializeStoredDocsLocale,
   type DocsLocale,
-} from './i18n';
+} from './i18n.ts';
 
 export interface LandingRouteResolution {
   currentPath: string;
@@ -84,6 +85,7 @@ export function resolveDocsLandingRoute(
   const storedLocale = getStoredDocsLocale(storedRouteValue);
   const currentPath = currentUrl.pathname || '/';
   const isLandingPath = isLandingRoutePath(currentPath);
+  const isReleaseNotesPath = isReleaseNotesRoutePath(currentPath);
 
   let resolvedLocale: DocsLocale;
   let shouldPersist = false;
@@ -102,6 +104,10 @@ export function resolveDocsLandingRoute(
     shouldPersist = true;
   } else if (isEnglishDocsPath(currentPath)) {
     resolvedLocale = 'en';
+  } else if (isReleaseNotesPath) {
+    // Root release-notes routes are already the Chinese locale and should
+    // remain stable for direct links and archive pages.
+    resolvedLocale = 'root';
   } else if (storedLocale === 'root') {
     // Non-landing root docs/blog paths stay Chinese only after an explicit Chinese choice was saved.
     resolvedLocale = 'root';
@@ -111,7 +117,9 @@ export function resolveDocsLandingRoute(
   }
 
   const shouldResolvePath =
-    requestedLang !== null || isLandingPath || (!isEnglishDocsPath(currentPath) && resolvedLocale === 'en');
+    requestedLang !== null
+    || isLandingPath
+    || (!isEnglishDocsPath(currentPath) && !isReleaseNotesPath && resolvedLocale === 'en');
   const targetBasePath =
     landingTargetPath && isLandingPath ? landingTargetPath : currentPath;
   const targetPath = shouldResolvePath

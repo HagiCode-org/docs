@@ -5,6 +5,7 @@
  */
 
 import { defineMiddleware } from 'astro:middleware';
+import { buildDocsRoutePath, mapLanguageParamToDocsLocale } from './lib/i18n';
 import {
   TRAFFIC_ENTRY_ROUTE_PATH,
   resolveTrafficEntryRequest,
@@ -32,21 +33,14 @@ export const onRequest = defineMiddleware((context, next) => {
     return next();
   }
 
-  if (lang !== 'en' && lang !== 'zh-CN') {
+  const mappedLang = mapLanguageParamToDocsLocale(lang);
+  if (!mappedLang) {
     const cleanUrl = new URL(url);
     cleanUrl.searchParams.delete('lang');
     return redirect(cleanUrl.toString(), 301);
   }
 
-  const mappedLang = lang === 'en' ? 'en' : 'root';
-  let targetPath: string;
-  if (mappedLang === 'en') {
-    const cleanPath = url.pathname.endsWith('/') ? url.pathname.slice(0, -1) : url.pathname;
-    targetPath = `/en${cleanPath}`;
-  } else {
-    targetPath = url.pathname;
-  }
-
+  const targetPath = buildDocsRoutePath(mappedLang, url.pathname);
   const targetUrl = new URL(url.origin + targetPath);
   url.searchParams.forEach((value, key) => {
     if (key !== 'lang') {
