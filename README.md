@@ -53,6 +53,9 @@ npm run release-notes:fetch
 npm run release-notes:materialize
 npm run release-notes:sync
 npm run test:release-notes
+
+# Optional local-source override for monorepo development
+DOCS_RELEASE_NOTES_LOCAL_REPO_ROOT=../release-notes npm run release-notes:sync
 ```
 
 ### Upstream asset contract
@@ -66,9 +69,11 @@ npm run test:release-notes
 
 - `.github/workflows/release-notes-sync.yml` runs daily and via `workflow_dispatch`.
 - The workflow uses `DOCS_RELEASE_NOTES_TOKEN` for upstream GitHub API access and falls back to the repository `GITHUB_TOKEN` only when that token already has cross-repository visibility.
+- In CI, `DOCS_RELEASE_NOTES_ALLOW_STALE_ON_SOURCE_ERROR=true` keeps the job green when the upstream repository is temporarily inaccessible and existing managed outputs are already present.
 - The sync scripts depend on the standard `zip` and `unzip` utilities in addition to Node.js.
 - If the sync job reports skipped tags, inspect the upstream Release asset contents first; fixing the upstream bundle is preferred over editing generated docs files in this repository.
 - If release discovery returns `404`, treat it as an authentication or repository-access problem first and verify that `DOCS_RELEASE_NOTES_TOKEN` can read `HagiCode-org/release-notes`.
+- For monorepo-local development, set `DOCS_RELEASE_NOTES_LOCAL_REPO_ROOT` to a sibling checkout of `release-notes` to regenerate managed outputs without hitting GitHub.
 
 ## Ecosystem role
 

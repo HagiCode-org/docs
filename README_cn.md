@@ -53,6 +53,9 @@ npm run release-notes:fetch
 npm run release-notes:materialize
 npm run release-notes:sync
 npm run test:release-notes
+
+# 单仓开发时可直接读取本地 release-notes 仓库
+DOCS_RELEASE_NOTES_LOCAL_REPO_ROOT=../release-notes npm run release-notes:sync
 ```
 
 ### 上游资产契约
@@ -66,9 +69,11 @@ npm run test:release-notes
 
 - `.github/workflows/release-notes-sync.yml` 会按日程运行，也支持 `workflow_dispatch` 手动触发。
 - 工作流优先使用 `DOCS_RELEASE_NOTES_TOKEN` 访问上游 GitHub API；只有当当前仓库默认 `GITHUB_TOKEN` 本身就具备跨仓库可见性时，才会回退到它。
+- 在 CI 中，`DOCS_RELEASE_NOTES_ALLOW_STALE_ON_SOURCE_ERROR=true` 会在上游仓库暂时不可访问、但当前受管输出已存在时保留现状并继续通过工作流。
 - 同步脚本除 Node.js 之外，还依赖系统自带的 `zip` 与 `unzip` 工具。
 - 如果同步日志里出现 skipped tags，优先检查上游 Release asset 是否缺文件或内容异常，而不是直接手改本仓库里的生成文件。
 - 如果 release discovery 返回 `404`，优先按认证或仓库访问问题排查，并确认 `DOCS_RELEASE_NOTES_TOKEN` 是否能读取 `HagiCode-org/release-notes`。
+- 如果是在 monorepo 本地开发，可设置 `DOCS_RELEASE_NOTES_LOCAL_REPO_ROOT` 指向相邻的 `release-notes` 仓库，以本地权威文件直接重建受管输出。
 
 ## 在生态中的角色
 

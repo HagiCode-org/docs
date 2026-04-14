@@ -86,8 +86,10 @@ test('materialization writes bilingual detail pages and locale-specific landing 
   const enLanding = await readFile(path.join(config.outputPaths.enDir, 'index.mdx'), 'utf8');
 
   assert.match(zhDetail, /> 发布日期: 2026-04-13/);
+  assert.match(zhDetail, /slug: "release-notes\/v1\.0\.0"/);
   assert.match(zhDetail, /\[Read English\]\(\/en\/release-notes\/v1\.0\.0\/\)/);
   assert.match(enDetail, /> Release date: 2026-04-13/);
+  assert.match(enDetail, /slug: "release-notes\/v1\.0\.0"/);
   assert.match(enDetail, /\[查看中文\]\(\/release-notes\/v1\.0\.0\/\)/);
   assert.match(zhLanding, /<ReleaseNotesLanding locale="zh-CN" \/>/);
   assert.match(enLanding, /<ReleaseNotesLanding locale="en" \/>/);

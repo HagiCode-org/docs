@@ -7,7 +7,10 @@ import path from 'node:path';
 import test from 'node:test';
 
 import {
+  createSourceFailureSummary,
   discoverReleaseNoteAssets,
+  fetchReleaseNotesSnapshot,
+  hasManagedReleaseNotesOutput,
   inspectReleaseNoteArchive,
   materializeReleaseNotes,
   normalizeSynchronizedReleaseNotes,
@@ -89,6 +92,44 @@ async function createArchiveFixture({
   return { root, zipPath };
 }
 
+async function createLocalReleaseNotesRepoFixture() {
+  const repoRoot = await mkdtemp(path.join(os.tmpdir(), 'docs-release-notes-local-'));
+  await writeFixtureFile(
+    path.join(repoRoot, 'artifacts', 'tags', 'v1.0.0', 'v1.0.0.json'),
+    `${JSON.stringify({
+      generatedAt: '2026-04-13T14:14:52.517Z',
+      formatVersion: 1,
+      tag: 'v1.0.0',
+      repositories: {
+        web: {
+          path: 'repos/web',
+          group: {
+            range: 'v0.9.0..v1.0.0',
+            commits: [
+              {
+                hash: 'abcdef',
+                shortHash: 'abcdef',
+                date: '2026-04-13',
+                author: 'tester',
+                subject: 'feat: ship release notes',
+              },
+            ],
+          },
+        },
+      },
+    }, null, 2)}\n`,
+  );
+  await writeFixtureFile(
+    path.join(repoRoot, 'published', 'v1.0.0.zh-CN.md'),
+    '# HagiCode\n\n- 统一了入口流程。\n',
+  );
+  await writeFixtureFile(
+    path.join(repoRoot, 'published', 'v1.0.0.en.md'),
+    '# HagiCode\n\n- Unified the entry flow.\n',
+  );
+  return repoRoot;
+}
+
 function createReleasePayload() {
   return [
     {
@@ -151,6 +192,23 @@ test('config prefers explicit cross-repository release-notes tokens', () => {
   });
 
   assert.equal(config.token, 'release-notes-token');
+});
+
+test('local release-notes repository override can build a snapshot without GitHub access', async () => {
+  const localRepoRoot = await createLocalReleaseNotesRepoFixture();
+  const config = resolveReleaseNotesConfig({
+    repoRoot: '/tmp/docs',
+    env: {
+      DOCS_RELEASE_NOTES_LOCAL_REPO_ROOT: localRepoRoot,
+    },
+  });
+
+  const snapshot = await fetchReleaseNotesSnapshot({ config });
+
+  assert.equal(snapshot.source.repository, 'local-repository');
+  assert.equal(snapshot.entries.length, 1);
+  assert.equal(snapshot.entries[0].tag, 'v1.0.0');
+  assert.equal(snapshot.entries[0].summary.en, 'Unified the entry flow.');
 });
 
 test('archive validation rejects missing required tag json', async () => {
@@ -249,4 +307,51 @@ test('normalization preserves display tags, sorts semver consistently, and mater
   assert.equal(firstIndex, secondIndex);
   assert.equal(firstZh, secondZh);
   assert.deepEqual(firstRun.writtenFiles, secondRun.writtenFiles);
+});
+
+test('stale-output detection and summary work for source failures', async () => {
+  const repoRoot = await mkdtemp(path.join(os.tmpdir(), 'docs-release-notes-stale-'));
+  const config = resolveReleaseNotesConfig({
+    repoRoot,
+    env: {
+      DOCS_RELEASE_NOTES_ALLOW_STALE_ON_SOURCE_ERROR: 'true',
+    },
+  });
+  const snapshot = {
+    ...normalizeSynchronizedReleaseNotes({
+      acceptedEntries: [],
+      config,
+      synchronizedAt: '2026-04-14T10:00:00.000Z',
+    }),
+    entries: [
+      {
+        tag: 'v1.0.0',
+        displayTag: 'v1.0.0',
+        sortVersion: '1.0.0',
+        releaseDate: '2026-04-13',
+        publishedAt: '2026-04-13T08:00:00.000Z',
+        synchronizedAt: '2026-04-14T10:00:00.000Z',
+        upstreamGeneratedAt: '2026-04-13T07:55:00.000Z',
+        summary: { 'zh-CN': '统一了入口流程。', en: 'Unified the entry flow.' },
+        routes: { 'zh-CN': '/release-notes/v1.0.0/', en: '/en/release-notes/v1.0.0/' },
+        repositoryRanges: [],
+        totalCommitCount: 0,
+        source: { releaseName: 'v1.0.0', releaseUrl: null, assetName: 'release-notes-v1.0.0-history.zip', assetUrl: null, jsonPath: 'artifacts/tags/v1.0.0/v1.0.0.json', bodies: { 'zh-CN': 'published/v1.0.0.zh-CN.md', en: 'published/v1.0.0.en.md' } },
+        bodies: { 'zh-CN': '# HagiCode\n\n- 统一了入口流程。\n', en: '# HagiCode\n\n- Unified the entry flow.\n' },
+      },
+    ],
+    skipped: [],
+    counts: { releases: 1, discovered: 1, synchronized: 1, skipped: 0 },
+  };
+
+  await materializeReleaseNotes({ snapshot, config });
+  assert.equal(await hasManagedReleaseNotesOutput(config), true);
+
+  const summary = createSourceFailureSummary({
+    config,
+    error: new Error('GitHub release discovery for HagiCode-org/release-notes failed with status 404.'),
+  });
+
+  assert.match(summary, /preserved existing managed outputs/);
+  assert.match(summary, /status 404/);
 });

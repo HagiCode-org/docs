@@ -2,8 +2,10 @@ import path from 'node:path';
 import { appendFile } from 'node:fs/promises';
 
 import {
+  createSourceFailureSummary,
   createSyncSummaryMarkdown,
   fetchReleaseNotesSnapshot,
+  hasManagedReleaseNotesOutput,
   materializeReleaseNotes,
   resolveReleaseNotesConfig,
   writeFetchedSnapshot,
@@ -56,14 +58,25 @@ const env = options.repository
   ? { ...process.env, DOCS_RELEASE_NOTES_REPOSITORY: options.repository }
   : process.env;
 const config = resolveReleaseNotesConfig({ repoRoot: options.repoRoot, env });
-const snapshot = await fetchReleaseNotesSnapshot({ config });
-const outputPath = options.outputPath
-  ? path.resolve(config.repoRoot, options.outputPath)
-  : config.fetchOutputPath;
+let summary;
 
-await writeFetchedSnapshot({ snapshot, outputPath });
-const materialized = await materializeReleaseNotes({ snapshot, config });
-const summary = createSyncSummaryMarkdown({ snapshot, materialized });
+try {
+  const snapshot = await fetchReleaseNotesSnapshot({ config });
+  const outputPath = options.outputPath
+    ? path.resolve(config.repoRoot, options.outputPath)
+    : config.fetchOutputPath;
+
+  await writeFetchedSnapshot({ snapshot, outputPath });
+  const materialized = await materializeReleaseNotes({ snapshot, config });
+  summary = createSyncSummaryMarkdown({ snapshot, materialized });
+} catch (error) {
+  if (!(config.allowStaleOnSourceError && await hasManagedReleaseNotesOutput(config))) {
+    throw error;
+  }
+
+  summary = createSourceFailureSummary({ config, error });
+}
+
 const summaryPath = process.env.GITHUB_STEP_SUMMARY;
 
 if (summaryPath) {
