@@ -166,6 +166,11 @@ export default defineConfig({
           link: "/product-overview",
         },
         {
+          label: "版本更新说明",
+          translations: { en: "Release Notes" },
+          link: "/release-notes",
+        },
+        {
           label: "快速开始",
           translations: { en: "Quick Start" },
           autogenerate: { directory: "quick-start" },
