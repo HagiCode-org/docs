@@ -61,6 +61,10 @@ function createSnapshot(tag = 'v1.0.0') {
           'zh-CN': '# HagiCode\n\n- 统一了 Code Server 的主要入口。\n',
           en: '# HagiCode\n\n- Unified the main Code Server entry flow.\n',
         },
+        landingBodyHtml: {
+          'zh-CN': '<ul>\n<li>统一了 Code Server 的主要入口。</li>\n</ul>',
+          en: '<ul>\n<li>Unified the main Code Server entry flow.</li>\n</ul>',
+        },
       },
     ],
     skipped: [],
@@ -80,37 +84,50 @@ test('materialization writes bilingual detail pages and locale-specific landing 
 
   await materializeReleaseNotes({ snapshot, config });
 
+  const indexPayload = JSON.parse(await readFile(config.outputPaths.indexJson, 'utf8'));
   const zhDetail = await readFile(path.join(config.outputPaths.zhDir, 'v1.0.0.md'), 'utf8');
   const enDetail = await readFile(path.join(config.outputPaths.enDir, 'v1.0.0.md'), 'utf8');
   const zhLanding = await readFile(path.join(config.outputPaths.zhDir, 'index.mdx'), 'utf8');
   const enLanding = await readFile(path.join(config.outputPaths.enDir, 'index.mdx'), 'utf8');
 
+  assert.match(indexPayload.entries[0].landingBodyHtml['zh-CN'], /<ul>/);
+  assert.match(indexPayload.entries[0].landingBodyHtml.en, /Unified the main Code Server entry flow\./);
   assert.match(zhDetail, /> 发布日期: 2026-04-13/);
-  assert.match(zhDetail, /slug: "release-notes\/v1\.0\.0"/);
+  assert.doesNotMatch(zhDetail, /slug:/);
   assert.match(zhDetail, /\[Read English\]\(\/en\/release-notes\/v1\.0\.0\/\)/);
   assert.match(enDetail, /> Release date: 2026-04-13/);
-  assert.match(enDetail, /slug: "release-notes\/v1\.0\.0"/);
+  assert.doesNotMatch(enDetail, /slug:/);
   assert.match(enDetail, /\[查看中文\]\(\/release-notes\/v1\.0\.0\/\)/);
   assert.match(zhLanding, /<ReleaseNotesLanding locale="zh-CN" \/>/);
   assert.match(enLanding, /<ReleaseNotesLanding locale="en" \/>/);
 });
 
-test('landing helpers expose localized summaries and metadata counts', () => {
+test('landing helpers expose localized summaries and expanded body HTML only for the active locale', () => {
   const snapshot = createSnapshot('v1.0.0');
   const zhEntries = getReleaseNotesLandingEntries(snapshot, 'zh-CN');
   const enEntries = getReleaseNotesLandingEntries(snapshot, 'en');
   const zhCopy = getReleaseNotesLandingCopy('zh-CN');
   const enCopy = getReleaseNotesLandingCopy('en');
 
-  assert.equal(zhEntries[0].primaryRoute, '/release-notes/v1.0.0/');
-  assert.equal(zhEntries[0].secondaryRoute, '/en/release-notes/v1.0.0/');
   assert.equal(zhEntries[0].summary, '统一了 Code Server 的主要入口。');
+  assert.match(zhEntries[0].bodyHtml, /Unified the main Code Server entry flow|统一了 Code Server 的主要入口/);
   assert.equal(zhEntries[0].repositoryCount, 1);
   assert.equal(zhEntries[0].totalCommitCount, 3);
-  assert.equal(zhCopy.readPrimary, '查看中文');
+  assert.equal(Object.hasOwn(zhCopy, 'archiveLinkLabel'), false);
+  assert.equal(Object.hasOwn(zhEntries[0], 'archiveRoute'), false);
 
-  assert.equal(enEntries[0].primaryRoute, '/en/release-notes/v1.0.0/');
-  assert.equal(enEntries[0].secondaryRoute, '/release-notes/v1.0.0/');
   assert.equal(enEntries[0].summary, 'Unified the main Code Server entry flow.');
-  assert.equal(enCopy.readPrimary, 'Read English');
+  assert.match(enEntries[0].bodyHtml, /<ul>/);
+  assert.equal(Object.hasOwn(enCopy, 'archiveLinkLabel'), false);
+  assert.equal(Object.hasOwn(enEntries[0], 'archiveRoute'), false);
+});
+
+test('landing helpers preserve informative empty states when no synchronized entries exist', () => {
+  const zhEntries = getReleaseNotesLandingEntries({ entries: [] }, 'zh-CN');
+  const enEntries = getReleaseNotesLandingEntries({ entries: [] }, 'en');
+
+  assert.deepEqual(zhEntries, []);
+  assert.deepEqual(enEntries, []);
+  assert.match(getReleaseNotesLandingCopy('zh-CN').empty, /当前语言下还没有可浏览的同步版本/);
+  assert.match(getReleaseNotesLandingCopy('en').empty, /No synchronized release notes are available yet/);
 });
