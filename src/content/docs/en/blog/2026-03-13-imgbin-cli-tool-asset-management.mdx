@@ -1,0 +1,383 @@
+---
+title: "ImgBin CLI Tool Design: HagiCode's Image Asset Management Approach"
+date: 2026-03-13
+tags: [CLI, Image Management, TypeScript, Node.js, Asset Pipeline]
+---
+
+## ImgBin CLI Tool Design: HagiCode's Image Asset Management Approach
+
+> This article explains how to build an automatable image asset pipeline from scratch, covering CLI tool design, a Provider Adapter architecture, and metadata management strategies.
+
+## Background
+
+Honestly, I did not expect image asset management to keep us tangled up for this long.
+
+During HagiCode development, we ran into a problem that looked simple on the surface but was surprisingly thorny in practice: generating and managing image assets. In a way, it was like the dramas of adolescence - calm on the outside, turbulent underneath.
+
+As the project accumulated more documentation and marketing materials, we needed a large number of supporting images. Some had to be AI-generated, some had to be selected from an existing asset library, and others needed AI recognition plus automatic labeling. The problem was that all of this had long been handled through scattered scripts and manual steps. Every time we generated an image, we had to run a script by hand, organize metadata by hand, and create thumbnails by hand. That alone was annoying enough, but the bigger issue was that everything was scattered everywhere. When we wanted to find something, we could not. When we needed to reuse something, we could not.
+
+The pain points were concrete:
+
+1. **No unified entry point**: the logic for image generation was spread across different scripts, so batch execution was basically impossible.
+2. **Missing metadata**: generated images had no unified `metadata.json`, which meant no reliable searchability or traceability.
+3. **High manual organization cost**: titles and tags had to be sorted out one by one by hand, which was inefficient.
+4. **No automation**: automatically generating visual assets in a CI/CD pipeline? Not a chance.
+
+We did think about just leaving it alone. But projects still need to move forward. Since we could not avoid the problem, we figured we might as well solve it. So we decided to upgrade ImgBin from a set of scattered scripts into an image asset pipeline that can be executed automatically. Some problems, after all, do not disappear just because you look away.
+
+## About HagiCode
+
+The approach shared in this article comes from our hands-on experience in the [HagiCode](https://hagicode.com) project. HagiCode is an AI coding assistant project that simultaneously maintains multiple components, including a VSCode extension, backend AI services, and a cross-platform desktop client. In a complex, multilingual, cross-platform environment like this, standardized image asset management becomes a key part of improving development efficiency.
+
+You could say this was one of those small growing pains in HagiCode's journey. Every project has moments like that: a minor issue that looks insignificant, yet somehow manages to take up half the day.
+
+HagiCode's build system is based on the TypeScript + Node.js ecosystem, so ImgBin naturally adopted the same tech stack to keep the project technically consistent. Once you are used to one stack, switching to something else just feels like unnecessary trouble.
+
+---
+
+## Core Design
+
+### Overall Architecture
+
+ImgBin uses a layered architecture that cleanly separates CLI commands, application services, third-party API adapters, and the infrastructure layer:
+
+```
+Component hierarchy
+├── CLI Entry (cli.ts)              Global argument parsing, command routing
+├── Commands (commands/*)           generate | batch | annotate | thumbnail
+├── Application Services            job-runner | metadata | thumbnail | asset-writer
+├── Provider Adapters               image-api-provider | vision-api-provider
+└── Infrastructure Layer            config | logger | paths | schema
+```
+
+The benefit of this layered design is clear responsibility boundaries. It also makes testing easier because external dependencies can be mocked cleanly. In practice, it just means each layer does its own job without getting in the way of the others, so when something breaks, it is easier to figure out why.
+
+### Single-Asset Directory Model
+
+ImgBin uses a model of "one asset, one directory." Every time an image is generated, it creates a structure like this:
+
+```
+library/
+└── 2026-03/
+    └── orange-dashboard/
+        ├── original.png      # Original image
+        ├── thumbnail.webp    # 512x512 thumbnail
+        └── metadata.json     # Structured metadata
+```
+
+The advantages of this model are:
+
+1. **Self-contained**: all files for a single asset live in the same directory, making migration and backup convenient.
+2. **Traceable**: `metadata.json` makes it possible to trace generation time, prompt, model, and other details.
+3. **Extensible**: if more variants are needed later, such as thumbnails in multiple sizes, we can simply add new files in the same directory.
+
+Beautiful things do not always need to be possessed. Sometimes it is enough that they remain beautiful, and that you can quietly appreciate them. That may sound a little far afield, but the logic still holds here: once images are kept together, they are more pleasant to look at and much easier to find.
+
+### Layered Metadata Storage
+
+`metadata.json` is the core of the entire system. It uses a layered storage strategy that separates fields into three categories:
+
+```json
+{
+  "schemaVersion": 2,
+  "assetId": "orange-dashboard",
+  "slug": "orange-dashboard",
+  "title": "Orange Dashboard",
+  "tags": ["dashboard", "hero", "orange"],
+
+  "source": { "type": "generated" },
+
+  "paths": {
+    "assetDir": "library/2026-03/orange-dashboard",
+    "original": "original.png",
+    "thumbnail": "thumbnail.webp"
+  },
+
+  "generated": {
+    "prompt": "orange dashboard for docs hero",
+    "provider": "azure-openai-image-api",
+    "model": "gpt-image-1.5"
+  },
+
+  "recognized": {
+    "title": "Orange Dashboard",
+    "tags": ["dashboard", "ui", "orange"],
+    "description": "A modern orange dashboard with charts and metrics"
+  },
+
+  "status": {
+    "generation": "succeeded",
+    "recognition": "succeeded",
+    "thumbnail": "succeeded"
+  },
+
+  "timestamps": {
+    "createdAt": "2026-03-11T04:01:19.570Z",
+    "updatedAt": "2026-03-11T04:02:09.132Z"
+  }
+}
+```
+
+- **generated**: records the original information from image generation, such as the prompt, provider, and model.
+- **recognized**: stores AI recognition results, such as auto-generated titles, tags, and descriptions.
+- **manual**: stores manually curated results. Data in this area has the highest priority and will not be overwritten by AI recognition.
+
+This layered strategy resolves one of our earlier core conflicts: when AI recognition and manual curation disagree, which one should win? The answer is manual input. AI recognition is there to assist, not to decide. That question also became clearer over time - machines are still machines, and in the end, people still need to make the call.
+
+---
+
+## Provider Adapter Pattern
+
+Another core part of ImgBin is the Provider Adapter pattern. We abstract external APIs behind a unified interface so that even if we switch AI service providers, we do not need to change the business logic.
+
+In a way, it is a bit like relationships - outward appearances can change, but what matters is that the inner structure stays the same. Once the interface is fixed, the internal implementation can vary freely.
+
+### Image Generation Provider
+
+```typescript
+interface ImageGenerationProvider {
+  // Generate an image and return its Buffer
+  generate(options: GenerateOptions): Promise<Buffer>;
+
+  // Get the list of supported models
+  getSupportedModels(): Promise<string[]>;
+}
+
+interface GenerateOptions {
+  prompt: string;
+  model?: string;
+  size?: '1024x1024' | '1792x1024' | '1024x1792';
+  quality?: 'standard' | 'hd';
+  format?: 'png' | 'webp' | 'jpeg';
+}
+```
+
+### Vision Recognition Provider
+
+```typescript
+interface VisionRecognitionProvider {
+  // Recognize image content and return structured metadata
+  recognize(imageBuffer: Buffer): Promise<RecognitionResult>;
+
+  // Get the list of supported models
+  getSupportedModels(): Promise<string[]>;
+}
+
+interface RecognitionResult {
+  title?: string;
+  tags: string[];
+  description?: string;
+  confidence: number;
+}
+```
+
+The advantages of this interface design are:
+
+1. **Testable**: in unit tests, we can pass in mock providers instead of making real external API calls.
+2. **Extensible**: adding a new provider only requires implementing the interface; caller code does not need to change.
+3. **Replaceable**: production can use Azure OpenAI while testing can use a local model, with configuration being the only thing that changes.
+
+Sometimes project work feels like that too. On the surface it looks like we just swapped an API, but the internal logic remains exactly the same, and that makes the whole thing a lot less scary.
+
+---
+
+## CLI Command Design
+
+ImgBin provides four core commands to cover different usage scenarios:
+
+### generate: single-image generation
+
+```bash
+# Simplest usage
+imgbin generate --prompt "orange dashboard for docs hero"
+
+# Generate a thumbnail and AI annotations at the same time
+imgbin generate --prompt "orange dashboard" --annotate --thumbnail
+
+# Specify an output directory
+imgbin generate --prompt "orange dashboard" --output ./library
+```
+
+### batch: batch jobs
+
+Batch jobs are defined through YAML or JSON manifest files, which makes them suitable for CI/CD workflows:
+
+```yaml
+# assets/jobs/launch.yaml
+defaults:
+  annotate: true
+  thumbnail: true
+  libraryRoot: ./library
+
+jobs:
+  - prompt: "orange dashboard hero"
+    slug: orange-dashboard
+    tags: [dashboard, hero, orange]
+
+  - prompt: "pricing grid for docs"
+    slug: pricing-grid
+    tags: [pricing, grid, docs]
+```
+
+Run the command:
+
+```bash
+imgbin batch assets/jobs/launch.yaml
+```
+
+The batch job design supports failure isolation: items in the manifest are processed one by one, and a failure in one item does not affect the others. You can also preview the job with `--dry-run` without actually executing it.
+
+And the best part is that it tells you exactly what succeeded and what failed. Unlike some things in life, where failure happens and you are left not even knowing how it happened.
+
+### annotate: AI annotation
+
+Run AI recognition on existing images to automatically generate titles, tags, and descriptions:
+
+```bash
+# Annotate a single image
+imgbin annotate ./library/2026-03/orange-dashboard
+
+# Annotate an entire directory in batch
+imgbin annotate ./library/2026-03/
+```
+
+### thumbnail: thumbnail generation
+
+Generate thumbnails for existing images:
+
+```bash
+# Generate a thumbnail
+imgbin thumbnail ./library/2026-03/orange-dashboard
+```
+
+---
+
+## Batch Job Manifest Design
+
+The manifest format for batch jobs supports flexible configuration. Defaults can be set globally, and individual jobs can override them:
+
+```yaml
+# Global defaults
+defaults:
+  annotate: true        # Enable AI annotation by default
+  thumbnail: true       # Generate thumbnails by default
+  libraryRoot: ./library
+  model: gpt-image-1.5
+
+jobs:
+  # Minimal configuration: only provide a prompt
+  - prompt: "first image"
+
+  # Full configuration
+  - prompt: "second image"
+    slug: custom-slug
+    tags: [tag1, tag2]
+    annotate: false     # Do not run AI annotation for this job
+    model: dall-e-3    # Use a different model for this job
+```
+
+When executed, ImgBin processes jobs one by one. The result of each job is written to its corresponding `metadata.json`. Even if one job fails, the others are unaffected. After all jobs complete, the CLI outputs a summary report:
+
+```
+✓ orange-dashboard (succeeded)
+✓ pricing-grid (succeeded)
+✗ hero-banner (failed: API rate limit exceeded)
+
+2/3 succeeded, 1 failed
+```
+
+Some things cannot be rushed. Taking them one at a time is often the steadier path. Maybe that is the philosophy behind batch jobs.
+
+---
+
+## Environment Variable Configuration
+
+ImgBin supports flexible configuration through environment variables:
+
+```bash
+# ImgBin working directory
+IMGBIN_WORKDIR=/path/to/imgbin
+
+# Executable path (for invocation inside scripts)
+IMGBIN_EXECUTABLE=/path/to/imgbin/dist/cli.js
+
+# Asset library root
+IMGBIN_LIBRARY_ROOT=./.imgbin-library
+
+# Azure OpenAI configuration (if using the Azure provider)
+AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com/
+AZURE_OPENAI_API_KEY=***
+AZURE_OPENAI_IMAGE_DEPLOYMENT=gpt-image-1
+```
+
+Configuration is one of those things that can feel both important and not that important at the same time. In the end, whatever feels comfortable and fits your workflow best is usually the right choice.
+
+---
+
+## Implementation Notes
+
+During implementation, we summarized a few key points:
+
+### Provider Interface Design
+
+Interface definitions should be clear and complete, including input parameters, return values, and error handling. It is also a good idea to provide both synchronous and asynchronous invocation styles for different scenarios.
+
+That is one small piece of hard-earned experience. Once an interface is set, nobody wants to keep changing it later.
+
+### Failure Handling Strategy
+
+When one item fails in a batch job, the CLI should:
+
+1. Write detailed error information to a separate log file.
+2. Continue executing other jobs instead of interrupting the whole process.
+3. Return a non-zero exit code at the end to indicate that some jobs failed.
+4. Clearly display the execution result of every job in the summary report.
+
+Some failures are just failures. There is no point pretending otherwise. It is better to acknowledge them openly and then figure out how to solve them. The same logic applies to projects and to life.
+
+### Metadata Merge Strategy
+
+Recognition results are written to the `recognized` section by default, while manually edited fields are marked in `manual`. Metadata updates follow an append-only strategy: unless `--force` is explicitly passed, existing manually curated results are not overwritten.
+
+That point became clear too - some things, once overwritten, are just gone. It is often better to preserve them, because the record itself has value.
+
+### Directory Creation Atomicity
+
+Use `fs.mkdir({ recursive: true })` to ensure directory creation remains atomic and to avoid race conditions in concurrent scenarios.
+
+Maybe that is what security feels like - being stable when stability matters, moving fast when speed matters, and never getting stuck second-guessing.
+
+---
+
+## Conclusion
+
+As the core tool for image asset management in the HagiCode project, ImgBin solves our problems through the following design choices:
+
+1. **Unified entry point**: the CLI covers generation, annotation, thumbnails, and all other core operations.
+2. **Metadata-driven**: every asset has a complete `metadata.json`, enabling search and traceability.
+3. **Provider Adapter**: flexible abstraction for external APIs, making testing and extension easier.
+4. **Batch job support**: batch image generation can be automated within CI/CD workflows.
+
+Everything else may have faded, but this approach really did end up proving useful.
+
+This solution not only improves HagiCode's own development efficiency, but also forms a reusable framework for image asset management. If you are building a similarly multi-component project, I believe ImgBin's design ideas may give you some inspiration.
+
+Youth is all about trying things and making a bit of a mess. If you never put yourself through that, how would you know what you are really capable of?
+
+---
+
+## References
+
+- ImgBin technical proposal: https://github.com/HagiCode-org/site/tree/main/openspec/changes/archive/2026-03-10-imgbin-cli-tool
+- HagiCode official website: https://hagicode.com
+- HagiCode GitHub: https://github.com/HagiCode-org/site
+
+---
+
+Thank you for reading. If you found this article helpful, please click the like button below so more people can discover it.
+
+This content was produced with AI-assisted collaboration, reviewed by me, and reflects my own views and position.
+
+- Author: [newbe36524](https://www.newbe.pro)
+- Article link: [https://docs.hagicode.com/blog/2026-03-13-imgbin-cli-tool-asset-management/](https://docs.hagicode.com/blog/2026-03-13-imgbin-cli-tool-asset-management/)
+- Copyright notice: Unless otherwise stated, all articles on this blog are licensed under BY-NC-SA. All rights reserved!
