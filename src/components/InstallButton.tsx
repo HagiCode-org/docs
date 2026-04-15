@@ -9,21 +9,22 @@ import type {
   AssetType,
   DesktopVersion,
   DownloadAction,
-  GithubReachabilityState,
   PlatformGroup,
 } from '@shared/desktop';
 import {
-  ensureGithubReachabilityProbe,
   detectOS,
-  findFirstGithubReleaseUrl,
-  getCachedGithubReachabilityState,
   getDownloadActionLabel,
   getArchitectureLabel,
   getAssetTypeLabel,
   getFileExtension,
+  getPrimaryDownloadSourceLabel,
   groupAssetsByPlatform,
   PLATFORM_ICONS,
-  resolvePrimaryDownloadAction,
+  resolvePrimaryDownloadActionPair,
+} from '@shared/desktop-utils';
+import type {
+  PrimaryDownloadActionPair,
+  PrimaryDownloadSourceKey,
 } from '@shared/desktop-utils';
 import {
   clearDesktopVersionCache,
@@ -55,9 +56,8 @@ interface PlatformDownloads {
 }
 
 interface InstallButtonPrimaryTarget {
-  href: string | null;
   option: DownloadOption | null;
-  action: DownloadAction | null;
+  actions: PrimaryDownloadActionPair;
 }
 
 interface InstallButtonProps {
@@ -123,28 +123,24 @@ function convertPlatformGroups(platforms: PlatformGroup[]): PlatformDownloads[] 
 
 export function resolveDocsInstallPrimaryTarget(
   platformData: PlatformDownloads[],
-  githubState: GithubReachabilityState,
   userOS: 'windows' | 'macos' | 'linux' | 'unknown',
 ): InstallButtonPrimaryTarget {
   if (platformData.length === 0) {
     return {
-      href: null,
       option: null,
-      action: null,
+      actions: resolvePrimaryDownloadActionPair(null),
     };
   }
 
   const userPlatform = platformData.find((platform) => platform.platform === userOS);
   const preferredPlatform = userPlatform ?? platformData[0];
   const preferredOption = preferredPlatform.options[0] ?? null;
-  const action = preferredOption
-    ? resolvePrimaryDownloadAction({ sourceActions: preferredOption.sourceActions }, githubState)
-    : null;
 
   return {
-    href: action?.url ?? preferredOption?.url ?? null,
     option: preferredOption,
-    action,
+    actions: resolvePrimaryDownloadActionPair(
+      preferredOption ? { sourceActions: preferredOption.sourceActions } : null,
+    ),
   };
 }
 
@@ -227,9 +223,6 @@ export default function InstallButton({
   const [platforms, setPlatforms] = useState<PlatformGroup[]>(initialPlatforms);
   const [error, setError] = useState<string | null>(versionError);
   const [runtimeData, setRuntimeData] = useState<DesktopVersionData | null>(null);
-  const [githubReachabilityState, setGithubReachabilityState] = useState<GithubReachabilityState>(
-    () => getCachedGithubReachabilityState(),
-  );
   const [isLoading, setIsLoading] = useState(
     !initialVersion && initialPlatforms.length === 0 && !versionError,
   );
@@ -362,46 +355,23 @@ export default function InstallButton({
 
   const canDownload = !isLoading && !error && !!version && platformData.length > 0;
 
-  useEffect(() => {
-    const probeUrl = findFirstGithubReleaseUrl(platforms);
-    const cachedState = getCachedGithubReachabilityState();
-    setGithubReachabilityState(cachedState);
-
-    if (!probeUrl || (cachedState !== 'unknown' && cachedState !== 'probing')) {
-      return;
-    }
-
-    let mounted = true;
-    void ensureGithubReachabilityProbe(probeUrl).then((state) => {
-      if (mounted) {
-        setGithubReachabilityState(state);
-      }
-    });
-
-    return () => {
-      mounted = false;
-    };
-  }, [platforms]);
-
   const primaryTarget = useMemo(() => {
     if (!canDownload) {
       return {
-        href: null,
         option: null,
-        action: null,
+        actions: resolvePrimaryDownloadActionPair(null),
       };
     }
 
     if (!FEATURE_MAC_DOWNLOAD_ENABLED && currentOS === 'macos') {
       return {
-        href: null,
         option: null,
-        action: null,
+        actions: resolvePrimaryDownloadActionPair(null),
       };
     }
 
-    return resolveDocsInstallPrimaryTarget(orderedPlatformData, githubReachabilityState, currentOS);
-  }, [canDownload, currentOS, githubReachabilityState, orderedPlatformData]);
+    return resolveDocsInstallPrimaryTarget(orderedPlatformData, currentOS);
+  }, [canDownload, currentOS, orderedPlatformData]);
 
   useEffect(() => {
     const handleClickOutside = () => {
@@ -481,6 +451,16 @@ export default function InstallButton({
     variant,
     locale,
   });
+  const primarySourceOrder: PrimaryDownloadSourceKey[] = ['github', 'accelerated'];
+  const primarySourceButtons = primarySourceOrder
+    .map((source) => ({
+      source,
+      action: primaryTarget.actions[source],
+      label: getPrimaryDownloadSourceLabel(source, locale),
+    }))
+    .filter((entry) => Boolean(entry.action));
+  const showDisabledPrimaryButtons = primarySourceButtons.length === 0;
+  const primaryButtonsDisabled = isLoading || !canDownload || (!FEATURE_MAC_DOWNLOAD_ENABLED && currentOS === 'macos');
 
   const macDisabledSection = !FEATURE_MAC_DOWNLOAD_ENABLED && macPlatform ? (
     <>
@@ -519,44 +499,74 @@ export default function InstallButton({
 
   return (
     <div className={`install-button-wrapper install-button-wrapper--${variant} ${className}`}>
-      <div className="split-button-container">
-        {canDownload && primaryTarget.href ? (
-          <a
-            href={primaryTarget.href}
-            className="btn-download-main"
-            aria-label={`${t.installHagicodeDesktop}${primaryTarget.action ? ` (${getDownloadActionLabel(primaryTarget.action.kind, locale)})` : ''}`}
-          >
-            <svg className="download-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <path
-                d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-            </svg>
-            <span className="btn-text">{t.installNow}</span>
-          </a>
-        ) : (
-          <button
-            type="button"
-            className={`btn-download-main btn-download-main-disabled ${isLoading ? 'btn-download-main-loading' : ''}`}
-            disabled
-            aria-disabled="true"
-            aria-label={t.unavailable}
-          >
-            <svg className="download-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <path
-                d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-            </svg>
-            <span className="btn-text">{isLoading ? t.installNow : t.unavailable}</span>
-          </button>
-        )}
+      <div
+        className={`split-button-container ${variant === 'compact' ? 'split-button-container--segmented' : ''}`}
+        data-action-group={variant === 'compact' ? 'segmented' : 'default'}
+      >
+        <div
+          className={`install-button-primary-actions ${variant === 'compact' ? 'install-button-primary-actions--grouped' : ''}`}
+          data-segment-role="primary-actions"
+        >
+          {(showDisabledPrimaryButtons
+            ? primarySourceOrder
+            : primarySourceButtons.map((entry) => entry.source)).map((source) => {
+            const configuredEntry = primarySourceButtons.find((entry) => entry.source === source);
+            const label = configuredEntry?.label ?? getPrimaryDownloadSourceLabel(source, locale);
+            const action = configuredEntry?.action ?? null;
+            const buttonClassName = [
+              'btn-download-source',
+              `btn-download-source--${source}`,
+              primaryButtonsDisabled || !action ? 'btn-download-source-disabled' : '',
+              isLoading ? 'btn-download-source-loading' : '',
+            ]
+              .filter(Boolean)
+              .join(' ');
+
+            if (primaryButtonsDisabled || !action) {
+              return (
+                <button
+                  key={source}
+                  type="button"
+                  className={buttonClassName}
+                  disabled
+                  aria-disabled="true"
+                  aria-label={label}
+                >
+                  <svg className="download-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <path
+                      d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                  <span className="btn-text">{label}</span>
+                </button>
+              );
+            }
+
+            return (
+              <a
+                key={source}
+                href={action.url}
+                className={buttonClassName}
+                aria-label={`${t.installHagicodeDesktop} (${label})`}
+              >
+                <svg className="download-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <path
+                    d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+                <span className="btn-text">{label}</span>
+              </a>
+            );
+          })}
+        </div>
 
         {canDownload && platformData.length > 0 && (
           <>
@@ -567,6 +577,7 @@ export default function InstallButton({
               aria-controls={`${buttonId}-menu`}
               aria-haspopup="menu"
               aria-label={t.selectOtherVersion}
+              data-segment-role="toggle"
               onClick={handleToggleDropdown}
             >
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -597,10 +608,16 @@ export default function InstallButton({
                     const archLabel = getArchitectureLabel(option.assetType, locale);
                     const fileExt = getFileExtension(option.assetType);
                     const isRecommended = index === 0;
-                    const resolvedAction = resolvePrimaryDownloadAction(
-                      { sourceActions: option.sourceActions },
-                      githubReachabilityState,
-                    );
+                    const actionPair = resolvePrimaryDownloadActionPair({
+                      sourceActions: option.sourceActions,
+                    });
+                    const visiblePrimaryActions = primarySourceOrder
+                      .map((source) => ({
+                        source,
+                        action: actionPair[source],
+                        label: getPrimaryDownloadSourceLabel(source, locale),
+                      }))
+                      .filter((entry) => Boolean(entry.action));
                     return (
                       <li key={option.url} role="none">
                         <div className={`dropdown-item dropdown-item-multi-source ${isRecommended ? 'dropdown-item-recommended' : ''}`}>
@@ -616,26 +633,30 @@ export default function InstallButton({
                             )}
                           </div>
                           <div className="dropdown-source-actions">
-                            {option.sourceActions.map((action) => {
-                              const isSmartDefault = resolvedAction?.kind === action.kind;
-                              return (
-                                <a
-                                  key={`${option.url}-${action.kind}`}
-                                  href={action.url}
-                                  className={`dropdown-source-action ${isSmartDefault ? 'dropdown-source-action-default' : ''}`}
-                                  role="menuitem"
-                                  download
-                                  onClick={handleLinkClick}
-                                >
-                                  <span>{getDownloadActionLabel(action.kind, locale)}</span>
-                                  {isSmartDefault && (
-                                    <span className="dropdown-source-action-badge">
-                                      {locale === 'en' ? 'Default' : '默认'}
-                                    </span>
-                                  )}
-                                </a>
-                              );
-                            })}
+                            {visiblePrimaryActions.map(({ source, action, label }) => (
+                              <a
+                                key={`${option.url}-${source}`}
+                                href={action?.url ?? option.url}
+                                className={`dropdown-source-action dropdown-source-action--${source}`}
+                                role="menuitem"
+                                download
+                                onClick={handleLinkClick}
+                              >
+                                <span>{label}</span>
+                              </a>
+                            ))}
+                            {actionPair.secondary.map((action) => (
+                              <a
+                                key={`${option.url}-${action.kind}`}
+                                href={action.url}
+                                className="dropdown-source-action dropdown-source-action-secondary"
+                                role="menuitem"
+                                download
+                                onClick={handleLinkClick}
+                              >
+                                <span>{getDownloadActionLabel(action.kind, locale)}</span>
+                              </a>
+                            ))}
                           </div>
                         </div>
                       </li>
