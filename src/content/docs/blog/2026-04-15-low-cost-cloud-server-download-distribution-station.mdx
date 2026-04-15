@@ -1,0 +1,434 @@
+---
+title: 如何利用廉价的云服务器搭建加速下载的分发站
+date: 2026-04-15
+tags: [云服务器, Nginx, 缓存, 文件分发, 成本优化]
+---
+
+## 如何利用廉价的云服务器搭建加速下载的分发站
+
+> 云存储的流量贵得离谱，跨国访问慢得让人抓狂，CDN 的价格又让人望而却步......这些痛，大概做分发的都懂吧。本文分享一下我们在 [HagiCode](https://hagicode.com) 项目里摸索出来的一套低成本方案。云服务器 + Nginx 缓存层，成本降了一半，速度倒是提上去了，也算是一点小小的安慰。
+
+## 背景
+
+互联网嘛，下载速度和稳定性，说到底都是用户体验。开源也好，商业也罢，总得给用户一个靠谱的下载方式。
+
+直接从云存储（比如 Azure Blob Storage、AWS S3）下文件，看起来简单，实际上问题还真不少：
+
+**网络延迟**：跨国跨地域的访问，慢得让人想砸键盘。用户等得花儿都谢了，体验能好到哪去？
+
+**带宽成本**：云存储的出口流量，贵得让人心疼。Azure Blob Storage 在中国大陆访问，差不多每 GB 0.5 元，一个月 1TB 就是 500 块。对于小团队来说，这笔钱说多不多，说少也不少，毕竟谁的钱都不是大风刮来的。
+
+**访问限制**：某些地区访问国外云服务，时好时坏，有时候干脆就访问不了。用户想下都下不了，这事儿本身就挺无奈的。
+
+**CDN 成本**：商业 CDN 确实能解决问题，但价格也确实美丽。小团队哪里用得起？
+
+那有没有既省钱又好用的办法呢？其实也是有的。云服务器 + 反向代理 + 缓存层，就这么简单粗暴。成本降了一半左右，速度还提上去了，也算是一点小小的慰藉。
+
+## 关于 HagiCode
+
+这套方案也不是凭空想出来的，是我们在 [HagiCode](https://hagicode.com) 项目里折腾出来的经验。
+
+HagiCode 是一个 AI 代码助手，要给用户提供服务器端和桌面端的下载服务。既然是给开发者用的工具，全球用户都能快速稳定地下载，这事儿本身就很重要。这也是我们为什么非要琢磨出一套低成本方案的原因——毕竟谁的钱都不是大风刮来的。
+
+如果你觉得这套方案还挺有价值的，那说明我们工程实力还算凑合......既然如此，HagiCode 本身也值得关注一下吧？
+
+## 架构设计
+
+### 整体架构思路
+
+先来看一下整体的架构设计：
+
+```
+用户请求
+    ↓
+DNS 解析
+    ↓
+┌─────────────────────────────────────┐
+│   反向代理层 (Traefik/Bunker Web)   │ ← SSL 终止、路由分发、安全防护
+├─────────────────────────────────────┤
+│   端口: 80/443                       │
+│   功能: 自动 Let's Encrypt 证书      │
+│         Host 路由                    │
+└─────────────────────────────────────┘
+    ↓
+┌─────────────────────────────────────┐
+│   缓存层 (Nginx)                     │ ← 文件缓存、Gzip 压缩
+├─────────────────────────────────────┤
+│   端口: 8080(server) / 8081(desktop) │
+│   缓存策略:                          │
+│   - index.json: 1 小时               │
+│   - 其他文件: 7 天                   │
+│   缓存大小: 1GB                      │
+└─────────────────────────────────────┘
+    ↓
+┌─────────────────────────────────────┐
+│   源站 (Azure Blob Storage)         │ ← 文件存储
+└─────────────────────────────────────┘
+```
+
+这个架构的核心思想，说白了就是：**在用户和云存储之间，加一层缓存罢了**。
+
+用户请求先到云服务器上的反向代理层，然后 Nginx 缓存层接手。缓存里有文件？直接给用户。没有？去云存储拉一份，顺便在本地存一份。下次再访问同一个文件，就不用麻烦云存储了。其实就像记忆一样，有些东西记住了，下次就不用再费劲去想......
+
+### 为什么选择这个架构？
+
+**云服务器优势**：
+- 成本可控：阿里云等提供廉价云服务器（1-2 核 2GB 配置月费约 50-100 元）
+- 部署灵活：可自由配置反向代理、缓存策略
+- 地理位置灵活：可选择靠近用户的服务器区域
+- 扩展性强：可根据流量需求升级配置
+
+**反向代理 + 缓存架构**：
+- 减少源站压力：缓存热点文件，减少对云存储的访问
+- 降低成本：云服务器流量费用远低于云存储出口流量
+- 提升速度：就近访问，服务器带宽通常优于云存储
+
+**为什么选择 Nginx 作为缓存层？**
+
+这事儿也不是随便选的，毕竟 Nginx 确实有它的道理：
+
+1. 高性能：Nginx 反向代理的性能，业界是有目共睹的
+2. 缓存成熟：内置的 proxy_cache 功能，稳定可靠，不会动不动就出幺蛾子
+3. 资源占用低：256MB 内存就能跑，对服务器也算友好
+4. 配置灵活：不同的文件类型可以设置不同的缓存策略，这点还是很贴心的
+
+## 反向代理层：Traefik vs Bunker Web
+
+HagiCode 的部署方案，其实支持两种反向代理，怎么说呢，各有各的特点：
+
+| 方案 | 特点 | 适用场景 |
+|------|------|----------|
+| **Traefik** | 轻量级、自动 SSL、配置简单 | 基础部署、低流量场景 |
+| **Bunker Web** | 内置 WAF、防 DDoS、防爬虫 | 高安全要求、高流量场景 |
+
+### Traefik：轻量级首选
+
+Traefik 是一个现代 HTTP 反向代理和负载均衡器，最大的特点就是配置简单，还能自动搞 Let's Encrypt 证书。
+
+对于初始部署或者流量不大的场景，Traefik 其实是挺不错的选择：
+- 资源占用不多（1.5 CPU/512MB 内存就够了）
+- SSL 证书自动配置，不用自己操心
+- 路由配置基于 Docker 标签，也算方便
+
+### Bunker Web：高安全场景
+
+Bunker Web 是一个基于 Nginx 的 Web 应用防火墙，安全防护更全面一些。
+
+什么时候可以考虑切换到 Bunker Web 呢？大概就是这些情况吧：
+- 遭受 DDoS 攻击（虽然谁都不希望遇到）
+- 需要 ModSecurity 防护
+- 想要防爬虫功能
+- 对安全有更高的要求
+
+HagiCode 提供了 `switch-deployment.sh` 脚本，可以在两种方案之间快速切换：
+
+```bash
+# 切换到 Bunker Web
+./switch-deployment.sh bunkerweb
+
+# 切换回 Traefik
+./switch-deployment.sh traefik
+
+# 查看当前状态
+./switch-deployment.sh status
+```
+
+脚本会自动做预检查、健康检查，还能自动回滚，切换过程也算安全可靠，不会说换着换着就挂了。
+
+## Nginx 缓存层配置
+
+缓存层是整个架构的核心，Nginx 配置得好不好，缓存效果天差地别。毕竟这事儿还挺关键的。
+
+### 缓存路径配置
+
+```nginx
+# 缓存路径配置
+proxy_cache_path /var/cache/nginx levels=1:2 keys_zone=azure_cache:10m
+                   max_size=1g inactive=7d use_temp_path=off;
+```
+
+参数说明：
+- `levels=1:2`：缓存目录层级，2 级目录结构，提高文件访问效率
+- `keys_zone=azure_cache:10m`：缓存键存储区域，10MB 足够存储大量键
+- `max_size=1g`：最大缓存大小 1GB
+- `inactive=7d`：缓存文件 7 天未被访问则删除
+- `use_temp_path=off`：直接写入缓存目录，提高性能
+
+### 分级缓存策略
+
+不同类型的文件需要不同的缓存策略：
+
+```nginx
+# Server 下载服务
+server {
+    listen 8080;
+
+    # index.json 短期缓存（便于及时更新）
+    location /index.json {
+        proxy_cache azure_cache;
+        proxy_cache_valid 200 1h;
+        proxy_cache_key "$scheme$server_port$request_uri";
+        add_header X-Cache-Status $upstream_cache_status;
+        add_header Cache-Control "public, max-age=3600";
+
+        # 反向代理到 Azure OSS
+        proxy_pass https://${SERVER_DL_HOST}/${SERVER_DL_CONTAINER}$uri?${SERVER_DL_SAS_TOKEN};
+        proxy_ssl_server_name on;
+        proxy_ssl_protocols TLSv1.2 TLSv1.3;
+    }
+
+    # 安装包等静态文件长期缓存
+    location / {
+        proxy_cache azure_cache;
+        proxy_cache_valid 200 7d;
+        proxy_cache_key "$scheme$server_port$request_uri";
+        add_header X-Cache-Status $upstream_cache_status;
+        add_header Cache-Control "public, max-age=604800";
+
+        proxy_pass https://${SERVER_DL_HOST}/${SERVER_DL_CONTAINER}$uri?${SERVER_DL_SAS_TOKEN};
+        proxy_ssl_server_name on;
+        proxy_ssl_protocols TLSv1.2 TLSv1.3;
+    }
+}
+```
+
+**为什么这样设计？**
+
+`index.json` 是版本检查文件，得及时更新，所以缓存时间设成了 1 小时。这样发布新版本后，最多 1 小时用户就能检测到更新，也不算太久。
+
+安装包这些静态文件，变化本来就少，缓存 7 天能大幅减少源站访问。需要更新的时候手动清理一下缓存就好了，也不算麻烦。
+
+**X-Cache-Status 响应头**：
+
+这个响应头能让你看看缓存命中情况怎么样，也挺有用的：
+- `HIT`：缓存命中
+- `MISS`：缓存未命中，从源站拉取
+- `EXPIRED`：缓存过期，重新从源站拉取
+- `BYPASS`：缓存被绕过
+
+查看方法：
+```bash
+curl -I https://server.dl.hagicode.com/app.zip
+```
+
+## 成本分析
+
+假设每月下载流量 1TB，我们来算算账：
+
+| 方案 | 流量费用 | 服务器费用 | 合计 |
+|------|----------|------------|------|
+| 直接 Azure OSS | 约 ¥500 | ¥0 | ¥500 |
+| 云服务器 + OSS (缓存命中率 80%) | ¥100 + ¥80 | ¥60 | ¥240 |
+| 商业 CDN | ¥300-500 | ¥0 | ¥300-500 |
+
+**结论**：缓存层能省下大概 50% 的分发成本。
+
+这个计算假设缓存命中率 80%，实际情况中，如果文件更新频率不高，命中率可能还会更高一些，毕竟这也是自然而然的事。
+
+## 部署实践
+
+### 环境准备
+
+首先配置环境变量：
+
+```bash
+cd /path/to/hagicode_aliyun_deployment/docker
+cp .env.example .env
+vi .env  # 填入 Azure OSS SAS URL、Lark Webhook URL
+```
+
+**重要**：`.env` 文件包含敏感信息（SAS Token、Webhook URL），千万别提交到版本控制，这事儿还是挺关键的。
+
+### DNS 配置
+
+添加以下 DNS A 记录，这步别忘了：
+- `server.dl.hagicode.com` → 服务器 IP
+- `desktop.dl.hagicode.com` → 服务器 IP
+
+### 初始化服务器
+
+使用 Ansible 自动化初始化服务器：
+
+```bash
+cd /path/to/hagicode_aliyun_deployment
+ansible-playbook -i ./ansible/inventory/hosts.yml ./ansible/playbooks/init.yml
+```
+
+这个 Playbook 会自动搞定这些：
+- 创建部署用户
+- 安装 Docker 和 Docker Compose
+- 配置 SSH 密钥
+- 设置防火墙规则
+
+也不算太复杂，毕竟自动化这东西，省时省力。
+
+### 部署服务
+
+```bash
+./deploy.sh
+```
+
+部署脚本会帮你做这些：
+- 检查环境配置
+- 拉取最新代码
+- 启动 Docker 容器
+- 执行健康检查
+- 发送部署通知（飞书）
+
+一条命令搞定，也算方便。
+
+### 验证部署
+
+```bash
+# 检查容器状态
+docker ps
+
+# 测试下载域名
+curl -I https://server.dl.hagicode.com/index.json
+curl -I https://desktop.dl.hagicode.com/index.json
+```
+
+## 运维技巧
+
+### 缓存管理
+
+缓存这东西，偶尔也得打理一下：
+
+**查看缓存磁盘使用**：
+```bash
+docker volume inspect docker_nginx-cache
+du -sh /var/lib/docker/volumes/docker_nginx-cache/_data
+```
+
+**手动清除缓存**：
+```bash
+./clear-cache.sh
+```
+
+或者手动执行，虽然麻烦一点，但也管用：
+```bash
+docker exec nginx sh -c "rm -rf /var/cache/nginx/*"
+docker restart nginx
+```
+
+### 资源限制
+
+在 1 核 2GB 服务器上，资源限制配置如下：
+
+```yaml
+services:
+  traefik:
+    deploy:
+      resources:
+        limits:
+          cpus: '1.50'
+          memory: 512M
+
+  nginx:
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 256M
+```
+
+监控资源使用情况，偶尔看看也挺好：
+```bash
+docker stats
+```
+
+### SAS Token 安全实践
+
+SAS Token 是访问 Azure Blob Storage 的凭证，泄露了可不是闹着玩的：
+
+- `.env` 文件不提交到版本控制（已在 .gitignore）
+- SAS Token 设置适当过期时间（推荐 1 年）
+- 限制 SAS Token 权限（仅读取）
+- 定期轮换 SAS Token
+
+### 监控告警
+
+HagiCode 集成了 Lark/飞书 Webhook 通知，可以在以下情况发送通知：
+- 部署成功/失败
+- 缓存清除状态
+- 服务异常
+
+通知包含服务器信息、时间戳、错误详情，快速定位问题也方便一些。
+
+### 高可用扩展
+
+当单台服务器撑不住的时候，也可以考虑：
+
+1. **水平扩展**：部署多个节点，通过 DNS 轮询或负载均衡分发
+2. **CDN 加持**：在云服务器前接入 CDN，进一步提升访问速度
+3. **缓存预热**：使用脚本提前将热门文件加载到缓存
+
+## 注意事项
+
+有几点还是得提醒一下，毕竟谁都不想遇到幺蛾子：
+
+1. **SSL 证书**：Let's Encrypt 有速率限制，别频繁切换部署，不然可能申请不到证书
+2. **缓存清理**：更新重要文件后记得清理缓存，不然用户可能下载不到新版本
+3. **日志管理**：定期清理 Docker 日志，不然磁盘满了就麻烦了
+4. **备份策略**：Traefik acme.json、Bunker Web 配置这些，还是备份一下比较好
+5. **监控告警**：配置飞书通知，及时了解部署状态，出问题也能快速反应
+
+## 总结
+
+云服务器 + Nginx 缓存层，就这么简单。HagiCode 用这套方案，成本不算高（服务器费用大概 60-100 元/月），效果还挺不错的。核心优势大概也就这些：
+
+- **成本可控**：比直接用云存储或商业 CDN，成本降了大概 50%
+- **部署灵活**：Traefik 还是 Bunker Web，看你自己选
+- **扩展性强**：需要的话可以水平扩展，或者再加个 CDN
+- **运维简单**：Shell 脚本 + Ansible，自动化部署也方便
+
+对于需要文件分发的小团队和个人开发者来说，这方案倒是可以试试。
+
+HagiCode 用这套架构在生产环境稳定运行了一段时间，全球用户下载也没出什么大问题。如果你也在找类似的解决方案，不妨试试看，说不定对你也有帮助。
+
+## 技术栈总结
+
+最后整理一下用到的技术，也算有个交代：
+
+| 组件 | 选型 | 用途 |
+|------|------|------|
+| 云服务器 | 阿里云 ECS | 基础运行环境 |
+| 反向代理 | Traefik / Bunker Web | SSL 终止、路由、安全防护 |
+| 缓存层 | Nginx | 反向代理缓存、Gzip 压缩 |
+| 文件存储 | Azure Blob Storage | 文件源站 |
+| 容器化 | Docker Compose | 服务编排 |
+| 自动化 | Ansible | 服务器配置管理 |
+| 通知 | Lark/飞书 Webhook | 部署状态通知 |
+
+## 参考资料
+
+最后还是给些参考资料吧，也算有个着落：
+
+- HagiCode 项目地址：[github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- HagiCode 官网：[hagicode.com](https://hagicode.com)
+- 30 分钟实战演示：[www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)
+- Docker Compose 一键安装：[docs.hagicode.com/installation/docker-compose](https://docs.hagicode.com/installation/docker-compose)
+- Desktop 桌面端快速安装：[hagicode.com/desktop/](https://hagicode.com/desktop/)
+
+---
+
+如果本文对你有帮助，那也算是值得了：
+- 点个赞让更多人看到
+- 来 GitHub 给个 Star：[github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- 访问官网了解更多：[hagicode.com](https://hagicode.com)
+- 观看 30 分钟实战演示：[www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)
+- 一键安装体验：[docs.hagicode.com/installation/docker-compose](https://docs.hagicode.com/installation/docker-compose)
+- Desktop 桌面端快速安装：[hagicode.com/desktop/](https://hagicode.com/desktop/)
+- 公测已开始，欢迎安装体验
+
+---
+
+写到这里也差不多了。希望这套方案对你有帮助，毕竟折腾这些东西也不容易......如果你也有什么好办法，欢迎一起交流。技术这东西，说到底还是大家一起进步比较好。
+
+## 版权说明
+
+感谢您的阅读,如果您觉得本文有用,欢迎点赞、收藏和分享支持。
+本内容采用人工智能辅助协作,最终内容由作者审核并确认。
+- 本文作者: [newbe36524](https://www.newbe.pro)
+- 原文链接: [https://docs.hagicode.com/blog/2026-04-15-low-cost-cloud-server-download-distribution-station/](https://docs.hagicode.com/blog/2026-04-15-low-cost-cloud-server-download-distribution-station/)
+- 版权声明: 本博客所有文章除特别声明外,均采用 BY-NC-SA 许可协议。转载请注明出处!
