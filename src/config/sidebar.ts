@@ -35,6 +35,11 @@ export const DOCS_SIDEBAR = [
     autogenerate: { directory: 'ai-service-subscriptions' },
   },
   {
+    label: '法律文档',
+    translations: { en: 'Legal' },
+    autogenerate: { directory: 'legal' },
+  },
+  {
     label: '版本更新说明',
     translations: { en: 'Release Notes' },
     link: '/release-notes',
