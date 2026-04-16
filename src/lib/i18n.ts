@@ -139,14 +139,13 @@ export function isLandingRoutePath(pathname = '/'): boolean {
 }
 
 /**
- * Returns true when the route is within the release-notes tree for either locale.
+ * Returns true when the route is the localized release-notes landing page.
  */
 export function isReleaseNotesRoutePath(pathname = '/'): boolean {
   const normalizedPath = stripDocsLocalePrefix(pathname);
   return (
     normalizedPath === RELEASE_NOTES_ROUTE_PREFIX
     || normalizedPath === `${RELEASE_NOTES_ROUTE_PREFIX}/`
-    || normalizedPath.startsWith(`${RELEASE_NOTES_ROUTE_PREFIX}/`)
   );
 }
 

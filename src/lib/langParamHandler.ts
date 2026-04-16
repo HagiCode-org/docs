@@ -105,8 +105,8 @@ export function resolveDocsLandingRoute(
   } else if (isEnglishDocsPath(currentPath)) {
     resolvedLocale = 'en';
   } else if (isReleaseNotesPath) {
-    // Root release-notes routes are already the Chinese locale and should
-    // remain stable for direct links and archive pages.
+    // Root release-notes landing is already the Chinese locale and should
+    // remain stable for direct landing links.
     resolvedLocale = 'root';
   } else if (storedLocale === 'root') {
     // Non-landing root docs/blog paths stay Chinese only after an explicit Chinese choice was saved.

@@ -61,8 +61,7 @@
     var normalizedPath = stripDocsLocalePrefix(pathname);
     return (
       normalizedPath === RELEASE_NOTES_ROUTE_PREFIX ||
-      normalizedPath === RELEASE_NOTES_ROUTE_PREFIX + '/' ||
-      normalizedPath.indexOf(RELEASE_NOTES_ROUTE_PREFIX + '/') === 0
+      normalizedPath === RELEASE_NOTES_ROUTE_PREFIX + '/'
     );
   }
 
