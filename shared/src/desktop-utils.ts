@@ -161,8 +161,8 @@ export function getDownloadActionLabel(
   locale: 'zh' | 'en' = 'zh',
 ): string {
   const zhLabels: Record<DownloadSourceKind, string> = {
-    official: '中国大陆加速下载',
-    legacy: '中国大陆加速下载',
+    official: '中国大陆下载',
+    legacy: '中国大陆下载',
     'github-release': 'GitHub 下载',
     torrent: '种子下载',
   };
@@ -181,7 +181,7 @@ export function getPrimaryDownloadSourceLabel(
   locale: 'zh' | 'en' = 'zh',
 ): string {
   if (source === 'accelerated') {
-    return locale === 'en' ? 'China' : '中国大陆加速';
+    return locale === 'en' ? 'China' : '中国大陆';
   }
 
   return locale === 'en' ? 'GitHub' : 'GitHub';
