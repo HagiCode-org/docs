@@ -18,6 +18,7 @@ export function getReleaseNotesLandingCopy(locale = 'zh-CN') {
 
 export function getReleaseNotesLandingEntries(indexPayload, locale = 'zh-CN') {
   const entries = Array.isArray(indexPayload?.entries) ? indexPayload.entries : [];
+  const landingPath = locale === 'en' ? '/en/release-notes/' : '/release-notes/';
 
   return entries.map((entry) => {
     const repositoryCount = Array.isArray(entry.repositoryRanges) ? entry.repositoryRanges.length : 0;
@@ -29,6 +30,8 @@ export function getReleaseNotesLandingEntries(indexPayload, locale = 'zh-CN') {
 
     return {
       tag: entry.displayTag ?? entry.tag,
+      anchorId: entry.anchorId ?? '',
+      anchorHref: entry.anchorId ? `${landingPath}#${entry.anchorId}` : landingPath,
       releaseDate: entry.releaseDate ?? 'Unknown',
       summary:
         locale === 'en'
