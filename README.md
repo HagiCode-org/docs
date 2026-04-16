@@ -45,7 +45,7 @@ Repository-scoped update detail pages are no longer hosted in this docs site. A 
 
 The replacement release-notes surface now lives in this repository under `src/content/docs/release-notes/`, `src/content/docs/en/release-notes/`, and `src/data/release-notes.index.json`.
 Managed outputs are generated from the authoritative `repos/release-notes` workspace data.
-For monorepo automation, the preferred path is direct repository-to-repository transfer. GitHub Release assets remain only as an optional fallback source for standalone sync jobs.
+For monorepo automation, the preferred path is direct repository-to-repository transfer. GitHub Release assets remain only as an optional fallback source for standalone sync jobs. `hagirepocron` is expected to reach this repo only after `release-notes` has produced a complete bilingual published dataset for each tag.
 
 ### Commands
 
@@ -77,6 +77,7 @@ npm run release-notes:sync
 
 - Each synchronized tag must provide `artifacts/tags/<tag>/<tag>.json`.
 - Each synchronized tag must also provide `published/<tag>.zh-CN.md` and `published/<tag>.en.md`.
+- In the monorepo cron path, these published bilingual files are expected to come from the upstream `release-notes` AI preparation step before docs sync begins.
 - Tags with missing JSON, malformed JSON, tag mismatches, or incomplete locale bodies are skipped with deterministic reasons and do not publish partial pages.
 
 ### GitHub fallback asset contract
@@ -89,6 +90,7 @@ npm run release-notes:sync
 
 - `.github/workflows/release-notes-sync.yml` runs daily and via `workflow_dispatch`.
 - In the monorepo cron path, `hagirepocron` sets `DOCS_RELEASE_NOTES_SOURCE=local` and passes the sibling `release-notes` checkout root, so docs no longer depends on published release assets to materialize pages.
+- Docs-managed output stays limited to `src/data/release-notes.index.json`, `src/content/docs/release-notes/index.mdx`, and `src/content/docs/en/release-notes/index.mdx`; incomplete upstream tags must not create any extra per-tag files.
 - The workflow uses `DOCS_RELEASE_NOTES_TOKEN` for upstream GitHub API access and falls back to the repository `GITHUB_TOKEN` only when that token already has cross-repository visibility.
 - In CI, `DOCS_RELEASE_NOTES_ALLOW_STALE_ON_SOURCE_ERROR=true` keeps the job green when the upstream repository is temporarily inaccessible and existing managed outputs are already present.
 - The sync scripts depend on the standard `zip` and `unzip` utilities in addition to Node.js.
