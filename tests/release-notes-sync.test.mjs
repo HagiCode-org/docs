@@ -8,6 +8,7 @@ import test from 'node:test';
 
 import {
   createSourceFailureSummary,
+  createSyncSummaryMarkdown,
   discoverReleaseNoteAssets,
   fetchReleaseNotesSnapshot,
   hasManagedReleaseNotesOutput,
@@ -194,11 +195,37 @@ test('config prefers explicit cross-repository release-notes tokens', () => {
   assert.equal(config.token, 'release-notes-token');
 });
 
+test('config resolves local source mode when an explicit local repository root is provided', () => {
+  const config = resolveReleaseNotesConfig({
+    repoRoot: '/tmp/docs',
+    env: {
+      DOCS_RELEASE_NOTES_SOURCE: 'local',
+      DOCS_RELEASE_NOTES_LOCAL_REPO_ROOT: '../release-notes',
+    },
+  });
+
+  assert.equal(config.resolvedSource, 'local');
+  assert.equal(config.localRepoRoot, path.resolve('/tmp/release-notes'));
+});
+
+test('config rejects local source mode without a local repository root', () => {
+  assert.throws(
+    () => resolveReleaseNotesConfig({
+      repoRoot: '/tmp/docs',
+      env: {
+        DOCS_RELEASE_NOTES_SOURCE: 'local',
+      },
+    }),
+    /DOCS_RELEASE_NOTES_SOURCE=local requires DOCS_RELEASE_NOTES_LOCAL_REPO_ROOT/u,
+  );
+});
+
 test('local release-notes repository override can build a snapshot without GitHub access', async () => {
   const localRepoRoot = await createLocalReleaseNotesRepoFixture();
   const config = resolveReleaseNotesConfig({
     repoRoot: '/tmp/docs',
     env: {
+      DOCS_RELEASE_NOTES_SOURCE: 'local',
       DOCS_RELEASE_NOTES_LOCAL_REPO_ROOT: localRepoRoot,
     },
   });
@@ -206,9 +233,14 @@ test('local release-notes repository override can build a snapshot without GitHu
   const snapshot = await fetchReleaseNotesSnapshot({ config });
 
   assert.equal(snapshot.source.repository, 'local-repository');
+  assert.equal(snapshot.source.mode, 'local');
   assert.equal(snapshot.entries.length, 1);
   assert.equal(snapshot.entries[0].tag, 'v1.0.0');
+  assert.equal(snapshot.entries[0].anchorId, 'v1.0.0');
   assert.equal(snapshot.entries[0].summary.en, 'Unified the entry flow.');
+  assert.equal(snapshot.entries[0].source.jsonPath, 'artifacts/tags/v1.0.0/v1.0.0.json');
+  assert.equal(snapshot.entries[0].source.bodies['zh-CN'], 'published/v1.0.0.zh-CN.md');
+  assert.equal(snapshot.entries[0].source.bodies.en, 'published/v1.0.0.en.md');
 });
 
 test('archive validation rejects missing required tag json', async () => {
@@ -295,18 +327,47 @@ test('normalization preserves display tags, sorts semver consistently, and mater
     snapshot.entries.map((entry) => entry.tag),
     ['v1.0.1', '1.0.0'],
   );
+  assert.deepEqual(
+    snapshot.entries.map((entry) => entry.anchorId),
+    ['v1.0.1', 'v1.0.0'],
+  );
+  assert.equal(snapshot.entries[0].source.jsonPath, 'artifacts/tags/v1.0.1/v1.0.1.json');
+  assert.equal(snapshot.entries[1].source.bodies.en, 'published/1.0.0.en.md');
+
+  await writeFixtureFile(path.join(config.outputPaths.zhDir, 'legacy-detail.md'), 'stale');
+  await writeFixtureFile(path.join(config.outputPaths.enDir, 'legacy-detail.md'), 'stale');
 
   const firstRun = await materializeReleaseNotes({ snapshot, config });
   const firstIndex = await readFile(config.outputPaths.indexJson, 'utf8');
-  const firstZh = await readFile(path.join(config.outputPaths.zhDir, 'v1.0.1.md'), 'utf8');
+  const firstZhLanding = await readFile(path.join(config.outputPaths.zhDir, 'index.mdx'), 'utf8');
+  const firstEnLanding = await readFile(path.join(config.outputPaths.enDir, 'index.mdx'), 'utf8');
 
   const secondRun = await materializeReleaseNotes({ snapshot, config });
   const secondIndex = await readFile(config.outputPaths.indexJson, 'utf8');
-  const secondZh = await readFile(path.join(config.outputPaths.zhDir, 'v1.0.1.md'), 'utf8');
+  const secondZhLanding = await readFile(path.join(config.outputPaths.zhDir, 'index.mdx'), 'utf8');
+  const secondEnLanding = await readFile(path.join(config.outputPaths.enDir, 'index.mdx'), 'utf8');
+  const parsedIndex = JSON.parse(secondIndex);
 
   assert.equal(firstIndex, secondIndex);
-  assert.equal(firstZh, secondZh);
+  assert.equal(firstZhLanding, secondZhLanding);
+  assert.equal(firstEnLanding, secondEnLanding);
   assert.deepEqual(firstRun.writtenFiles, secondRun.writtenFiles);
+  assert.deepEqual(firstRun.writtenFiles, [
+    'src/data/release-notes.index.json',
+    'src/content/docs/release-notes/index.mdx',
+    'src/content/docs/en/release-notes/index.mdx',
+  ]);
+  assert.equal(fs.existsSync(path.join(config.outputPaths.zhDir, 'legacy-detail.md')), false);
+  assert.equal(fs.existsSync(path.join(config.outputPaths.enDir, 'legacy-detail.md')), false);
+  assert.equal(fs.existsSync(path.join(config.outputPaths.zhDir, 'v1.0.1.md')), false);
+  assert.equal(fs.existsSync(path.join(config.outputPaths.enDir, 'v1.0.1.md')), false);
+  assert.equal(parsedIndex.entries[0].anchorId, 'v1.0.1');
+  assert.equal(Object.hasOwn(parsedIndex.entries[0], 'routes'), false);
+
+  const summary = createSyncSummaryMarkdown({ snapshot, materialized: secondRun });
+  assert.match(summary, /\/release-notes\/#v1\.0\.1/);
+  assert.match(summary, /\/en\/release-notes\/#v1\.0\.1/);
+  assert.doesNotMatch(summary, /\/release-notes\/v1\.0\.1\//);
 });
 
 test('stale-output detection and summary work for source failures', async () => {
@@ -332,8 +393,8 @@ test('stale-output detection and summary work for source failures', async () => 
         publishedAt: '2026-04-13T08:00:00.000Z',
         synchronizedAt: '2026-04-14T10:00:00.000Z',
         upstreamGeneratedAt: '2026-04-13T07:55:00.000Z',
+        anchorId: 'v1.0.0',
         summary: { 'zh-CN': '统一了入口流程。', en: 'Unified the entry flow.' },
-        routes: { 'zh-CN': '/release-notes/v1.0.0/', en: '/en/release-notes/v1.0.0/' },
         repositoryRanges: [],
         totalCommitCount: 0,
         source: { releaseName: 'v1.0.0', releaseUrl: null, assetName: 'release-notes-v1.0.0-history.zip', assetUrl: null, jsonPath: 'artifacts/tags/v1.0.0/v1.0.0.json', bodies: { 'zh-CN': 'published/v1.0.0.zh-CN.md', en: 'published/v1.0.0.en.md' } },

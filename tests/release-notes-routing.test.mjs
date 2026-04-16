@@ -102,14 +102,15 @@ function evaluateEntryScript(scriptContent, href, storedRouteValue = null, navig
   };
 }
 
-test('release-notes helper flags landing and archive routes without confusing other docs pages', () => {
+test('release-notes helper flags only landing routes without confusing other docs pages', () => {
   assert.equal(isReleaseNotesRoutePath('/release-notes/'), true);
-  assert.equal(isReleaseNotesRoutePath('/release-notes/v1.0.0/'), true);
-  assert.equal(isReleaseNotesRoutePath('/en/release-notes/v1.0.0/'), true);
+  assert.equal(isReleaseNotesRoutePath('/en/release-notes/'), true);
+  assert.equal(isReleaseNotesRoutePath('/release-notes/v1.0.0/'), false);
+  assert.equal(isReleaseNotesRoutePath('/en/release-notes/v1.0.0/'), false);
   assert.equal(isReleaseNotesRoutePath('/product-overview/'), false);
 });
 
-test('release-notes routes keep root Chinese paths stable while allowing explicit ?lang switches', () => {
+test('release-notes landing keeps locale-specific routes stable while allowing explicit ?lang switches', () => {
   const rooted = resolveDocsLandingRoute(
     new URL('https://docs.hagicode.com/release-notes/'),
     JSON.stringify({ lang: 'en' }),
@@ -119,31 +120,31 @@ test('release-notes routes keep root Chinese paths stable while allowing explici
   assert.equal(rooted.targetUrl, 'https://docs.hagicode.com/release-notes/');
   assert.equal(rooted.shouldRedirect, false);
 
-  const archive = resolveDocsLandingRoute(
-    new URL('https://docs.hagicode.com/release-notes/v1.0.0/'),
-    JSON.stringify({ lang: 'en' }),
-    ['en-US', 'en'],
-  );
-  assert.equal(archive.resolvedLocale, 'root');
-  assert.equal(archive.targetUrl, 'https://docs.hagicode.com/release-notes/v1.0.0/');
-  assert.equal(archive.shouldRedirect, false);
-
-  const switchToEnglish = resolveDocsLandingRoute(
-    new URL('https://docs.hagicode.com/release-notes/?lang=en'),
+  const anchoredLanding = resolveDocsLandingRoute(
+    new URL('https://docs.hagicode.com/release-notes/#v1.0.0'),
     JSON.stringify({ lang: 'root' }),
     ['zh-CN', 'zh'],
   );
-  assert.equal(switchToEnglish.resolvedLocale, 'en');
-  assert.equal(switchToEnglish.targetUrl, 'https://docs.hagicode.com/en/release-notes/');
-  assert.equal(switchToEnglish.shouldRedirect, true);
+  assert.equal(anchoredLanding.resolvedLocale, 'root');
+  assert.equal(anchoredLanding.targetUrl, 'https://docs.hagicode.com/release-notes/#v1.0.0');
+  assert.equal(anchoredLanding.shouldRedirect, false);
+
+  const switchLandingToEnglish = resolveDocsLandingRoute(
+    new URL('https://docs.hagicode.com/release-notes/?lang=en#v1.0.0'),
+    JSON.stringify({ lang: 'root' }),
+    ['zh-CN', 'zh'],
+  );
+  assert.equal(switchLandingToEnglish.resolvedLocale, 'en');
+  assert.equal(switchLandingToEnglish.targetUrl, 'https://docs.hagicode.com/en/release-notes/#v1.0.0');
+  assert.equal(switchLandingToEnglish.shouldRedirect, true);
 
   const switchToChinese = resolveDocsLandingRoute(
-    new URL('https://docs.hagicode.com/en/release-notes/?lang=zh-CN'),
+    new URL('https://docs.hagicode.com/en/release-notes/?lang=zh-CN#v1.0.0'),
     JSON.stringify({ lang: 'en' }),
     ['en-US', 'en'],
   );
   assert.equal(switchToChinese.resolvedLocale, 'root');
-  assert.equal(switchToChinese.targetUrl, 'https://docs.hagicode.com/release-notes/');
+  assert.equal(switchToChinese.targetUrl, 'https://docs.hagicode.com/release-notes/#v1.0.0');
   assert.equal(switchToChinese.shouldRedirect, true);
 });
 

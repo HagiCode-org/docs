@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { mkdtemp, readFile } from 'node:fs/promises';
+import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 
@@ -26,13 +27,10 @@ function createSnapshot(tag = 'v1.0.0') {
         publishedAt: '2026-04-13T08:00:00.000Z',
         synchronizedAt: '2026-04-14T10:00:00.000Z',
         upstreamGeneratedAt: '2026-04-13T07:55:00.000Z',
+        anchorId: tag.toLowerCase().startsWith('v') ? tag.toLowerCase() : `v${tag.toLowerCase()}`,
         summary: {
           'zh-CN': '统一了 Code Server 的主要入口。',
           en: 'Unified the main Code Server entry flow.',
-        },
-        routes: {
-          'zh-CN': `/release-notes/${tag}/`,
-          en: `/en/release-notes/${tag}/`,
         },
         repositoryRanges: [
           {
@@ -77,29 +75,33 @@ function createSnapshot(tag = 'v1.0.0') {
   };
 }
 
-test('materialization writes bilingual detail pages and locale-specific landing routes', async () => {
+test('materialization writes only bilingual landing pages and strips legacy detail outputs', async () => {
   const repoRoot = await mkdtemp(path.join(process.env.TMPDIR ?? '/tmp', 'docs-release-notes-pages-'));
   const config = resolveReleaseNotesConfig({ repoRoot });
   const snapshot = createSnapshot('v1.0.0');
 
+  await fs.promises.mkdir(config.outputPaths.zhDir, { recursive: true });
+  await fs.promises.mkdir(config.outputPaths.enDir, { recursive: true });
+  await fs.promises.writeFile(path.join(config.outputPaths.zhDir, 'legacy.md'), 'stale', 'utf8');
+  await fs.promises.writeFile(path.join(config.outputPaths.enDir, 'legacy.md'), 'stale', 'utf8');
+
   await materializeReleaseNotes({ snapshot, config });
 
   const indexPayload = JSON.parse(await readFile(config.outputPaths.indexJson, 'utf8'));
-  const zhDetail = await readFile(path.join(config.outputPaths.zhDir, 'v1.0.0.md'), 'utf8');
-  const enDetail = await readFile(path.join(config.outputPaths.enDir, 'v1.0.0.md'), 'utf8');
   const zhLanding = await readFile(path.join(config.outputPaths.zhDir, 'index.mdx'), 'utf8');
   const enLanding = await readFile(path.join(config.outputPaths.enDir, 'index.mdx'), 'utf8');
 
+  assert.equal(indexPayload.entries[0].anchorId, 'v1.0.0');
   assert.match(indexPayload.entries[0].landingBodyHtml['zh-CN'], /<ul>/);
   assert.match(indexPayload.entries[0].landingBodyHtml.en, /Unified the main Code Server entry flow\./);
-  assert.match(zhDetail, /> 发布日期: 2026-04-13/);
-  assert.doesNotMatch(zhDetail, /slug:/);
-  assert.match(zhDetail, /\[Read English\]\(\/en\/release-notes\/v1\.0\.0\/\)/);
-  assert.match(enDetail, /> Release date: 2026-04-13/);
-  assert.doesNotMatch(enDetail, /slug:/);
-  assert.match(enDetail, /\[查看中文\]\(\/release-notes\/v1\.0\.0\/\)/);
+  assert.equal(Object.hasOwn(indexPayload.entries[0], 'routes'), false);
   assert.match(zhLanding, /<ReleaseNotesLanding locale="zh-CN" \/>/);
   assert.match(enLanding, /<ReleaseNotesLanding locale="en" \/>/);
+  assert.equal(path.basename(config.outputPaths.indexJson), 'release-notes.index.json');
+  assert.equal(fs.existsSync(path.join(config.outputPaths.zhDir, 'v1.0.0.md')), false);
+  assert.equal(fs.existsSync(path.join(config.outputPaths.enDir, 'v1.0.0.md')), false);
+  assert.equal(fs.existsSync(path.join(config.outputPaths.zhDir, 'legacy.md')), false);
+  assert.equal(fs.existsSync(path.join(config.outputPaths.enDir, 'legacy.md')), false);
 });
 
 test('landing helpers expose localized summaries and expanded body HTML only for the active locale', () => {
@@ -110,6 +112,8 @@ test('landing helpers expose localized summaries and expanded body HTML only for
   const enCopy = getReleaseNotesLandingCopy('en');
 
   assert.equal(zhEntries[0].summary, '统一了 Code Server 的主要入口。');
+  assert.equal(zhEntries[0].anchorId, 'v1.0.0');
+  assert.equal(zhEntries[0].anchorHref, '/release-notes/#v1.0.0');
   assert.match(zhEntries[0].bodyHtml, /Unified the main Code Server entry flow|统一了 Code Server 的主要入口/);
   assert.equal(zhEntries[0].repositoryCount, 1);
   assert.equal(zhEntries[0].totalCommitCount, 3);
@@ -117,6 +121,8 @@ test('landing helpers expose localized summaries and expanded body HTML only for
   assert.equal(Object.hasOwn(zhEntries[0], 'archiveRoute'), false);
 
   assert.equal(enEntries[0].summary, 'Unified the main Code Server entry flow.');
+  assert.equal(enEntries[0].anchorId, 'v1.0.0');
+  assert.equal(enEntries[0].anchorHref, '/en/release-notes/#v1.0.0');
   assert.match(enEntries[0].bodyHtml, /<ul>/);
   assert.equal(Object.hasOwn(enCopy, 'archiveLinkLabel'), false);
   assert.equal(Object.hasOwn(enEntries[0], 'archiveRoute'), false);

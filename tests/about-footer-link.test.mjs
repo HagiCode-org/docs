@@ -42,7 +42,15 @@ test('docs header navigation reuses the shared about link registry and keeps dis
   assert.match(navigationSource, /linkKey:\s*'about'/);
   assert.equal(navigationSource.includes('https://hagicode.com/about/'), false);
   assert.match(footerSource, /const discordLink = getLink\('discord'\);/);
+  assert.match(
+    footerSource,
+    /const steamLink = 'https:\/\/store\.steampowered\.com\/app\/4625540\/Hagicode\/';/,
+  );
   assert.match(footerSource, /<a href=\{discordLink\} class="unified-footer-link" target=\{discordTarget\} rel=\{discordRel\}>Discord<\/a>/);
+  assert.match(
+    footerSource,
+    /<a href=\{steamLink\} class="unified-footer-link" target="_blank" rel="noopener noreferrer">Steam<\/a>/,
+  );
 });
 
 test('docs snapshot artifact stays aligned with the canonical sites catalog for footer destinations', async () => {
