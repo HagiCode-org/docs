@@ -16,6 +16,8 @@ function parseArgs(argv) {
     repoRoot: undefined,
     repository: undefined,
     outputPath: undefined,
+    source: undefined,
+    localRepoRoot: undefined,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -35,6 +37,16 @@ function parseArgs(argv) {
       index += 1;
     } else if (argument.startsWith('--output=')) {
       options.outputPath = argument.slice('--output='.length);
+    } else if (argument === '--source') {
+      options.source = argv[index + 1];
+      index += 1;
+    } else if (argument.startsWith('--source=')) {
+      options.source = argument.slice('--source='.length);
+    } else if (argument === '--local-repo-root') {
+      options.localRepoRoot = argv[index + 1];
+      index += 1;
+    } else if (argument.startsWith('--local-repo-root=')) {
+      options.localRepoRoot = argument.slice('--local-repo-root='.length);
     } else if (argument === '--help' || argument === '-h') {
       console.log(`Usage: node scripts/sync-release-notes.mjs [options]
 
@@ -42,6 +54,9 @@ Options:
   --repo-root <path>    Override the docs repository root
   --repository <slug>   Override the GitHub repository slug
   --output <path>       Override the fetched snapshot output file
+  --source <mode>       Override the source mode: auto, github, or local
+  --local-repo-root <path>
+                        Override the local release-notes repository root
   -h, --help            Show this help
 `);
       process.exit(0);
@@ -54,9 +69,12 @@ Options:
 }
 
 const options = parseArgs(process.argv.slice(2));
-const env = options.repository
-  ? { ...process.env, DOCS_RELEASE_NOTES_REPOSITORY: options.repository }
-  : process.env;
+const env = {
+  ...process.env,
+  ...(options.repository ? { DOCS_RELEASE_NOTES_REPOSITORY: options.repository } : {}),
+  ...(options.source ? { DOCS_RELEASE_NOTES_SOURCE: options.source } : {}),
+  ...(options.localRepoRoot ? { DOCS_RELEASE_NOTES_LOCAL_REPO_ROOT: options.localRepoRoot } : {}),
+};
 const config = resolveReleaseNotesConfig({ repoRoot: options.repoRoot, env });
 let summary;
 

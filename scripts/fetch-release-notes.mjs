@@ -11,6 +11,8 @@ function parseArgs(argv) {
     repoRoot: undefined,
     outputPath: undefined,
     repository: undefined,
+    source: undefined,
+    localRepoRoot: undefined,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -30,6 +32,16 @@ function parseArgs(argv) {
       index += 1;
     } else if (argument.startsWith('--repository=')) {
       options.repository = argument.slice('--repository='.length);
+    } else if (argument === '--source') {
+      options.source = argv[index + 1];
+      index += 1;
+    } else if (argument.startsWith('--source=')) {
+      options.source = argument.slice('--source='.length);
+    } else if (argument === '--local-repo-root') {
+      options.localRepoRoot = argv[index + 1];
+      index += 1;
+    } else if (argument.startsWith('--local-repo-root=')) {
+      options.localRepoRoot = argument.slice('--local-repo-root='.length);
     } else if (argument === '--help' || argument === '-h') {
       console.log(`Usage: node scripts/fetch-release-notes.mjs [options]
 
@@ -37,6 +49,9 @@ Options:
   --repo-root <path>    Override the docs repository root
   --output <path>       Write the fetched snapshot to a JSON file
   --repository <slug>   Override the GitHub repository slug
+  --source <mode>       Override the source mode: auto, github, or local
+  --local-repo-root <path>
+                        Override the local release-notes repository root
   -h, --help            Show this help
 `);
       process.exit(0);
@@ -49,9 +64,12 @@ Options:
 }
 
 const options = parseArgs(process.argv.slice(2));
-const env = options.repository
-  ? { ...process.env, DOCS_RELEASE_NOTES_REPOSITORY: options.repository }
-  : process.env;
+const env = {
+  ...process.env,
+  ...(options.repository ? { DOCS_RELEASE_NOTES_REPOSITORY: options.repository } : {}),
+  ...(options.source ? { DOCS_RELEASE_NOTES_SOURCE: options.source } : {}),
+  ...(options.localRepoRoot ? { DOCS_RELEASE_NOTES_LOCAL_REPO_ROOT: options.localRepoRoot } : {}),
+};
 const config = resolveReleaseNotesConfig({ repoRoot: options.repoRoot, env });
 const snapshot = await fetchReleaseNotesSnapshot({ config });
 const outputPath = options.outputPath
