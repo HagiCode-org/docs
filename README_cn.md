@@ -43,8 +43,16 @@ Desktop 下载数据在运行时直接读取 `repos/index` 发布的 canonical i
 
 ## Release Notes 同步工作流
 
-新的版本更新说明入口现在由本仓库托管，受管输出位于 `src/content/docs/release-notes/`、`src/content/docs/en/release-notes/` 与 `src/data/release-notes.index.json`。
-这些文件统一从 `HagiCode-org/release-notes` 发布的 GitHub Release asset 生成。
+新的版本更新说明入口现在由本仓库托管，受管输出固定为单路由模式：
+
+- `src/data/release-notes.index.json`
+- `src/content/docs/release-notes/index.mdx`
+- `src/content/docs/en/release-notes/index.mdx`
+
+这些文件统一从权威的 `repos/release-notes` 工作区数据生成。
+同步结果不再生成 `src/content/docs/release-notes/<tag>.md` 或 `src/content/docs/en/release-notes/<tag>.md` 这类按 tag 拆分的详情页。
+版本级深链现在统一改为 landing 页面锚点，例如 `/release-notes/#v0.1.0-beta.46` 与 `/en/release-notes/#v0.1.0-beta.46`。
+对于 monorepo 内的自动化，首选路径是仓库到仓库的直接转移；GitHub Release asset 只保留为无本地 checkout 时的可选 fallback source。
 
 ### 常用命令
 
@@ -54,26 +62,49 @@ npm run release-notes:materialize
 npm run release-notes:sync
 npm run test:release-notes
 
-# 单仓开发时可直接读取本地 release-notes 仓库
-DOCS_RELEASE_NOTES_LOCAL_REPO_ROOT=../release-notes npm run release-notes:sync
+# monorepo / cron 路径：直接读取相邻的 release-notes 仓库
+DOCS_RELEASE_NOTES_SOURCE=local \
+DOCS_RELEASE_NOTES_LOCAL_REPO_ROOT=../release-notes \
+npm run release-notes:sync
 ```
 
-### 上游资产契约
+### Source 模式
 
-- docs 同步流程只接受命名为 `release-notes-<tag>-history.zip` 的 asset。
+- `DOCS_RELEASE_NOTES_SOURCE=local`
+  - 直接从 `DOCS_RELEASE_NOTES_LOCAL_REPO_ROOT` 读取 `artifacts/tags/<tag>/<tag>.json` 与 `published/<tag>.<locale>.md`。
+  - 这是 `hagirepocron` 与同机编排任务的目标模式。
+- `DOCS_RELEASE_NOTES_SOURCE=github`
+  - 从 `DOCS_RELEASE_NOTES_REPOSITORY` 的 GitHub Releases 与 `release-notes-<tag>-history.zip` asset 读取。
+  - 只适合 docs 无法访问本地 sibling checkout 的场景。
+- `DOCS_RELEASE_NOTES_SOURCE=auto`
+  - 默认模式。
+  - 设置了 `DOCS_RELEASE_NOTES_LOCAL_REPO_ROOT` 时优先走本地，否则回退到 GitHub。
+
+### 本地仓库契约
+
+- 每个同步的 tag 必须提供 `artifacts/tags/<tag>/<tag>.json`。
+- 每个同步的 tag 还必须同时提供 `published/<tag>.zh-CN.md` 与 `published/<tag>.en.md`。
+- 如果 JSON 缺失、JSON 非法、tag 不一致，或某个语言正文缺失，则该 tag 会按确定性原因跳过，不会发布部分页面。
+- 本次 docs 侧回滚不会修改这些上游输入路径，也不会改写 `published/` 下的正文结构；问题应优先在 docs 物化层排查。
+
+### GitHub fallback 资产契约
+
+- GitHub fallback 流程只接受命名为 `release-notes-<tag>-history.zip` 的 asset。
 - 每个可接受的压缩包都必须包含 `artifacts/tags/<tag>/<tag>.json`。
 - 每个可接受的压缩包还必须同时包含 `published/<tag>.zh-CN.md` 与 `published/<tag>.en.md`。
-- 如果 JSON 缺失、JSON 非法、tag 不一致，或某个语言正文缺失，则该 tag 会按确定性原因跳过，不会发布部分页面。
 
 ### 自动化与排障
 
 - `.github/workflows/release-notes-sync.yml` 会按日程运行，也支持 `workflow_dispatch` 手动触发。
+- 在 monorepo cron 路径中，`hagirepocron` 会显式设置 `DOCS_RELEASE_NOTES_SOURCE=local` 并传入 sibling `release-notes` 路径，因此 docs 页面物化不再依赖已发布的 release asset。
 - 工作流优先使用 `DOCS_RELEASE_NOTES_TOKEN` 访问上游 GitHub API；只有当当前仓库默认 `GITHUB_TOKEN` 本身就具备跨仓库可见性时，才会回退到它。
 - 在 CI 中，`DOCS_RELEASE_NOTES_ALLOW_STALE_ON_SOURCE_ERROR=true` 会在上游仓库暂时不可访问、但当前受管输出已存在时保留现状并继续通过工作流。
 - 同步脚本除 Node.js 之外，还依赖系统自带的 `zip` 与 `unzip` 工具。
-- 如果同步日志里出现 skipped tags，优先检查上游 Release asset 是否缺文件或内容异常，而不是直接手改本仓库里的生成文件。
+- 如果历史同步曾留下 `src/content/docs/release-notes/*.md` 或 `src/content/docs/en/release-notes/*.md`，重新运行 `npm run release-notes:sync` 会自动清理这些旧的受管详情页。
+- 如果需要排查“为什么页面仍然像旧的多路由模式”，先确认 `src/data/release-notes.index.json` 中是否已经移除了 `routes` 字段并为每个条目生成 `anchorId`。
+- 如果 local 模式下同步日志里出现 skipped tags，优先检查 `release-notes` 源文件；如果是 GitHub 模式，再检查上游 Release asset。
 - 如果 release discovery 返回 `404`，优先按认证或仓库访问问题排查，并确认 `DOCS_RELEASE_NOTES_TOKEN` 是否能读取 `HagiCode-org/release-notes`。
-- 如果是在 monorepo 本地开发，可设置 `DOCS_RELEASE_NOTES_LOCAL_REPO_ROOT` 指向相邻的 `release-notes` 仓库，以本地权威文件直接重建受管输出。
+- 如果是在 monorepo 本地开发，优先使用 `DOCS_RELEASE_NOTES_SOURCE=local` 加 `DOCS_RELEASE_NOTES_LOCAL_REPO_ROOT`。
 
 ## 在生态中的角色
 
