@@ -511,7 +511,7 @@ export function inspectReleaseNoteArchive({ zipPath, candidate }) {
         accepted: false,
         tag,
         reason: 'missing_locale_body',
-        message: `Archive is missing the required published body for ${locale}: ${bodyPath}.`,
+        message: `Archive is incomplete for docs sync; missing required published body for ${locale}: ${bodyPath}.`,
         locale,
       };
     }
@@ -601,7 +601,7 @@ async function inspectLocalReleaseNoteTag({ config, tag }) {
         accepted: false,
         tag,
         reason: 'missing_locale_body',
-        message: `Local source is missing published/${tag}.${locale}.md.`,
+        message: `Local source is incomplete for docs sync; missing published/${tag}.${locale}.md.`,
         locale,
       };
     }
@@ -612,7 +612,7 @@ async function inspectLocalReleaseNoteTag({ config, tag }) {
         accepted: false,
         tag,
         reason: 'empty_locale_body',
-        message: `Local source body published/${tag}.${locale}.md is empty.`,
+        message: `Local source is incomplete for docs sync because published/${tag}.${locale}.md is empty.`,
         locale,
       };
     }

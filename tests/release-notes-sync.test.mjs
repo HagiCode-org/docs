@@ -131,6 +131,40 @@ async function createLocalReleaseNotesRepoFixture() {
   return repoRoot;
 }
 
+async function createMixedLocalReleaseNotesRepoFixture() {
+  const repoRoot = await createLocalReleaseNotesRepoFixture();
+  await writeFixtureFile(
+    path.join(repoRoot, 'artifacts', 'tags', 'v1.0.1', 'v1.0.1.json'),
+    `${JSON.stringify({
+      generatedAt: '2026-04-14T14:14:52.517Z',
+      formatVersion: 1,
+      tag: 'v1.0.1',
+      repositories: {
+        web: {
+          path: 'repos/web',
+          group: {
+            range: 'v1.0.0..v1.0.1',
+            commits: [
+              {
+                hash: '123456',
+                shortHash: '123456',
+                date: '2026-04-14',
+                author: 'tester',
+                subject: 'fix: keep docs sync strict',
+              },
+            ],
+          },
+        },
+      },
+    }, null, 2)}\n`,
+  );
+  await writeFixtureFile(
+    path.join(repoRoot, 'published', 'v1.0.1.zh-CN.md'),
+    '# HagiCode\n\n- 保持 docs 同步严格。\n',
+  );
+  return repoRoot;
+}
+
 function createReleasePayload() {
   return [
     {
@@ -275,6 +309,34 @@ test('archive validation requires both published locales', async () => {
   assert.equal(inspection.accepted, false);
   assert.equal(inspection.reason, 'missing_locale_body');
   assert.equal(inspection.locale, 'en');
+});
+
+test('local source skips incomplete upstream tags without materializing partial docs outputs', async () => {
+  const localRepoRoot = await createMixedLocalReleaseNotesRepoFixture();
+  const config = resolveReleaseNotesConfig({
+    repoRoot: await mkdtemp(path.join(os.tmpdir(), 'docs-release-notes-local-sync-')),
+    env: {
+      DOCS_RELEASE_NOTES_SOURCE: 'local',
+      DOCS_RELEASE_NOTES_LOCAL_REPO_ROOT: localRepoRoot,
+    },
+  });
+
+  const snapshot = await fetchReleaseNotesSnapshot({ config });
+  const materialized = await materializeReleaseNotes({ snapshot, config });
+  const index = JSON.parse(await readFile(config.outputPaths.indexJson, 'utf8'));
+  const summary = createSyncSummaryMarkdown({ snapshot, materialized });
+
+  assert.deepEqual(snapshot.entries.map((entry) => entry.tag), ['v1.0.0']);
+  assert.deepEqual(snapshot.skipped.map((entry) => [entry.tag, entry.reason]), [['v1.0.1', 'missing_locale_body']]);
+  assert.match(snapshot.skipped[0].message, /incomplete for docs sync/u);
+  assert.deepEqual(materialized.writtenFiles, [
+    'src/data/release-notes.index.json',
+    'src/content/docs/release-notes/index.mdx',
+    'src/content/docs/en/release-notes/index.mdx',
+  ]);
+  assert.deepEqual(index.entries.map((entry) => entry.tag), ['v1.0.0']);
+  assert.match(summary, /v1\.0\.1/);
+  assert.match(summary, /missing_locale_body/);
 });
 
 test('normalization preserves display tags, sorts semver consistently, and materialization is idempotent', async () => {
