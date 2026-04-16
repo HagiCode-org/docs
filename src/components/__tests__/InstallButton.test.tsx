@@ -9,6 +9,7 @@ import * as versionManager from '@shared/version-manager';
 import InstallButton from '../InstallButton';
 
 const fallbackUrl = 'https://index.hagicode.com/desktop/history/';
+const fallbackSteamUrl = 'https://store.steampowered.com/app/4625540/Hagicode/';
 
 vi.mock('@shared/version-manager', async () => {
   const actual = await vi.importActual<typeof import('@shared/version-manager')>('@shared/version-manager');
@@ -21,6 +22,19 @@ vi.mock('@shared/version-manager', async () => {
 
 vi.mock('@shared/links', () => ({
   getLink: vi.fn(() => '/container/'),
+}));
+
+vi.mock('@shared/steam-store-link', () => ({
+  getFallbackSteamStoreLink: vi.fn(() => ({
+    href: fallbackSteamUrl,
+    source: 'fallback',
+    updatedAt: null,
+  })),
+  loadSteamStoreLink: vi.fn(async () => ({
+    href: fallbackSteamUrl,
+    source: 'canonical',
+    updatedAt: '2026-04-16T00:00:00.000Z',
+  })),
 }));
 
 function createVersionData(overrides: Partial<DesktopVersionData> = {}): DesktopVersionData {
@@ -270,6 +284,80 @@ describe('InstallButton runtime states', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Select Other Version' }));
     expect(await screen.findByRole('menu')).toBeInTheDocument();
+  });
+
+  it('adds a direct Steam shortcut to the compact header install cluster', async () => {
+    vi.mocked(versionManager.getDesktopVersionData).mockResolvedValue(
+      createVersionData({
+        latest: {
+          version: 'v1.2.4',
+          assets: [
+            {
+              name: 'Hagicode.Desktop.Setup.1.2.4.exe',
+              path: 'v1.2.4/Hagicode.Desktop.Setup.1.2.4.exe',
+              size: 1048576,
+              lastModified: null,
+              torrentUrl: 'v1.2.4/Hagicode.Desktop.Setup.1.2.4.exe.torrent',
+              downloadSources: [
+                {
+                  kind: 'official',
+                  label: 'Official Download',
+                  url: 'https://desktop.dl.hagicode.com/v1.2.4/Hagicode.Desktop.Setup.1.2.4.exe',
+                  primary: true,
+                },
+                {
+                  kind: 'github-release',
+                  label: 'GitHub Release',
+                  url: 'https://github.com/HagiCode-org/releases/download/v1.2.4/Hagicode.Desktop.Setup.1.2.4.exe',
+                },
+              ],
+            },
+          ],
+        },
+        channels: {
+          stable: {
+            latest: {
+              version: 'v1.2.4',
+              assets: [
+                {
+                  name: 'Hagicode.Desktop.Setup.1.2.4.exe',
+                  path: 'v1.2.4/Hagicode.Desktop.Setup.1.2.4.exe',
+                  size: 1048576,
+                  lastModified: null,
+                  torrentUrl: 'v1.2.4/Hagicode.Desktop.Setup.1.2.4.exe.torrent',
+                  downloadSources: [
+                    {
+                      kind: 'official',
+                      label: 'Official Download',
+                      url: 'https://desktop.dl.hagicode.com/v1.2.4/Hagicode.Desktop.Setup.1.2.4.exe',
+                      primary: true,
+                    },
+                    {
+                      kind: 'github-release',
+                      label: 'GitHub Release',
+                      url: 'https://github.com/HagiCode-org/releases/download/v1.2.4/Hagicode.Desktop.Setup.1.2.4.exe',
+                    },
+                  ],
+                },
+              ],
+            },
+            all: [],
+          },
+          beta: { latest: null, all: [] },
+        },
+      }),
+    );
+
+    render(<InstallButton variant="compact" locale="en" />);
+
+    const steamLink = await screen.findByRole('link', { name: 'Open Hagicode on Steam' });
+    expect(steamLink).toHaveAttribute('href', fallbackSteamUrl);
+    expect(steamLink).toHaveAttribute('target', '_blank');
+    expect(steamLink).toHaveAttribute('rel', 'noopener noreferrer');
+    expect(steamLink).toHaveTextContent('Steam');
+    expect(steamLink.querySelector('[data-steam-icon=\"true\"]')).not.toBeNull();
+    expect(screen.getByRole('link', { name: /China/i })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /GitHub/i })).toBeInTheDocument();
   });
 
   it('hides the missing GitHub button when only the accelerated source is available', async () => {

@@ -36,6 +36,7 @@ import type {
   DesktopVersionState,
 } from '@shared/version-manager';
 import { getLink } from '@shared/links';
+import { getFallbackSteamStoreLink, loadSteamStoreLink } from '@shared/steam-store-link';
 import { FEATURE_MAC_DOWNLOAD_ENABLED } from '@/config/features';
 
 const MAC_DOWNLOAD_DISABLED_NOTICE = '建议安装 Docker 版本';
@@ -58,6 +59,41 @@ interface PlatformDownloads {
 interface InstallButtonPrimaryTarget {
   option: DownloadOption | null;
   actions: PrimaryDownloadActionPair;
+}
+
+function SteamIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      fill="none"
+      xmlns="http://www.w3.org/2000/svg"
+      aria-hidden="true"
+      data-steam-icon="true"
+    >
+      <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="1.75" />
+      <circle cx="16.8" cy="7.8" r="2.15" stroke="currentColor" strokeWidth="1.75" />
+      <circle cx="9.1" cy="15.1" r="1.45" fill="currentColor" />
+      <path
+        d="M10.2 14.2L14.7 10.3"
+        stroke="currentColor"
+        strokeWidth="1.75"
+        strokeLinecap="round"
+      />
+      <path
+        d="M15.6 9.2a1.75 1.75 0 1 0 2.4-2.4"
+        stroke="currentColor"
+        strokeWidth="1.75"
+        strokeLinecap="round"
+      />
+      <path
+        d="M7.5 14.6l2.8 1.5"
+        stroke="currentColor"
+        strokeWidth="1.75"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
 }
 
 interface InstallButtonProps {
@@ -223,6 +259,7 @@ export default function InstallButton({
   const [platforms, setPlatforms] = useState<PlatformGroup[]>(initialPlatforms);
   const [error, setError] = useState<string | null>(versionError);
   const [runtimeData, setRuntimeData] = useState<DesktopVersionData | null>(null);
+  const [steamStoreLink, setSteamStoreLink] = useState(() => getFallbackSteamStoreLink());
   const [isLoading, setIsLoading] = useState(
     !initialVersion && initialPlatforms.length === 0 && !versionError,
   );
@@ -260,6 +297,9 @@ export default function InstallButton({
   const containerLink = useMemo(() => (
     locale === 'en' ? 'https://hagicode.com/en/container/' : getLink('container')
   ), [locale]);
+  const steamShortcutLabel = 'Steam';
+  const steamShortcutAriaLabel =
+    locale === 'en' ? 'Open Hagicode on Steam' : '打开 Hagicode Steam 商店页';
 
   const loadRuntimeVersionData = useCallback(() => {
     let mounted = true;
@@ -314,6 +354,20 @@ export default function InstallButton({
       mounted = false;
     };
   }, [channel]);
+
+  useEffect(() => {
+    let mounted = true;
+
+    void loadSteamStoreLink().then((nextLink) => {
+      if (mounted) {
+        setSteamStoreLink(nextLink);
+      }
+    });
+
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
   useEffect(() => {
     if (initialVersion || initialPlatforms.length > 0 || versionError) {
@@ -461,6 +515,8 @@ export default function InstallButton({
     .filter((entry) => Boolean(entry.action));
   const showDisabledPrimaryButtons = primarySourceButtons.length === 0;
   const primaryButtonsDisabled = isLoading || !canDownload || (!FEATURE_MAC_DOWNLOAD_ENABLED && currentOS === 'macos');
+  const showSteamShortcut = variant === 'compact' && steamStoreLink.href.length > 0;
+  const showDropdownToggle = canDownload && platformData.length > 0;
 
   const macDisabledSection = !FEATURE_MAC_DOWNLOAD_ENABLED && macPlatform ? (
     <>
@@ -568,7 +624,21 @@ export default function InstallButton({
           })}
         </div>
 
-        {canDownload && platformData.length > 0 && (
+        {showSteamShortcut && (
+          <a
+            href={steamStoreLink.href}
+            className={`btn-download-source btn-download-source--steam btn-download-source--steam-shortcut ${showDropdownToggle ? '' : 'btn-download-source--steam-shortcut-last'}`.trim()}
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label={steamShortcutAriaLabel}
+            data-steam-entry="docs-header-install"
+          >
+            <SteamIcon className="download-icon" />
+            <span className="btn-text">{steamShortcutLabel}</span>
+          </a>
+        )}
+
+        {showDropdownToggle && (
           <>
             <button
               className="btn-dropdown-toggle"
