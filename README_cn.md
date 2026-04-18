@@ -33,6 +33,17 @@ npm run preview
 
 本地文档站默认运行在 `http://localhost:31265`。
 
+## 截图分析工作流
+
+受管截图同步流程会在启动 ImgBin 之前读取 `repos/docs/.env`。
+仓库默认使用下面这组图片分析配置：
+
+- `IMGBIN_ANALYSIS_PROVIDER=codex`
+- `IMGBIN_CODEX_MODEL=lemon/gpt-5.4`
+- `IMGBIN_CODEX_BASE_URL=http://localhost:36129/v1`
+
+如果你需要给 `npm run screenshots:sync` 准备一份本地配置文件，可以把 [`./.env.example`](./.env.example) 复制成 `.env`。
+
 ## Desktop 版本数据
 
 Desktop 下载数据在运行时直接读取 `repos/index` 发布的 canonical index 端点。
