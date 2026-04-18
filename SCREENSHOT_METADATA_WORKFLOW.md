@@ -71,16 +71,16 @@ Remaining follow-up items after this backlog pass:
 
 - Run commands from `repos/docs`
 - Ensure `@hagicode/imgbin` is installed in `repos/docs` (recommended), or `repos/imgbin/dist/cli.js` exists as a fallback
-- Ensure the `claude` CLI is installed and available in `PATH`
+- Ensure the `codex` CLI is installed and available in `PATH`
 - Ensure `repos/docs/.env` contains valid analysis settings
 - Ensure the checked-in ImgBin analysis context file exists at `repos/docs/prompts/screenshot-analysis-context.txt`, unless you plan to override it explicitly
 
 Recommended `repos/docs/.env` keys:
 
 ```bash
-IMGBIN_ANALYSIS_CLI_PATH=claude
-IMGBIN_ANALYSIS_API_MODEL=glm-5
-ANTHROPIC_MODEL=glm-5
+IMGBIN_ANALYSIS_PROVIDER=codex
+IMGBIN_CODEX_MODEL=lemon/gpt-5.4
+IMGBIN_CODEX_BASE_URL=http://localhost:36129/v1
 IMGBIN_ANALYSIS_TIMEOUT_MS=180000
 SCREENSHOT_ANALYSIS_CONTEXT_FILE=./prompts/screenshot-analysis-context.txt
 ```
@@ -447,7 +447,7 @@ npm run screenshots:sync -- --analysis-context-file ./prompts/experimental-conte
 
 ## Troubleshooting
 
-### `Claude CLI analysis timed out after 60000ms`
+### `Codex analysis timed out after 60000ms`
 
 Increase the timeout in `repos/docs/.env` or your shell environment:
 
@@ -473,12 +473,13 @@ Verify:
 
 If this is a one-off batch, prefer a CLI override. If the missing file should be the repository default, restore or fix `repos/docs/prompts/screenshot-analysis-context.txt` so CI and local runs stay aligned.
 
-### `Claude analysis model is not configured`
+### `Codex analysis model is not configured`
 
-Verify `repos/docs/.env` contains either:
+Verify `repos/docs/.env` contains:
 
-- `IMGBIN_ANALYSIS_API_MODEL`
-- `ANTHROPIC_MODEL`
+- `IMGBIN_ANALYSIS_PROVIDER=codex`
+- `IMGBIN_CODEX_MODEL=lemon/gpt-5.4`
+- `IMGBIN_CODEX_BASE_URL=http://localhost:36129/v1`
 
 ### `EXDEV: cross-device link not permitted`
 
