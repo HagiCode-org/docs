@@ -98,6 +98,9 @@ test('resolveConfig loads docs .env defaults and prepares a workspace tmp direct
   assert.equal(config.imgbinExecutable, './fake-imgbin.mjs');
   assert.equal(config.analysisContextFilePath, path.join(docsRoot, 'prompts', 'screenshot-analysis-context.txt'));
   assert.equal(config.analysisContextFileSource, 'default checked-in analysis context file');
+  assert.equal(config.env.IMGBIN_ANALYSIS_PROVIDER, 'codex');
+  assert.equal(config.env.IMGBIN_CODEX_MODEL, 'lemon/gpt-5.4');
+  assert.equal(config.env.IMGBIN_CODEX_BASE_URL, 'http://localhost:36129/v1');
   assert.equal(config.tempDir, path.join(docsRoot, '.tmp'));
   assert.equal(config.env.TMPDIR, path.join(docsRoot, '.tmp'));
   assert.equal(config.env.TMP, path.join(docsRoot, '.tmp'));

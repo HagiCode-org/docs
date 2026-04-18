@@ -16,6 +16,11 @@ const DEFAULT_INSTALLED_IMGBIN_PACKAGE_RELATIVE = path.join('node_modules', '@ha
 const DEFAULT_IMGBIN_RELATIVE = path.join('..', 'imgbin', 'dist', 'cli.js');
 const DEFAULT_DOTENV_RELATIVE = '.env';
 const DEFAULT_TMP_RELATIVE = '.tmp';
+const DEFAULT_IMGBIN_ANALYSIS_ENV = Object.freeze({
+  IMGBIN_ANALYSIS_PROVIDER: 'codex',
+  IMGBIN_CODEX_MODEL: 'lemon/gpt-5.4',
+  IMGBIN_CODEX_BASE_URL: 'http://localhost:36129/v1'
+});
 const SUPPORTED_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp']);
 const LOG_PREFIX = '[screenshots:sync]';
 
@@ -1004,6 +1009,7 @@ async function resolveRuntimeEnvironment(docsRoot, baseEnv) {
   const envPath = path.join(docsRoot, DEFAULT_DOTENV_RELATIVE);
   const dotenvValues = await loadDotEnvFile(envPath);
   const env = {
+    ...DEFAULT_IMGBIN_ANALYSIS_ENV,
     ...dotenvValues,
     ...baseEnv
   };

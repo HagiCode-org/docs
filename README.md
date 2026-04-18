@@ -33,6 +33,17 @@ npm run preview
 
 The local docs server runs on `http://localhost:31265` by default.
 
+## Screenshot analysis workflow
+
+The managed screenshot sync flow reads `repos/docs/.env` before it launches ImgBin.
+The repository default for image analysis is:
+
+- `IMGBIN_ANALYSIS_PROVIDER=codex`
+- `IMGBIN_CODEX_MODEL=lemon/gpt-5.4`
+- `IMGBIN_CODEX_BASE_URL=http://localhost:36129/v1`
+
+Copy [`./.env.example`](./.env.example) to `.env` when you need a local config file for `npm run screenshots:sync`.
+
 ## Desktop version data
 
 Desktop download data is fetched at runtime from the canonical index endpoint published by `repos/index`.
