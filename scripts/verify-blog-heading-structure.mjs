@@ -72,8 +72,11 @@ function verifyCollectionRoutes() {
 }
 
 function verifyPostRoutes() {
-  for (const entry of getBlogSourceEntries()) {
+  for (const entry of getBlogSourceEntries({ locale: 'zh' })) {
     verifyPostRoute(path.posix.join('blog', entry.slug, 'index.html'), entry.title);
+  }
+
+  for (const entry of getBlogSourceEntries({ locale: 'en' })) {
     verifyPostRoute(path.posix.join('en/blog', entry.slug, 'index.html'), entry.title);
   }
 }

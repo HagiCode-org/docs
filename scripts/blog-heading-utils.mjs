@@ -2,10 +2,27 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 export const blogContentDir = path.resolve(process.cwd(), 'src/content/docs/blog');
+export const englishBlogContentDir = path.resolve(process.cwd(), 'src/content/docs/en/blog');
 export const distDir = path.resolve(process.cwd(), 'dist');
+export const blogLocaleDirs = {
+  zh: 'src/content/docs/blog',
+  en: 'src/content/docs/en/blog',
+};
 
 export function normalizeText(value) {
-  return value.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+  return decodeHtmlEntities(value)
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function decodeHtmlEntities(value) {
+  return value
+    .replace(/&#39;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>');
 }
 
 export function splitFrontmatter(source) {
@@ -123,24 +140,31 @@ export function listRenderedHtmlFiles(relativeDir) {
   return results.sort();
 }
 
-export function getBlogSourceEntries() {
-  if (!fs.existsSync(blogContentDir)) {
-    throw new Error(`Missing blog content directory: ${blogContentDir}`);
+export function getBlogSourceEntries({ locale = 'zh', rootDir = process.cwd() } = {}) {
+  const relativeDir = blogLocaleDirs[locale];
+  if (!relativeDir) {
+    throw new Error(`Unsupported blog locale: ${locale}`);
+  }
+
+  const contentDir = path.resolve(rootDir, relativeDir);
+  if (!fs.existsSync(contentDir)) {
+    throw new Error(`Missing blog content directory: ${contentDir}`);
   }
 
   return fs
-    .readdirSync(blogContentDir)
+    .readdirSync(contentDir)
     .filter((name) => name.endsWith('.md') || name.endsWith('.mdx'))
     .sort()
     .map((name) => {
-      const relativePath = path.join('src/content/docs/blog', name);
-      const fullPath = path.join(blogContentDir, name);
+      const relativePath = path.join(relativeDir, name);
+      const fullPath = path.join(contentDir, name);
       const source = readTextFile(fullPath);
       const { frontmatter, body, bodyStartLine } = splitFrontmatter(source);
       const slug = name.replace(/\.(md|mdx)$/i, '');
       return {
         fullPath,
         relativePath,
+        locale,
         slug,
         title: parseFrontmatterTitle(frontmatter),
         body,
