@@ -165,7 +165,7 @@ Hermes generates an outline from the research note.
 The outline must include:
 
 - 3 title candidates
-- 2 meta description candidates
+- 2 meta description candidates, with one marked as the preferred top-level `description`
 - H2 and H3 structure
 - FAQ suggestions
 - internal link placements
@@ -187,12 +187,20 @@ Hermes generates the article draft into `seo/drafts/` using the approved outline
 Draft requirements:
 
 - include frontmatter
+- set a publishable top-level `description`
 - use only approved facts
 - use repository-aligned product naming
 - include internal links from the brief where appropriate
 - use concrete commands and file paths when relevant
 - avoid keyword stuffing
 - avoid generic AI filler language
+
+Description rules:
+
+- The top-level `description` field is the only publishable source of truth.
+- Manual edits to `description` take priority over generated suggestions.
+- If a draft starts from a generated lead paragraph, rewrite it before publication when the wording is generic, repetitive, or too close to the title.
+- Do not move the description into `seo.description` or any other nested field.
 
 The draft stays out of `src/content/docs/blog/` until it passes review.
 
@@ -217,19 +225,14 @@ Run repository checks before approval.
 Current available verification commands:
 
 ```bash
+npm run sync:blog-seo-descriptions
+npm run sync:blog-seo-descriptions:write
+npm run verify:blog-seo
 npm run verify:blog
 npm run build:verify-blog
 ```
 
-Current repo checks validate blog structure and rendering, but they do not yet validate SEO workflow metadata. Add more checks over time.
-
-Future recommended checks:
-
-- `verify:seo-frontmatter`
-- `verify:seo-source-traceability`
-- `verify:seo-internal-links`
-- `verify:seo-metadata-length`
-- `verify:seo-duplicate-topics`
+Current repo checks validate blog structure, rendering, and SEO description quality. Publication is blocked when `description` is missing, empty after normalization, over the hard limit, or effectively duplicates the title.
 
 ### Stage 7: Human review
 
