@@ -49,6 +49,11 @@ export const navLinks: NavLink[] = [
     linkKey: 'website',
   },
   {
+    label: "部署生成器",
+    labelEn: "Builder",
+    href: 'https://builder.hagicode.com/',
+  },
+  {
     label: "博客",
     labelEn: "Blog",
     href: getLink('blog'),

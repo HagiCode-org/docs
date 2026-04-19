@@ -31,4 +31,18 @@ describe('docs navigation support entry', () => {
     expect(linkKeys).not.toContain('qqGroup');
     expect(linkKeys).not.toContain('discord');
   });
+
+  it('exposes the builder site as a crawlable header path in both locales', () => {
+    const chineseBuilderLink = getLocalizedNavLinks('zh-CN').find((link) => link.href === 'https://builder.hagicode.com/');
+    const englishBuilderLink = getLocalizedNavLinks('en').find((link) => link.href === 'https://builder.hagicode.com/');
+
+    expect(chineseBuilderLink).toMatchObject({
+      href: 'https://builder.hagicode.com/',
+      displayLabel: '部署生成器',
+    });
+    expect(englishBuilderLink).toMatchObject({
+      href: 'https://builder.hagicode.com/',
+      displayLabel: 'Builder',
+    });
+  });
 });
