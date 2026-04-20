@@ -8,8 +8,10 @@
 import semver from 'semver';
 
 import type {
+  ChannelInfo,
   DownloadAction,
   DesktopAsset,
+  DesktopChannels,
   DesktopIndexResponse,
   DesktopPlatform,
   DesktopStructuredSourceKind,
@@ -437,13 +439,20 @@ function assertBrowserEnvironment(): void {
   }
 }
 
-function isValidChannelInfo(channel: unknown): boolean {
+function isValidChannelInfo(channel: unknown): channel is ChannelInfo {
   if (!channel || typeof channel !== 'object') {
     return false;
   }
 
   const maybeChannel = channel as { latest?: unknown; versions?: unknown };
-  return typeof maybeChannel.latest === 'string' && Array.isArray(maybeChannel.versions);
+  const hasValidLatest =
+    maybeChannel.latest === null || typeof maybeChannel.latest === 'string';
+
+  return (
+    hasValidLatest &&
+    Array.isArray(maybeChannel.versions) &&
+    maybeChannel.versions.every((version): version is string => typeof version === 'string')
+  );
 }
 
 function normalizeDesktopVersionEntry(version: unknown): DesktopVersion {
@@ -501,28 +510,49 @@ function normalizeDesktopIndexPayload(payload: unknown): DesktopIndexResponse {
 
   const normalizedVersions = data.versions.map((version) => normalizeDesktopVersionEntry(version));
 
-  if (data.channels) {
-    if (!isValidChannelInfo(data.channels.stable) || !isValidChannelInfo(data.channels.beta)) {
-      throw new Error('Invalid desktop index payload: malformed channel data');
+  const normalizedChannels = (() => {
+    if (!data.channels) {
+      return undefined;
     }
-  }
+
+    const stableChannel = data.channels.stable;
+    if (!isValidChannelInfo(stableChannel)) {
+      throw new Error('Invalid desktop index payload: malformed stable channel data');
+    }
+
+    const nextChannels: DesktopChannels = {
+      stable: {
+        latest: stableChannel.latest,
+        versions: [...stableChannel.versions],
+      },
+    };
+
+    for (const [name, rawChannel] of Object.entries(data.channels)) {
+      if (name === 'stable' || !isValidChannelInfo(rawChannel)) {
+        continue;
+      }
+
+      nextChannels[name] = {
+        latest: rawChannel.latest,
+        versions: [...rawChannel.versions],
+      };
+    }
+
+    if (!('beta' in nextChannels)) {
+      nextChannels.beta = {
+        latest: null,
+        versions: [],
+      };
+    }
+
+    return nextChannels;
+  })();
 
   return {
     ...data,
     versions: normalizedVersions
       .sort((a, b) => compareVersions(b.version, a.version)),
-    channels: data.channels
-      ? {
-          stable: {
-            latest: data.channels.stable.latest,
-            versions: [...data.channels.stable.versions],
-          },
-          beta: {
-            latest: data.channels.beta.latest,
-            versions: [...data.channels.beta.versions],
-          },
-        }
-      : undefined,
+    channels: normalizedChannels,
   };
 }
 
@@ -773,7 +803,7 @@ export function getAssetTypeLabel(assetType: AssetType, locale: 'zh' | 'en' = 'z
 
 export async function getChannelLatestVersion(
   channel: 'stable' | 'beta',
-): Promise<DesktopVersion> {
+): Promise<DesktopVersion | null> {
   const data = await fetchDesktopVersions();
 
   if (!data.channels || !data.channels[channel]) {
@@ -781,6 +811,9 @@ export async function getChannelLatestVersion(
   }
 
   const channelInfo = data.channels[channel];
+  if (!channelInfo.latest) {
+    return null;
+  }
   const latestVersionObj = data.versions.find((v) => v.version === channelInfo.latest);
 
   if (!latestVersionObj) {

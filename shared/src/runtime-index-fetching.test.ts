@@ -89,6 +89,28 @@ describe('docs runtime index fetching', () => {
     expect(first.platforms).toHaveLength(3);
   });
 
+  it('accepts a stable-only release index when beta has no published version', async () => {
+    const fixture = structuredClone(desktopIndexFixture) as {
+      channels: Record<string, { latest: string | null; versions: string[] }>;
+    };
+    fixture.channels.beta = { latest: null, versions: [] };
+    fixture.channels.dev = { latest: null, versions: [] };
+
+    const fetchMock = vi.fn().mockResolvedValue(createJsonResponse(fixture));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const data = await getDesktopVersionData();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(data.source).toBe('primary');
+    expect(data.status).toBe('ready');
+    expect(data.error).toBeNull();
+    expect(data.latest?.version).toBe('v1.2.3');
+    expect(data.channels.stable.latest?.version).toBe('v1.2.3');
+    expect(data.channels.beta.latest).toBeNull();
+    expect(data.channels.beta.all).toEqual([]);
+  });
+
   it('falls back to the backup source when the primary payload is invalid', async () => {
     const fetchMock = vi.fn().mockImplementation(async (url: string) => {
       if (url === PRIMARY_INDEX_JSON_URL) {
