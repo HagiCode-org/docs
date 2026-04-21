@@ -44,4 +44,9 @@ export const DOCS_SIDEBAR = [
     translations: { en: 'Release Notes' },
     link: '/release-notes',
   },
+  {
+    label: 'DLC',
+    translations: { en: 'DLC' },
+    autogenerate: { directory: 'dlc' },
+  },
 ];
