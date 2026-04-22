@@ -157,6 +157,27 @@ function convertPlatformGroups(platforms: PlatformGroup[]): PlatformDownloads[] 
   }));
 }
 
+function isUnsupportedPublicDownload(
+  download: Pick<DownloadOption, 'assetType' | 'label'>,
+): boolean {
+  const assetType = String(download.assetType);
+  return assetType === 'linux-deb'
+    || assetType === 'linux-arm64-deb'
+    || download.label.toLowerCase().endsWith('.deb');
+}
+
+export function filterSupportedPlatformGroups(platforms: PlatformGroup[]): PlatformGroup[] {
+  return platforms
+    .map((platform) => ({
+      ...platform,
+      downloads: platform.downloads.filter((download) => !isUnsupportedPublicDownload({
+        assetType: download.assetType,
+        label: download.filename,
+      })),
+    }))
+    .filter((platform) => platform.downloads.length > 0);
+}
+
 export function resolveDocsInstallPrimaryTarget(
   platformData: PlatformDownloads[],
   userOS: 'windows' | 'macos' | 'linux' | 'unknown',
@@ -254,14 +275,18 @@ export default function InstallButton({
   channel = 'stable',
   locale = 'zh',
 }: InstallButtonProps) {
+  const supportedInitialPlatforms = useMemo(
+    () => filterSupportedPlatformGroups(initialPlatforms),
+    [initialPlatforms],
+  );
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
   const [version, setVersion] = useState<DesktopVersion | null>(initialVersion);
-  const [platforms, setPlatforms] = useState<PlatformGroup[]>(initialPlatforms);
+  const [platforms, setPlatforms] = useState<PlatformGroup[]>(supportedInitialPlatforms);
   const [error, setError] = useState<string | null>(versionError);
   const [runtimeData, setRuntimeData] = useState<DesktopVersionData | null>(null);
   const [steamStoreLink, setSteamStoreLink] = useState(() => getFallbackSteamStoreLink());
   const [isLoading, setIsLoading] = useState(
-    !initialVersion && initialPlatforms.length === 0 && !versionError,
+    !initialVersion && supportedInitialPlatforms.length === 0 && !versionError,
   );
 
   const t = useMemo(() => {
@@ -313,7 +338,7 @@ export default function InstallButton({
         }
 
         const latest = selectLatestForChannel(data, channel);
-        const nextPlatforms = latest ? groupAssetsByPlatform(latest.assets) : [];
+        const nextPlatforms = latest ? filterSupportedPlatformGroups(groupAssetsByPlatform(latest.assets)) : [];
 
         setRuntimeData(data);
         setVersion(latest);
@@ -370,12 +395,12 @@ export default function InstallButton({
   }, []);
 
   useEffect(() => {
-    if (initialVersion || initialPlatforms.length > 0 || versionError) {
+    if (initialVersion || supportedInitialPlatforms.length > 0 || versionError) {
       return;
     }
 
     return loadRuntimeVersionData();
-  }, [initialPlatforms.length, initialVersion, loadRuntimeVersionData, versionError]);
+  }, [initialVersion, loadRuntimeVersionData, supportedInitialPlatforms.length, versionError]);
 
   const buttonId = useId();
   const currentOS = useMemo(() => detectOS(), []);
@@ -469,10 +494,10 @@ export default function InstallButton({
     setVersion(null);
     setPlatforms([]);
     setError(null);
-    if (!initialVersion && initialPlatforms.length === 0 && !versionError) {
+    if (!initialVersion && supportedInitialPlatforms.length === 0 && !versionError) {
       loadRuntimeVersionData();
     }
-  }, [initialPlatforms.length, initialVersion, loadRuntimeVersionData, versionError]);
+  }, [initialVersion, loadRuntimeVersionData, supportedInitialPlatforms.length, versionError]);
 
   const historyFallbackTarget =
     runtimeData?.fallbackTarget ?? (versionError ? DESKTOP_HISTORY_FALLBACK_URL : null);

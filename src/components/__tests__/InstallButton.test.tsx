@@ -4,9 +4,10 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { AssetType, CpuArchitecture } from '@shared/desktop';
 import type { DesktopVersionData } from '@shared/version-manager';
 import * as versionManager from '@shared/version-manager';
-import InstallButton from '../InstallButton';
+import InstallButton, { filterSupportedPlatformGroups } from '../InstallButton';
 
 const fallbackUrl = 'https://index.hagicode.com/desktop/history/';
 const fallbackSteamUrl = 'https://store.steampowered.com/app/4625540/Hagicode/';
@@ -131,6 +132,38 @@ describe('InstallButton runtime states', () => {
       'href',
       expect.stringContaining('Hagicode.Desktop.Setup.1.2.3.exe'),
     );
+  });
+
+  it('filters historical deb downloads out of precomputed platform groups', () => {
+    const filtered = filterSupportedPlatformGroups([
+      {
+        platform: 'linux',
+        architectures: [CpuArchitecture.X64],
+        downloads: [
+          {
+            url: 'https://desktop.dl.hagicode.com/v1.2.4/Hagicode.Desktop-1.2.4.AppImage',
+            size: '120 MB',
+            filename: 'Hagicode.Desktop-1.2.4.AppImage',
+            assetType: AssetType.LinuxAppImage,
+            architecture: CpuArchitecture.X64,
+            sourceActions: [],
+          },
+          {
+            url: 'https://desktop.dl.hagicode.com/v1.2.4/hagicode-desktop_1.2.4_amd64.deb',
+            size: '118 MB',
+            filename: 'hagicode-desktop_1.2.4_amd64.deb',
+            assetType: 'linux-deb' as AssetType,
+            architecture: CpuArchitecture.X64,
+            sourceActions: [],
+          },
+        ],
+      },
+    ]);
+
+    expect(filtered).toHaveLength(1);
+    expect(filtered[0]?.downloads.map((download) => download.filename)).toEqual([
+      'Hagicode.Desktop-1.2.4.AppImage',
+    ]);
   });
 
   it('renders separate accelerated and GitHub buttons while keeping torrent in the version menu', async () => {

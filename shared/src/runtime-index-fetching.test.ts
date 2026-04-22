@@ -34,11 +34,18 @@ const desktopIndexFixture = {
           size: 1048576,
           lastModified: null,
         },
+        {
+          name: 'hagicode-desktop_1.2.3_amd64.deb',
+          path: 'v1.2.3/hagicode-desktop_1.2.3_amd64.deb',
+          size: 1048576,
+          lastModified: null,
+        },
       ],
       files: [
         'v1.2.3/Hagicode.Desktop.Setup.1.2.3.exe',
         'v1.2.3/Hagicode.Desktop-1.2.3-arm64.dmg',
         'v1.2.3/Hagicode.Desktop-1.2.3.AppImage',
+        'v1.2.3/hagicode-desktop_1.2.3_amd64.deb',
       ],
     },
   ],
@@ -87,6 +94,9 @@ describe('docs runtime index fetching', () => {
     expect(first.fallbackTarget).toBeNull();
     expect(first.latest?.version).toBe('v1.2.3');
     expect(first.platforms).toHaveLength(3);
+    expect(first.platforms.find((platform) => platform.platform === 'linux')?.downloads.map((download) => download.filename)).toEqual([
+      'Hagicode.Desktop-1.2.3.AppImage',
+    ]);
   });
 
   it('accepts a stable-only release index when beta has no published version', async () => {
