@@ -31,20 +31,17 @@ The `screenshot-management-optimization` change uses this existing workflow to a
   - `quick-start/create-project` (`6` screenshots)
   - `quick-start/create-proposal-session` (`26` screenshots)
   - `installation/install-desktop` (`14` screenshots, including `1` currently unreferenced legacy file)
-  - `installation/install-postgres-windows` (`11` screenshots)
   - `ai-compose-commit` (`3` screenshots)
   - `monospecs` (`3` screenshots)
 - Affected docs pages to re-check after sync:
   - `src/content/docs/quick-start/create-first-project.mdx`
   - `src/content/docs/quick-start/proposal-session.mdx`
   - `src/content/docs/installation/desktop.mdx`
-  - `src/content/docs/related-software-installation/postgresql/install-on-windows.mdx`
   - `src/content/docs/guides/ai-compose-commit.mdx`
   - `src/content/docs/guides/monospecs.mdx`
   - `src/content/docs/en/quick-start/create-first-project.mdx`
   - `src/content/docs/en/quick-start/proposal-session.mdx`
   - `src/content/docs/en/installation/desktop.mdx`
-  - `src/content/docs/en/related-software-installation/postgresql/install-on-windows.mdx`
   - `src/content/docs/en/guides/ai-compose-commit.mdx`
 - Known exception recorded during inventory:
   - Historical inventory found one missing legacy source, `img/ai-compose-commit/✓ 处理完成.png`; `src/content/docs/en/guides/ai-compose-commit.mdx` was switched to text-only confirmation instead of keeping a broken image reference
@@ -299,7 +296,7 @@ Recommended batches for this repository:
 
 1. `quick-start/create-project`
 2. `quick-start/create-proposal-session`
-3. `installation/install-desktop` + `installation/install-postgres-windows`
+3. `installation/install-desktop`
 4. `ai-compose-commit` + `monospecs`
 
 For each batch:
