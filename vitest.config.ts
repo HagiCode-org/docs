@@ -13,6 +13,7 @@ export default defineConfig({
     include: [
       'shared/src/**/*.test.ts',
       'src/components/**/*.test.tsx',
+      'src/lib/**/*.test.ts',
     ],
     environment: 'node',
   },

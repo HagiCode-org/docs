@@ -157,13 +157,15 @@ export default defineConfig({
         Head: "./src/components/StarlightHead.astro",
         Header: "./src/components/StarlightHeader.astro",
         Footer: "./src/components/StarlightFooter.astro",
+        EditLink: "./src/components/StarlightEditLink.astro",
+        PageTitle: "./src/components/StarlightPageTitle.astro",
         LanguageSelect: "./src/components/StarlightLanguageSelect.astro",
         MarkdownContent: './src/components/MarkdownContent.astro',
       },
       sidebar: DOCS_SIDEBAR,
       customCss: ["./src/styles/starlight-override.css"],
       editLink: {
-        baseUrl: "https://github.com/HagiCode-org/site/edit/main/",
+        baseUrl: "https://github.com/HagiCode-org/docs/edit/main/",
       },
       plugins: [
         {
