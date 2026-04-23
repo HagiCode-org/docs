@@ -17,7 +17,7 @@ import {
   resolveDocsEntryLocale,
   serializeStoredDocsLocale,
   type DocsLocale,
-} from './i18n';
+} from './i18n.ts';
 
 export interface LandingRouteResolution {
   currentPath: string;
