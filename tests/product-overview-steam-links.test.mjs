@@ -8,6 +8,7 @@ const docsRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'
 
 const BASE_STEAM_URL = 'https://store.steampowered.com/app/4625540/Hagicode/';
 const TURBO_ENGINE_STEAM_URL = 'https://store.steampowered.com/app/4635480/Hagicode__Turbo_Engine/';
+const HAGICODE_PLUS_BUNDLE_URL = 'https://store.steampowered.com/bundle/73989/Hagicode_Plus/';
 
 function resolveDocsPath(relativePath) {
   return path.join(docsRoot, relativePath);
@@ -21,7 +22,7 @@ function readSteamUrls(source) {
   return source.match(/https:\/\/store\.steampowered\.com\/app\/\d+\/[A-Za-z_]+\/?/g) ?? [];
 }
 
-test('product overview pages keep the generic Steam entry on the base app and route Turbo Engine CTAs to the DLC page', async () => {
+test('product overview pages keep the generic Steam entry on the base app while routing Hagicode Plus to the bundle page', async () => {
   const [zhSource, enSource] = await Promise.all([
     readFile(resolveDocsPath('src/content/docs/product-overview.mdx'), 'utf8'),
     readFile(resolveDocsPath('src/content/docs/en/product-overview.mdx'), 'utf8'),
@@ -29,7 +30,8 @@ test('product overview pages keep the generic Steam entry on the base app and ro
 
   for (const source of [zhSource, enSource]) {
     assert.equal(countOccurrences(source, BASE_STEAM_URL), 3);
-    assert.equal(countOccurrences(source, TURBO_ENGINE_STEAM_URL), 2);
+    assert.equal(countOccurrences(source, TURBO_ENGINE_STEAM_URL), 1);
+    assert.equal(countOccurrences(source, HAGICODE_PLUS_BUNDLE_URL), 1);
   }
 });
 
