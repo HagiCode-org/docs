@@ -49,4 +49,9 @@ export const DOCS_SIDEBAR = [
     translations: { en: 'DLC' },
     autogenerate: { directory: 'dlc' },
   },
+  {
+    label: 'Bundles',
+    translations: { en: 'Bundles' },
+    autogenerate: { directory: 'bundles' },
+  },
 ];
