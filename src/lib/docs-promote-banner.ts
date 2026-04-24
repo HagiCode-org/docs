@@ -594,14 +594,14 @@ export class DocsPromoteBannerController {
     const fragment = document.createDocumentFragment();
 
     this.promotions.forEach((promotion, index) => {
-      const slide = document.createElement('a');
+      const slide = document.createElement('button');
       slide.className = 'docs-promote-banner__slide';
+      slide.type = 'button';
       slide.dataset.slideId = promotion.id;
-      slide.href = promotion.link;
-      slide.target = '_blank';
-      slide.rel = 'noopener noreferrer';
-      slide.setAttribute('aria-roledescription', 'slide');
       slide.setAttribute('aria-label', `${promotion.title} (${index + 1} / ${this.promotions.length})`);
+      slide.addEventListener('click', () => {
+        this.openPromotionLink(promotion.link);
+      });
 
       const copy = document.createElement('div');
       copy.className = 'docs-promote-banner__copy';
@@ -628,7 +628,7 @@ export class DocsPromoteBannerController {
 
       const cta = document.createElement('span');
       cta.className = 'docs-promote-banner__cta';
-      cta.textContent = mapDocsLocaleToPromoteLocale(this.locale) === 'en' ? 'View' : '查看';
+      cta.textContent = mapDocsLocaleToPromoteLocale(this.locale) === 'en' ? 'Open now' : '立即查看';
       actions.append(cta);
 
       slide.append(copy, actions);
@@ -815,6 +815,17 @@ export class DocsPromoteBannerController {
     }
 
     this.spacer.style.height = `${Math.max(height, 0)}px`;
+  }
+
+  private openPromotionLink(url: string): void {
+    if (typeof window.open === 'function') {
+      window.open(url, '_blank', 'noopener,noreferrer');
+      return;
+    }
+
+    if (typeof window.location.assign === 'function') {
+      window.location.assign(url);
+    }
   }
 
   private applyVisibilityState(): boolean {

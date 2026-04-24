@@ -215,6 +215,7 @@ describe('DocsPromoteBannerController', () => {
       configurable: true,
       value: 900,
     });
+    vi.stubGlobal('open', vi.fn());
     vi.stubGlobal('ResizeObserver', ResizeObserverStub);
     vi.stubGlobal('requestAnimationFrame', ((callback: FrameRequestCallback) => {
       callback(0);
@@ -301,11 +302,15 @@ describe('DocsPromoteBannerController', () => {
     expect(getActiveSlideTitle(root)).toBe('立即添加到愿望单');
     expect(screen.getByText('游戏将于 2026-04-29 发售，立即前往 Steam 添加愿望单。')).toBeInTheDocument();
     expect(screen.getByText('Steam')).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: /立即添加到愿望单/i })).toHaveAttribute(
-      'href',
+    const stripButton = screen.getByRole('button', { name: /立即添加到愿望单/i });
+    expect(stripButton).toBeInTheDocument();
+    expect(screen.getByText('立即查看')).toBeInTheDocument();
+    fireEvent.click(stripButton);
+    expect(window.open).toHaveBeenCalledWith(
       'https://store.steampowered.com/app/4625540/Hagicode/',
+      '_blank',
+      'noopener,noreferrer',
     );
-    expect(screen.getByText('查看')).toBeInTheDocument();
     expect(root.querySelector('[data-promote-banner-previous]')).toHaveAttribute('hidden');
     expect(root.querySelector('[data-promote-banner-next]')).toHaveAttribute('hidden');
     expect(root.querySelector('[data-promote-banner-pause]')).toHaveAttribute('hidden');
