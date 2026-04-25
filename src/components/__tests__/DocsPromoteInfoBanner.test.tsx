@@ -54,6 +54,8 @@ function createMatchMedia(matches = false): MatchMediaResult {
 function createFetchMock(promotions: Array<{
   id: string;
   on?: boolean;
+  startTime?: string;
+  endTime?: string;
   titleZh: string;
   titleEn: string;
   descriptionZh: string;
@@ -78,12 +80,14 @@ function createFetchMock(promotions: Array<{
     }
 
     if (url.endsWith('/promote.json')) {
-      return new Response(JSON.stringify({
-        promotes: promotions.map((promotion) => ({
-          id: promotion.id,
-          on: promotion.on ?? true,
-        })),
-      }), { status: 200, headers: jsonHeaders });
+        return new Response(JSON.stringify({
+          promotes: promotions.map((promotion) => ({
+            id: promotion.id,
+            on: promotion.on ?? true,
+            startTime: promotion.startTime,
+            endTime: promotion.endTime,
+          })),
+        }), { status: 200, headers: jsonHeaders });
     }
 
     if (url.endsWith('/promote_content.json')) {
@@ -109,15 +113,17 @@ function renderBannerShell(locale = 'en') {
       <docs-promote-banner data-locale="${locale}" hidden>
         <div data-promote-banner-spacer></div>
         <section data-promote-banner-shell hidden>
-          <button type="button" data-promote-banner-close aria-label="${closeLabel}">×</button>
-          <div>
-            <div data-promote-banner-track></div>
-          </div>
-          <div>
-            <button type="button" data-promote-banner-previous aria-label="Show previous promotion">‹</button>
-            <span data-promote-banner-count></span>
-            <button type="button" data-promote-banner-next aria-label="Show next promotion">›</button>
-            <button type="button" data-promote-banner-pause aria-label="Pause automatic rotation">Pause</button>
+          <div class="docs-promote-banner__inner">
+            <button type="button" data-promote-banner-close aria-label="${closeLabel}">×</button>
+            <div>
+              <div data-promote-banner-track></div>
+            </div>
+            <div>
+              <button type="button" data-promote-banner-previous aria-label="Show previous promotion">‹</button>
+              <span data-promote-banner-count></span>
+              <button type="button" data-promote-banner-next aria-label="Show next promotion">›</button>
+              <button type="button" data-promote-banner-pause aria-label="Pause automatic rotation">Pause</button>
+            </div>
           </div>
           <span data-promote-banner-status aria-live="polite"></span>
         </section>
@@ -211,6 +217,7 @@ describe('DocsPromoteBannerController', () => {
 
   beforeEach(() => {
     vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-28T23:59:59+08:00'));
     Object.defineProperty(window, 'innerHeight', {
       configurable: true,
       value: 900,
@@ -245,6 +252,118 @@ describe('DocsPromoteBannerController', () => {
     expect(spacer).toHaveAttribute('hidden');
     expect(spacer.style.display).toBe('none');
     expect(spacer.style.height).toBe('0px');
+  });
+
+  it('keeps pre-start promotions hidden until a refresh crosses the start time', async () => {
+    const matchMedia = createMatchMedia(false);
+    vi.stubGlobal('matchMedia', vi.fn(() => matchMedia));
+    const { footer, root, shell } = renderBannerShell('en');
+
+    const controller = new DocsPromoteBannerController(root, {
+      footer,
+      fetchImpl: createFetchMock([
+        {
+          id: 'future',
+          startTime: '2026-04-29T00:00:00+08:00',
+          titleZh: '即将上线',
+          titleEn: 'Starts Soon',
+          descriptionZh: '预热中',
+          descriptionEn: 'Warming up',
+          link: 'https://example.invalid/future',
+          platform: 'steam',
+        },
+      ]) as typeof fetch,
+      refreshIntervalMs: 1000,
+    });
+
+    await controller.connect();
+
+    expect(root).toHaveAttribute('hidden');
+    expect(shell).toHaveAttribute('hidden');
+
+    vi.setSystemTime(new Date('2026-04-29T00:00:00+08:00'));
+    await (controller as unknown as { reloadPromotions: ({ forceRefresh }: { forceRefresh: boolean }) => Promise<void> })
+      .reloadPromotions({ forceRefresh: true });
+    (controller as unknown as { syncLayout: () => void }).syncLayout();
+
+    expect(root).not.toHaveAttribute('hidden');
+    expect(getActiveSlideTitle(root)).toBe('Starts Soon');
+  });
+
+  it('removes an expired promotion after refresh and hides the banner when no active entry remains', async () => {
+    const matchMedia = createMatchMedia(false);
+    vi.stubGlobal('matchMedia', vi.fn(() => matchMedia));
+    const { footer, root, shell } = renderBannerShell('en');
+
+    const controller = new DocsPromoteBannerController(root, {
+      footer,
+      fetchImpl: createFetchMock([
+        {
+          id: 'expires-now',
+          endTime: '2026-04-29T00:00:00+08:00',
+          titleZh: '即将结束',
+          titleEn: 'Ends Soon',
+          descriptionZh: '最后一刻',
+          descriptionEn: 'Last chance',
+          link: 'https://example.invalid/ends',
+          platform: 'steam',
+        },
+      ]) as typeof fetch,
+      refreshIntervalMs: 1000,
+    });
+
+    await controller.connect();
+
+    expect(root).not.toHaveAttribute('hidden');
+
+    vi.setSystemTime(new Date('2026-04-29T00:00:00+08:00'));
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(root).toHaveAttribute('hidden');
+    expect(shell).toHaveAttribute('hidden');
+    expect(root.dataset.state).toBe('hidden');
+  });
+
+  it('swaps promotions at the exact boundary on refresh', async () => {
+    const matchMedia = createMatchMedia(false);
+    vi.stubGlobal('matchMedia', vi.fn(() => matchMedia));
+    const { footer, root } = renderBannerShell('en');
+
+    const controller = new DocsPromoteBannerController(root, {
+      footer,
+      fetchImpl: createFetchMock([
+        {
+          id: 'main-game-2026-04-29',
+          endTime: '2026-04-29T00:00:00+08:00',
+          titleZh: '愿望单',
+          titleEn: 'Wishlist Now',
+          descriptionZh: '旧推广',
+          descriptionEn: 'Old promotion',
+          link: 'https://example.invalid/wishlist',
+          platform: 'steam',
+        },
+        {
+          id: 'main-game-steam-ea-2026-04-29',
+          startTime: '2026-04-29T00:00:00+08:00',
+          titleZh: '抢先体验',
+          titleEn: 'Early Access Is Live',
+          descriptionZh: '新推广',
+          descriptionEn: 'New promotion',
+          link: 'https://example.invalid/ea',
+          platform: 'steam',
+        },
+      ]) as typeof fetch,
+      refreshIntervalMs: 1000,
+    });
+
+    await controller.connect();
+
+    expect(getActiveSlideTitle(root)).toBe('Wishlist Now');
+
+    vi.setSystemTime(new Date('2026-04-29T00:00:00+08:00'));
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(getActiveSlideTitle(root)).toBe('Early Access Is Live');
   });
 
   it('keeps the entire banner hidden when promotion fetch fails', async () => {

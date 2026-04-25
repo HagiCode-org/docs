@@ -22,6 +22,8 @@ interface IndexCatalogEntry {
 interface PromoteFlagRecord {
   id: string;
   on: boolean;
+  startTime?: string;
+  endTime?: string;
 }
 
 interface PromoteFlagsDocument {
@@ -64,6 +66,7 @@ export interface LoadActivePromotionsOptions {
   locale?: string | null | undefined;
   fetchImpl?: FetchLike;
   forceRefresh?: boolean;
+  now?: number;
 }
 
 export interface DocsPromoteBannerControllerOptions extends LoadActivePromotionsOptions {
@@ -104,6 +107,46 @@ function parseCatalogEntries(payload: unknown): IndexCatalogEntry[] {
   });
 }
 
+function parseOptionalTimestamp(value: unknown): string | undefined {
+  return isNonEmptyString(value) ? value.trim() : undefined;
+}
+
+function parseTimestamp(value: string | undefined): number | null {
+  if (!value) {
+    return null;
+  }
+
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? timestamp : Number.NaN;
+}
+
+function isPromoteFlagActive(record: PromoteFlagRecord, now = Date.now()): boolean {
+  if (!record.on) {
+    return false;
+  }
+
+  const startTime = parseTimestamp(record.startTime);
+  const endTime = parseTimestamp(record.endTime);
+
+  if (Number.isNaN(startTime) || Number.isNaN(endTime)) {
+    return false;
+  }
+
+  if (startTime !== null && endTime !== null && startTime >= endTime) {
+    return false;
+  }
+
+  if (startTime !== null && now < startTime) {
+    return false;
+  }
+
+  if (endTime !== null && now >= endTime) {
+    return false;
+  }
+
+  return true;
+}
+
 function parsePromoteFlagsDocument(payload: unknown): PromoteFlagsDocument {
   if (!isRecord(payload) || !Array.isArray(payload.promotes)) {
     return { promotes: [] };
@@ -115,7 +158,12 @@ function parsePromoteFlagsDocument(payload: unknown): PromoteFlagsDocument {
         return [];
       }
 
-      return [{ id: record.id, on: record.on }];
+      return [{
+        id: record.id,
+        on: record.on,
+        startTime: parseOptionalTimestamp(record.startTime),
+        endTime: parseOptionalTimestamp(record.endTime),
+      }];
     }),
   };
 }
@@ -290,12 +338,13 @@ export function normalizeActivePromotions(
   flags: PromoteFlagsDocument,
   content: PromoteContentDocument,
   locale: string | null | undefined,
+  now = Date.now(),
 ): ActivePromotion[] {
   const promoteLocale = mapDocsLocaleToPromoteLocale(locale);
   const contentById = new Map(content.contents.map((entry) => [entry.id, entry]));
 
   return flags.promotes.flatMap((record) => {
-    if (!record.on) {
+    if (!isPromoteFlagActive(record, now)) {
       return [];
     }
 
@@ -323,11 +372,11 @@ export function normalizeActivePromotions(
 export async function loadActivePromotions(
   options: LoadActivePromotionsOptions = {},
 ): Promise<ActivePromotion[]> {
-  const { locale, fetchImpl = fetch, forceRefresh = false } = options;
+  const { locale, fetchImpl = fetch, forceRefresh = false, now = Date.now() } = options;
 
   try {
     const documents = await loadPromotionDocuments({ fetchImpl, forceRefresh });
-    return normalizeActivePromotions(documents.flags, documents.content, locale);
+    return normalizeActivePromotions(documents.flags, documents.content, locale, now);
   } catch {
     return [];
   }

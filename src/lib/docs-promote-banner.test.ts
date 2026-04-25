@@ -158,6 +158,85 @@ describe('docs promote banner source', () => {
     expect(mapDocsLocaleToPromoteLocale('en')).toBe('en');
   });
 
+  it('keeps pre-start promotions hidden until their window begins', async () => {
+    const fetchMock = createScheduleFetch([
+      {
+        id: 'future',
+        on: true,
+        startTime: '2026-04-29T00:00:00+08:00',
+        titleEn: 'Future promotion',
+      },
+    ]);
+
+    await expect(loadActivePromotions({
+      locale: 'en',
+      fetchImpl: fetchMock,
+      now: Date.parse('2026-04-28T23:59:59+08:00'),
+    })).resolves.toEqual([]);
+  });
+
+  it('removes post-end promotions and swaps cleanly at the exact boundary', async () => {
+    const fetchMock = createScheduleFetch([
+      {
+        id: 'main-game-2026-04-29',
+        on: true,
+        endTime: '2026-04-29T00:00:00+08:00',
+        titleEn: 'Wishlist Now',
+      },
+      {
+        id: 'main-game-steam-ea-2026-04-29',
+        on: true,
+        startTime: '2026-04-29T00:00:00+08:00',
+        titleEn: 'Early Access Is Live',
+      },
+    ]);
+
+    const before = await loadActivePromotions({
+      locale: 'en',
+      fetchImpl: fetchMock,
+      now: Date.parse('2026-04-28T23:59:59+08:00'),
+    });
+    const atBoundary = await loadActivePromotions({
+      locale: 'en',
+      fetchImpl: fetchMock,
+      now: Date.parse('2026-04-29T00:00:00+08:00'),
+    });
+
+    expect(before.map((promotion) => promotion.id)).toEqual(['main-game-2026-04-29']);
+    expect(atBoundary.map((promotion) => promotion.id)).toEqual(['main-game-steam-ea-2026-04-29']);
+  });
+
+  it('fails closed for invalid schedule values while preserving valid entries', async () => {
+    const fetchMock = createScheduleFetch([
+      {
+        id: 'broken-start',
+        on: true,
+        startTime: 'not-a-date',
+        titleEn: 'Broken start',
+      },
+      {
+        id: 'broken-range',
+        on: true,
+        startTime: '2026-04-29T00:00:01+08:00',
+        endTime: '2026-04-28T23:59:59+08:00',
+        titleEn: 'Broken range',
+      },
+      {
+        id: 'valid',
+        on: true,
+        titleEn: 'Valid',
+      },
+    ]);
+
+    const promotions = await loadActivePromotions({
+      locale: 'en',
+      fetchImpl: fetchMock,
+      now: Date.parse('2026-04-29T00:00:00+08:00'),
+    });
+
+    expect(promotions.map((promotion) => promotion.id)).toEqual(['valid']);
+  });
+
   it('returns a hidden-state empty list when promote payloads are invalid', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = input.toString();
@@ -269,3 +348,49 @@ describe('docs promote banner source', () => {
     await expect(loadActivePromotions({ locale: 'en' })).resolves.toEqual([]);
   });
 });
+
+function createScheduleFetch(promotions: Array<{
+  id: string;
+  on?: boolean;
+  startTime?: string;
+  endTime?: string;
+  titleEn: string;
+}>) {
+  return vi.fn(async (input: RequestInfo | URL) => {
+    const url = input.toString();
+
+    if (url.endsWith('/index-catalog.json')) {
+      return jsonResponse({
+        entries: [
+          { id: 'promotion-flags', path: '/promote.json' },
+          { id: 'promotion-content', path: '/promote_content.json' },
+        ],
+      });
+    }
+
+    if (url.endsWith('/promote.json')) {
+      return jsonResponse({
+        promotes: promotions.map((promotion) => ({
+          id: promotion.id,
+          on: promotion.on ?? true,
+          startTime: promotion.startTime,
+          endTime: promotion.endTime,
+        })),
+      });
+    }
+
+    if (url.endsWith('/promote_content.json')) {
+      return jsonResponse({
+        contents: promotions.map((promotion) => ({
+          id: promotion.id,
+          title: { zh: promotion.titleEn, en: promotion.titleEn },
+          description: { zh: promotion.titleEn, en: promotion.titleEn },
+          link: `https://example.invalid/${promotion.id}`,
+          targetPlatform: 'steam',
+        })),
+      });
+    }
+
+    throw new Error(`Unexpected fetch: ${url}`);
+  });
+}
