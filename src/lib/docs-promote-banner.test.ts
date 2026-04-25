@@ -49,6 +49,7 @@ describe('docs promote banner source', () => {
               zh: '游戏将于 2026-04-29 发售，立即前往 Steam 添加愿望单。',
               en: 'Coming April 29, 2026. Add to your Steam wishlist now!',
             },
+            cta: { zh: '加入愿望单', en: 'Wishlist on Steam' },
             link: 'https://store.steampowered.com/app/4625540/Hagicode/',
             targetPlatform: 'steam',
           }],
@@ -131,6 +132,7 @@ describe('docs promote banner source', () => {
               zh: '游戏将于 2026-04-29 发售，立即前往 Steam 添加愿望单。',
               en: 'Coming April 29, 2026. Add to your Steam wishlist now!',
             },
+            cta: { zh: '加入愿望单', en: 'Wishlist on Steam' },
             link: 'https://store.steampowered.com/app/4625540/Hagicode/',
             targetPlatform: 'steam',
           },
@@ -150,6 +152,7 @@ describe('docs promote banner source', () => {
         id: 'main-game',
         title: 'Wishlist Now',
         description: 'Coming April 29, 2026. Add to your Steam wishlist now!',
+        ctaLabel: 'Wishlist on Steam',
         link: 'https://store.steampowered.com/app/4625540/Hagicode/',
         platform: 'Steam',
       },
@@ -237,6 +240,31 @@ describe('docs promote banner source', () => {
     expect(promotions.map((promotion) => promotion.id)).toEqual(['valid']);
   });
 
+  it('resolves CTA labels from promotion content with shared fallback behavior', () => {
+    const flags = {
+      promotes: [
+        { id: 'localized', on: true },
+        { id: 'missing-locale', on: true },
+        { id: 'malformed-cta', on: true },
+        { id: 'legacy', on: true },
+      ],
+    };
+    const content = {
+      contents: [
+        { id: 'localized', title: { zh: '中文标题', en: 'Localized' }, description: { zh: '中文描述', en: 'English copy' }, cta: { zh: '查看优惠', en: 'View Offer' }, link: 'https://example.invalid/localized' },
+        { id: 'missing-locale', title: { zh: '中文标题', en: 'Missing locale' }, description: { zh: '中文描述', en: 'Fallback copy' }, cta: { zh: '中文按钮' } as Record<string, string>, link: 'https://example.invalid/missing-locale' },
+        { id: 'malformed-cta', title: { zh: '中文标题', en: 'Malformed' }, description: { zh: '中文描述', en: 'Malformed copy' }, cta: { zh: '', en: '   ' }, link: 'https://example.invalid/malformed-cta' },
+        { id: 'legacy', title: { zh: '中文标题', en: 'Legacy' }, description: { zh: '中文描述', en: 'Legacy copy' }, link: 'https://example.invalid/legacy' },
+      ],
+    };
+
+    const englishPromotions = normalizeActivePromotions(flags, content, 'en-US');
+    const chinesePromotions = normalizeActivePromotions(flags, content, 'zh-CN');
+
+    expect(englishPromotions.map((promotion) => promotion.ctaLabel)).toEqual(['View Offer', '中文按钮', 'GO', 'GO']);
+    expect(chinesePromotions.map((promotion) => promotion.ctaLabel)).toEqual(['查看优惠', '中文按钮', '立即前往', '立即前往']);
+  });
+
   it('returns a hidden-state empty list when promote payloads are invalid', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = input.toString();
@@ -322,6 +350,7 @@ describe('docs promote banner source', () => {
               zh: '游戏将于 2026-04-29 发售，立即前往 Steam 添加愿望单。',
               en: 'Coming April 29, 2026. Add to your Steam wishlist now!',
             },
+            cta: { zh: '加入愿望单', en: 'Wishlist on Steam' },
             link: 'https://store.steampowered.com/app/4625540/Hagicode/',
             targetPlatform: 'steam',
           }],
@@ -338,6 +367,7 @@ describe('docs promote banner source', () => {
         id: 'main-game',
         title: 'Wishlist Now',
         description: 'Coming April 29, 2026. Add to your Steam wishlist now!',
+        ctaLabel: 'Wishlist on Steam',
         link: 'https://store.steampowered.com/app/4625540/Hagicode/',
         platform: 'Steam',
       },
@@ -385,6 +415,7 @@ function createScheduleFetch(promotions: Array<{
           id: promotion.id,
           title: { zh: promotion.titleEn, en: promotion.titleEn },
           description: { zh: promotion.titleEn, en: promotion.titleEn },
+          cta: { zh: `打开 ${promotion.id}`, en: `Open ${promotion.id}` },
           link: `https://example.invalid/${promotion.id}`,
           targetPlatform: 'steam',
         })),

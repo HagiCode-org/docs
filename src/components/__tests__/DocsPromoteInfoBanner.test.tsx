@@ -60,6 +60,8 @@ function createFetchMock(promotions: Array<{
   titleEn: string;
   descriptionZh: string;
   descriptionEn: string;
+  ctaZh?: string;
+  ctaEn?: string;
   link: string;
   platform?: string;
 }>) {
@@ -96,6 +98,9 @@ function createFetchMock(promotions: Array<{
           id: promotion.id,
           title: { zh: promotion.titleZh, en: promotion.titleEn },
           description: { zh: promotion.descriptionZh, en: promotion.descriptionEn },
+          cta: promotion.ctaZh || promotion.ctaEn
+            ? { zh: promotion.ctaZh, en: promotion.ctaEn }
+            : undefined,
           link: promotion.link,
           targetPlatform: promotion.platform,
         })),
@@ -407,6 +412,8 @@ describe('DocsPromoteBannerController', () => {
           titleEn: 'Wishlist Now',
           descriptionZh: '游戏将于 2026-04-29 发售，立即前往 Steam 添加愿望单。',
           descriptionEn: 'Coming April 29, 2026. Add to your Steam wishlist now!',
+          ctaZh: '加入愿望单',
+          ctaEn: 'Wishlist on Steam',
           link: 'https://store.steampowered.com/app/4625540/Hagicode/',
           platform: 'steam',
         },
@@ -423,7 +430,7 @@ describe('DocsPromoteBannerController', () => {
     expect(screen.getByText('Steam')).toBeInTheDocument();
     const stripButton = screen.getByRole('button', { name: /立即添加到愿望单/i });
     expect(stripButton).toBeInTheDocument();
-    expect(screen.getByText('立即查看')).toBeInTheDocument();
+    expect(screen.getByText('加入愿望单')).toBeInTheDocument();
     fireEvent.click(stripButton);
     expect(window.open).toHaveBeenCalledWith(
       'https://store.steampowered.com/app/4625540/Hagicode/',
@@ -602,6 +609,7 @@ describe('DocsPromoteBannerController', () => {
               zh: '游戏将于 2026-04-29 发售，立即前往 Steam 添加愿望单。',
               en: 'Coming April 29, 2026. Add to your Steam wishlist now!',
             },
+            cta: { zh: '加入愿望单', en: 'Wishlist on Steam' },
             link: 'https://store.steampowered.com/app/4625540/Hagicode/',
             targetPlatform: 'steam',
           }],

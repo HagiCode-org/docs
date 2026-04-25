@@ -34,6 +34,7 @@ interface PromoteContentRecord {
   id: string;
   title: Record<string, string>;
   description: Record<string, string>;
+  cta?: Record<string, string>;
   link: string;
   targetPlatform?: string;
 }
@@ -58,6 +59,7 @@ export interface ActivePromotion {
   id: string;
   title: string;
   description: string;
+  ctaLabel: string;
   link: string;
   platform: string | null;
 }
@@ -85,12 +87,19 @@ function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0;
 }
 
-function isLocalizedStringMap(value: unknown): value is Record<string, string> {
+function sanitizeLocalizedStringMap(value: unknown): Record<string, string> | null {
   if (!isRecord(value)) {
-    return false;
+    return null;
   }
 
-  return Object.values(value).every(isNonEmptyString);
+  const entries: Array<[string, string]> = [];
+  for (const [key, entryValue] of Object.entries(value)) {
+    if (isNonEmptyString(key) && isNonEmptyString(entryValue)) {
+      entries.push([key.trim(), entryValue.trim()]);
+    }
+  }
+
+  return entries.length > 0 ? Object.fromEntries(entries) : null;
 }
 
 function parseCatalogEntries(payload: unknown): IndexCatalogEntry[] {
@@ -178,17 +187,23 @@ function parsePromoteContentDocument(payload: unknown): PromoteContentDocument {
       if (
         !isRecord(record) ||
         !isNonEmptyString(record.id) ||
-        !isLocalizedStringMap(record.title) ||
-        !isLocalizedStringMap(record.description) ||
         !isNonEmptyString(record.link)
       ) {
         return [];
       }
 
+      const title = sanitizeLocalizedStringMap(record.title);
+      const description = sanitizeLocalizedStringMap(record.description);
+      const cta = sanitizeLocalizedStringMap(record.cta);
+      if (!title || !description) {
+        return [];
+      }
+
       return [{
         id: record.id,
-        title: record.title,
-        description: record.description,
+        title,
+        description,
+        cta: cta ?? undefined,
         link: record.link,
         targetPlatform: isNonEmptyString(record.targetPlatform) ? record.targetPlatform : undefined,
       }];
@@ -265,6 +280,17 @@ function pickLocalizedValue(
 
   const fallbackValue = Object.values(value).find(isNonEmptyString);
   return fallbackValue?.trim() ?? null;
+}
+
+function resolveCtaLabel(value: Record<string, string> | undefined, locale: PromoteLocale): string {
+  if (value) {
+    const localized = pickLocalizedValue(value, locale);
+    if (localized) {
+      return localized;
+    }
+  }
+
+  return locale === 'zh' ? '立即前往' : 'GO';
 }
 
 export async function resolvePromotionDocumentUrls(
@@ -363,6 +389,7 @@ export function normalizeActivePromotions(
       id: promoteContent.id,
       title,
       description,
+      ctaLabel: resolveCtaLabel(promoteContent.cta, promoteLocale),
       link: promoteContent.link,
       platform: localizePlatform(promoteContent.targetPlatform, promoteLocale),
     }];
@@ -382,7 +409,11 @@ export async function loadActivePromotions(
   }
 }
 
-function setElementHidden(element: HTMLElement, hidden: boolean): void {
+function setElementHidden(element: HTMLElement | null, hidden: boolean): void {
+  if (!element) {
+    return;
+  }
+
   if (hidden) {
     element.setAttribute('hidden', '');
     element.style.setProperty('display', 'none');
@@ -677,7 +708,7 @@ export class DocsPromoteBannerController {
 
       const cta = document.createElement('span');
       cta.className = 'docs-promote-banner__cta';
-      cta.textContent = mapDocsLocaleToPromoteLocale(this.locale) === 'en' ? 'Open now' : '立即查看';
+      cta.textContent = promotion.ctaLabel;
       actions.append(cta);
 
       slide.append(copy, actions);
