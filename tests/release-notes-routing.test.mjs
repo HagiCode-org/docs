@@ -110,15 +110,15 @@ test('release-notes helper flags only landing routes without confusing other doc
   assert.equal(isReleaseNotesRoutePath('/product-overview/'), false);
 });
 
-test('release-notes landing keeps locale-specific routes stable while allowing explicit ?lang switches', () => {
+test('release-notes landing follows saved preference and allows explicit ?lang switches', () => {
   const rooted = resolveDocsLandingRoute(
     new URL('https://docs.hagicode.com/release-notes/'),
     JSON.stringify({ lang: 'en' }),
     ['en-US', 'en'],
   );
-  assert.equal(rooted.resolvedLocale, 'root');
-  assert.equal(rooted.targetUrl, 'https://docs.hagicode.com/release-notes/');
-  assert.equal(rooted.shouldRedirect, false);
+  assert.equal(rooted.resolvedLocale, 'en');
+  assert.equal(rooted.targetUrl, 'https://docs.hagicode.com/en/release-notes/');
+  assert.equal(rooted.shouldRedirect, true);
 
   const anchoredLanding = resolveDocsLandingRoute(
     new URL('https://docs.hagicode.com/release-notes/#v1.0.0'),
@@ -148,7 +148,7 @@ test('release-notes landing keeps locale-specific routes stable while allowing e
   assert.equal(switchToChinese.shouldRedirect, true);
 });
 
-test('public lang-redirect script preserves release-notes locale context for Chinese, English, and stored-locale cases', async () => {
+test('public lang-redirect script redirects release-notes routes by saved or explicit locale', async () => {
   const scriptPath = path.join(testDir, '..', 'public', 'lang-redirect.js');
   const scriptContent = await readFile(scriptPath, 'utf8');
 
@@ -161,9 +161,9 @@ test('public lang-redirect script preserves release-notes locale context for Chi
       languages: ['en-US', 'en'],
     },
   );
-  assert.equal(rootChinese.api.lastResolution.resolvedLocale, 'root');
-  assert.equal(rootChinese.finalUrl, 'https://docs.hagicode.com/release-notes/');
-  assert.equal(rootChinese.api.lastResolution.shouldRedirect, false);
+  assert.equal(rootChinese.api.lastResolution.resolvedLocale, 'en');
+  assert.equal(rootChinese.finalUrl, 'https://docs.hagicode.com/en/release-notes/');
+  assert.equal(rootChinese.api.lastResolution.shouldRedirect, true);
 
   const english = evaluateEntryScript(
     scriptContent,
@@ -174,9 +174,9 @@ test('public lang-redirect script preserves release-notes locale context for Chi
       languages: ['zh-CN', 'zh'],
     },
   );
-  assert.equal(english.api.lastResolution.resolvedLocale, 'en');
-  assert.equal(english.finalUrl, 'https://docs.hagicode.com/en/release-notes/');
-  assert.equal(english.api.lastResolution.shouldRedirect, false);
+  assert.equal(english.api.lastResolution.resolvedLocale, 'root');
+  assert.equal(english.finalUrl, 'https://docs.hagicode.com/release-notes/');
+  assert.equal(english.api.lastResolution.shouldRedirect, true);
 
   const storedLocaleSwitch = evaluateEntryScript(
     scriptContent,
