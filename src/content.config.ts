@@ -10,6 +10,8 @@ export const collections = {
 			extend: (context) => blogSchema(context).extend({
 				/** 隐藏博客文章中的广告区域 */
 				hideAd: z.boolean().optional(),
+				/** Optional explicit RSS language. Missing blog posts derive language from their locale path. */
+				language: z.enum(['zh-CN', 'zh', 'en', 'en-US']).optional(),
 			}),
 		})
 	}),
