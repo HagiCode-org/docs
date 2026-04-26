@@ -2,19 +2,18 @@
  * Client-side landing route resolution for docs entry pages.
  *
  * Rule priority:
- * - landing (`/`): `query > stored preference > client language > default en`
- * - docs/blog root paths: `query > stored preference > default en`
+ * - all routed docs pages: `query > stored preference > client language > default en`
  */
 
 import {
   buildDocsRoutePath,
   DOCS_LANGUAGE_STORAGE_KEY,
+  DEFAULT_DOCS_ENTRY_LOCALE,
   getStoredDocsLocale,
-  isEnglishDocsPath,
   isLandingRoutePath,
-  isReleaseNotesRoutePath,
+  parseDocsLocale,
   parseLangFromUrl,
-  resolveDocsEntryLocale,
+  resolveClientDocsLocale,
   serializeStoredDocsLocale,
   type DocsLocale,
 } from './i18n.ts';
@@ -29,6 +28,31 @@ export interface LandingRouteResolution {
   isLandingPath: boolean;
   shouldPersist: boolean;
   shouldRedirect: boolean;
+}
+
+function resolveRouteLocale(options: {
+  requestedLang: string | null;
+  storedLocale: DocsLocale | null;
+  clientLanguages: Array<string | null | undefined>;
+}): { locale: DocsLocale; shouldPersist: boolean } {
+  const { requestedLang, storedLocale, clientLanguages } = options;
+
+  if (requestedLang !== null) {
+    const requestedLocale = parseDocsLocale(requestedLang);
+    return {
+      locale: requestedLocale ?? storedLocale ?? resolveClientDocsLocale(clientLanguages) ?? DEFAULT_DOCS_ENTRY_LOCALE,
+      shouldPersist: requestedLocale !== null,
+    };
+  }
+
+  if (storedLocale) {
+    return { locale: storedLocale, shouldPersist: false };
+  }
+
+  return {
+    locale: resolveClientDocsLocale(clientLanguages) ?? DEFAULT_DOCS_ENTRY_LOCALE,
+    shouldPersist: true,
+  };
 }
 
 function getClientLanguages(win: Window): string[] {
@@ -85,46 +109,14 @@ export function resolveDocsLandingRoute(
   const storedLocale = getStoredDocsLocale(storedRouteValue);
   const currentPath = currentUrl.pathname || '/';
   const isLandingPath = isLandingRoutePath(currentPath);
-  const isReleaseNotesPath = isReleaseNotesRoutePath(currentPath);
-
-  let resolvedLocale: DocsLocale;
-  let shouldPersist = false;
-
-  if (requestedLang !== null) {
-    resolvedLocale = resolveDocsEntryLocale({
-      requestedLang,
-      storedLocale,
-    });
-    shouldPersist = true;
-  } else if (isLandingPath && !isEnglishDocsPath(currentPath)) {
-    resolvedLocale = resolveDocsEntryLocale({
-      storedLocale,
-      clientLanguages,
-    });
-    shouldPersist = true;
-  } else if (isEnglishDocsPath(currentPath)) {
-    resolvedLocale = 'en';
-  } else if (isReleaseNotesPath) {
-    // Root release-notes landing is already the Chinese locale and should
-    // remain stable for direct landing links.
-    resolvedLocale = 'root';
-  } else if (storedLocale === 'root') {
-    // Non-landing root docs/blog paths stay Chinese only after an explicit Chinese choice was saved.
-    resolvedLocale = 'root';
-  } else {
-    // Default root docs/blog paths should flow to the English-prefixed route.
-    resolvedLocale = 'en';
-  }
-
-  const shouldResolvePath =
-    requestedLang !== null
-    || isLandingPath
-    || (!isEnglishDocsPath(currentPath) && !isReleaseNotesPath && resolvedLocale === 'en');
+  const { locale: resolvedLocale, shouldPersist } = resolveRouteLocale({
+    requestedLang,
+    storedLocale,
+    clientLanguages,
+  });
   const targetBasePath =
     landingTargetPath && isLandingPath ? landingTargetPath : currentPath;
-  const targetPath = shouldResolvePath
-    ? buildDocsRoutePath(resolvedLocale, targetBasePath)
-    : currentPath;
+  const targetPath = buildDocsRoutePath(resolvedLocale, targetBasePath);
   const targetUrl = buildTargetUrl(currentUrl, targetPath);
 
   return {

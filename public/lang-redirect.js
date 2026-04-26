@@ -5,8 +5,6 @@
 
   var DOCS_LANGUAGE_STORAGE_KEY = 'starlight-route';
   var DEFAULT_DOCS_ENTRY_LOCALE = 'en';
-  var RELEASE_NOTES_ROUTE_PREFIX = '/release-notes';
-
   function parseDocsLocale(value) {
     if (!value) {
       return null;
@@ -49,20 +47,8 @@
     return pathname;
   }
 
-  function isEnglishDocsPath(pathname) {
-    return pathname === '/en' || pathname.indexOf('/en/') === 0;
-  }
-
   function isLandingRoutePath(pathname) {
     return stripDocsLocalePrefix(pathname) === '/';
-  }
-
-  function isReleaseNotesRoutePath(pathname) {
-    var normalizedPath = stripDocsLocalePrefix(pathname);
-    return (
-      normalizedPath === RELEASE_NOTES_ROUTE_PREFIX ||
-      normalizedPath === RELEASE_NOTES_ROUTE_PREFIX + '/'
-    );
   }
 
   function buildDocsRoutePath(locale, originalPath) {
@@ -103,18 +89,6 @@
     return JSON.stringify(routeObj);
   }
 
-  function resolveDocsEntryLocale(requestedLang, storedLocale, clientLanguages) {
-    if (requestedLang !== null && requestedLang !== undefined) {
-      return parseDocsLocale(requestedLang) || DEFAULT_DOCS_ENTRY_LOCALE;
-    }
-
-    return (
-      parseDocsLocale(storedLocale) ||
-      resolveClientDocsLocale(clientLanguages || []) ||
-      DEFAULT_DOCS_ENTRY_LOCALE
-    );
-  }
-
   function resolveClientDocsLocale(clientLanguages) {
     if (!Array.isArray(clientLanguages)) {
       return null;
@@ -128,6 +102,28 @@
     }
 
     return null;
+  }
+
+  function resolveRouteLocale(requestedLang, storedLocale, clientLanguages) {
+    if (requestedLang !== null && requestedLang !== undefined) {
+      var requestedLocale = parseDocsLocale(requestedLang);
+      return {
+        locale: requestedLocale || storedLocale || resolveClientDocsLocale(clientLanguages || []) || DEFAULT_DOCS_ENTRY_LOCALE,
+        shouldPersist: requestedLocale !== null,
+      };
+    }
+
+    if (storedLocale) {
+      return {
+        locale: storedLocale,
+        shouldPersist: false,
+      };
+    }
+
+    return {
+      locale: resolveClientDocsLocale(clientLanguages || []) || DEFAULT_DOCS_ENTRY_LOCALE,
+      shouldPersist: true,
+    };
   }
 
   function getClientLanguages(win) {
@@ -191,34 +187,11 @@
     var storedLocale = getStoredDocsLocale(storedRouteValue);
     var currentPath = currentUrl.pathname || '/';
     var landingPath = isLandingRoutePath(currentPath);
-    var releaseNotesPath = isReleaseNotesRoutePath(currentPath);
-    var resolvedLocale;
-    var shouldPersist = false;
-
-    if (requestedLang !== null) {
-      resolvedLocale = resolveDocsEntryLocale(requestedLang, storedLocale);
-      shouldPersist = true;
-    } else if (landingPath && !isEnglishDocsPath(currentPath)) {
-      resolvedLocale = resolveDocsEntryLocale(null, storedLocale, clientLanguages);
-      shouldPersist = true;
-    } else if (isEnglishDocsPath(currentPath)) {
-      resolvedLocale = 'en';
-    } else if (releaseNotesPath) {
-      resolvedLocale = 'root';
-    } else if (storedLocale === 'root') {
-      resolvedLocale = 'root';
-    } else {
-      resolvedLocale = 'en';
-    }
-
-    var shouldResolvePath =
-      requestedLang !== null ||
-      landingPath ||
-      (!isEnglishDocsPath(currentPath) && !releaseNotesPath && resolvedLocale === 'en');
+    var resolved = resolveRouteLocale(requestedLang, storedLocale, clientLanguages);
+    var resolvedLocale = resolved.locale;
+    var shouldPersist = resolved.shouldPersist;
     var targetBasePath = landingTargetPath && landingPath ? landingTargetPath : currentPath;
-    var targetPath = shouldResolvePath
-      ? buildDocsRoutePath(resolvedLocale, targetBasePath)
-      : currentPath;
+    var targetPath = buildDocsRoutePath(resolvedLocale, targetBasePath);
     var targetUrl = buildTargetUrl(currentUrl, targetPath);
 
     return {
