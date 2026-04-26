@@ -3,8 +3,17 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const LIB_DIR = path.dirname(fileURLToPath(import.meta.url));
-const RELEASE_NOTES_DATA_DIR = path.resolve(LIB_DIR, '..', 'data', 'release-notes');
+const RELEASE_NOTES_DATA_DIR = path.resolve(process.cwd(), 'src', 'data', 'release-notes');
+const SOURCE_RELEASE_NOTES_DATA_DIR = path.resolve(LIB_DIR, '..', 'data', 'release-notes');
 const RELEASE_NOTES_INDEX_PATH = path.join(RELEASE_NOTES_DATA_DIR, 'index.json');
+
+function resolveReleaseNotesDataDir() {
+  if (fs.existsSync(RELEASE_NOTES_INDEX_PATH)) {
+    return RELEASE_NOTES_DATA_DIR;
+  }
+
+  return SOURCE_RELEASE_NOTES_DATA_DIR;
+}
 
 function readJsonFile(filePath, fallback) {
   if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
@@ -14,7 +23,7 @@ function readJsonFile(filePath, fallback) {
   return JSON.parse(fs.readFileSync(filePath, 'utf8'));
 }
 
-export function loadManagedReleaseNotesIndex(indexPath = RELEASE_NOTES_INDEX_PATH) {
+export function loadManagedReleaseNotesIndex(indexPath = path.join(resolveReleaseNotesDataDir(), 'index.json')) {
   return readJsonFile(indexPath, {
     generatedAt: null,
     source: null,
@@ -22,7 +31,7 @@ export function loadManagedReleaseNotesIndex(indexPath = RELEASE_NOTES_INDEX_PAT
   });
 }
 
-export function loadManagedReleaseNotesDetails(indexPayload, dataDir = RELEASE_NOTES_DATA_DIR) {
+export function loadManagedReleaseNotesDetails(indexPayload, dataDir = resolveReleaseNotesDataDir()) {
   const entries = Array.isArray(indexPayload?.entries) ? indexPayload.entries : [];
   const details = new Map();
 
