@@ -56,7 +56,8 @@ Desktop 下载数据在运行时直接读取 `repos/index` 发布的 canonical i
 
 新的版本更新说明入口现在由本仓库托管，受管输出固定为单路由模式：
 
-- `src/data/release-notes.index.json`
+- `src/data/release-notes/index.json`
+- `src/data/release-notes/<tag>.json`
 - `src/content/docs/release-notes/index.mdx`
 - `src/content/docs/en/release-notes/index.mdx`
 
@@ -108,11 +109,12 @@ npm run release-notes:sync
 
 - `.github/workflows/release-notes-sync.yml` 会按日程运行，也支持 `workflow_dispatch` 手动触发。
 - 在 monorepo cron 路径中，`hagirepocron` 会显式设置 `DOCS_RELEASE_NOTES_SOURCE=local` 并传入 sibling `release-notes` 路径，因此 docs 页面物化不再依赖已发布的 release asset。
+- docs 受管数据现已拆分为轻量 `index.json` 与按 tag 输出的详情 JSON；landing 页面仍保持单路由聚合展示。
 - 工作流优先使用 `DOCS_RELEASE_NOTES_TOKEN` 访问上游 GitHub API；只有当当前仓库默认 `GITHUB_TOKEN` 本身就具备跨仓库可见性时，才会回退到它。
 - 在 CI 中，`DOCS_RELEASE_NOTES_ALLOW_STALE_ON_SOURCE_ERROR=true` 会在上游仓库暂时不可访问、但当前受管输出已存在时保留现状并继续通过工作流。
 - 同步脚本除 Node.js 之外，还依赖系统自带的 `zip` 与 `unzip` 工具。
 - 如果历史同步曾留下 `src/content/docs/release-notes/*.md` 或 `src/content/docs/en/release-notes/*.md`，重新运行 `npm run release-notes:sync` 会自动清理这些旧的受管详情页。
-- 如果需要排查“为什么页面仍然像旧的多路由模式”，先确认 `src/data/release-notes.index.json` 中是否已经移除了 `routes` 字段并为每个条目生成 `anchorId`。
+- 如果需要排查“为什么页面仍然像旧的多路由模式”，先确认 `src/data/release-notes/index.json` 中是否已经移除了 `routes` 字段、为每个条目生成 `anchorId`，并且 `src/data/release-notes/<tag>.json` 已正确写出详情 HTML。
 - 如果 local 模式下同步日志里出现 skipped tags，优先检查 `release-notes` 源文件；如果是 GitHub 模式，再检查上游 Release asset。
 - 如果 release discovery 返回 `404`，优先按认证或仓库访问问题排查，并确认 `DOCS_RELEASE_NOTES_TOKEN` 是否能读取 `HagiCode-org/release-notes`。
 - 如果是在 monorepo 本地开发，优先使用 `DOCS_RELEASE_NOTES_SOURCE=local` 加 `DOCS_RELEASE_NOTES_LOCAL_REPO_ROOT`。

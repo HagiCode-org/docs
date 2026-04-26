@@ -54,7 +54,7 @@ Repository-scoped update detail pages are no longer hosted in this docs site. A 
 
 ## Release-notes sync workflow
 
-The replacement release-notes surface now lives in this repository under `src/content/docs/release-notes/`, `src/content/docs/en/release-notes/`, and `src/data/release-notes.index.json`.
+The replacement release-notes surface now lives in this repository under `src/content/docs/release-notes/`, `src/content/docs/en/release-notes/`, and the managed `src/data/release-notes/` directory.
 Managed outputs are generated from the authoritative `repos/release-notes` workspace data.
 For monorepo automation, the preferred path is direct repository-to-repository transfer. GitHub Release assets remain only as an optional fallback source for standalone sync jobs. `hagirepocron` is expected to reach this repo only after `release-notes` has produced a complete bilingual published dataset for each tag.
 
@@ -101,7 +101,9 @@ npm run release-notes:sync
 
 - `.github/workflows/release-notes-sync.yml` runs daily and via `workflow_dispatch`.
 - In the monorepo cron path, `hagirepocron` sets `DOCS_RELEASE_NOTES_SOURCE=local` and passes the sibling `release-notes` checkout root, so docs no longer depends on published release assets to materialize pages.
-- Docs-managed output stays limited to `src/data/release-notes.index.json`, `src/content/docs/release-notes/index.mdx`, and `src/content/docs/en/release-notes/index.mdx`; incomplete upstream tags must not create any extra per-tag files.
+- Docs-managed output now uses `src/data/release-notes/index.json` plus `src/data/release-notes/<tag>.json`, together with `src/content/docs/release-notes/index.mdx` and `src/content/docs/en/release-notes/index.mdx`.
+- The lightweight index keeps browse metadata only; detailed rendered bodies live in the per-tag JSON files generated inside this repository.
+- Incomplete upstream tags must not create partial detail files or extra docs routes.
 - The workflow uses `DOCS_RELEASE_NOTES_TOKEN` for upstream GitHub API access and falls back to the repository `GITHUB_TOKEN` only when that token already has cross-repository visibility.
 - In CI, `DOCS_RELEASE_NOTES_ALLOW_STALE_ON_SOURCE_ERROR=true` keeps the job green when the upstream repository is temporarily inaccessible and existing managed outputs are already present.
 - The sync scripts depend on the standard `zip` and `unzip` utilities in addition to Node.js.
