@@ -64,6 +64,12 @@ function createFetchMock(promotions: Array<{
   ctaEn?: string;
   link: string;
   platform?: string;
+  image?: string | {
+    src?: string;
+    alt?: string;
+    width?: number;
+    height?: number;
+  };
 }>) {
   const jsonHeaders = {
     'content-type': 'application/json',
@@ -82,14 +88,14 @@ function createFetchMock(promotions: Array<{
     }
 
     if (url.endsWith('/promote.json')) {
-        return new Response(JSON.stringify({
-          promotes: promotions.map((promotion) => ({
-            id: promotion.id,
-            on: promotion.on ?? true,
-            startTime: promotion.startTime,
-            endTime: promotion.endTime,
-          })),
-        }), { status: 200, headers: jsonHeaders });
+      return new Response(JSON.stringify({
+        promotes: promotions.map((promotion) => ({
+          id: promotion.id,
+          on: promotion.on ?? true,
+          startTime: promotion.startTime,
+          endTime: promotion.endTime,
+        })),
+      }), { status: 200, headers: jsonHeaders });
     }
 
     if (url.endsWith('/promote_content.json')) {
@@ -103,6 +109,7 @@ function createFetchMock(promotions: Array<{
             : undefined,
           link: promotion.link,
           targetPlatform: promotion.platform,
+          image: promotion.image,
         })),
       }), { status: 200, headers: jsonHeaders });
     }
@@ -111,29 +118,62 @@ function createFetchMock(promotions: Array<{
   });
 }
 
-function renderBannerShell(locale = 'en') {
-  const closeLabel = locale === 'zh-CN' ? '关闭推广信息' : 'Dismiss promotion message';
+function renderBannerShell({
+  locale = 'en',
+  path = '/en/product-overview/',
+}: {
+  locale?: string;
+  path?: string;
+} = {}) {
+  const labels = locale === 'zh-CN'
+    ? {
+        close: '关闭推广信息',
+        previous: '查看上一条推广',
+        next: '查看下一条推广',
+        pause: '暂停自动轮播',
+        resume: '恢复自动轮播',
+      }
+    : {
+        close: 'Dismiss promotion message',
+        previous: 'Show previous promotion',
+        next: 'Show next promotion',
+        pause: 'Pause automatic rotation',
+        resume: 'Resume automatic rotation',
+      };
+
   document.body.innerHTML = `
-    <footer data-footer-root>
-      <docs-promote-banner data-locale="${locale}" hidden>
-        <div data-promote-banner-spacer></div>
-        <section data-promote-banner-shell hidden>
-          <div class="docs-promote-banner__inner">
-            <button type="button" data-promote-banner-close aria-label="${closeLabel}">×</button>
-            <div>
-              <div data-promote-banner-track></div>
+    <main data-page-shell data-page-path="${path}">
+      <footer data-footer-root>
+        <docs-promote-banner data-locale="${locale}" hidden>
+          <div data-promote-banner-spacer></div>
+          <section data-promote-banner-shell hidden>
+            <div class="docs-promote-banner__inner">
+              <button type="button" data-promote-banner-close aria-label="${labels.close}">×</button>
+              <div class="docs-promote-banner__body">
+                <div class="docs-promote-banner__viewport">
+                  <div data-promote-banner-track></div>
+                </div>
+                <div data-promote-banner-controls hidden>
+                  <button type="button" data-promote-banner-previous aria-label="${labels.previous}">‹</button>
+                  <span data-promote-banner-count></span>
+                  <button type="button" data-promote-banner-next aria-label="${labels.next}">›</button>
+                  <button
+                    type="button"
+                    data-promote-banner-pause
+                    data-rotation-pause-label="${labels.pause}"
+                    data-rotation-resume-label="${labels.resume}"
+                    aria-label="${labels.pause}"
+                  >
+                    ${locale === 'zh-CN' ? '暂停' : 'Pause'}
+                  </button>
+                </div>
+              </div>
             </div>
-            <div>
-              <button type="button" data-promote-banner-previous aria-label="Show previous promotion">‹</button>
-              <span data-promote-banner-count></span>
-              <button type="button" data-promote-banner-next aria-label="Show next promotion">›</button>
-              <button type="button" data-promote-banner-pause aria-label="Pause automatic rotation">Pause</button>
-            </div>
-          </div>
-          <span data-promote-banner-status aria-live="polite"></span>
-        </section>
-      </docs-promote-banner>
-    </footer>
+            <span data-promote-banner-status aria-live="polite"></span>
+          </section>
+        </docs-promote-banner>
+      </footer>
+    </main>
   `;
 
   const footer = document.querySelector<HTMLElement>('[data-footer-root]');
@@ -162,22 +202,7 @@ function renderBannerShell(locale = 'en') {
     }),
   });
 
-  Object.defineProperty(footer, 'getBoundingClientRect', {
-    configurable: true,
-    value: () => ({
-      width: 720,
-      height: 280,
-      top: 1200,
-      right: 720,
-      bottom: 1480,
-      left: 0,
-      x: 0,
-      y: 1200,
-      toJSON() {
-        return {};
-      },
-    }),
-  });
+  setFooterRect(footer, 1200);
 
   return { footer, root, shell, spacer };
 }
@@ -202,7 +227,11 @@ function setFooterRect(footer: HTMLElement, top: number, height = 280) {
 }
 
 function getActiveSlideTitle(root: HTMLElement): string | null {
-  return root.querySelector<HTMLElement>('.docs-promote-banner__slide[data-active="true"] .docs-promote-banner__title')?.textContent ?? null;
+  return root.querySelector<HTMLElement>('[data-active="true"] .docs-promote-banner__title')?.textContent ?? null;
+}
+
+function syncLayout(controller: DocsPromoteBannerController): void {
+  (controller as unknown as { syncLayout: () => void }).syncLayout();
 }
 
 describe('DocsPromoteBannerController', () => {
@@ -236,10 +265,13 @@ describe('DocsPromoteBannerController', () => {
     vi.stubGlobal('cancelAnimationFrame', vi.fn());
   });
 
-  it('keeps the banner hidden when no valid promotions are available', async () => {
+  it('shows the localized fallback on the Chinese product overview entry flow and hides carousel chrome', async () => {
     const matchMedia = createMatchMedia(false);
     vi.stubGlobal('matchMedia', vi.fn(() => matchMedia));
-    const { footer, root, shell, spacer } = renderBannerShell('en');
+    const { footer, root, shell, spacer } = renderBannerShell({
+      locale: 'zh-CN',
+      path: '/product-overview/',
+    });
 
     const controller = new DocsPromoteBannerController(root, {
       footer,
@@ -249,159 +281,26 @@ describe('DocsPromoteBannerController', () => {
 
     await controller.connect();
 
-    expect(root).toHaveAttribute('hidden');
-    expect(shell).toHaveAttribute('hidden');
-    expect(root.dataset.state).toBe('hidden');
-    expect(root.style.display).toBe('none');
-    expect(shell.style.display).toBe('none');
-    expect(spacer).toHaveAttribute('hidden');
-    expect(spacer.style.display).toBe('none');
-    expect(spacer.style.height).toBe('0px');
-  });
-
-  it('keeps pre-start promotions hidden until a refresh crosses the start time', async () => {
-    const matchMedia = createMatchMedia(false);
-    vi.stubGlobal('matchMedia', vi.fn(() => matchMedia));
-    const { footer, root, shell } = renderBannerShell('en');
-
-    const controller = new DocsPromoteBannerController(root, {
-      footer,
-      fetchImpl: createFetchMock([
-        {
-          id: 'future',
-          startTime: '2026-04-29T00:00:00+08:00',
-          titleZh: '即将上线',
-          titleEn: 'Starts Soon',
-          descriptionZh: '预热中',
-          descriptionEn: 'Warming up',
-          link: 'https://example.invalid/future',
-          platform: 'steam',
-        },
-      ]) as typeof fetch,
-      refreshIntervalMs: 1000,
-    });
-
-    await controller.connect();
-
-    expect(root).toHaveAttribute('hidden');
-    expect(shell).toHaveAttribute('hidden');
-
-    vi.setSystemTime(new Date('2026-04-29T00:00:00+08:00'));
-    await (controller as unknown as { reloadPromotions: ({ forceRefresh }: { forceRefresh: boolean }) => Promise<void> })
-      .reloadPromotions({ forceRefresh: true });
-    (controller as unknown as { syncLayout: () => void }).syncLayout();
-
     expect(root).not.toHaveAttribute('hidden');
-    expect(getActiveSlideTitle(root)).toBe('Starts Soon');
+    expect(shell).not.toHaveAttribute('hidden');
+    expect(spacer).not.toHaveAttribute('hidden');
+    expect(root.dataset.mode).toBe('fallback');
+    expect(getActiveSlideTitle(root)).toBe('查看 HagiCode 产品概览');
+    expect(screen.getByText('从文档入口快速了解产品能力、版本关系与常见上手路径。')).toBeInTheDocument();
+    expect(screen.getByText('文档')).toBeInTheDocument();
+    expect(root.querySelector('[data-promote-banner-controls]')).toHaveAttribute('hidden');
+
+    fireEvent.click(screen.getByRole('button', { name: /查看文档/i }));
+    expect(window.open).toHaveBeenCalledWith('/product-overview/', '_blank', 'noopener,noreferrer');
   });
 
-  it('removes an expired promotion after refresh and hides the banner when no active entry remains', async () => {
+  it('shows the remote promotion on the English product overview entry flow and keeps single-card controls hidden', async () => {
     const matchMedia = createMatchMedia(false);
     vi.stubGlobal('matchMedia', vi.fn(() => matchMedia));
-    const { footer, root, shell } = renderBannerShell('en');
-
-    const controller = new DocsPromoteBannerController(root, {
-      footer,
-      fetchImpl: createFetchMock([
-        {
-          id: 'expires-now',
-          endTime: '2026-04-29T00:00:00+08:00',
-          titleZh: '即将结束',
-          titleEn: 'Ends Soon',
-          descriptionZh: '最后一刻',
-          descriptionEn: 'Last chance',
-          link: 'https://example.invalid/ends',
-          platform: 'steam',
-        },
-      ]) as typeof fetch,
-      refreshIntervalMs: 1000,
+    const { footer, root } = renderBannerShell({
+      locale: 'en',
+      path: '/en/product-overview/',
     });
-
-    await controller.connect();
-
-    expect(root).not.toHaveAttribute('hidden');
-
-    vi.setSystemTime(new Date('2026-04-29T00:00:00+08:00'));
-    await vi.advanceTimersByTimeAsync(1000);
-
-    expect(root).toHaveAttribute('hidden');
-    expect(shell).toHaveAttribute('hidden');
-    expect(root.dataset.state).toBe('hidden');
-  });
-
-  it('swaps promotions at the exact boundary on refresh', async () => {
-    const matchMedia = createMatchMedia(false);
-    vi.stubGlobal('matchMedia', vi.fn(() => matchMedia));
-    const { footer, root } = renderBannerShell('en');
-
-    const controller = new DocsPromoteBannerController(root, {
-      footer,
-      fetchImpl: createFetchMock([
-        {
-          id: 'main-game-2026-04-29',
-          endTime: '2026-04-29T00:00:00+08:00',
-          titleZh: '愿望单',
-          titleEn: 'Wishlist Now',
-          descriptionZh: '旧推广',
-          descriptionEn: 'Old promotion',
-          link: 'https://example.invalid/wishlist',
-          platform: 'steam',
-        },
-        {
-          id: 'main-game-steam-ea-2026-04-29',
-          startTime: '2026-04-29T00:00:00+08:00',
-          titleZh: '抢先体验',
-          titleEn: 'Early Access Is Live',
-          descriptionZh: '新推广',
-          descriptionEn: 'New promotion',
-          link: 'https://example.invalid/ea',
-          platform: 'steam',
-        },
-      ]) as typeof fetch,
-      refreshIntervalMs: 1000,
-    });
-
-    await controller.connect();
-
-    expect(getActiveSlideTitle(root)).toBe('Wishlist Now');
-
-    vi.setSystemTime(new Date('2026-04-29T00:00:00+08:00'));
-    await vi.advanceTimersByTimeAsync(1000);
-
-    expect(getActiveSlideTitle(root)).toBe('Early Access Is Live');
-  });
-
-  it('keeps the entire banner hidden when promotion fetch fails', async () => {
-    const matchMedia = createMatchMedia(false);
-    vi.stubGlobal('matchMedia', vi.fn(() => matchMedia));
-    const { footer, root, shell, spacer } = renderBannerShell('en');
-
-    const fetchMock = vi.fn(async () => {
-      throw new Error('network failed');
-    });
-
-    const controller = new DocsPromoteBannerController(root, {
-      footer,
-      fetchImpl: fetchMock as typeof fetch,
-      refreshIntervalMs: 60_000,
-    });
-
-    await controller.connect();
-
-    expect(root).toHaveAttribute('hidden');
-    expect(shell).toHaveAttribute('hidden');
-    expect(root.dataset.state).toBe('hidden');
-    expect(root.style.display).toBe('none');
-    expect(shell.style.display).toBe('none');
-    expect(spacer).toHaveAttribute('hidden');
-    expect(spacer.style.display).toBe('none');
-    expect(spacer.style.height).toBe('0px');
-  });
-
-  it('renders a single promotion with localized content and hides carousel-only controls', async () => {
-    const matchMedia = createMatchMedia(false);
-    vi.stubGlobal('matchMedia', vi.fn(() => matchMedia));
-    const { footer, root, shell, spacer } = renderBannerShell('zh-CN');
 
     const controller = new DocsPromoteBannerController(root, {
       footer,
@@ -416,244 +315,130 @@ describe('DocsPromoteBannerController', () => {
           ctaEn: 'Wishlist on Steam',
           link: 'https://store.steampowered.com/app/4625540/Hagicode/',
           platform: 'steam',
+          image: {
+            src: '/images/promotions/main-game.webp',
+            alt: 'HagiCode Steam artwork',
+            width: 640,
+            height: 640,
+          },
         },
       ]) as typeof fetch,
+      refreshIntervalMs: 60_000,
     });
 
     await controller.connect();
 
-    expect(root).not.toHaveAttribute('hidden');
-    expect(shell).not.toHaveAttribute('hidden');
-    expect(spacer).not.toHaveAttribute('hidden');
-    expect(getActiveSlideTitle(root)).toBe('立即添加到愿望单');
-    expect(screen.getByText('游戏将于 2026-04-29 发售，立即前往 Steam 添加愿望单。')).toBeInTheDocument();
+    expect(root.dataset.mode).toBe('remote');
+    expect(getActiveSlideTitle(root)).toBe('Wishlist Now');
+    expect(screen.getByText('Coming April 29, 2026. Add to your Steam wishlist now!')).toBeInTheDocument();
     expect(screen.getByText('Steam')).toBeInTheDocument();
-    const stripButton = screen.getByRole('button', { name: /立即添加到愿望单/i });
-    expect(stripButton).toBeInTheDocument();
-    expect(screen.getByText('加入愿望单')).toBeInTheDocument();
-    fireEvent.click(stripButton);
-    expect(window.open).toHaveBeenCalledWith(
-      'https://store.steampowered.com/app/4625540/Hagicode/',
-      '_blank',
-      'noopener,noreferrer',
-    );
-    expect(root.querySelector('[data-promote-banner-previous]')).toHaveAttribute('hidden');
-    expect(root.querySelector('[data-promote-banner-next]')).toHaveAttribute('hidden');
-    expect(root.querySelector('[data-promote-banner-pause]')).toHaveAttribute('hidden');
-    expect(spacer.style.height).toBe('0px');
-    expect(shell.style.getPropertyValue('--docs-promote-banner-bottom-offset')).toBe('0px');
+    const promoImage = root.querySelector<HTMLImageElement>('.docs-promote-banner__image');
+    expect(promoImage).not.toBeNull();
+    expect(promoImage).toHaveAttribute('src', 'https://index.hagicode.com/images/promotions/main-game.webp');
+    expect(promoImage).toHaveAttribute('alt', 'HagiCode Steam artwork');
+    expect(root.querySelector('[data-promote-banner-controls]')).toHaveAttribute('hidden');
   });
 
-  it('keeps the panel floating until the footer enters the viewport, then hides it', async () => {
+  it('keeps the banner visible on ordinary Starlight page shells and docks above the footer instead of hiding', async () => {
     const matchMedia = createMatchMedia(false);
     vi.stubGlobal('matchMedia', vi.fn(() => matchMedia));
-    const { footer, root, shell, spacer } = renderBannerShell('en');
-    setFooterRect(footer, 1200);
-
-    const controller = new DocsPromoteBannerController(root, {
-      footer,
-      fetchImpl: createFetchMock([
-        {
-          id: 'main-game',
-          titleZh: '立即添加到愿望单',
-          titleEn: 'Wishlist Now',
-          descriptionZh: '游戏将于 2026-04-29 发售，立即前往 Steam 添加愿望单。',
-          descriptionEn: 'Coming April 29, 2026. Add to your Steam wishlist now!',
-          link: 'https://store.steampowered.com/app/4625540/Hagicode/',
-          platform: 'steam',
-        },
-      ]) as typeof fetch,
-      refreshIntervalMs: 60_000,
+    const { footer, root, shell } = renderBannerShell({
+      locale: 'en',
+      path: '/en/guides/skills/',
     });
 
-    await controller.connect();
-
-    expect(root).not.toHaveAttribute('hidden');
-    expect(shell).not.toHaveAttribute('hidden');
-    expect(spacer).not.toHaveAttribute('hidden');
-    expect(root.dataset.state).toBe('ready');
-    expect(spacer.style.height).toBe('0px');
-
-    setFooterRect(footer, 760);
-    (controller as unknown as { syncLayout: () => void }).syncLayout();
-
-    expect(root).toHaveAttribute('hidden');
-    expect(shell).toHaveAttribute('hidden');
-    expect(spacer).toHaveAttribute('hidden');
-    expect(root.dataset.state).toBe('footer-hidden');
-    expect(spacer.style.height).toBe('0px');
-  });
-
-  it('allows dismissing the current promotion banner from the close button', async () => {
-    const matchMedia = createMatchMedia(false);
-    vi.stubGlobal('matchMedia', vi.fn(() => matchMedia));
-    const { footer, root, shell, spacer } = renderBannerShell('en');
-
-    const controller = new DocsPromoteBannerController(root, {
-      footer,
-      fetchImpl: createFetchMock([
-        {
-          id: 'main-game',
-          titleZh: '立即添加到愿望单',
-          titleEn: 'Wishlist Now',
-          descriptionZh: '游戏将于 2026-04-29 发售，立即前往 Steam 添加愿望单。',
-          descriptionEn: 'Coming April 29, 2026. Add to your Steam wishlist now!',
-          link: 'https://store.steampowered.com/app/4625540/Hagicode/',
-          platform: 'steam',
-        },
-      ]) as typeof fetch,
-      refreshIntervalMs: 60_000,
-    });
-
-    await controller.connect();
-
-    fireEvent.click(screen.getByRole('button', { name: 'Dismiss promotion message' }));
-
-    expect(root).toHaveAttribute('hidden');
-    expect(shell).toHaveAttribute('hidden');
-    expect(spacer).toHaveAttribute('hidden');
-    expect(root.dataset.state).toBe('dismissed');
-    expect(spacer.style.height).toBe('0px');
-    expect(window.localStorage.getItem('hagicode:docs-promote-banner:dismissed-signature')).toBe('main-game');
-  });
-
-  it('keeps the same promotion set dismissed across reconnects', async () => {
-    const matchMedia = createMatchMedia(false);
-    vi.stubGlobal('matchMedia', vi.fn(() => matchMedia));
-    const firstRender = renderBannerShell('en');
-
-    const options = {
-      footer: firstRender.footer,
-      fetchImpl: createFetchMock([
-        {
-          id: 'main-game',
-          titleZh: '立即添加到愿望单',
-          titleEn: 'Wishlist Now',
-          descriptionZh: '游戏将于 2026-04-29 发售，立即前往 Steam 添加愿望单。',
-          descriptionEn: 'Coming April 29, 2026. Add to your Steam wishlist now!',
-          link: 'https://store.steampowered.com/app/4625540/Hagicode/',
-          platform: 'steam',
-        },
-      ]) as typeof fetch,
-      refreshIntervalMs: 60_000,
-    };
-
-    const firstController = new DocsPromoteBannerController(firstRender.root, options);
-    await firstController.connect();
-    fireEvent.click(screen.getByRole('button', { name: 'Dismiss promotion message' }));
-    firstController.disconnect();
-
-    const secondRender = renderBannerShell('en');
-    const secondController = new DocsPromoteBannerController(secondRender.root, {
-      ...options,
-      footer: secondRender.footer,
-    });
-
-    await secondController.connect();
-
-    expect(secondRender.root).toHaveAttribute('hidden');
-    expect(secondRender.shell).toHaveAttribute('hidden');
-    expect(secondRender.spacer).toHaveAttribute('hidden');
-    expect(secondRender.root.dataset.state).toBe('dismissed');
-  });
-
-  it('collapses the banner again when a refresh later returns invalid html instead of json', async () => {
-    const matchMedia = createMatchMedia(false);
-    vi.stubGlobal('matchMedia', vi.fn(() => matchMedia));
-    const { footer, root, shell, spacer } = renderBannerShell('en');
-
-    let mode: 'json' | 'html' = 'json';
-    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-      const url = input.toString();
-
-      if (mode === 'html') {
-        return new Response('<html>down</html>', {
-          status: 200,
-          headers: {
-            'content-type': 'text/html',
-          },
-        });
-      }
-
-      if (url.endsWith('/index-catalog.json')) {
-        return new Response(JSON.stringify({
-          entries: [
-            { id: 'promotion-flags', path: '/promote.json' },
-            { id: 'promotion-content', path: '/promote_content.json' },
-          ],
-        }), {
-          status: 200,
-          headers: {
-            'content-type': 'application/json',
-          },
-        });
-      }
-
-      if (url.endsWith('/promote.json')) {
-        return new Response(JSON.stringify({
-          promotes: [{ id: 'main-game', on: true }],
-        }), {
-          status: 200,
-          headers: {
-            'content-type': 'application/json',
-          },
-        });
-      }
-
-      if (url.endsWith('/promote_content.json')) {
-        return new Response(JSON.stringify({
-          contents: [{
-            id: 'main-game',
-            title: { zh: '立即添加到愿望单', en: 'Wishlist Now' },
-            description: {
-              zh: '游戏将于 2026-04-29 发售，立即前往 Steam 添加愿望单。',
-              en: 'Coming April 29, 2026. Add to your Steam wishlist now!',
-            },
-            cta: { zh: '加入愿望单', en: 'Wishlist on Steam' },
-            link: 'https://store.steampowered.com/app/4625540/Hagicode/',
-            targetPlatform: 'steam',
-          }],
-        }), {
-          status: 200,
-          headers: {
-            'content-type': 'application/json',
-          },
-        });
-      }
-
-      throw new Error(`Unexpected fetch: ${url}`);
+    const fetchMock = vi.fn(async () => {
+      throw new Error('network failed');
     });
 
     const controller = new DocsPromoteBannerController(root, {
       footer,
       fetchImpl: fetchMock as typeof fetch,
-      refreshIntervalMs: 1000,
+      refreshIntervalMs: 60_000,
     });
 
     await controller.connect();
 
     expect(root).not.toHaveAttribute('hidden');
-    expect(shell).not.toHaveAttribute('hidden');
-    expect(spacer).not.toHaveAttribute('hidden');
-    expect(getActiveSlideTitle(root)).toBe('Wishlist Now');
+    expect(root.dataset.mode).toBe('fallback');
+    expect(root.dataset.state).toBe('ready');
+    expect(shell.style.getPropertyValue('--docs-promote-banner-bottom-offset')).toBe('0px');
 
-    mode = 'html';
-    await vi.advanceTimersByTimeAsync(1000);
+    setFooterRect(footer, 760);
+    syncLayout(controller);
 
-    expect(root).toHaveAttribute('hidden');
-    expect(shell).toHaveAttribute('hidden');
-    expect(spacer).toHaveAttribute('hidden');
-    expect(root.dataset.state).toBe('hidden');
-    expect(root.style.display).toBe('none');
-    expect(shell.style.display).toBe('none');
-    expect(spacer.style.display).toBe('none');
-    expect(spacer.style.height).toBe('0px');
+    expect(root).not.toHaveAttribute('hidden');
+    expect(root.dataset.state).toBe('docked');
+    expect(shell.style.getPropertyValue('--docs-promote-banner-bottom-offset')).toBe('140px');
   });
 
-  it('supports multi-promotion manual navigation', async () => {
+  it('keeps fallback dismissal persisted for the same payload but allows a later remote promotion to reappear', async () => {
     const matchMedia = createMatchMedia(false);
     vi.stubGlobal('matchMedia', vi.fn(() => matchMedia));
-    const { footer, root } = renderBannerShell('en');
+
+    const firstRender = renderBannerShell({
+      locale: 'en',
+      path: '/en/product-overview/',
+    });
+    const fallbackController = new DocsPromoteBannerController(firstRender.root, {
+      footer: firstRender.footer,
+      fetchImpl: createFetchMock([]) as typeof fetch,
+      refreshIntervalMs: 60_000,
+    });
+
+    await fallbackController.connect();
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss promotion message' }));
+    expect(firstRender.root.dataset.state).toBe('dismissed');
+
+    const secondRender = renderBannerShell({
+      locale: 'en',
+      path: '/en/product-overview/',
+    });
+    const secondController = new DocsPromoteBannerController(secondRender.root, {
+      footer: secondRender.footer,
+      fetchImpl: createFetchMock([]) as typeof fetch,
+      refreshIntervalMs: 60_000,
+    });
+
+    await secondController.connect();
+    expect(secondRender.root).toHaveAttribute('hidden');
+    expect(secondRender.root.dataset.state).toBe('dismissed');
+
+    const thirdRender = renderBannerShell({
+      locale: 'en',
+      path: '/en/product-overview/',
+    });
+    const remoteController = new DocsPromoteBannerController(thirdRender.root, {
+      footer: thirdRender.footer,
+      fetchImpl: createFetchMock([
+        {
+          id: 'builder',
+          titleZh: '体验部署生成器',
+          titleEn: 'Try the Builder',
+          descriptionZh: '使用 Docker Compose Builder 快速生成部署配置。',
+          descriptionEn: 'Generate Docker Compose deployment files with the Builder.',
+          ctaZh: '立即体验',
+          ctaEn: 'Open Builder',
+          link: 'https://builder.hagicode.com/',
+          platform: 'web',
+        },
+      ]) as typeof fetch,
+      refreshIntervalMs: 60_000,
+    });
+
+    await remoteController.connect();
+    expect(thirdRender.root).not.toHaveAttribute('hidden');
+    expect(thirdRender.root.dataset.mode).toBe('remote');
+    expect(getActiveSlideTitle(thirdRender.root)).toBe('Try the Builder');
+  });
+
+  it('preserves multi-promotion navigation and carousel controls for multiple active remote entries', async () => {
+    const matchMedia = createMatchMedia(false);
+    vi.stubGlobal('matchMedia', vi.fn(() => matchMedia));
+    const { footer, root } = renderBannerShell({
+      locale: 'en',
+      path: '/en/guides/skills/',
+    });
 
     const controller = new DocsPromoteBannerController(root, {
       footer,
@@ -677,26 +462,25 @@ describe('DocsPromoteBannerController', () => {
           platform: 'web',
         },
       ]) as typeof fetch,
+      refreshIntervalMs: 60_000,
     });
 
     await controller.connect();
 
-    expect(root).not.toHaveAttribute('hidden');
-    expect(getActiveSlideTitle(root)).toBe('Wishlist Now');
+    expect(root.querySelector('[data-promote-banner-controls]')).not.toHaveAttribute('hidden');
     expect(screen.getByText('1 / 2')).toBeInTheDocument();
-
     fireEvent.click(screen.getByRole('button', { name: 'Show next promotion' }));
     expect(getActiveSlideTitle(root)).toBe('Try the Builder');
     expect(screen.getByText('2 / 2')).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole('button', { name: 'Show previous promotion' }));
-    expect(screen.getByText('1 / 2')).toBeInTheDocument();
   });
 
-  it('supports pause/resume and manual switching while auto-rotation is available', async () => {
+  it('supports pause and resume while automatic rotation is available', async () => {
     const matchMedia = createMatchMedia(false);
     vi.stubGlobal('matchMedia', vi.fn(() => matchMedia));
-    const { footer, root } = renderBannerShell('en');
+    const { footer, root } = renderBannerShell({
+      locale: 'en',
+      path: '/en/guides/skills/',
+    });
 
     const controller = new DocsPromoteBannerController(root, {
       footer,
@@ -721,68 +505,26 @@ describe('DocsPromoteBannerController', () => {
         },
       ]) as typeof fetch,
       rotationIntervalMs: 1000,
+      refreshIntervalMs: 60_000,
     });
 
     await controller.connect();
 
-    expect(root).not.toHaveAttribute('hidden');
     await vi.advanceTimersByTimeAsync(1000);
     expect(screen.getByText('2 / 2')).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Pause automatic rotation' }));
-    expect(screen.getByRole('button', { name: 'Pause automatic rotation' })).toHaveTextContent('Resume');
+    const pauseButton = screen.getByRole('button', { name: 'Pause automatic rotation' });
+    fireEvent.click(pauseButton);
+    expect(pauseButton).toHaveTextContent('Resume');
+    expect(pauseButton).toHaveAttribute('aria-label', 'Resume automatic rotation');
 
     await vi.advanceTimersByTimeAsync(2000);
     expect(screen.getByText('2 / 2')).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Show previous promotion' }));
-    expect(screen.getByText('1 / 2')).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole('button', { name: 'Pause automatic rotation' }));
-    expect(screen.getByRole('button', { name: 'Pause automatic rotation' })).toHaveTextContent('Pause');
+    fireEvent.click(pauseButton);
+    expect(pauseButton).toHaveTextContent('Pause');
 
     await vi.advanceTimersByTimeAsync(1000);
-    expect(screen.getByText('2 / 2')).toBeInTheDocument();
-  });
-
-  it('respects reduced-motion by disabling automatic rotation while preserving manual controls', async () => {
-    const matchMedia = createMatchMedia(true);
-    vi.stubGlobal('matchMedia', vi.fn(() => matchMedia));
-    const { footer, root } = renderBannerShell('en');
-
-    const controller = new DocsPromoteBannerController(root, {
-      footer,
-      fetchImpl: createFetchMock([
-        {
-          id: 'main-game',
-          titleZh: '立即添加到愿望单',
-          titleEn: 'Wishlist Now',
-          descriptionZh: '游戏将于 2026-04-29 发售，立即前往 Steam 添加愿望单。',
-          descriptionEn: 'Coming April 29, 2026. Add to your Steam wishlist now!',
-          link: 'https://store.steampowered.com/app/4625540/Hagicode/',
-          platform: 'steam',
-        },
-        {
-          id: 'builder',
-          titleZh: '体验部署生成器',
-          titleEn: 'Try the Builder',
-          descriptionZh: '使用 Docker Compose Builder 快速生成部署配置。',
-          descriptionEn: 'Generate Docker Compose deployment files with the Builder.',
-          link: 'https://builder.hagicode.com/',
-          platform: 'web',
-        },
-      ]) as typeof fetch,
-      rotationIntervalMs: 1000,
-    });
-
-    await controller.connect();
-
-    expect(root).not.toHaveAttribute('hidden');
-    expect(screen.getByRole('button', { name: 'Pause automatic rotation' })).toHaveTextContent('Resume');
-    await vi.advanceTimersByTimeAsync(2000);
     expect(screen.getByText('1 / 2')).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole('button', { name: 'Show next promotion' }));
-    expect(screen.getByText('2 / 2')).toBeInTheDocument();
   });
 });

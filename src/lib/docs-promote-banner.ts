@@ -1,59 +1,31 @@
-import { parseDocsLocale } from '@/lib/i18n';
+import { getDocsPromoteFallback } from '@/lib/docs-promote-fallback';
+import {
+  clearPromotionDocumentCache,
+  filterActivePromotions,
+  loadPromotionDocuments,
+  loadPromotions as loadSharedPromotions,
+  mapDocsLocaleToPromoteLocale,
+  normalizePromotions,
+  resolvePromotionDocumentUrls,
+  type LoadPromotionsOptions,
+  type NormalizedPromotion,
+  type PromotionImage,
+} from '@/lib/promotions';
 
-const INDEX_ORIGIN = 'https://index.hagicode.com';
-const INDEX_CATALOG_URL = `${INDEX_ORIGIN}/index-catalog.json`;
-const FALLBACK_PROMOTE_FLAGS_URL = `${INDEX_ORIGIN}/promote.json`;
-const FALLBACK_PROMOTE_CONTENT_URL = `${INDEX_ORIGIN}/promote_content.json`;
 const DEFAULT_ROTATION_INTERVAL_MS = 8000;
 const DEFAULT_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 const DISMISSED_PROMOTIONS_STORAGE_KEY = 'hagicode:docs-promote-banner:dismissed-signature';
 
-type FetchLike = typeof fetch;
-
 type PromoteLocale = 'zh' | 'en';
 
-type JsonRecord = Record<string, unknown>;
+type FetchLike = typeof fetch;
 
-interface IndexCatalogEntry {
-  id: string;
-  path: string;
-}
-
-interface PromoteFlagRecord {
-  id: string;
-  on: boolean;
-  startTime?: string;
-  endTime?: string;
-}
-
-interface PromoteFlagsDocument {
-  promotes: PromoteFlagRecord[];
-}
-
-interface PromoteContentRecord {
-  id: string;
-  title: Record<string, string>;
-  description: Record<string, string>;
-  cta?: Record<string, string>;
-  link: string;
-  targetPlatform?: string;
-}
-
-interface PromoteContentDocument {
-  contents: PromoteContentRecord[];
-}
-
-interface PromotionDocumentUrls {
-  flagsUrl: string;
-  contentUrl: string;
-  source: 'catalog' | 'fallback';
-}
-
-interface PromotionDocuments {
-  urls: PromotionDocumentUrls;
-  flags: PromoteFlagsDocument;
-  content: PromoteContentDocument;
-}
+export {
+  clearPromotionDocumentCache,
+  loadPromotionDocuments,
+  mapDocsLocaleToPromoteLocale,
+  resolvePromotionDocumentUrls,
+};
 
 export interface ActivePromotion {
   id: string;
@@ -62,14 +34,13 @@ export interface ActivePromotion {
   ctaLabel: string;
   link: string;
   platform: string | null;
+  badgeText: string;
+  image: PromotionImage | null;
+  source: 'remote' | 'fallback';
+  payloadSignature: string;
 }
 
-export interface LoadActivePromotionsOptions {
-  locale?: string | null | undefined;
-  fetchImpl?: FetchLike;
-  forceRefresh?: boolean;
-  now?: number;
-}
+export interface LoadActivePromotionsOptions extends LoadPromotionsOptions {}
 
 export interface DocsPromoteBannerControllerOptions extends LoadActivePromotionsOptions {
   footer?: HTMLElement | null;
@@ -77,336 +48,113 @@ export interface DocsPromoteBannerControllerOptions extends LoadActivePromotions
   refreshIntervalMs?: number;
 }
 
-let cachedDocumentsPromise: Promise<PromotionDocuments> | null = null;
-
-function isRecord(value: unknown): value is JsonRecord {
-  return typeof value === 'object' && value !== null;
+function defaultBadgeText(locale: PromoteLocale): string {
+  return locale === 'en' ? 'Promoted' : '推荐';
 }
 
-function isNonEmptyString(value: unknown): value is string {
-  return typeof value === 'string' && value.trim().length > 0;
+function serializeSignaturePart(value: string): string {
+  return encodeURIComponent(value);
 }
 
-function sanitizeLocalizedStringMap(value: unknown): Record<string, string> | null {
-  if (!isRecord(value)) {
-    return null;
-  }
-
-  const entries: Array<[string, string]> = [];
-  for (const [key, entryValue] of Object.entries(value)) {
-    if (isNonEmptyString(key) && isNonEmptyString(entryValue)) {
-      entries.push([key.trim(), entryValue.trim()]);
-    }
-  }
-
-  return entries.length > 0 ? Object.fromEntries(entries) : null;
+function buildPayloadSignature(source: 'remote' | 'fallback', values: string[]): string {
+  return `${source}:${values.map(serializeSignaturePart).join('|')}`;
 }
 
-function parseCatalogEntries(payload: unknown): IndexCatalogEntry[] {
-  if (!isRecord(payload) || !Array.isArray(payload.entries)) {
-    return [];
-  }
-
-  return payload.entries.flatMap((entry) => {
-    if (!isRecord(entry) || !isNonEmptyString(entry.id) || !isNonEmptyString(entry.path)) {
-      return [];
-    }
-
-    return [{ id: entry.id, path: entry.path }];
-  });
-}
-
-function parseOptionalTimestamp(value: unknown): string | undefined {
-  return isNonEmptyString(value) ? value.trim() : undefined;
-}
-
-function parseTimestamp(value: string | undefined): number | null {
-  if (!value) {
-    return null;
-  }
-
-  const timestamp = Date.parse(value);
-  return Number.isFinite(timestamp) ? timestamp : Number.NaN;
-}
-
-function isPromoteFlagActive(record: PromoteFlagRecord, now = Date.now()): boolean {
-  if (!record.on) {
-    return false;
-  }
-
-  const startTime = parseTimestamp(record.startTime);
-  const endTime = parseTimestamp(record.endTime);
-
-  if (Number.isNaN(startTime) || Number.isNaN(endTime)) {
-    return false;
-  }
-
-  if (startTime !== null && endTime !== null && startTime >= endTime) {
-    return false;
-  }
-
-  if (startTime !== null && now < startTime) {
-    return false;
-  }
-
-  if (endTime !== null && now >= endTime) {
-    return false;
-  }
-
-  return true;
-}
-
-function parsePromoteFlagsDocument(payload: unknown): PromoteFlagsDocument {
-  if (!isRecord(payload) || !Array.isArray(payload.promotes)) {
-    return { promotes: [] };
-  }
-
-  return {
-    promotes: payload.promotes.flatMap((record) => {
-      if (!isRecord(record) || !isNonEmptyString(record.id) || typeof record.on !== 'boolean') {
-        return [];
-      }
-
-      return [{
-        id: record.id,
-        on: record.on,
-        startTime: parseOptionalTimestamp(record.startTime),
-        endTime: parseOptionalTimestamp(record.endTime),
-      }];
-    }),
-  };
-}
-
-function parsePromoteContentDocument(payload: unknown): PromoteContentDocument {
-  if (!isRecord(payload) || !Array.isArray(payload.contents)) {
-    return { contents: [] };
-  }
-
-  return {
-    contents: payload.contents.flatMap((record) => {
-      if (
-        !isRecord(record) ||
-        !isNonEmptyString(record.id) ||
-        !isNonEmptyString(record.link)
-      ) {
-        return [];
-      }
-
-      const title = sanitizeLocalizedStringMap(record.title);
-      const description = sanitizeLocalizedStringMap(record.description);
-      const cta = sanitizeLocalizedStringMap(record.cta);
-      if (!title || !description) {
-        return [];
-      }
-
-      return [{
-        id: record.id,
-        title,
-        description,
-        cta: cta ?? undefined,
-        link: record.link,
-        targetPlatform: isNonEmptyString(record.targetPlatform) ? record.targetPlatform : undefined,
-      }];
-    }),
-  };
-}
-
-async function readJson(fetchImpl: FetchLike, url: string): Promise<unknown> {
-  const response = await fetchImpl(url, {
-    headers: {
-      accept: 'application/json',
-    },
-    cache: 'no-store',
-  });
-
-  if (!response.ok) {
-    throw new Error(`Failed to load ${url}: ${response.status}`);
-  }
-
-  const contentType = response.headers.get('content-type')?.toLowerCase() ?? '';
-  const isJsonResponse =
-    contentType.includes('application/json') ||
-    contentType.includes('+json');
-
-  if (!isJsonResponse) {
-    throw new Error(`Expected JSON response from ${url}, received ${contentType || 'unknown content type'}`);
-  }
-
-  return response.json();
-}
-
-function buildCatalogUrl(path: string): string {
-  return new URL(path, INDEX_ORIGIN).toString();
-}
-
-export function clearPromotionDocumentCache(): void {
-  cachedDocumentsPromise = null;
-}
-
-export function mapDocsLocaleToPromoteLocale(locale: string | null | undefined): PromoteLocale {
-  return parseDocsLocale(locale) === 'en' ? 'en' : 'zh';
-}
-
-function localizePlatform(targetPlatform: string | undefined, locale: PromoteLocale): string | null {
-  if (!isNonEmptyString(targetPlatform)) {
-    return null;
-  }
-
-  const normalized = targetPlatform.trim().toLowerCase();
-  const labels: Record<string, Record<PromoteLocale, string>> = {
-    steam: {
-      zh: 'Steam',
-      en: 'Steam',
-    },
-  };
-
-  return labels[normalized]?.[locale] ?? targetPlatform.trim();
-}
-
-function pickLocalizedValue(
-  value: Record<string, string>,
+function createRemotePromotion(
+  promotion: NormalizedPromotion,
   locale: PromoteLocale,
-): string | null {
-  const orderedKeys = locale === 'en'
-    ? ['en', 'zh']
-    : ['zh', 'zh-CN', 'en'];
-
-  for (const key of orderedKeys) {
-    const candidate = value[key];
-    if (isNonEmptyString(candidate)) {
-      return candidate.trim();
-    }
-  }
-
-  const fallbackValue = Object.values(value).find(isNonEmptyString);
-  return fallbackValue?.trim() ?? null;
-}
-
-function resolveCtaLabel(value: Record<string, string> | undefined, locale: PromoteLocale): string {
-  if (value) {
-    const localized = pickLocalizedValue(value, locale);
-    if (localized) {
-      return localized;
-    }
-  }
-
-  return locale === 'zh' ? '立即前往' : 'GO';
-}
-
-export async function resolvePromotionDocumentUrls(
-  fetchImpl: FetchLike = fetch,
-): Promise<PromotionDocumentUrls> {
-  try {
-    const catalogPayload = await readJson(fetchImpl, INDEX_CATALOG_URL);
-    const entries = parseCatalogEntries(catalogPayload);
-    const flagsEntry = entries.find((entry) => entry.id === 'promotion-flags');
-    const contentEntry = entries.find((entry) => entry.id === 'promotion-content');
-
-    if (flagsEntry && contentEntry) {
-      return {
-        flagsUrl: buildCatalogUrl(flagsEntry.path),
-        contentUrl: buildCatalogUrl(contentEntry.path),
-        source: 'catalog',
-      };
-    }
-  } catch {
-    // Fall back to canonical promote endpoints.
-  }
+): ActivePromotion {
+  const badgeText = promotion.platform ?? defaultBadgeText(locale);
 
   return {
-    flagsUrl: FALLBACK_PROMOTE_FLAGS_URL,
-    contentUrl: FALLBACK_PROMOTE_CONTENT_URL,
-    source: 'fallback',
+    id: promotion.id,
+    title: promotion.title,
+    description: promotion.description,
+    ctaLabel: promotion.ctaLabel,
+    link: promotion.link,
+    platform: promotion.platform,
+    badgeText,
+    image: promotion.image,
+    source: 'remote',
+    payloadSignature: buildPayloadSignature('remote', [
+      promotion.id,
+      badgeText,
+      promotion.title,
+      promotion.description,
+      promotion.ctaLabel,
+      promotion.link,
+      promotion.image?.src ?? '',
+      promotion.image?.alt ?? '',
+    ]),
   };
 }
 
-export async function loadPromotionDocuments(options: {
-  fetchImpl?: FetchLike;
-  forceRefresh?: boolean;
-} = {}): Promise<PromotionDocuments> {
-  const { fetchImpl = fetch, forceRefresh = false } = options;
-  const canReuseInFlightRequest = fetchImpl === fetch && forceRefresh === false;
+export function createFallbackPromotion(
+  locale: string | null | undefined,
+): ActivePromotion {
+  const fallback = getDocsPromoteFallback(locale);
 
-  if (canReuseInFlightRequest && cachedDocumentsPromise) {
-    return cachedDocumentsPromise;
+  return {
+    id: fallback.id,
+    title: fallback.title,
+    description: fallback.description,
+    ctaLabel: fallback.ctaLabel,
+    link: fallback.link,
+    platform: null,
+    badgeText: fallback.badgeText,
+    image: null,
+    source: 'fallback',
+    payloadSignature: buildPayloadSignature('fallback', [
+      fallback.id,
+      fallback.badgeText,
+      fallback.title,
+      fallback.description,
+      fallback.ctaLabel,
+      fallback.link,
+    ]),
+  };
+}
+
+export function selectBannerPromotions(
+  promotions: NormalizedPromotion[],
+  locale: string | null | undefined,
+): ActivePromotion[] {
+  const promoteLocale = mapDocsLocaleToPromoteLocale(locale);
+  const remotePromotions = filterActivePromotions(promotions).map((promotion) =>
+    createRemotePromotion(promotion, promoteLocale),
+  );
+
+  if (remotePromotions.length > 0) {
+    return remotePromotions;
   }
 
-  const request = (async () => {
-    const urls = await resolvePromotionDocumentUrls(fetchImpl);
-    const [flagsPayload, contentPayload] = await Promise.all([
-      readJson(fetchImpl, urls.flagsUrl),
-      readJson(fetchImpl, urls.contentUrl),
-    ]);
-
-    const documents: PromotionDocuments = {
-      urls,
-      flags: parsePromoteFlagsDocument(flagsPayload),
-      content: parsePromoteContentDocument(contentPayload),
-    };
-
-    return documents;
-  })();
-
-  if (canReuseInFlightRequest) {
-    cachedDocumentsPromise = request;
-  }
-
-  try {
-    return await request;
-  } finally {
-    if (canReuseInFlightRequest) {
-      cachedDocumentsPromise = null;
-    }
-  }
+  return [createFallbackPromotion(locale)];
 }
 
 export function normalizeActivePromotions(
-  flags: PromoteFlagsDocument,
-  content: PromoteContentDocument,
+  flags: Parameters<typeof normalizePromotions>[0],
+  content: Parameters<typeof normalizePromotions>[1],
   locale: string | null | undefined,
   now = Date.now(),
 ): ActivePromotion[] {
-  const promoteLocale = mapDocsLocaleToPromoteLocale(locale);
-  const contentById = new Map(content.contents.map((entry) => [entry.id, entry]));
-
-  return flags.promotes.flatMap((record) => {
-    if (!isPromoteFlagActive(record, now)) {
-      return [];
-    }
-
-    const promoteContent = contentById.get(record.id);
-    if (!promoteContent) {
-      return [];
-    }
-
-    const title = pickLocalizedValue(promoteContent.title, promoteLocale);
-    const description = pickLocalizedValue(promoteContent.description, promoteLocale);
-    if (!title || !description) {
-      return [];
-    }
-
-    return [{
-      id: promoteContent.id,
-      title,
-      description,
-      ctaLabel: resolveCtaLabel(promoteContent.cta, promoteLocale),
-      link: promoteContent.link,
-      platform: localizePlatform(promoteContent.targetPlatform, promoteLocale),
-    }];
-  });
+  return selectBannerPromotions(normalizePromotions(flags, content, locale, now), locale);
 }
 
 export async function loadActivePromotions(
   options: LoadActivePromotionsOptions = {},
 ): Promise<ActivePromotion[]> {
-  const { locale, fetchImpl = fetch, forceRefresh = false, now = Date.now() } = options;
+  const promotions = await loadSharedPromotions(options);
+  return selectBannerPromotions(promotions, options.locale);
+}
 
-  try {
-    const documents = await loadPromotionDocuments({ fetchImpl, forceRefresh });
-    return normalizeActivePromotions(documents.flags, documents.content, locale, now);
-  } catch {
-    return [];
+export function getPromotionSetSignature(
+  promotions: ActivePromotion[],
+): string | null {
+  if (promotions.length === 0) {
+    return null;
   }
+
+  return promotions.map((promotion) => promotion.payloadSignature).join('||');
 }
 
 function setElementHidden(element: HTMLElement | null, hidden: boolean): void {
@@ -465,10 +213,13 @@ export class DocsPromoteBannerController {
   private readonly nextButton: HTMLButtonElement | null;
   private readonly pauseButton: HTMLButtonElement | null;
   private readonly closeButton: HTMLButtonElement | null;
+  private readonly controls: HTMLElement | null;
   private readonly countLabel: HTMLElement | null;
   private readonly statusLabel: HTMLElement | null;
   private readonly motionQuery: MediaQueryList | null;
   private readonly resizeObserver: ResizeObserver | null;
+  private readonly pauseLabel: string;
+  private readonly resumeLabel: string;
   private readonly boundRequestLayoutSync: () => void;
   private readonly boundHandlePrevious: () => void;
   private readonly boundHandleNext: () => void;
@@ -481,7 +232,6 @@ export class DocsPromoteBannerController {
   private currentIndex = 0;
   private isPaused = false;
   private prefersReducedMotion = false;
-  private isFooterInView = false;
   private dismissedPromotionSignature: string | null;
   private rotationHandle: number | null = null;
   private refreshHandle: number | null = null;
@@ -504,6 +254,7 @@ export class DocsPromoteBannerController {
     this.nextButton = root.querySelector<HTMLButtonElement>('[data-promote-banner-next]');
     this.pauseButton = root.querySelector<HTMLButtonElement>('[data-promote-banner-pause]');
     this.closeButton = root.querySelector<HTMLButtonElement>('[data-promote-banner-close]');
+    this.controls = root.querySelector<HTMLElement>('[data-promote-banner-controls]');
     this.countLabel = root.querySelector<HTMLElement>('[data-promote-banner-count]');
     this.statusLabel = root.querySelector<HTMLElement>('[data-promote-banner-status]');
     this.motionQuery =
@@ -538,6 +289,10 @@ export class DocsPromoteBannerController {
       this.updatePauseButton();
       this.syncRotationTimer();
     };
+    this.pauseLabel = this.pauseButton?.getAttribute('data-rotation-pause-label')
+      ?? (mapDocsLocaleToPromoteLocale(this.locale) === 'en' ? 'Pause automatic rotation' : '暂停自动轮播');
+    this.resumeLabel = this.pauseButton?.getAttribute('data-rotation-resume-label')
+      ?? (mapDocsLocaleToPromoteLocale(this.locale) === 'en' ? 'Resume automatic rotation' : '恢复自动轮播');
     this.dismissedPromotionSignature = readDismissedPromotionSignature();
   }
 
@@ -650,11 +405,14 @@ export class DocsPromoteBannerController {
 
     const hasPromotions = this.promotions.length > 0;
     if (!hasPromotions) {
-      this.isFooterInView = false;
       this.applyVisibilityState();
       this.track.replaceChildren();
-      this.statusLabel && (this.statusLabel.textContent = '');
-      this.countLabel && (this.countLabel.textContent = '');
+      if (this.statusLabel) {
+        this.statusLabel.textContent = '';
+      }
+      if (this.countLabel) {
+        this.countLabel.textContent = '';
+      }
       this.stopRotationTimer();
       this.requestLayoutSync();
       return;
@@ -678,7 +436,14 @@ export class DocsPromoteBannerController {
       slide.className = 'docs-promote-banner__slide';
       slide.type = 'button';
       slide.dataset.slideId = promotion.id;
-      slide.setAttribute('aria-label', `${promotion.title} (${index + 1} / ${this.promotions.length})`);
+      slide.dataset.source = promotion.source;
+      slide.dataset.hasImage = promotion.image ? 'true' : 'false';
+      slide.setAttribute(
+        'aria-label',
+        this.promotions.length > 1
+          ? `${promotion.ctaLabel}: ${promotion.title} (${index + 1} / ${this.promotions.length})`
+          : `${promotion.ctaLabel}: ${promotion.title}`,
+      );
       slide.addEventListener('click', () => {
         this.openPromotionLink(promotion.link);
       });
@@ -686,12 +451,10 @@ export class DocsPromoteBannerController {
       const copy = document.createElement('div');
       copy.className = 'docs-promote-banner__copy';
 
-      if (promotion.platform) {
-        const platform = document.createElement('p');
-        platform.className = 'docs-promote-banner__platform';
-        platform.textContent = promotion.platform;
-        copy.append(platform);
-      }
+      const badge = document.createElement('p');
+      badge.className = 'docs-promote-banner__badge';
+      badge.textContent = promotion.badgeText;
+      copy.append(badge);
 
       const title = document.createElement('h2');
       title.className = 'docs-promote-banner__title';
@@ -703,6 +466,29 @@ export class DocsPromoteBannerController {
       description.textContent = promotion.description;
       copy.append(description);
 
+      let media: HTMLElement | null = null;
+      if (promotion.image?.src) {
+        media = document.createElement('span');
+        media.className = 'docs-promote-banner__media';
+
+        const image = document.createElement('img');
+        image.className = 'docs-promote-banner__image';
+        image.src = promotion.image.src;
+        image.alt = promotion.image.alt || promotion.title;
+        image.loading = index === this.currentIndex ? 'eager' : 'lazy';
+        image.decoding = 'async';
+
+        if (promotion.image.width) {
+          image.width = promotion.image.width;
+        }
+
+        if (promotion.image.height) {
+          image.height = promotion.image.height;
+        }
+
+        media.append(image);
+      }
+
       const actions = document.createElement('div');
       actions.className = 'docs-promote-banner__actions';
 
@@ -711,7 +497,11 @@ export class DocsPromoteBannerController {
       cta.textContent = promotion.ctaLabel;
       actions.append(cta);
 
-      slide.append(copy, actions);
+      if (media) {
+        slide.append(copy, media, actions);
+      } else {
+        slide.append(copy, actions);
+      }
       fragment.append(slide);
     });
 
@@ -725,8 +515,10 @@ export class DocsPromoteBannerController {
 
     const slides = Array.from(this.track.querySelectorAll<HTMLElement>('.docs-promote-banner__slide'));
     slides.forEach((slide, index) => {
-      slide.setAttribute('aria-hidden', index === this.currentIndex ? 'false' : 'true');
-      slide.dataset.active = index === this.currentIndex ? 'true' : 'false';
+      const isActive = index === this.currentIndex;
+      slide.setAttribute('aria-hidden', isActive ? 'false' : 'true');
+      slide.dataset.active = isActive ? 'true' : 'false';
+      slide.tabIndex = isActive ? 0 : -1;
     });
 
     this.track.style.transform = `translate3d(-${this.currentIndex * 100}%, 0, 0)`;
@@ -744,22 +536,11 @@ export class DocsPromoteBannerController {
   private updateControls(): void {
     const hasMultiple = this.promotions.length > 1;
 
-    if (this.previousButton) {
-      setElementHidden(this.previousButton, !hasMultiple);
-    }
-
-    if (this.nextButton) {
-      setElementHidden(this.nextButton, !hasMultiple);
-    }
-
-    if (this.pauseButton) {
-      setElementHidden(this.pauseButton, !hasMultiple);
-    }
-
-    if (this.countLabel) {
-      setElementHidden(this.countLabel, !hasMultiple);
-    }
-
+    setElementHidden(this.controls, !hasMultiple);
+    setElementHidden(this.previousButton, !hasMultiple);
+    setElementHidden(this.nextButton, !hasMultiple);
+    setElementHidden(this.pauseButton, !hasMultiple);
+    setElementHidden(this.countLabel, !hasMultiple);
     this.updatePauseButton();
   }
 
@@ -770,14 +551,16 @@ export class DocsPromoteBannerController {
 
     const disabledByMotion = this.prefersReducedMotion;
     const isPaused = disabledByMotion || this.isPaused;
+    const promoteLocale = mapDocsLocaleToPromoteLocale(this.locale);
 
     this.pauseButton.textContent = isPaused
-      ? (mapDocsLocaleToPromoteLocale(this.locale) === 'en' ? 'Resume' : '继续')
-      : (mapDocsLocaleToPromoteLocale(this.locale) === 'en' ? 'Pause' : '暂停');
+      ? (promoteLocale === 'en' ? 'Resume' : '继续')
+      : (promoteLocale === 'en' ? 'Pause' : '暂停');
+    this.pauseButton.setAttribute('aria-label', isPaused ? this.resumeLabel : this.pauseLabel);
     this.pauseButton.setAttribute('aria-pressed', isPaused ? 'true' : 'false');
     this.pauseButton.disabled = this.promotions.length < 2;
     this.pauseButton.title = disabledByMotion
-      ? (mapDocsLocaleToPromoteLocale(this.locale) === 'en'
+      ? (promoteLocale === 'en'
           ? 'Automatic rotation is disabled because reduced motion is enabled.'
           : '检测到减少动画偏好，自动轮播已关闭。')
       : '';
@@ -810,8 +593,7 @@ export class DocsPromoteBannerController {
     if (
       this.promotions.length < 2 ||
       this.isPaused ||
-      this.prefersReducedMotion ||
-      this.isFooterInView
+      this.prefersReducedMotion
     ) {
       return;
     }
@@ -910,21 +692,19 @@ export class DocsPromoteBannerController {
 
   private applyVisibilityState(): boolean {
     const hasPromotions = this.promotions.length > 0;
-    const footerVisible = this.isFooterVisible();
     const dismissed = this.isCurrentPromotionDismissed();
-    const shouldShow = hasPromotions && !footerVisible && !dismissed;
+    const footerVisible = this.isFooterVisible();
+    const shouldShow = hasPromotions && !dismissed;
 
-    this.isFooterInView = footerVisible;
     setElementHidden(this.root, !shouldShow);
     setElementHidden(this.shell, !shouldShow);
     setElementHidden(this.spacer, !shouldShow);
+    this.root.dataset.mode = this.promotions[0]?.source ?? 'hidden';
     this.root.dataset.state = shouldShow
-      ? 'ready'
+      ? (footerVisible ? 'docked' : 'ready')
       : dismissed
         ? 'dismissed'
-        : hasPromotions
-          ? 'footer-hidden'
-          : 'hidden';
+        : 'hidden';
 
     if (!shouldShow) {
       this.setSpacerHeight(0);
@@ -936,7 +716,7 @@ export class DocsPromoteBannerController {
 
   private isFooterVisible(): boolean {
     if (!this.footer) {
-      return true;
+      return false;
     }
 
     const footerRect = this.footer.getBoundingClientRect();
@@ -944,11 +724,7 @@ export class DocsPromoteBannerController {
   }
 
   private getCurrentPromotionSignature(): string | null {
-    if (this.promotions.length === 0) {
-      return null;
-    }
-
-    return this.promotions.map((promotion) => promotion.id).join('|');
+    return getPromotionSetSignature(this.promotions);
   }
 
   private isCurrentPromotionDismissed(): boolean {

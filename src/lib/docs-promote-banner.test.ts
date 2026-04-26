@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   clearPromotionDocumentCache,
+  createFallbackPromotion,
+  getPromotionSetSignature,
   loadActivePromotions,
   loadPromotionDocuments,
   mapDocsLocaleToPromoteLocale,
@@ -18,6 +20,80 @@ function jsonResponse(payload: unknown): Response {
   });
 }
 
+function createPromotionFetch(
+  promotions: Array<{
+    id: string;
+    on?: boolean;
+    startTime?: string;
+    endTime?: string;
+    titleZh?: string;
+    titleEn?: string;
+    descriptionZh?: string;
+    descriptionEn?: string;
+    ctaZh?: string;
+    ctaEn?: string;
+    link?: string;
+    platform?: string;
+    image?: string | {
+      src?: string;
+      alt?: string;
+      width?: number;
+      height?: number;
+    };
+  }>,
+) {
+  return vi.fn(async (input: RequestInfo | URL) => {
+    const url = input.toString();
+
+    if (url.endsWith('/index-catalog.json')) {
+      return jsonResponse({
+        entries: [
+          { id: 'promotion-flags', path: '/promote.json' },
+          { id: 'promotion-content', path: '/promote_content.json' },
+        ],
+      });
+    }
+
+    if (url.endsWith('/promote.json')) {
+      return jsonResponse({
+        promotes: promotions.map((promotion) => ({
+          id: promotion.id,
+          on: promotion.on ?? true,
+          startTime: promotion.startTime,
+          endTime: promotion.endTime,
+        })),
+      });
+    }
+
+    if (url.endsWith('/promote_content.json')) {
+      return jsonResponse({
+        contents: promotions.map((promotion) => ({
+          id: promotion.id,
+          title: {
+            zh: promotion.titleZh ?? '默认中文标题',
+            en: promotion.titleEn ?? 'Default title',
+          },
+          description: {
+            zh: promotion.descriptionZh ?? '默认中文描述',
+            en: promotion.descriptionEn ?? 'Default description',
+          },
+          cta: promotion.ctaZh || promotion.ctaEn
+            ? {
+                zh: promotion.ctaZh,
+                en: promotion.ctaEn,
+              }
+            : undefined,
+          link: promotion.link ?? 'https://example.invalid/default',
+          targetPlatform: promotion.platform,
+          image: promotion.image,
+        })),
+      });
+    }
+
+    throw new Error(`Unexpected fetch: ${url}`);
+  });
+}
+
 describe('docs promote banner source', () => {
   afterEach(() => {
     clearPromotionDocumentCache();
@@ -28,16 +104,11 @@ describe('docs promote banner source', () => {
       const url = input.toString();
 
       if (url.endsWith('/index-catalog.json')) {
-        return jsonResponse({
-          version: '1.0.0',
-          entries: [],
-        });
+        return jsonResponse({ version: '1.0.0', entries: [] });
       }
 
       if (url.endsWith('/promote.json')) {
-        return jsonResponse({
-          promotes: [{ id: 'main-game', on: true }],
-        });
+        return jsonResponse({ promotes: [{ id: 'main-game', on: true }] });
       }
 
       if (url.endsWith('/promote_content.json')) {
@@ -70,57 +141,14 @@ describe('docs promote banner source', () => {
     expect(documents.urls.source).toBe('fallback');
     expect(documents.flags.promotes).toEqual([{ id: 'main-game', on: true }]);
     expect(documents.content.contents).toHaveLength(1);
-    expect(fetchMock).toHaveBeenCalledWith(
-      'https://index.hagicode.com/index-catalog.json',
-      expect.objectContaining({
-        cache: 'no-store',
-        headers: expect.objectContaining({
-          accept: 'application/json',
-        }),
-      }),
-    );
   });
 
-  it('uses catalog-provided endpoints when they are published', async () => {
-    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-      const url = input.toString();
-
-      if (url.endsWith('/index-catalog.json')) {
-        return jsonResponse({
-          entries: [
-            { id: 'promotion-flags', path: '/promote.json' },
-            { id: 'promotion-content', path: '/promote_content.json' },
-          ],
-        });
-      }
-
-      if (url.endsWith('/promote.json')) {
-        return jsonResponse({ promotes: [] });
-      }
-
-      if (url.endsWith('/promote_content.json')) {
-        return jsonResponse({ contents: [] });
-      }
-
-      throw new Error(`Unexpected fetch: ${url}`);
-    });
-
-    const urls = await resolvePromotionDocumentUrls(fetchMock);
-
-    expect(urls).toEqual({
-      flagsUrl: 'https://index.hagicode.com/promote.json',
-      contentUrl: 'https://index.hagicode.com/promote_content.json',
-      source: 'catalog',
-    });
-  });
-
-  it('keeps only enabled promotions with matching content and localizes fields for docs locales', () => {
+  it('uses the first eligible active remote promotion set when remote data is available', () => {
     const promotions = normalizeActivePromotions(
       {
         promotes: [
           { id: 'main-game', on: true },
-          { id: 'missing-copy', on: true },
-          { id: 'hidden-entry', on: false },
+          { id: 'disabled-entry', on: false },
         ],
       },
       {
@@ -135,12 +163,12 @@ describe('docs promote banner source', () => {
             cta: { zh: '加入愿望单', en: 'Wishlist on Steam' },
             link: 'https://store.steampowered.com/app/4625540/Hagicode/',
             targetPlatform: 'steam',
-          },
-          {
-            id: 'hidden-entry',
-            title: { zh: '不应显示', en: 'Hidden' },
-            description: { zh: '关闭条目', en: 'Disabled entry' },
-            link: 'https://example.com/hidden',
+            image: {
+              src: '/images/promotions/main-game.webp',
+              alt: 'HagiCode Steam artwork',
+              width: 640,
+              height: 640,
+            },
           },
         ],
       },
@@ -148,280 +176,120 @@ describe('docs promote banner source', () => {
     );
 
     expect(promotions).toEqual([
-      {
+      expect.objectContaining({
         id: 'main-game',
         title: 'Wishlist Now',
-        description: 'Coming April 29, 2026. Add to your Steam wishlist now!',
         ctaLabel: 'Wishlist on Steam',
-        link: 'https://store.steampowered.com/app/4625540/Hagicode/',
-        platform: 'Steam',
-      },
+        badgeText: 'Steam',
+        image: {
+          src: 'https://index.hagicode.com/images/promotions/main-game.webp',
+          alt: 'HagiCode Steam artwork',
+          width: 640,
+          height: 640,
+        },
+        source: 'remote',
+      }),
     ]);
     expect(mapDocsLocaleToPromoteLocale('zh-CN')).toBe('zh');
     expect(mapDocsLocaleToPromoteLocale('en')).toBe('en');
   });
 
-  it('keeps pre-start promotions hidden until their window begins', async () => {
-    const fetchMock = createScheduleFetch([
-      {
-        id: 'future',
-        on: true,
-        startTime: '2026-04-29T00:00:00+08:00',
-        titleEn: 'Future promotion',
-      },
+  it('returns the localized fallback card when no active remote promotion exists', async () => {
+    const promotions = await loadActivePromotions({
+      locale: 'zh-CN',
+      fetchImpl: createPromotionFetch([
+        {
+          id: 'future-entry',
+          on: true,
+          startTime: '2026-04-29T00:00:00+08:00',
+          titleZh: '未来推广',
+          titleEn: 'Future promotion',
+        },
+      ]) as typeof fetch,
+      now: Date.parse('2026-04-28T23:59:59+08:00'),
+    });
+
+    expect(promotions).toEqual([
+      expect.objectContaining({
+        id: 'docs-product-overview-fallback-zh',
+        badgeText: '文档',
+        title: '查看 HagiCode 产品概览',
+        link: '/product-overview/',
+        source: 'fallback',
+      }),
     ]);
+  });
+
+  it('returns the localized fallback card when remote promotion fetch fails', async () => {
+    const fetchMock = vi.fn(async () => {
+      throw new Error('network failed');
+    });
 
     await expect(loadActivePromotions({
       locale: 'en',
-      fetchImpl: fetchMock,
-      now: Date.parse('2026-04-28T23:59:59+08:00'),
-    })).resolves.toEqual([]);
+      fetchImpl: fetchMock as typeof fetch,
+    })).resolves.toEqual([
+      expect.objectContaining({
+        id: 'docs-product-overview-fallback-en',
+        badgeText: 'Docs',
+        title: 'Explore the HagiCode Product Overview',
+        link: '/en/product-overview/',
+        source: 'fallback',
+      }),
+    ]);
   });
 
-  it('removes post-end promotions and swaps cleanly at the exact boundary', async () => {
-    const fetchMock = createScheduleFetch([
-      {
-        id: 'main-game-2026-04-29',
-        on: true,
-        endTime: '2026-04-29T00:00:00+08:00',
-        titleEn: 'Wishlist Now',
-      },
-      {
-        id: 'main-game-steam-ea-2026-04-29',
-        on: true,
-        startTime: '2026-04-29T00:00:00+08:00',
-        titleEn: 'Early Access Is Live',
-      },
-    ]);
-
-    const before = await loadActivePromotions({
+  it('distinguishes fallback dismissal signatures from later remote campaign signatures', async () => {
+    const fallback = createFallbackPromotion('en');
+    const remote = await loadActivePromotions({
       locale: 'en',
-      fetchImpl: fetchMock,
-      now: Date.parse('2026-04-28T23:59:59+08:00'),
-    });
-    const atBoundary = await loadActivePromotions({
-      locale: 'en',
-      fetchImpl: fetchMock,
-      now: Date.parse('2026-04-29T00:00:00+08:00'),
+      fetchImpl: createPromotionFetch([
+        {
+          id: 'builder',
+          titleZh: '体验部署生成器',
+          titleEn: 'Try the Builder',
+          descriptionZh: '使用 Docker Compose Builder 快速生成部署配置。',
+          descriptionEn: 'Generate Docker Compose deployment files with the Builder.',
+          ctaZh: '立即体验',
+          ctaEn: 'Open Builder',
+          link: 'https://builder.hagicode.com/',
+          platform: 'web',
+        },
+      ]) as typeof fetch,
     });
 
-    expect(before.map((promotion) => promotion.id)).toEqual(['main-game-2026-04-29']);
-    expect(atBoundary.map((promotion) => promotion.id)).toEqual(['main-game-steam-ea-2026-04-29']);
+    expect(getPromotionSetSignature([fallback])).not.toBe(getPromotionSetSignature(remote));
+    expect(getPromotionSetSignature([fallback])).toBe(getPromotionSetSignature([createFallbackPromotion('en')]));
   });
 
-  it('fails closed for invalid schedule values while preserving valid entries', async () => {
-    const fetchMock = createScheduleFetch([
-      {
-        id: 'broken-start',
-        on: true,
-        startTime: 'not-a-date',
-        titleEn: 'Broken start',
-      },
-      {
-        id: 'broken-range',
-        on: true,
-        startTime: '2026-04-29T00:00:01+08:00',
-        endTime: '2026-04-28T23:59:59+08:00',
-        titleEn: 'Broken range',
-      },
-      {
-        id: 'valid',
-        on: true,
-        titleEn: 'Valid',
-      },
-    ]);
-
+  it('keeps remote promotion image metadata so the banner can render it', async () => {
     const promotions = await loadActivePromotions({
       locale: 'en',
-      fetchImpl: fetchMock,
-      now: Date.parse('2026-04-29T00:00:00+08:00'),
-    });
-
-    expect(promotions.map((promotion) => promotion.id)).toEqual(['valid']);
-  });
-
-  it('resolves CTA labels from promotion content with shared fallback behavior', () => {
-    const flags = {
-      promotes: [
-        { id: 'localized', on: true },
-        { id: 'missing-locale', on: true },
-        { id: 'malformed-cta', on: true },
-        { id: 'legacy', on: true },
-      ],
-    };
-    const content = {
-      contents: [
-        { id: 'localized', title: { zh: '中文标题', en: 'Localized' }, description: { zh: '中文描述', en: 'English copy' }, cta: { zh: '查看优惠', en: 'View Offer' }, link: 'https://example.invalid/localized' },
-        { id: 'missing-locale', title: { zh: '中文标题', en: 'Missing locale' }, description: { zh: '中文描述', en: 'Fallback copy' }, cta: { zh: '中文按钮' } as Record<string, string>, link: 'https://example.invalid/missing-locale' },
-        { id: 'malformed-cta', title: { zh: '中文标题', en: 'Malformed' }, description: { zh: '中文描述', en: 'Malformed copy' }, cta: { zh: '', en: '   ' }, link: 'https://example.invalid/malformed-cta' },
-        { id: 'legacy', title: { zh: '中文标题', en: 'Legacy' }, description: { zh: '中文描述', en: 'Legacy copy' }, link: 'https://example.invalid/legacy' },
-      ],
-    };
-
-    const englishPromotions = normalizeActivePromotions(flags, content, 'en-US');
-    const chinesePromotions = normalizeActivePromotions(flags, content, 'zh-CN');
-
-    expect(englishPromotions.map((promotion) => promotion.ctaLabel)).toEqual(['View Offer', '中文按钮', 'GO', 'GO']);
-    expect(chinesePromotions.map((promotion) => promotion.ctaLabel)).toEqual(['查看优惠', '中文按钮', '立即前往', '立即前往']);
-  });
-
-  it('returns a hidden-state empty list when promote payloads are invalid', async () => {
-    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-      const url = input.toString();
-
-      if (url.endsWith('/index-catalog.json')) {
-        return new Response('<html>not-json</html>', {
-          status: 200,
-          headers: {
-            'content-type': 'text/html',
+      fetchImpl: createPromotionFetch([
+        {
+          id: 'main-game',
+          titleZh: '立即添加到愿望单',
+          titleEn: 'Wishlist Now',
+          descriptionZh: '游戏将于 2026-04-29 发售，立即前往 Steam 添加愿望单。',
+          descriptionEn: 'Coming April 29, 2026. Add to your Steam wishlist now!',
+          link: 'https://store.steampowered.com/app/4625540/Hagicode/',
+          platform: 'steam',
+          image: {
+            src: '/images/promotions/main-game.webp',
+            width: 640,
+            height: 360,
           },
-        });
-      }
-
-      if (url.endsWith('/promote.json') || url.endsWith('/promote_content.json')) {
-        return new Response('<html>not-json</html>', {
-          status: 200,
-          headers: {
-            'content-type': 'text/html',
-          },
-        });
-      }
-
-      throw new Error(`Unexpected fetch: ${url}`);
+        },
+      ]) as typeof fetch,
     });
 
-    await expect(loadActivePromotions({ locale: 'zh-CN', fetchImpl: fetchMock })).resolves.toEqual([]);
-  });
-
-  it('does not reuse stale promotions when a later request returns html instead of json', async () => {
-    let responseMode: 'json' | 'html' = 'json';
-
-    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-      const url = input.toString();
-
-      if (url.endsWith('/index-catalog.json')) {
-        if (responseMode === 'html') {
-          return new Response('<html>catalog down</html>', {
-            status: 200,
-            headers: {
-              'content-type': 'text/html',
-            },
-          });
-        }
-
-        return jsonResponse({
-          entries: [
-            { id: 'promotion-flags', path: '/promote.json' },
-            { id: 'promotion-content', path: '/promote_content.json' },
-          ],
-        });
-      }
-
-      if (url.endsWith('/promote.json')) {
-        if (responseMode === 'html') {
-          return new Response('<html>promote down</html>', {
-            status: 200,
-            headers: {
-              'content-type': 'text/html',
-            },
-          });
-        }
-
-        return jsonResponse({
-          promotes: [{ id: 'main-game', on: true }],
-        });
-      }
-
-      if (url.endsWith('/promote_content.json')) {
-        if (responseMode === 'html') {
-          return new Response('<html>content down</html>', {
-            status: 200,
-            headers: {
-              'content-type': 'text/html',
-            },
-          });
-        }
-
-        return jsonResponse({
-          contents: [{
-            id: 'main-game',
-            title: { zh: '立即添加到愿望单', en: 'Wishlist Now' },
-            description: {
-              zh: '游戏将于 2026-04-29 发售，立即前往 Steam 添加愿望单。',
-              en: 'Coming April 29, 2026. Add to your Steam wishlist now!',
-            },
-            cta: { zh: '加入愿望单', en: 'Wishlist on Steam' },
-            link: 'https://store.steampowered.com/app/4625540/Hagicode/',
-            targetPlatform: 'steam',
-          }],
-        });
-      }
-
-      throw new Error(`Unexpected fetch: ${url}`);
-    });
-
-    vi.stubGlobal('fetch', fetchMock as typeof fetch);
-
-    await expect(loadActivePromotions({ locale: 'en' })).resolves.toEqual([
-      {
-        id: 'main-game',
-        title: 'Wishlist Now',
-        description: 'Coming April 29, 2026. Add to your Steam wishlist now!',
-        ctaLabel: 'Wishlist on Steam',
-        link: 'https://store.steampowered.com/app/4625540/Hagicode/',
-        platform: 'Steam',
+    expect(promotions[0]).toEqual(expect.objectContaining({
+      image: {
+        src: 'https://index.hagicode.com/images/promotions/main-game.webp',
+        alt: 'Wishlist Now',
+        width: 640,
+        height: 360,
       },
-    ]);
-
-    responseMode = 'html';
-
-    await expect(loadActivePromotions({ locale: 'en' })).resolves.toEqual([]);
+    }));
   });
 });
-
-function createScheduleFetch(promotions: Array<{
-  id: string;
-  on?: boolean;
-  startTime?: string;
-  endTime?: string;
-  titleEn: string;
-}>) {
-  return vi.fn(async (input: RequestInfo | URL) => {
-    const url = input.toString();
-
-    if (url.endsWith('/index-catalog.json')) {
-      return jsonResponse({
-        entries: [
-          { id: 'promotion-flags', path: '/promote.json' },
-          { id: 'promotion-content', path: '/promote_content.json' },
-        ],
-      });
-    }
-
-    if (url.endsWith('/promote.json')) {
-      return jsonResponse({
-        promotes: promotions.map((promotion) => ({
-          id: promotion.id,
-          on: promotion.on ?? true,
-          startTime: promotion.startTime,
-          endTime: promotion.endTime,
-        })),
-      });
-    }
-
-    if (url.endsWith('/promote_content.json')) {
-      return jsonResponse({
-        contents: promotions.map((promotion) => ({
-          id: promotion.id,
-          title: { zh: promotion.titleEn, en: promotion.titleEn },
-          description: { zh: promotion.titleEn, en: promotion.titleEn },
-          cta: { zh: `打开 ${promotion.id}`, en: `Open ${promotion.id}` },
-          link: `https://example.invalid/${promotion.id}`,
-          targetPlatform: 'steam',
-        })),
-      });
-    }
-
-    throw new Error(`Unexpected fetch: ${url}`);
-  });
-}

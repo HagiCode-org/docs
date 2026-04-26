@@ -25,6 +25,8 @@ test('docs link registry keeps a canonical about entry that points to the site-o
 test('docs footer exposes the local about link entry without importing the site footer', async () => {
   const footerSource = await readFile(resolveDocsPath('src/components/StarlightFooter.astro'), 'utf8');
 
+  assert.match(footerSource, /import DocsPromoteInfoBanner from '\.\/DocsPromoteInfoBanner\.astro';/);
+  assert.match(footerSource, /<DocsPromoteInfoBanner locale=\{Astro\.locals\?\.starlightRoute\?\.locale\} \/>/);
   assert.match(footerSource, /const aboutLink = getLink\('about'\);/);
   assert.match(footerSource, /const relatedSiteLinks = resolveDocsFooterSiteLinks/);
   assert.match(footerSource, /<h3 class="unified-footer-section-title">生态站点<\/h3>/);
