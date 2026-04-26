@@ -157,6 +157,10 @@ function verifyScenario(scriptContent, scenario) {
     const stored = JSON.parse(result.localStorage['starlight-route']);
     assert.equal(stored.lang, scenario.expectedStoredLang, `${scenario.name}: stored lang`);
   }
+
+  if (scenario.expectedStoredLang === null) {
+    assert.equal(result.localStorage['starlight-route'], undefined, `${scenario.name}: should not persist lang`);
+  }
 }
 
 async function main() {
@@ -237,7 +241,7 @@ async function main() {
       expectedStoredLang: 'root',
     },
     {
-      name: 'invalid language falls back to English product overview',
+      name: 'invalid language falls back to browser language product overview',
       href: 'https://docs.hagicode.com/?lang=fr',
       storedRouteValue: null,
       navigator: {
@@ -245,11 +249,11 @@ async function main() {
         languages: ['zh-CN', 'zh'],
       },
       landingTargetPath: '/product-overview/',
-      expectedLocale: 'en',
-      expectedTargetUrl: 'https://docs.hagicode.com/en/product-overview/',
-      expectedFinalUrl: 'https://docs.hagicode.com/en/product-overview/',
+      expectedLocale: 'root',
+      expectedTargetUrl: 'https://docs.hagicode.com/product-overview/',
+      expectedFinalUrl: 'https://docs.hagicode.com/product-overview/',
       expectRedirect: true,
-      expectedStoredLang: 'en',
+      expectedStoredLang: null,
     },
     {
       name: 'stored Chinese preference keeps root redirect in Chinese',
@@ -267,17 +271,18 @@ async function main() {
       expectedStoredLang: 'root',
     },
     {
-      name: 'root docs path defaults to English for first-time visitors',
+      name: 'root docs path follows Chinese browser language for first-time visitors',
       href: 'https://docs.hagicode.com/product-overview/',
       storedRouteValue: null,
       navigator: {
         language: 'zh-CN',
         languages: ['zh-CN', 'zh'],
       },
-      expectedLocale: 'en',
-      expectedTargetUrl: 'https://docs.hagicode.com/en/product-overview/',
-      expectedFinalUrl: 'https://docs.hagicode.com/en/product-overview/',
-      expectRedirect: true,
+      expectedLocale: 'root',
+      expectedTargetUrl: 'https://docs.hagicode.com/product-overview/',
+      expectedFinalUrl: 'https://docs.hagicode.com/product-overview/',
+      expectRedirect: false,
+      expectedStoredLang: 'root',
     },
     {
       name: 'stored Chinese preference keeps root docs path in Chinese',
@@ -294,34 +299,35 @@ async function main() {
       expectedStoredLang: 'root',
     },
     {
-      name: 'root blog path defaults to English for first-time visitors',
+      name: 'root blog path follows Chinese browser language for first-time visitors',
       href: 'https://docs.hagicode.com/blog/',
       storedRouteValue: null,
       navigator: {
         language: 'zh-CN',
         languages: ['zh-CN', 'zh'],
       },
-      expectedLocale: 'en',
-      expectedTargetUrl: 'https://docs.hagicode.com/en/blog/',
-      expectedFinalUrl: 'https://docs.hagicode.com/en/blog/',
-      expectRedirect: true,
+      expectedLocale: 'root',
+      expectedTargetUrl: 'https://docs.hagicode.com/blog/',
+      expectedFinalUrl: 'https://docs.hagicode.com/blog/',
+      expectRedirect: false,
+      expectedStoredLang: 'root',
     },
     {
-      name: 'invalid language on root blog falls back to English',
+      name: 'invalid language on root blog falls back to stored Chinese preference',
       href: 'https://docs.hagicode.com/blog/?lang=invalid',
       storedRouteValue: JSON.stringify({ lang: 'root' }),
       navigator: {
         language: 'zh-CN',
         languages: ['zh-CN', 'zh'],
       },
-      expectedLocale: 'en',
-      expectedTargetUrl: 'https://docs.hagicode.com/en/blog/',
-      expectedFinalUrl: 'https://docs.hagicode.com/en/blog/',
+      expectedLocale: 'root',
+      expectedTargetUrl: 'https://docs.hagicode.com/blog/',
+      expectedFinalUrl: 'https://docs.hagicode.com/blog/',
       expectRedirect: true,
-      expectedStoredLang: 'en',
+      expectedStoredLang: 'root',
     },
     {
-      name: 'English landing redirects to English product overview even with stored Chinese preference',
+      name: 'English landing redirects to stored Chinese product overview preference',
       href: 'https://docs.hagicode.com/en/',
       storedRouteValue: JSON.stringify({ lang: 'root' }),
       navigator: {
@@ -329,9 +335,9 @@ async function main() {
         languages: ['zh-CN', 'zh'],
       },
       landingTargetPath: '/product-overview/',
-      expectedLocale: 'en',
-      expectedTargetUrl: 'https://docs.hagicode.com/en/product-overview/',
-      expectedFinalUrl: 'https://docs.hagicode.com/en/product-overview/',
+      expectedLocale: 'root',
+      expectedTargetUrl: 'https://docs.hagicode.com/product-overview/',
+      expectedFinalUrl: 'https://docs.hagicode.com/product-overview/',
       expectRedirect: true,
       expectedStoredLang: 'root',
     },
@@ -344,10 +350,10 @@ async function main() {
   console.log('Docs entry language verification passed.');
   console.log('- landing routes now redirect directly to product overview');
   console.log('- first-time visitors still follow the browser language before falling back to English');
-  console.log('- root docs/blog paths default to English unless Chinese was explicitly chosen');
+  console.log('- root docs/blog paths follow saved preference, then browser language, then English default');
   console.log('- explicit zh-CN keeps the Chinese redirect target');
-  console.log('- invalid lang values cleanly fall back to English');
-  console.log('- /en/ also redirects directly to the English product overview');
+  console.log('- invalid lang values do not overwrite saved preferences');
+  console.log('- /en/ redirects according to the same preference chain as other routed pages');
 }
 
 main().catch((error) => {
