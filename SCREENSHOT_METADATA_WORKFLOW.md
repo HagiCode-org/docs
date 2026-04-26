@@ -30,7 +30,7 @@ The `screenshot-management-optimization` change uses this existing workflow to a
 - In scope for this backlog pass:
   - `quick-start/create-project` (`6` screenshots)
   - `quick-start/create-proposal-session` (`26` screenshots)
-  - `installation/install-desktop` (`14` screenshots, including `1` currently unreferenced legacy file)
+  - `installation/install-desktop` screenshots that remain referenced by published Desktop management sections
   - `ai-compose-commit` (`3` screenshots)
   - `monospecs` (`3` screenshots)
 - Affected docs pages to re-check after sync:
@@ -62,7 +62,7 @@ Current execution result for `screenshot-management-optimization`:
 Remaining follow-up items after this backlog pass:
 
 - `src/content/docs/img/product-overview/**` illustrations still use legacy paths by design and remain outside the managed screenshot workflow
-- `src/content/docs/img/installation/install-desktop/向导01-04，选择配置好的AgentCLI.png` is now preserved as a managed asset for historical completeness, but there is still no active page reference pointing to it
+- Retired Desktop installation walkthrough screenshots should not be reintroduced as managed examples unless a published page links to them again
 
 ## Preconditions
 
@@ -296,7 +296,7 @@ Recommended batches for this repository:
 
 1. `quick-start/create-project`
 2. `quick-start/create-proposal-session`
-3. `installation/install-desktop`
+3. currently referenced `installation/install-desktop` management screenshots
 4. `ai-compose-commit` + `monospecs`
 
 For each batch:
