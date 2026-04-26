@@ -1,3 +1,48 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const LIB_DIR = path.dirname(fileURLToPath(import.meta.url));
+const RELEASE_NOTES_DATA_DIR = path.resolve(LIB_DIR, '..', 'data', 'release-notes');
+const RELEASE_NOTES_INDEX_PATH = path.join(RELEASE_NOTES_DATA_DIR, 'index.json');
+
+function readJsonFile(filePath, fallback) {
+  if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
+    return fallback;
+  }
+
+  return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+}
+
+export function loadManagedReleaseNotesIndex(indexPath = RELEASE_NOTES_INDEX_PATH) {
+  return readJsonFile(indexPath, {
+    generatedAt: null,
+    source: null,
+    entries: [],
+  });
+}
+
+export function loadManagedReleaseNotesDetails(indexPayload, dataDir = RELEASE_NOTES_DATA_DIR) {
+  const entries = Array.isArray(indexPayload?.entries) ? indexPayload.entries : [];
+  const details = new Map();
+
+  for (const entry of entries) {
+    const detailPath = typeof entry?.detailPath === 'string' ? entry.detailPath.trim() : '';
+    if (detailPath.length === 0) {
+      continue;
+    }
+
+    const absolutePath = path.join(dataDir, detailPath);
+    const detailPayload = readJsonFile(absolutePath, null);
+    if (detailPayload) {
+      details.set(entry.tag, detailPayload);
+      details.set(detailPath, detailPayload);
+    }
+  }
+
+  return details;
+}
+
 export function getReleaseNotesLandingCopy(locale = 'zh-CN') {
   if (locale === 'en') {
     return {
@@ -16,7 +61,7 @@ export function getReleaseNotesLandingCopy(locale = 'zh-CN') {
   };
 }
 
-export function getReleaseNotesLandingEntries(indexPayload, locale = 'zh-CN') {
+export function getReleaseNotesLandingEntries(indexPayload, locale = 'zh-CN', detailEntries = new Map()) {
   const entries = Array.isArray(indexPayload?.entries) ? indexPayload.entries : [];
   const landingPath = locale === 'en' ? '/en/release-notes/' : '/release-notes/';
 
@@ -24,9 +69,12 @@ export function getReleaseNotesLandingEntries(indexPayload, locale = 'zh-CN') {
     const repositoryCount = Array.isArray(entry.repositoryRanges) ? entry.repositoryRanges.length : 0;
     const totalCommitCount =
       typeof entry.totalCommitCount === 'number' ? entry.totalCommitCount : 0;
+    const detailEntry = detailEntries.get(entry.tag)
+      ?? detailEntries.get(entry.detailPath ?? '')
+      ?? null;
     const bodyHtml = locale === 'en'
-      ? entry.landingBodyHtml?.en ?? ''
-      : entry.landingBodyHtml?.['zh-CN'] ?? '';
+      ? detailEntry?.bodyHtml?.en ?? ''
+      : detailEntry?.bodyHtml?.['zh-CN'] ?? '';
 
     return {
       tag: entry.displayTag ?? entry.tag,
@@ -42,4 +90,14 @@ export function getReleaseNotesLandingEntries(indexPayload, locale = 'zh-CN') {
       totalCommitCount,
     };
   });
+}
+
+export function getManagedReleaseNotesLanding(locale = 'zh-CN') {
+  const indexPayload = loadManagedReleaseNotesIndex();
+  const detailEntries = loadManagedReleaseNotesDetails(indexPayload);
+
+  return {
+    copy: getReleaseNotesLandingCopy(locale),
+    entries: getReleaseNotesLandingEntries(indexPayload, locale, detailEntries),
+  };
 }

@@ -123,6 +123,10 @@ function createExcerpt(markdown) {
   return `${excerpt.slice(0, 177).trimEnd()}...`;
 }
 
+function getReleaseNoteDetailFileName(tag) {
+  return `${assertNonEmptyString(tag, 'tag')}.json`;
+}
+
 function buildReleaseSortValue(tag) {
   const normalized = tag.startsWith('v') ? tag.slice(1) : tag;
   const valid = semver.valid(normalized);
@@ -348,7 +352,9 @@ export function resolveReleaseNotesConfig({ repoRoot = DEFAULT_DOCS_REPO_ROOT, e
       String(env.DOCS_RELEASE_NOTES_ALLOW_STALE_ON_SOURCE_ERROR ?? '').toLowerCase() === 'true',
     fetchOutputPath,
     outputPaths: {
-      indexJson: path.join(resolvedRoot, 'src', 'data', 'release-notes.index.json'),
+      dataDir: path.join(resolvedRoot, 'src', 'data', 'release-notes'),
+      indexJson: path.join(resolvedRoot, 'src', 'data', 'release-notes', 'index.json'),
+      legacyIndexJson: path.join(resolvedRoot, 'src', 'data', 'release-notes.index.json'),
       zhDir: path.join(resolvedRoot, 'src', 'content', 'docs', 'release-notes'),
       enDir: path.join(resolvedRoot, 'src', 'content', 'docs', 'en', 'release-notes'),
     },
@@ -720,24 +726,42 @@ import ReleaseNotesLanding from '@/components/ReleaseNotesLanding.astro';
 export async function materializeReleaseNotes({ snapshot, config }) {
   assert(isRecord(snapshot), 'Release-notes materialization requires an object snapshot');
   const entries = Array.isArray(snapshot.entries) ? snapshot.entries : [];
-  const indexEntries = await Promise.all(entries.map(async (entry) => ({
-    tag: entry.tag,
-    displayTag: entry.displayTag,
-    sortVersion: entry.sortVersion,
-    releaseDate: entry.releaseDate,
-    publishedAt: entry.publishedAt,
-    synchronizedAt: entry.synchronizedAt,
-    upstreamGeneratedAt: entry.upstreamGeneratedAt,
-    anchorId: entry.anchorId ?? normalizeReleaseNotesAnchorId(entry.tag),
-    summary: entry.summary,
-    repositoryRanges: entry.repositoryRanges,
-    totalCommitCount: entry.totalCommitCount,
-    source: entry.source,
-    landingBodyHtml: {
-      'zh-CN': await renderLandingBodyHtml(entry.bodies['zh-CN']),
-      en: await renderLandingBodyHtml(entry.bodies.en),
-    },
-  })));
+  const indexEntries = [];
+  const detailEntries = [];
+
+  for (const entry of entries) {
+    const detailPath = getReleaseNoteDetailFileName(entry.tag);
+    indexEntries.push({
+      tag: entry.tag,
+      displayTag: entry.displayTag,
+      sortVersion: entry.sortVersion,
+      releaseDate: entry.releaseDate,
+      publishedAt: entry.publishedAt,
+      synchronizedAt: entry.synchronizedAt,
+      upstreamGeneratedAt: entry.upstreamGeneratedAt,
+      anchorId: entry.anchorId ?? normalizeReleaseNotesAnchorId(entry.tag),
+      summary: entry.summary,
+      repositoryRanges: entry.repositoryRanges,
+      totalCommitCount: entry.totalCommitCount,
+      source: entry.source,
+      detailPath,
+    });
+    detailEntries.push({
+      tag: entry.tag,
+      displayTag: entry.displayTag,
+      anchorId: entry.anchorId ?? normalizeReleaseNotesAnchorId(entry.tag),
+      releaseDate: entry.releaseDate,
+      summary: entry.summary,
+      bodyHtml: {
+        'zh-CN': await renderLandingBodyHtml(entry.bodies['zh-CN']),
+        en: await renderLandingBodyHtml(entry.bodies.en),
+      },
+      source: {
+        bodies: entry.source?.bodies ?? null,
+      },
+    });
+  }
+
   const indexPayload = {
     generatedAt: snapshot.generatedAt ?? new Date().toISOString(),
     source: snapshot.source ?? {
@@ -748,11 +772,18 @@ export async function materializeReleaseNotes({ snapshot, config }) {
     entries: indexEntries,
   };
 
+  await resetManagedDirectory(config.outputPaths.dataDir);
+  await rm(config.outputPaths.legacyIndexJson, { force: true });
   await writeJsonFile(config.outputPaths.indexJson, indexPayload);
   await resetManagedDirectory(config.outputPaths.zhDir);
   await resetManagedDirectory(config.outputPaths.enDir);
 
   const writtenFiles = [relativeFromRepo(config.repoRoot, config.outputPaths.indexJson)];
+  for (const entry of detailEntries) {
+    const detailFilePath = path.join(config.outputPaths.dataDir, getReleaseNoteDetailFileName(entry.tag));
+    await writeJsonFile(detailFilePath, entry);
+    writtenFiles.push(relativeFromRepo(config.repoRoot, detailFilePath));
+  }
 
   const zhLandingPath = path.join(config.outputPaths.zhDir, 'index.mdx');
   const enLandingPath = path.join(config.outputPaths.enDir, 'index.mdx');
