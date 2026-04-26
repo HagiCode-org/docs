@@ -5,6 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { materializeReleaseNotes, resolveReleaseNotesConfig } from '../scripts/release-notes-sync-lib.mjs';
+import { verifyReleaseNotesBuildInput } from '../scripts/verify-release-notes-build-input.mjs';
 import {
   getReleaseNotesLandingCopy,
   getReleaseNotesLandingEntries,
@@ -159,6 +160,44 @@ test('landing helpers preserve informative empty states when no synchronized ent
   assert.deepEqual(enEntries, []);
   assert.match(getReleaseNotesLandingCopy('zh-CN').empty, /当前语言下还没有可浏览的同步版本/);
   assert.match(getReleaseNotesLandingCopy('en').empty, /No synchronized release notes are available yet/);
+});
+
+test('release-notes input verification fails when index references a missing detail file', async () => {
+  const repoRoot = await mkdtemp(path.join(process.env.TMPDIR ?? '/tmp', 'docs-release-notes-missing-detail-'));
+  const config = resolveReleaseNotesConfig({ repoRoot });
+  const snapshot = createSnapshot('v1.0.0');
+
+  await fs.promises.mkdir(config.outputPaths.dataDir, { recursive: true });
+  await fs.promises.writeFile(config.outputPaths.indexJson, JSON.stringify({
+    ...snapshot,
+    entries: snapshot.entries.map((entry) => ({
+      ...entry,
+      detailPath: 'missing-detail.json',
+    })),
+  }, null, 2), 'utf8');
+
+  const result = verifyReleaseNotesBuildInput({ docsRoot: repoRoot });
+
+  assert.equal(result.ok, false);
+  assert.match(result.issues.join('\n'), /missing detail file/);
+});
+
+test('release-notes input verification fails when localized body HTML is missing', async () => {
+  const repoRoot = await mkdtemp(path.join(process.env.TMPDIR ?? '/tmp', 'docs-release-notes-missing-body-'));
+  const config = resolveReleaseNotesConfig({ repoRoot });
+  const snapshot = createSnapshot('v1.0.0');
+
+  await materializeReleaseNotes({ snapshot, config });
+
+  const detailPath = path.join(config.outputPaths.dataDir, 'v1.0.0.json');
+  const detailPayload = JSON.parse(await readFile(detailPath, 'utf8'));
+  delete detailPayload.bodyHtml.en;
+  await fs.promises.writeFile(detailPath, JSON.stringify(detailPayload, null, 2), 'utf8');
+
+  const result = verifyReleaseNotesBuildInput({ docsRoot: repoRoot });
+
+  assert.equal(result.ok, false);
+  assert.match(result.issues.join('\n'), /missing en bodyHtml/);
 });
 
 test('release-notes toc items expose version anchors for both locales', () => {

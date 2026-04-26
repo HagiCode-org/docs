@@ -64,6 +64,8 @@ For monorepo automation, the preferred path is direct repository-to-repository t
 npm run release-notes:fetch
 npm run release-notes:materialize
 npm run release-notes:sync
+npm run verify:release-notes:input
+npm run verify:release-notes:output
 npm run test:release-notes
 
 # Monorepo / cron path: read release-notes directly from a sibling checkout
@@ -104,6 +106,7 @@ npm run release-notes:sync
 - Docs-managed output now uses `src/data/release-notes/index.json` plus `src/data/release-notes/<tag>.json`, together with `src/content/docs/release-notes/index.mdx` and `src/content/docs/en/release-notes/index.mdx`.
 - The lightweight index keeps browse metadata only; detailed rendered bodies live in the per-tag JSON files generated inside this repository.
 - Incomplete upstream tags must not create partial detail files or extra docs routes.
+- `npm run build` runs release-notes input verification before Astro and output verification after Astro. Empty release-notes pages are valid only when `src/data/release-notes/index.json` has zero entries; if entries exist, missing detail JSON, missing localized body HTML, missing anchors, or empty-state output must fail the build.
 - The workflow uses `DOCS_RELEASE_NOTES_TOKEN` for upstream GitHub API access and falls back to the repository `GITHUB_TOKEN` only when that token already has cross-repository visibility.
 - In CI, `DOCS_RELEASE_NOTES_ALLOW_STALE_ON_SOURCE_ERROR=true` keeps the job green when the upstream repository is temporarily inaccessible and existing managed outputs are already present.
 - The sync scripts depend on the standard `zip` and `unzip` utilities in addition to Node.js.

@@ -72,6 +72,8 @@ Desktop 下载数据在运行时直接读取 `repos/index` 发布的 canonical i
 npm run release-notes:fetch
 npm run release-notes:materialize
 npm run release-notes:sync
+npm run verify:release-notes:input
+npm run verify:release-notes:output
 npm run test:release-notes
 
 # monorepo / cron 路径：直接读取相邻的 release-notes 仓库
@@ -110,6 +112,7 @@ npm run release-notes:sync
 - `.github/workflows/release-notes-sync.yml` 会按日程运行，也支持 `workflow_dispatch` 手动触发。
 - 在 monorepo cron 路径中，`hagirepocron` 会显式设置 `DOCS_RELEASE_NOTES_SOURCE=local` 并传入 sibling `release-notes` 路径，因此 docs 页面物化不再依赖已发布的 release asset。
 - docs 受管数据现已拆分为轻量 `index.json` 与按 tag 输出的详情 JSON；landing 页面仍保持单路由聚合展示。
+- `npm run build` 会在 Astro 构建前校验 release-notes 输入，并在 Astro 构建后校验静态产物。只有 `src/data/release-notes/index.json` 的 `entries` 为空时才允许 release-notes 空态；只要 entries 存在，detail JSON、本地化正文、版本锚点或静态 HTML 内容缺失都必须让构建失败。
 - 工作流优先使用 `DOCS_RELEASE_NOTES_TOKEN` 访问上游 GitHub API；只有当当前仓库默认 `GITHUB_TOKEN` 本身就具备跨仓库可见性时，才会回退到它。
 - 在 CI 中，`DOCS_RELEASE_NOTES_ALLOW_STALE_ON_SOURCE_ERROR=true` 会在上游仓库暂时不可访问、但当前受管输出已存在时保留现状并继续通过工作流。
 - 同步脚本除 Node.js 之外，还依赖系统自带的 `zip` 与 `unzip` 工具。
