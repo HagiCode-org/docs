@@ -330,7 +330,8 @@ test('local source skips incomplete upstream tags without materializing partial 
   assert.deepEqual(snapshot.skipped.map((entry) => [entry.tag, entry.reason]), [['v1.0.1', 'missing_locale_body']]);
   assert.match(snapshot.skipped[0].message, /incomplete for docs sync/u);
   assert.deepEqual(materialized.writtenFiles, [
-    'src/data/release-notes.index.json',
+    'src/data/release-notes/index.json',
+    'src/data/release-notes/v1.0.0.json',
     'src/content/docs/release-notes/index.mdx',
     'src/content/docs/en/release-notes/index.mdx',
   ]);
@@ -415,7 +416,9 @@ test('normalization preserves display tags, sorts semver consistently, and mater
   assert.equal(firstEnLanding, secondEnLanding);
   assert.deepEqual(firstRun.writtenFiles, secondRun.writtenFiles);
   assert.deepEqual(firstRun.writtenFiles, [
-    'src/data/release-notes.index.json',
+    'src/data/release-notes/index.json',
+    'src/data/release-notes/v1.0.1.json',
+    'src/data/release-notes/1.0.0.json',
     'src/content/docs/release-notes/index.mdx',
     'src/content/docs/en/release-notes/index.mdx',
   ]);
@@ -424,6 +427,8 @@ test('normalization preserves display tags, sorts semver consistently, and mater
   assert.equal(fs.existsSync(path.join(config.outputPaths.zhDir, 'v1.0.1.md')), false);
   assert.equal(fs.existsSync(path.join(config.outputPaths.enDir, 'v1.0.1.md')), false);
   assert.equal(parsedIndex.entries[0].anchorId, 'v1.0.1');
+  assert.equal(parsedIndex.entries[0].detailPath, 'v1.0.1.json');
+  assert.equal(parsedIndex.entries[1].detailPath, '1.0.0.json');
   assert.equal(Object.hasOwn(parsedIndex.entries[0], 'routes'), false);
 
   const summary = createSyncSummaryMarkdown({ snapshot, materialized: secondRun });

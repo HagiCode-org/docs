@@ -59,10 +59,6 @@ function createSnapshot(tag = 'v1.0.0') {
           'zh-CN': '# HagiCode\n\n- 统一了 Code Server 的主要入口。\n',
           en: '# HagiCode\n\n- Unified the main Code Server entry flow.\n',
         },
-        landingBodyHtml: {
-          'zh-CN': '<ul>\n<li>统一了 Code Server 的主要入口。</li>\n</ul>',
-          en: '<ul>\n<li>Unified the main Code Server entry flow.</li>\n</ul>',
-        },
       },
     ],
     skipped: [],
@@ -75,39 +71,65 @@ function createSnapshot(tag = 'v1.0.0') {
   };
 }
 
-test('materialization writes only bilingual landing pages and strips legacy detail outputs', async () => {
+test('materialization writes index plus per-tag detail files and strips legacy outputs', async () => {
   const repoRoot = await mkdtemp(path.join(process.env.TMPDIR ?? '/tmp', 'docs-release-notes-pages-'));
   const config = resolveReleaseNotesConfig({ repoRoot });
   const snapshot = createSnapshot('v1.0.0');
 
   await fs.promises.mkdir(config.outputPaths.zhDir, { recursive: true });
   await fs.promises.mkdir(config.outputPaths.enDir, { recursive: true });
+  await fs.promises.mkdir(path.dirname(config.outputPaths.legacyIndexJson), { recursive: true });
   await fs.promises.writeFile(path.join(config.outputPaths.zhDir, 'legacy.md'), 'stale', 'utf8');
   await fs.promises.writeFile(path.join(config.outputPaths.enDir, 'legacy.md'), 'stale', 'utf8');
+  await fs.promises.writeFile(config.outputPaths.legacyIndexJson, 'stale', 'utf8');
 
   await materializeReleaseNotes({ snapshot, config });
 
   const indexPayload = JSON.parse(await readFile(config.outputPaths.indexJson, 'utf8'));
+  const detailPayload = JSON.parse(await readFile(path.join(config.outputPaths.dataDir, 'v1.0.0.json'), 'utf8'));
   const zhLanding = await readFile(path.join(config.outputPaths.zhDir, 'index.mdx'), 'utf8');
   const enLanding = await readFile(path.join(config.outputPaths.enDir, 'index.mdx'), 'utf8');
 
   assert.equal(indexPayload.entries[0].anchorId, 'v1.0.0');
-  assert.match(indexPayload.entries[0].landingBodyHtml['zh-CN'], /<ul>/);
-  assert.match(indexPayload.entries[0].landingBodyHtml.en, /Unified the main Code Server entry flow\./);
+  assert.equal(indexPayload.entries[0].detailPath, 'v1.0.0.json');
+  assert.equal(Object.hasOwn(indexPayload.entries[0], 'landingBodyHtml'), false);
+  assert.match(detailPayload.bodyHtml['zh-CN'], /<ul>/);
+  assert.match(detailPayload.bodyHtml.en, /Unified the main Code Server entry flow\./);
   assert.equal(Object.hasOwn(indexPayload.entries[0], 'routes'), false);
   assert.match(zhLanding, /<ReleaseNotesLanding locale="zh-CN" \/>/);
   assert.match(enLanding, /<ReleaseNotesLanding locale="en" \/>/);
-  assert.equal(path.basename(config.outputPaths.indexJson), 'release-notes.index.json');
+  assert.equal(path.basename(config.outputPaths.indexJson), 'index.json');
   assert.equal(fs.existsSync(path.join(config.outputPaths.zhDir, 'v1.0.0.md')), false);
   assert.equal(fs.existsSync(path.join(config.outputPaths.enDir, 'v1.0.0.md')), false);
   assert.equal(fs.existsSync(path.join(config.outputPaths.zhDir, 'legacy.md')), false);
   assert.equal(fs.existsSync(path.join(config.outputPaths.enDir, 'legacy.md')), false);
+  assert.equal(fs.existsSync(config.outputPaths.legacyIndexJson), false);
 });
 
 test('landing helpers expose localized summaries and expanded body HTML only for the active locale', () => {
   const snapshot = createSnapshot('v1.0.0');
-  const zhEntries = getReleaseNotesLandingEntries(snapshot, 'zh-CN');
-  const enEntries = getReleaseNotesLandingEntries(snapshot, 'en');
+  const detailEntries = new Map([
+    ['v1.0.0', {
+      bodyHtml: {
+        'zh-CN': '<ul>\n<li>统一了 Code Server 的主要入口。</li>\n</ul>',
+        en: '<ul>\n<li>Unified the main Code Server entry flow.</li>\n</ul>',
+      },
+    }],
+  ]);
+  const zhEntries = getReleaseNotesLandingEntries({
+    ...snapshot,
+    entries: snapshot.entries.map((entry) => ({
+      ...entry,
+      detailPath: 'v1.0.0.json',
+    })),
+  }, 'zh-CN', detailEntries);
+  const enEntries = getReleaseNotesLandingEntries({
+    ...snapshot,
+    entries: snapshot.entries.map((entry) => ({
+      ...entry,
+      detailPath: 'v1.0.0.json',
+    })),
+  }, 'en', detailEntries);
   const zhCopy = getReleaseNotesLandingCopy('zh-CN');
   const enCopy = getReleaseNotesLandingCopy('en');
 
