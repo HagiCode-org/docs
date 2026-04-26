@@ -8,6 +8,7 @@ import { materializeReleaseNotes, resolveReleaseNotesConfig } from '../scripts/r
 import {
   getReleaseNotesLandingCopy,
   getReleaseNotesLandingEntries,
+  getReleaseNotesTocItems,
 } from '../src/lib/release-notes.mjs';
 
 function createSnapshot(tag = 'v1.0.0') {
@@ -158,4 +159,26 @@ test('landing helpers preserve informative empty states when no synchronized ent
   assert.deepEqual(enEntries, []);
   assert.match(getReleaseNotesLandingCopy('zh-CN').empty, /当前语言下还没有可浏览的同步版本/);
   assert.match(getReleaseNotesLandingCopy('en').empty, /No synchronized release notes are available yet/);
+});
+
+test('release-notes toc items expose version anchors for both locales', () => {
+  const snapshot = createSnapshot('v1.0.0');
+  const zhToc = getReleaseNotesTocItems(snapshot, 'zh-CN');
+  const enToc = getReleaseNotesTocItems(snapshot, 'en');
+
+  assert.deepEqual(zhToc, [
+    {
+      text: 'v1.0.0',
+      slug: 'v1.0.0',
+      href: '/release-notes/#v1.0.0',
+    },
+  ]);
+
+  assert.deepEqual(enToc, [
+    {
+      text: 'v1.0.0',
+      slug: 'v1.0.0',
+      href: '/en/release-notes/#v1.0.0',
+    },
+  ]);
 });

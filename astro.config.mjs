@@ -160,6 +160,7 @@ export default defineConfig({
         EditLink: "./src/components/StarlightEditLink.astro",
         PageTitle: "./src/components/StarlightPageTitle.astro",
         LanguageSelect: "./src/components/StarlightLanguageSelect.astro",
+        TableOfContents: "./src/components/StarlightTableOfContents.astro",
         MarkdownContent: './src/components/MarkdownContent.astro',
       },
       sidebar: DOCS_SIDEBAR,

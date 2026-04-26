@@ -54,7 +54,7 @@ export function getReleaseNotesLandingCopy(locale = 'zh-CN') {
   }
 
   return {
-    intro: '这里会按当前语言直接展开所有已同步的 HagiCode 版本更新说明，最新版本排在最前，方便连续阅读。',
+    intro: '',
     empty: '当前语言下还没有可浏览的同步版本。运行 release-notes 同步工作流后，这里会自动出现完整的更新历史。',
     repositoryLabel: '个仓库',
     commitLabel: '次提交',
@@ -92,6 +92,14 @@ export function getReleaseNotesLandingEntries(indexPayload, locale = 'zh-CN', de
   });
 }
 
+export function getReleaseNotesTocItems(indexPayload, locale = 'zh-CN') {
+  return getReleaseNotesLandingEntries(indexPayload, locale).map((entry) => ({
+    text: entry.tag,
+    slug: entry.anchorId,
+    href: entry.anchorHref,
+  })).filter((entry) => entry.slug);
+}
+
 export function getManagedReleaseNotesLanding(locale = 'zh-CN') {
   const indexPayload = loadManagedReleaseNotesIndex();
   const detailEntries = loadManagedReleaseNotesDetails(indexPayload);
@@ -100,4 +108,9 @@ export function getManagedReleaseNotesLanding(locale = 'zh-CN') {
     copy: getReleaseNotesLandingCopy(locale),
     entries: getReleaseNotesLandingEntries(indexPayload, locale, detailEntries),
   };
+}
+
+export function getManagedReleaseNotesToc(locale = 'zh-CN') {
+  const indexPayload = loadManagedReleaseNotesIndex();
+  return getReleaseNotesTocItems(indexPayload, locale);
 }
