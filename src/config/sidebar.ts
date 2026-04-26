@@ -15,6 +15,11 @@ export const DOCS_SIDEBAR = [
     autogenerate: { directory: 'installation' },
   },
   {
+    label: '常见问题',
+    translations: { en: 'FAQ' },
+    autogenerate: { directory: 'faq' },
+  },
+  {
     label: '相关软件安装',
     translations: { en: 'Related Software Installation' },
     autogenerate: { directory: 'related-software-installation' },
