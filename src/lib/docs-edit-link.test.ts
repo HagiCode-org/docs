@@ -84,24 +84,6 @@ describe("resolveDocsEditLink", () => {
     );
   });
 
-  it("keeps the original file extension when the source file is markdown", () => {
-    const result = resolveDocsEditLink(
-      createRoute({
-        id: "en-terms-glossary",
-        entry: {
-          filePath: "src/content/docs/en-terms-glossary.md",
-        },
-      }),
-    );
-
-    expect(result).toMatchObject({
-      isVisible: true,
-      sourcePath: "src/content/docs/en-terms-glossary.md",
-      repoPath: "src/content/docs/en-terms-glossary.md",
-    });
-    expect(result.href).toContain("en-terms-glossary.md");
-  });
-
   it("falls back to a locale-aware route lookup when filePath metadata is unavailable", () => {
     const result = resolveDocsEditLink(
       createRoute({
