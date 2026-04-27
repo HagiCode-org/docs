@@ -48,6 +48,8 @@ export interface DocsPromoteBannerControllerOptions extends LoadActivePromotions
   refreshIntervalMs?: number;
 }
 
+type BannerVisibilityState = 'dismissed' | 'footer-hidden' | 'hidden' | 'ready';
+
 function defaultBadgeText(locale: PromoteLocale): string {
   return locale === 'en' ? 'Promoted' : '推荐';
 }
@@ -590,10 +592,13 @@ export class DocsPromoteBannerController {
   private syncRotationTimer(): void {
     this.stopRotationTimer();
 
+    const visibilityState = this.getVisibilityState();
+
     if (
       this.promotions.length < 2 ||
       this.isPaused ||
-      this.prefersReducedMotion
+      this.prefersReducedMotion ||
+      visibilityState !== 'ready'
     ) {
       return;
     }
@@ -659,15 +664,6 @@ export class DocsPromoteBannerController {
     }
 
     this.setSpacerHeight(0);
-
-    let bottomOffset = 0;
-    if (this.footer) {
-      const footerRect = this.footer.getBoundingClientRect();
-      bottomOffset = Math.max(window.innerHeight - footerRect.top, 0);
-      bottomOffset = Math.min(bottomOffset, footerRect.height);
-    }
-
-    this.shell.style.setProperty('--docs-promote-banner-bottom-offset', `${bottomOffset}px`);
     this.syncRotationTimer();
   }
 
@@ -691,27 +687,57 @@ export class DocsPromoteBannerController {
   }
 
   private applyVisibilityState(): boolean {
-    const hasPromotions = this.promotions.length > 0;
-    const dismissed = this.isCurrentPromotionDismissed();
-    const footerVisible = this.isFooterVisible();
-    const shouldShow = hasPromotions && !dismissed;
+    const visibilityState = this.getVisibilityState();
+    const shouldShow = visibilityState === 'ready' || visibilityState === 'footer-hidden';
+    const footerHidden = visibilityState === 'footer-hidden';
 
     setElementHidden(this.root, !shouldShow);
     setElementHidden(this.shell, !shouldShow);
     setElementHidden(this.spacer, !shouldShow);
     this.root.dataset.mode = this.promotions[0]?.source ?? 'hidden';
-    this.root.dataset.state = shouldShow
-      ? (footerVisible ? 'docked' : 'ready')
-      : dismissed
-        ? 'dismissed'
-        : 'hidden';
+    this.root.dataset.state = visibilityState;
+    this.syncFooterHiddenState(footerHidden);
 
     if (!shouldShow) {
       this.setSpacerHeight(0);
-      this.shell?.style.removeProperty('--docs-promote-banner-bottom-offset');
     }
 
     return shouldShow;
+  }
+
+  private syncFooterHiddenState(footerHidden: boolean): void {
+    if (!this.shell) {
+      return;
+    }
+
+    if (footerHidden) {
+      this.shell.setAttribute('aria-hidden', 'true');
+      this.shell.setAttribute('inert', '');
+
+      if (
+        document.activeElement instanceof HTMLElement &&
+        this.shell.contains(document.activeElement)
+      ) {
+        document.activeElement.blur();
+      }
+
+      return;
+    }
+
+    this.shell.removeAttribute('aria-hidden');
+    this.shell.removeAttribute('inert');
+  }
+
+  private getVisibilityState(): BannerVisibilityState {
+    if (this.promotions.length === 0) {
+      return 'hidden';
+    }
+
+    if (this.isCurrentPromotionDismissed()) {
+      return 'dismissed';
+    }
+
+    return this.isFooterVisible() ? 'footer-hidden' : 'ready';
   }
 
   private isFooterVisible(): boolean {

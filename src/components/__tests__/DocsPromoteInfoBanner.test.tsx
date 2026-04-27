@@ -339,7 +339,7 @@ describe('DocsPromoteBannerController', () => {
     expect(root.querySelector('[data-promote-banner-controls]')).toHaveAttribute('hidden');
   });
 
-  it('keeps the banner visible on ordinary Starlight page shells and docks above the footer instead of hiding', async () => {
+  it('hides the banner while the footer is visible and restores it after scrolling away', async () => {
     const matchMedia = createMatchMedia(false);
     vi.stubGlobal('matchMedia', vi.fn(() => matchMedia));
     const { footer, root, shell } = renderBannerShell({
@@ -362,14 +362,57 @@ describe('DocsPromoteBannerController', () => {
     expect(root).not.toHaveAttribute('hidden');
     expect(root.dataset.mode).toBe('fallback');
     expect(root.dataset.state).toBe('ready');
-    expect(shell.style.getPropertyValue('--docs-promote-banner-bottom-offset')).toBe('0px');
+    expect(getActiveSlideTitle(root)).toBe('Explore the HagiCode Product Overview');
+    expect(shell.style.getPropertyValue('--docs-promote-banner-bottom-offset')).toBe('');
 
     setFooterRect(footer, 760);
     syncLayout(controller);
 
     expect(root).not.toHaveAttribute('hidden');
-    expect(root.dataset.state).toBe('docked');
-    expect(shell.style.getPropertyValue('--docs-promote-banner-bottom-offset')).toBe('140px');
+    expect(root.dataset.state).toBe('footer-hidden');
+    expect(shell).toHaveAttribute('aria-hidden', 'true');
+    expect(shell).toHaveAttribute('inert');
+    expect(shell.style.getPropertyValue('--docs-promote-banner-bottom-offset')).toBe('');
+
+    setFooterRect(footer, 1200);
+    syncLayout(controller);
+
+    expect(root).not.toHaveAttribute('hidden');
+    expect(root.dataset.state).toBe('ready');
+    expect(shell).not.toHaveAttribute('aria-hidden');
+    expect(shell).not.toHaveAttribute('inert');
+    expect(getActiveSlideTitle(root)).toBe('Explore the HagiCode Product Overview');
+  });
+
+  it('keeps the dismissed banner hidden when footer visibility changes for the same promotion set', async () => {
+    const matchMedia = createMatchMedia(false);
+    vi.stubGlobal('matchMedia', vi.fn(() => matchMedia));
+    const { footer, root } = renderBannerShell({
+      locale: 'en',
+      path: '/en/product-overview/',
+    });
+
+    const controller = new DocsPromoteBannerController(root, {
+      footer,
+      fetchImpl: createFetchMock([]) as typeof fetch,
+      refreshIntervalMs: 60_000,
+    });
+
+    await controller.connect();
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss promotion message' }));
+
+    expect(root).toHaveAttribute('hidden');
+    expect(root.dataset.state).toBe('dismissed');
+
+    setFooterRect(footer, 760);
+    syncLayout(controller);
+    expect(root).toHaveAttribute('hidden');
+    expect(root.dataset.state).toBe('dismissed');
+
+    setFooterRect(footer, 1200);
+    syncLayout(controller);
+    expect(root).toHaveAttribute('hidden');
+    expect(root.dataset.state).toBe('dismissed');
   });
 
   it('keeps fallback dismissal persisted for the same payload but allows a later remote promotion to reappear', async () => {
@@ -470,6 +513,60 @@ describe('DocsPromoteBannerController', () => {
     expect(root.querySelector('[data-promote-banner-controls]')).not.toHaveAttribute('hidden');
     expect(screen.getByText('1 / 2')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Show next promotion' }));
+    expect(getActiveSlideTitle(root)).toBe('Try the Builder');
+    expect(screen.getByText('2 / 2')).toBeInTheDocument();
+  });
+
+  it('pauses automatic rotation while footer-hidden and resumes after the footer leaves the viewport', async () => {
+    const matchMedia = createMatchMedia(false);
+    vi.stubGlobal('matchMedia', vi.fn(() => matchMedia));
+    const { footer, root } = renderBannerShell({
+      locale: 'en',
+      path: '/en/guides/skills/',
+    });
+
+    const controller = new DocsPromoteBannerController(root, {
+      footer,
+      fetchImpl: createFetchMock([
+        {
+          id: 'main-game',
+          titleZh: '立即添加到愿望单',
+          titleEn: 'Wishlist Now',
+          descriptionZh: '游戏将于 2026-04-29 发售，立即前往 Steam 添加愿望单。',
+          descriptionEn: 'Coming April 29, 2026. Add to your Steam wishlist now!',
+          link: 'https://store.steampowered.com/app/4625540/Hagicode/',
+          platform: 'steam',
+        },
+        {
+          id: 'builder',
+          titleZh: '体验部署生成器',
+          titleEn: 'Try the Builder',
+          descriptionZh: '使用 Docker Compose Builder 快速生成部署配置。',
+          descriptionEn: 'Generate Docker Compose deployment files with the Builder.',
+          link: 'https://builder.hagicode.com/',
+          platform: 'web',
+        },
+      ]) as typeof fetch,
+      rotationIntervalMs: 1000,
+      refreshIntervalMs: 60_000,
+    });
+
+    await controller.connect();
+
+    expect(getActiveSlideTitle(root)).toBe('Wishlist Now');
+    setFooterRect(footer, 760);
+    syncLayout(controller);
+    expect(root.dataset.state).toBe('footer-hidden');
+
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(getActiveSlideTitle(root)).toBe('Wishlist Now');
+    expect(screen.getByText('1 / 2')).toBeInTheDocument();
+
+    setFooterRect(footer, 1200);
+    syncLayout(controller);
+    expect(root.dataset.state).toBe('ready');
+
+    await vi.advanceTimersByTimeAsync(1000);
     expect(getActiveSlideTitle(root)).toBe('Try the Builder');
     expect(screen.getByText('2 / 2')).toBeInTheDocument();
   });
