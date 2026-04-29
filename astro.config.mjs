@@ -35,6 +35,8 @@ const docsLinkCheckCacheTtlHours = Number.parseInt(
 const docsLinkCheckCacheTtlMs = Number.isFinite(docsLinkCheckCacheTtlHours)
   ? docsLinkCheckCacheTtlHours * 60 * 60 * 1000
   : 48 * 60 * 60 * 1000;
+// 默认不在常规构建后执行链接校验；需要时显式设置 DOCS_ENABLE_LINK_CHECK=true。
+const docsEnableLinkCheck = process.env.DOCS_ENABLE_LINK_CHECK === "true";
 
 // 获取 base 路径：文档站点独立部署在 docs.hagicode.com，开发和生产都使用根路径
 const getBasePath = () => {
@@ -155,22 +157,26 @@ export default defineConfig({
     sitemap(),
     partytown(),
     react(),
-    cachedLinkValidator({
-      // 仅在 CI 环境中启用外部链接检查，避免本地构建时间过长
-      checkExternal: process.env.CI === "true",
-      // 外部链接超时时间（毫秒）
-      externalTimeout: 10000,
-      // 仅复用近期成功的外链结果，避免长期信任旧缓存。
-      cacheDir: ".tmp/link-check-cache",
-      cacheTtlMs: docsLinkCheckCacheTtlMs,
-      // 链接检查不再阻塞构建，仅发出警告
-      // 独立的链接检查由 .github/workflows/link-check.yml 负责
-      failOnBrokenLinks: false,
-      // 详细输出（用于调试）
-      verbose: process.env.CI === "true",
-      // 排除某些路径（如 API 端点、管理后台）
-      exclude: [],
-    }),
+    ...(docsEnableLinkCheck
+      ? [
+          cachedLinkValidator({
+            // 仅在 CI 环境中启用外部链接检查，避免本地构建时间过长
+            checkExternal: process.env.CI === "true",
+            // 外部链接超时时间（毫秒）
+            externalTimeout: 10000,
+            // 仅复用近期成功的外链结果，避免长期信任旧缓存。
+            cacheDir: ".tmp/link-check-cache",
+            cacheTtlMs: docsLinkCheckCacheTtlMs,
+            // 链接检查不再阻塞构建，仅发出警告
+            // 独立的链接检查由 .github/workflows/link-check.yml 负责
+            failOnBrokenLinks: false,
+            // 详细输出（用于调试）
+            verbose: process.env.CI === "true",
+            // 排除某些路径（如 API 端点、管理后台）
+            exclude: [],
+          }),
+        ]
+      : []),
   ],
   scopedStyleStrategy: "where",
 });
