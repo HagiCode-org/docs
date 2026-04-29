@@ -2,10 +2,12 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import test from 'node:test';
 
 import {
   generateDocsTranslationReport,
+  main,
   REQUIRED_DOCS_LOCALES,
 } from '../scripts/report-docs-translation-status.mjs';
 
@@ -129,5 +131,54 @@ test('reports highly similar docs against zh-CN baseline and writes a JSON repor
     const onDisk = JSON.parse(await fs.readFile(reportFile, 'utf8'));
     assert.equal(onDisk.summary.totalBaselineDocs, 1);
     assert.equal(onDisk.summary.highSimilarityComparisonsVsBaseline, 1);
+  });
+});
+
+test('covers the full configured locale set including zh-CN baseline', async () => {
+  const expectedLocales = [
+    'zh-CN', 'zh-Hant', 'en-US', 'ja-JP', 'ko-KR',
+    'de-DE', 'fr-FR', 'es-ES', 'pt-BR', 'ru-RU',
+  ];
+  const actualCodes = REQUIRED_DOCS_LOCALES.map((locale) => locale.code);
+  assert.deepEqual(actualCodes, expectedLocales);
+
+  const contentPrefixes = REQUIRED_DOCS_LOCALES.filter((locale) => locale.contentPrefix).map((locale) => locale.contentPrefix);
+  const expectedPrefixes = ['zh-Hant', 'en', 'ja-JP', 'ko-KR', 'de-DE', 'fr-FR', 'es-ES', 'pt-BR', 'ru-RU'];
+  assert.deepEqual(contentPrefixes, expectedPrefixes);
+});
+
+test('reports no findings when all locales are present and translated', async () => {
+  await withFixture(async (root) => {
+    const relativeDocPath = 'installation/index.mdx';
+    await writeCompleteSet(root, relativeDocPath);
+
+    const report = await generateDocsTranslationReport({
+      contentRoot: root,
+      reportPath: null,
+    });
+
+    assert.equal(report.summary.docsWithFindings, 0);
+    assert.equal(report.summary.missingTranslations, 0);
+    assert.equal(report.summary.exactDuplicateComparisonsVsBaseline, 0);
+    assert.equal(report.summary.highSimilarityComparisonsVsBaseline, 0);
+  });
+});
+
+test('fail-on-findings exits non-zero when findings remain', async () => {
+  await withFixture(async (root) => {
+    const relativeDocPath = 'faq/index.mdx';
+    await writeDoc(root, REQUIRED_DOCS_LOCALES[0], relativeDocPath, '中文内容');
+
+    const scriptPath = pathToFileURL(
+      path.resolve(root, '../../../scripts/report-docs-translation-status.mjs'),
+    ).href;
+
+    const originalExitCode = process.exitCode;
+    process.exitCode = 0;
+
+    await main(['--root-dir', root, '--fail-on-findings', '--report-json', '/dev/null']);
+
+    assert.equal(process.exitCode, 1);
+    process.exitCode = originalExitCode;
   });
 });
