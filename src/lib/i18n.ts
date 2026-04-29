@@ -6,13 +6,58 @@
  * - Landing pages and docs/blog content pages now use different default-route strategies.
  */
 
-export type DocsLocale = 'root' | 'en';
+import {
+  DOCS_LOCALE_RESOURCES,
+  DOCS_LOCALE_SELECTOR_OPTIONS,
+} from '../i18n/generated/docs-locale-resources.mjs';
+import {
+  BLOG_ROUTE_LOCALES,
+  buildBlogRoutePath,
+  getBlogLanguageByRouteLocale,
+  getBlogRouteLocale,
+  stripBlogLocalePrefix,
+  type BlogRouteLocale,
+} from './blog-i18n';
+
+export type DocsLocale = BlogRouteLocale;
 export type DocsLanguageParam = 'zh-CN' | 'en';
+
+type GeneratedDocsLocaleOption = {
+  code: DocsLocale;
+  sourceLocale: string;
+  label: string;
+  lang: string;
+  htmlLang: string;
+  direction: string;
+};
+
+export const DOCS_LOCALE_METADATA = DOCS_LOCALE_SELECTOR_OPTIONS as GeneratedDocsLocaleOption[];
+export const DOCS_ROUTE_TO_SOURCE_LOCALE = Object.fromEntries(
+  DOCS_LOCALE_METADATA.map((locale) => [locale.code, locale.sourceLocale]),
+) as Record<DocsLocale, string>;
+export const DOCS_ROUTE_LOCALE_LABELS = Object.fromEntries(
+  DOCS_LOCALE_METADATA.map((locale) => [locale.code, locale.label]),
+) as Record<DocsLocale, string>;
+
+function normalizeLocaleKey(locale: string): string {
+  return locale.trim().replace(/_/g, '-').toLowerCase();
+}
+
+const DOCS_ROUTE_LOCALE_BY_NORMALIZED_KEY = Object.fromEntries(
+  DOCS_LOCALE_METADATA.map((locale) => [normalizeLocaleKey(locale.code), locale.code]),
+) as Record<string, DocsLocale>;
+
+const DOCS_SOURCE_TO_ROUTE_LOCALE = Object.fromEntries(
+  Object.entries(DOCS_LOCALE_RESOURCES['en-US'].metadata.aliases).map(([locale, routeLocale]) => [
+    normalizeLocaleKey(locale),
+    routeLocale,
+  ]),
+) as Record<string, DocsLocale>;
 
 export const DOCS_LANGUAGE_STORAGE_KEY = 'starlight-route';
 export const DEFAULT_DOCS_ENTRY_LOCALE: DocsLocale = 'en';
 export const RELEASE_NOTES_ROUTE_PREFIX = '/release-notes';
-export const DOCS_ENTRY_PATHS: Record<DocsLocale, string> = {
+export const DOCS_ENTRY_PATHS: Partial<Record<DocsLocale, string>> = {
   root: '/',
   en: '/en/',
 };
@@ -33,22 +78,19 @@ export function parseDocsLocale(lang: string | null | undefined): DocsLocale | n
     return null;
   }
 
-  const normalized = lang.trim().toLowerCase();
+  const normalized = normalizeLocaleKey(lang);
   if (!normalized) {
     return null;
   }
 
-  if (normalized === 'en' || normalized.startsWith('en-')) {
-    return 'en';
+  const generatedRouteLocale = DOCS_SOURCE_TO_ROUTE_LOCALE[normalized];
+  if (generatedRouteLocale) {
+    return generatedRouteLocale;
   }
 
-  if (
-    normalized === 'root' ||
-    normalized === 'zh' ||
-    normalized === 'zh-cn' ||
-    normalized.startsWith('zh-')
-  ) {
-    return 'root';
+  const blogRouteLocale = getBlogRouteLocale(lang);
+  if (blogRouteLocale) {
+    return blogRouteLocale;
   }
 
   return null;
@@ -113,15 +155,11 @@ export function isValidLanguage(lang: string | null): boolean {
  * Remove the docs locale prefix from a path.
  */
 export function stripDocsLocalePrefix(pathname = '/'): string {
-  if (!pathname || pathname === '/en') {
+  if (!pathname) {
     return '/';
   }
 
-  if (pathname.startsWith('/en/')) {
-    return pathname.slice(3) || '/';
-  }
-
-  return pathname;
+  return stripBlogLocalePrefix(pathname);
 }
 
 /**
@@ -156,10 +194,14 @@ export function buildDocsRoutePath(locale: DocsLocale, originalPath = '/'): stri
   const normalizedPath = stripDocsLocalePrefix(originalPath || '/');
 
   if (locale === 'en') {
-    return normalizedPath === '/' ? DOCS_ENTRY_PATHS.en : `/en${normalizedPath}`;
+    return normalizedPath === '/' ? DOCS_ENTRY_PATHS.en ?? '/en/' : `/en${normalizedPath}`;
   }
 
-  return normalizedPath || '/';
+  if (locale === 'root') {
+    return normalizedPath || '/';
+  }
+
+  return buildBlogRoutePath(getBlogLanguageByRouteLocale(locale)?.code ?? locale, normalizedPath || '/');
 }
 
 /**
@@ -179,7 +221,12 @@ export function getStoredDocsLocale(storageValue: string | null | undefined): Do
 
   try {
     const parsed = JSON.parse(storageValue) as { lang?: string | null };
-    return parseDocsLocale(parsed.lang);
+    if (typeof parsed.lang !== 'string') {
+      return null;
+    }
+
+    const normalizedRouteLocale = normalizeLocaleKey(parsed.lang);
+    return DOCS_ROUTE_LOCALE_BY_NORMALIZED_KEY[normalizedRouteLocale] ?? null;
   } catch {
     return null;
   }
@@ -257,3 +304,5 @@ export function resolveDocsEntryLocale(options: {
 export function toInstallButtonLocale(locale: DocsLocale): 'zh' | 'en' {
   return locale === 'en' ? 'en' : 'zh';
 }
+
+export { BLOG_ROUTE_LOCALES };
