@@ -12,6 +12,17 @@ const FALLBACK_PROMOTE_CONTENT_URL = `${INDEX_ORIGIN}/promote_content.json`;
 type FetchLike = typeof fetch;
 type PromoteLocale = 'zh' | 'en';
 type JsonRecord = Record<string, unknown>;
+type PromoteContentLocaleCode =
+  | 'zh-CN'
+  | 'zh-Hant'
+  | 'en-US'
+  | 'ja-JP'
+  | 'ko-KR'
+  | 'de-DE'
+  | 'fr-FR'
+  | 'es-ES'
+  | 'pt-BR'
+  | 'ru-RU';
 
 interface IndexCatalogEntry {
   id: string;
@@ -89,6 +100,45 @@ export interface LoadPromotionsOptions {
   now?: number;
 }
 
+const DEFAULT_PROMOTE_CONTENT_LOCALE: PromoteContentLocaleCode = 'zh-CN';
+const UNSUPPORTED_PROMOTE_CONTENT_LOCALE_FALLBACK: PromoteContentLocaleCode = 'en-US';
+const SUPPORTED_PROMOTE_CONTENT_LOCALE_CODES = [
+  'zh-CN',
+  'zh-Hant',
+  'en-US',
+  'ja-JP',
+  'ko-KR',
+  'de-DE',
+  'fr-FR',
+  'es-ES',
+  'pt-BR',
+  'ru-RU',
+] as const satisfies readonly PromoteContentLocaleCode[];
+const PROMOTE_CONTENT_LOCALE_FALLBACKS: Record<PromoteContentLocaleCode, readonly PromoteContentLocaleCode[]> = {
+  'zh-CN': ['en-US'],
+  'zh-Hant': ['zh-CN', 'en-US'],
+  'en-US': ['en-US'],
+  'ja-JP': ['en-US'],
+  'ko-KR': ['en-US'],
+  'de-DE': ['en-US'],
+  'fr-FR': ['en-US'],
+  'es-ES': ['en-US'],
+  'pt-BR': ['en-US'],
+  'ru-RU': ['en-US'],
+};
+const DEFAULT_PROMOTE_CTA_LABELS: Record<PromoteContentLocaleCode, string> = {
+  'zh-CN': '立即前往',
+  'zh-Hant': '立即前往',
+  'en-US': 'GO',
+  'ja-JP': '今すぐ見る',
+  'ko-KR': '바로 보기',
+  'de-DE': 'Ansehen',
+  'fr-FR': 'Voir',
+  'es-ES': 'Ver ahora',
+  'pt-BR': 'Ver agora',
+  'ru-RU': 'Открыть',
+};
+
 let cachedDocumentsPromise: Promise<PromotionDocuments> | null = null;
 
 function isRecord(value: unknown): value is JsonRecord {
@@ -97,6 +147,19 @@ function isRecord(value: unknown): value is JsonRecord {
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0;
+}
+
+function canonicalizeLocale(locale: string): string {
+  const candidate = locale.trim().replace(/_/g, '-');
+  if (!candidate) {
+    return '';
+  }
+
+  try {
+    return Intl.getCanonicalLocales(candidate)[0] ?? candidate;
+  } catch {
+    return candidate;
+  }
 }
 
 function sanitizeLocalizedStringMap(value: unknown): Record<string, string> | null {
@@ -314,7 +377,21 @@ export function clearPromotionDocumentCache(): void {
 }
 
 export function mapDocsLocaleToPromoteLocale(locale: string | null | undefined): PromoteLocale {
-  return parseDocsLocale(locale) === 'en' ? 'en' : 'zh';
+  const docsLocale = parseDocsLocale(locale);
+  if (docsLocale === 'root') {
+    return 'zh';
+  }
+
+  if (docsLocale === 'en') {
+    return 'en';
+  }
+
+  const contentLocale = normalizePromoteContentLocale(locale);
+  if (contentLocale === 'zh-CN' || contentLocale === 'zh-Hant') {
+    return 'zh';
+  }
+
+  return 'en';
 }
 
 function localizePlatform(targetPlatform: string | undefined, locale: PromoteLocale): string | null {
@@ -337,10 +414,86 @@ function localizePlatform(targetPlatform: string | undefined, locale: PromoteLoc
   return labels[normalized]?.[locale] ?? targetPlatform.trim();
 }
 
-function pickLocalizedValue(value: Record<string, string>, locale: PromoteLocale): string | null {
-  const orderedKeys = locale === 'en'
-    ? ['en', 'zh', 'zh-CN']
-    : ['zh', 'zh-CN', 'en'];
+function normalizePromoteContentLocale(locale: string | null | undefined): PromoteContentLocaleCode | null {
+  if (!locale) {
+    return null;
+  }
+
+  const docsLocale = parseDocsLocale(locale);
+  if (docsLocale === 'root') {
+    return 'zh-CN';
+  }
+
+  if (docsLocale === 'en') {
+    return 'en-US';
+  }
+
+  const canonical = canonicalizeLocale(locale);
+  const normalized = canonical.toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+
+  if (normalized === 'zh-hant' || normalized.includes('-hant') || ['zh-tw', 'zh-hk', 'zh-mo'].includes(normalized)) {
+    return 'zh-Hant';
+  }
+
+  if (normalized === 'zh' || normalized.includes('-hans') || ['zh-cn', 'zh-sg'].includes(normalized)) {
+    return 'zh-CN';
+  }
+
+  for (const supportedCode of SUPPORTED_PROMOTE_CONTENT_LOCALE_CODES) {
+    if (supportedCode.toLowerCase() === normalized) {
+      return supportedCode;
+    }
+  }
+
+  const [languagePart] = normalized.split('-');
+  switch (languagePart) {
+    case 'en':
+      return 'en-US';
+    case 'ja':
+      return 'ja-JP';
+    case 'ko':
+      return 'ko-KR';
+    case 'de':
+      return 'de-DE';
+    case 'fr':
+      return 'fr-FR';
+    case 'es':
+      return 'es-ES';
+    case 'pt':
+      return 'pt-BR';
+    case 'ru':
+      return 'ru-RU';
+    default:
+      return null;
+  }
+}
+
+function resolvePromoteContentLocale(locale: string | null | undefined): PromoteContentLocaleCode {
+  if (locale === undefined || locale === null || locale.trim().length === 0) {
+    return DEFAULT_PROMOTE_CONTENT_LOCALE;
+  }
+
+  return normalizePromoteContentLocale(locale) ?? UNSUPPORTED_PROMOTE_CONTENT_LOCALE_FALLBACK;
+}
+
+function getPromoteContentKeys(locale: string | null | undefined): string[] {
+  const resolvedLocale = resolvePromoteContentLocale(locale);
+  const fallbackCodes = PROMOTE_CONTENT_LOCALE_FALLBACKS[resolvedLocale];
+  const keys = [
+    resolvedLocale,
+    resolvedLocale.split('-')[0] ?? resolvedLocale,
+    ...fallbackCodes,
+    ...fallbackCodes.map((code) => code.split('-')[0] ?? code),
+  ];
+
+  return [...new Set(keys)];
+}
+
+function pickLocalizedValue(value: Record<string, string>, locale: string | null | undefined): string | null {
+  const orderedKeys = getPromoteContentKeys(locale);
 
   for (const key of orderedKeys) {
     const candidate = value[key];
@@ -353,7 +506,7 @@ function pickLocalizedValue(value: Record<string, string>, locale: PromoteLocale
   return fallbackValue?.trim() ?? null;
 }
 
-function resolveCtaLabel(value: Record<string, string> | undefined, locale: PromoteLocale): string {
+function resolveCtaLabel(value: Record<string, string> | undefined, locale: string | null | undefined): string {
   if (value) {
     const localized = pickLocalizedValue(value, locale);
     if (localized) {
@@ -361,7 +514,7 @@ function resolveCtaLabel(value: Record<string, string> | undefined, locale: Prom
     }
   }
 
-  return locale === 'zh' ? '立即前往' : 'GO';
+  return DEFAULT_PROMOTE_CTA_LABELS[resolvePromoteContentLocale(locale)];
 }
 
 function resolveImage(image: PromotionImage | undefined, title: string): PromotionImage | null {
@@ -457,7 +610,7 @@ export function normalizePromotions(
         id: record.id,
         title: record.id,
         description: '',
-        ctaLabel: resolveCtaLabel(undefined, promoteLocale),
+        ctaLabel: resolveCtaLabel(undefined, locale),
         link: '',
         platform: null,
         targetPlatform: null,
@@ -471,8 +624,8 @@ export function normalizePromotions(
       }];
     }
 
-    const title = pickLocalizedValue(promoteContent.title, promoteLocale);
-    const description = pickLocalizedValue(promoteContent.description, promoteLocale);
+    const title = pickLocalizedValue(promoteContent.title, locale);
+    const description = pickLocalizedValue(promoteContent.description, locale);
     if (!title || !description) {
       return [];
     }
@@ -483,7 +636,7 @@ export function normalizePromotions(
       id: promoteContent.id,
       title,
       description,
-      ctaLabel: resolveCtaLabel(promoteContent.cta, promoteLocale),
+      ctaLabel: resolveCtaLabel(promoteContent.cta, locale),
       link: promoteContent.link,
       platform: localizePlatform(promoteContent.targetPlatform, promoteLocale),
       targetPlatform: promoteContent.targetPlatform ?? null,

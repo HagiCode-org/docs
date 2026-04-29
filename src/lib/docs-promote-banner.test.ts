@@ -194,6 +194,38 @@ describe('docs promote banner source', () => {
     expect(mapDocsLocaleToPromoteLocale('en')).toBe('en');
   });
 
+  it('keeps localized remote content for supported desktop locales outside the docs route set', () => {
+    const promotions = normalizeActivePromotions(
+      {
+        promotes: [{ id: 'german-remote', on: true }],
+      },
+      {
+        contents: [
+          {
+            id: 'german-remote',
+            title: { 'de-DE': 'Nur heute', en: 'Only today' },
+            description: { 'de-DE': 'Deutscher Text', en: 'English copy' },
+            cta: { 'de-DE': 'Angebot ansehen', en: 'View offer' },
+            link: 'https://example.invalid/german-remote',
+          },
+        ],
+      },
+      'de-DE',
+    );
+
+    expect(promotions).toEqual([
+      expect.objectContaining({
+        id: 'german-remote',
+        title: 'Nur heute',
+        description: 'Deutscher Text',
+        ctaLabel: 'Angebot ansehen',
+        badgeText: 'Promoted',
+        source: 'remote',
+      }),
+    ]);
+    expect(mapDocsLocaleToPromoteLocale('de-DE')).toBe('en');
+  });
+
   it('returns the localized fallback card when no active remote promotion exists', async () => {
     const promotions = await loadActivePromotions({
       locale: 'zh-CN',
