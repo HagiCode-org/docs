@@ -33,6 +33,47 @@ npm run preview
 
 The local docs server runs on `http://localhost:31265` by default.
 
+## hagi18n maintenance workflow
+
+Docs UI strings are maintained with `@hagicode/hagi18n` from this repository. The source of truth is the YAML tree under `src/i18n/locales/<locale>/`; generated runtime resources are committed under `src/i18n/generated/` because `astro.config.mjs` imports them during config evaluation.
+
+Use these commands from `repos/docs`:
+
+```bash
+npm run i18n:audit
+npm run i18n:doctor
+npm run i18n:generate
+npm run i18n:check
+```
+
+`npm install` installs the project-local `hagi18n` CLI. To verify CLI availability directly, run `npx hagi18n info` or any script above.
+
+### Updating UI translations
+
+Edit YAML files in `src/i18n/locales/en-US/` and `src/i18n/locales/zh-CN/`. Keep namespace files, scalar key paths, and `{{placeholder}}` tokens aligned between locales. Run `npm run i18n:audit` or `npm run i18n:doctor`, then run `npm run i18n:generate` to refresh `src/i18n/generated/docs-locale-resources.mjs`.
+
+`npm run i18n:check` combines hagi18n validation with a stale generated-resource check. `npm run dev`, `npm run build`, and `npm run typecheck` run `prepare:i18n` first so generated resources exist before Astro or TypeScript consumes them.
+
+### Safe sync and prune commands
+
+Sync and prune default to dry-run previews:
+
+```bash
+npm run i18n:sync
+npm run i18n:prune
+```
+
+Only the explicit write variants mutate locale source files:
+
+```bash
+npm run i18n:sync:write
+npm run i18n:prune:write
+```
+
+### Content boundary
+
+hagi18n manages docs UI strings, blog plugin UI labels, Starlight locale metadata, and common selector labels. MDX documentation pages and blog posts remain organized through Starlight locale folders: Chinese content lives under `src/content/docs/`, and English content lives under `src/content/docs/en/`.
+
 ## Screenshot analysis workflow
 
 The managed screenshot sync flow reads `repos/docs/.env` before it launches ImgBin.

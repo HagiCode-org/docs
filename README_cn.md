@@ -33,6 +33,47 @@ npm run preview
 
 本地文档站默认运行在 `http://localhost:31265`。
 
+## hagi18n 维护工作流
+
+Docs 的 UI 文案由本仓库内的 `@hagicode/hagi18n` 维护。翻译源文件位于 `src/i18n/locales/<locale>/`，这是提交到仓库的 source of truth；运行时资源提交在 `src/i18n/generated/`，因为 `astro.config.mjs` 会在配置求值阶段同步导入它们。
+
+在 `repos/docs` 目录运行：
+
+```bash
+npm run i18n:audit
+npm run i18n:doctor
+npm run i18n:generate
+npm run i18n:check
+```
+
+`npm install` 会安装项目本地的 `hagi18n` CLI。需要直接确认 CLI 可用时，可以运行 `npx hagi18n info`，也可以直接执行上面的 npm scripts。
+
+### 更新 UI 翻译
+
+修改 `src/i18n/locales/en-US/` 与 `src/i18n/locales/zh-CN/` 下的 YAML 文件。两个语言目录必须保持 namespace 文件、标量 key 路径和 `{{placeholder}}` 占位符一致。修改后先运行 `npm run i18n:audit` 或 `npm run i18n:doctor`，再运行 `npm run i18n:generate` 刷新 `src/i18n/generated/docs-locale-resources.mjs`。
+
+`npm run i18n:check` 会同时执行 hagi18n 校验和 generated resource stale check。`npm run dev`、`npm run build` 与 `npm run typecheck` 会先执行 `prepare:i18n`，确保 Astro 或 TypeScript 读取资源前生成文件已存在。
+
+### 安全的 sync 与 prune 命令
+
+sync 和 prune 默认只做 dry-run 预览：
+
+```bash
+npm run i18n:sync
+npm run i18n:prune
+```
+
+只有显式的 write 变体会修改 locale 源文件：
+
+```bash
+npm run i18n:sync:write
+npm run i18n:prune:write
+```
+
+### 内容边界
+
+hagi18n 只管理 docs UI 文案、博客插件 UI 标签、Starlight locale metadata 和通用语言选择器标签。MDX 文档页与博客正文仍由 Starlight locale 文件夹组织：中文内容位于 `src/content/docs/`，英文内容位于 `src/content/docs/en/`。
+
 ## 截图分析工作流
 
 受管截图同步流程会在启动 ImgBin 之前读取 `repos/docs/.env`。
