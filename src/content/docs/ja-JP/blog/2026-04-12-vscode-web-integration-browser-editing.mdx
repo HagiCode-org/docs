@@ -1,0 +1,339 @@
+---
+title: "Fast Code Editing in the Browser: VSCode Web Integration in Practice"
+date: 2026-04-12
+tags: [VSCode, code-server, HagiCode, Web IDE, AI-assisted Programming]
+description: "After AI finishes analyzing code, how do you immediately open an editor in the browser and start making changes? This article shares our practical experience"
+---
+
+## Fast Code Editing in the Browser: VSCode Web Integration in Practice
+
+> After AI finishes analyzing code, how do you immediately open an editor in the browser and start making changes? This article shares our practical experience integrating code-server in the HagiCode project to create a seamless bridge between the AI assistant and the code editing experience.
+
+## Background
+
+In the era of AI-assisted programming, developers often need to inspect and edit code quickly. The traditional workflow is simple: open the project in a desktop IDE, locate the file, edit it, and save. But in some situations, that flow always feels slightly off.
+
+Scenario one: remote development. When using an AI assistant like HagiCode, the backend may be running on a remote server or inside a container, and local machines cannot directly access the project files. Every time you need to inspect or modify code, you have to connect through SSH or another method, and the experience feels fragmented. It is like wanting to meet someone through a thick pane of glass: you can see them, but you cannot reach them.
+
+Scenario two: quick previews. After the AI assistant analyzes the code, the user may only want to quickly browse a file or make a small change. Launching a full desktop IDE feels heavy, while a lightweight in-browser editor better fits the need for a "quick look." After all, who wants to mobilize an entire toolchain just to take a glance?
+
+Scenario three: cross-device collaboration. When working across different devices, a browser-based editor provides a unified access point without requiring every machine to be configured with a development environment. That alone saves a lot of trouble. Life is short; why repeat the same setup work over and over?
+
+To solve these pain points, we integrated VSCode Web into the HagiCode project. This lets the AI assistant and the code editing experience connect seamlessly: after AI analyzes the code, users can immediately open an editor and make changes in the same browser session, without switching applications. It is the kind of experience where, when you need it, it is simply there.
+
+## About HagiCode
+
+The solution shared in this article comes from our practical experience in the [HagiCode](https://hagicode.com) project. HagiCode is an AI-driven coding assistant designed to improve development efficiency through natural language interaction. During development, we found that users often need to switch quickly between AI analysis and code editing, which pushed us to explore how to integrate the editor directly into the browser.
+
+Project repository: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+
+## Technical Choice: Why code-server?
+
+Among the many VSCode Web solutions available, we chose code-server. There were a few concrete reasons behind that decision.
+
+Feature completeness. code-server is the web version of VSCode and supports most desktop features, including the extension system, intelligent suggestions, debugging, and more. That means users can get an editing experience in the browser that is very close to the desktop version. After all, who really wants to compromise on functionality?
+
+Flexible deployment. code-server can run as an independent service and also supports Docker-based deployment, which fits well with HagiCode's architecture. Our backend is written in C#, the frontend uses React, and the two communicate with the code-server service through REST APIs. It is like building with blocks: every piece has its place.
+
+Secure authentication. code-server includes a built-in `connection-token` mechanism to prevent unauthorized access. Each session has a unique token so that only authorized users can open the editor. Security is one of those things you only fully appreciate once you have it.
+
+## Architecture Design
+
+HagiCode's VSCode Web integration uses a front-end/back-end separated architecture.
+
+### Frontend Service Layer
+
+The frontend wraps interactions with the backend through `vscodeServerService.ts`:
+
+```typescript
+// Open project
+export async function openProjectInCodeServer(
+  id: string,
+  currentInterfaceLanguage?: string,
+): Promise<VsCodeServerLaunchResponseDto>
+
+// Open vault
+export async function openVaultInCodeServer(
+  id: string,
+  path?: string,
+  currentInterfaceLanguage?: string,
+): Promise<VsCodeServerLaunchResponseDto>
+```
+
+The difference between these two methods is straightforward: `openProjectInCodeServer` opens the entire project, while `openVaultInCodeServer` opens a specific path inside a Vault. For MonoSpecs multi-repository projects, the system automatically creates a workspace file. Clear responsibilities are often enough when each part does its own job well.
+
+### Backend Service Layer
+
+The backend `VaultAppService.cs` implements the core logic:
+
+```csharp
+public async Task<VsCodeServerLaunchResponseDto> OpenInCodeServerAsync(
+    string id,
+    string? relativePath = null,
+    string? currentInterfaceLanguage = null,
+    CancellationToken cancellationToken = default)
+{
+    // 1. Get settings and check whether the feature is enabled
+    var settings = await _vsCodeServerSettingsService.GetResolvedSettingsAsync(cancellationToken);
+    if (!settings.Enabled) {
+        throw new BusinessException(VsCodeServerErrorCodes.Disabled, "VSCode Server is disabled.");
+    }
+
+    // 2. Get vault and resolve the launch directory
+    var vault = await RequireVaultAsync(id, cancellationToken);
+    var launchDirectory = ResolveLaunchDirectory(vault, relativePath);
+
+    // 3. Ensure code-server is running and get runtime info
+    var runtime = await _vsCodeServerManager.EnsureStartedAsync(settings, cancellationToken);
+
+    // 4. Resolve language settings
+    var language = _vsCodeServerSettingsService.ResolveLaunchLanguage(
+        settings.Language,
+        currentInterfaceLanguage);
+
+    // 5. Build launch URL
+    return new VsCodeServerLaunchResponseDto {
+        LaunchUrl = AppendQueryString(runtime.BaseUrl, new Dictionary<string, string?> {
+            ["folder"] = launchDirectory,
+            ["tkn"] = runtime.ConnectionToken,
+            ["vscode-lang"] = language,
+        }),
+        ConnectionToken = runtime.ConnectionToken,
+        OpenMode = "folder",
+        Runtime = VsCodeServerSettingsService.MapRuntime(
+            await _vsCodeServerManager.GetRuntimeSnapshotAsync(cancellationToken)),
+    };
+}
+```
+
+This method has a very clear responsibility: check settings, resolve paths, start the service, and build the URL. Among them, the `ResolveLaunchDirectory` method performs path security checks to prevent path traversal attacks. Code can feel a little like poetry when every line has a purpose.
+
+### Automatic Runtime Management
+
+The backend manages the code-server process through `VsCodeServerManager`:
+
+- Check process status
+- Automatically start stopped services
+- Return runtime snapshots such as port, process ID, and start time
+
+This design lets the system automatically handle the code-server lifecycle, so users do not need to manage service processes manually. Life is already complicated enough; anything that can be automated should be.
+
+### Language Synchronization
+
+HagiCode supports a multilingual interface, and code-server needs to follow that setting. The system supports three language modes:
+
+- `follow`: follow the current interface language
+- `zh-CN`: fixed to Chinese
+- `en-US`: fixed to English
+
+The setting is passed to code-server through the `vscode-lang` URL parameter so that the editor language stays consistent with the HagiCode interface. Language feels best when it is unified.
+
+### MonoSpecs Multi-Repository Workspace
+
+For MonoSpecs projects, which contain multiple sub-repositories inside one monorepo, the system automatically creates a `.code-workspace` file:
+
+```csharp
+private async Task<string> CreateWorkspaceFileAsync(Project project, Guid projectId)
+{
+    var folders = await ResolveWorkspaceFoldersAsync(project.Path);
+    var workspaceDocument = new {
+        folders = folders.Select(path => new { path }).ToArray(),
+    };
+    // Generate workspace file...
+}
+```
+
+This makes it possible to edit multiple sub-repositories in the same code-server instance, which is especially practical for large monorepo projects. Multiple repositories in one window can feel like multiple stories gathered in the same book.
+
+## Frontend Integration
+
+The HagiCode frontend uses React + TypeScript, and integrating code-server is not especially complicated.
+
+### Quick Action Button
+
+Add a Code Server button to the project card:
+
+```tsx
+// QuickActionsZone.tsx
+<Button
+  size="sm"
+  variant="default"
+  onClick={() => onAction({ type: 'open-code-server' })}
+>
+  <Globe className="h-3 w-3 mr-1" />
+  <span className="text-xs">{t('project.openCodeServer')}</span>
+</Button>
+```
+
+This button triggers the open action and calls the backend API to obtain the launch URL. One button, one action, direct and simple.
+
+### Handling the Open Action
+
+```tsx
+const handleAction = async (action: ProjectAction) => {
+  if (action.type === 'open-code-server') {
+    const response = await openProjectInCodeServer(project.id, i18n.language);
+    window.open(response.launchUrl, '_blank', 'noopener,noreferrer');
+  }
+};
+```
+
+Use `window.open` to open code-server in a new tab. The `noopener,noreferrer` parameters provide extra security. When it comes to security, there is no such thing as being too careful.
+
+### Vault Editing Entry
+
+Add a similar edit button in the Vault list:
+
+```tsx
+const handleEditVault = async (vault: VaultItemDto) => {
+  const response = await openVaultInCodeServer(vault.id);
+  window.open(response.launchUrl, '_blank', 'noopener,noreferrer');
+};
+```
+
+Projects and Vaults use the same open mechanism, which keeps the interaction consistent. Consistency matters almost as much as the feature itself.
+
+## URL Construction Logic
+
+The URL format for code-server has a few details worth noting.
+
+**Folder mode**:
+```
+http://{host}:{port}/?folder={path}&tkn={token}&vscode-lang={lang}
+```
+
+**Workspace mode**:
+```
+http://{host}:{port}/?workspace={workspacePath}&tkn={token}&vscode-lang={lang}
+```
+
+Here, `tkn` is the connection token. It is generated automatically every time code-server starts, ensuring secure access. The `vscode-lang` parameter controls the editor UI language. Every one of these parameters has a role to play.
+
+## Usage Scenarios
+
+### Scenario One: AI-Assisted Code Review
+
+The user talks with HagiCode, the AI analyzes the project code and finds a potential issue, and then the user clicks the "Open in Code Server" button to open the editor directly in the browser, inspect the affected file, fix it, and return to HagiCode to continue the conversation. The entire flow happens in the browser without switching applications. It feels smooth in the way running water feels smooth.
+
+### Scenario Two: Editing Study Materials in a Vault
+
+A user creates a Vault for studying an open source project and wants to add study notes under the `docs/` directory. With code-server, they can edit Markdown files directly in the browser, save them, and let HagiCode immediately read the updated notes. This is especially useful for building a personal knowledge base. Knowledge only becomes more valuable the more you accumulate it.
+
+### Scenario Three: MonoSpecs Multi-Repository Development
+
+A MonoSpecs project contains multiple sub-repositories, and code-server automatically creates a multi-folder workspace. In the browser, users can edit code across several repositories at once and then commit changes back to their respective Git repositories. This workflow is particularly well suited for changes that need to span multiple repositories. Editing several repositories together takes a bit of technique, just like handling multiple tasks at the same time.
+
+## Security Considerations
+
+When implementing code-server integration, security deserves special attention. If security goes wrong, you always notice too late.
+
+### Connection Token
+
+The `connection-token` is generated randomly and should not be exposed. It is best used under HTTPS to prevent the token from being intercepted by a man-in-the-middle. Sensitive information is worth protecting properly.
+
+### File Path Security
+
+The backend implements path traversal checks:
+
+```csharp
+private static string ResolveLaunchDirectory(VaultRegistryEntry vault, string? relativePath)
+{
+    var vaultRoot = EnsureTrailingSeparator(Path.GetFullPath(vault.PhysicalPath));
+    var combinedPath = Path.GetFullPath(Path.Combine(vaultRoot, relativePath ?? "."));
+    if (!combinedPath.StartsWith(vaultRoot, StringComparison.OrdinalIgnoreCase))
+    {
+        throw new BusinessException(VaultRelativePathTraversalCode, "Relative path traversal detected.");
+    }
+    return combinedPath;
+}
+```
+
+This code ensures that users cannot use `../` or similar patterns to access files outside the Vault directory. Boundary checks are always better done than skipped.
+
+### Permission Control
+
+The code-server process should run with appropriate user permissions so that it cannot access sensitive system files. It is best to run the code-server service under a dedicated user. Permission control is one of those fundamentals you should always keep in place.
+
+## Performance Optimization
+
+code-server consumes server resources, so here are a few optimization suggestions:
+
+- Monitor CPU and memory usage, and adjust resource limits when necessary
+- Large projects may require longer timeouts
+- Implement automatic session timeout cleanup to release resources
+- Consider caching to reduce repeated computation
+
+HagiCode provides a runtime status monitoring API, and the frontend can call `getVsCodeServerSettings()` to retrieve the current state:
+
+```typescript
+const { settings, runtime } = await getVsCodeServerSettings();
+// runtime.status: 'disabled' | 'stopped' | 'starting' | 'running' | 'unhealthy'
+// runtime.baseUrl: "http://localhost:8080"
+// runtime.processId: 12345
+```
+
+This design allows users to clearly understand the health status of code-server and quickly locate problems when something goes wrong. When the status is visible, people feel more in control.
+
+## User Experience Details
+
+During implementation, we discovered a few details that noticeably affect the user experience and deserve extra attention.
+
+Opening code-server for the first time may require waiting for startup, and that delay can range from a few seconds to half a minute. It is a good idea to show a loading state in the frontend so users know the system is still working. Waiting is easier when there is feedback.
+
+Browsers may block the popup, so users should be prompted to allow it manually. On first launch, HagiCode displays guidance that explains how to grant the necessary browser permissions. User experience often lives in exactly these small details.
+
+It is also a good idea to display runtime status such as starting, running, or error, so that when problems occur, users can quickly tell whether the issue is on the server side or in their own operation. Knowing where the problem is at least gives you a place to start.
+
+## Configuration Example
+
+The configuration for code-server is not complicated:
+
+```json
+{
+  "vscodeServer": {
+    "enabled": true,
+    "host": "0.0.0.0",
+    "port": 8080,
+    "language": "follow"
+  }
+}
+```
+
+`enabled` controls whether the feature is turned on, `host` and `port` define the listening address, and `language` sets the language mode. These settings can be modified through the UI and take effect immediately. Simple things are often the easiest to use.
+
+## Conclusion
+
+HagiCode's VSCode Web integration provides an elegant solution: it lets the AI assistant and the code editing experience connect seamlessly. By integrating code-server into the browser, users can quickly act on AI analysis results and complete the full flow from analysis to editing in the same browser session.
+
+This solution brings several key advantages: a unified experience, because projects and Vaults use the same open mechanism; multi-repository support, because MonoSpecs projects automatically create workspaces; and controllable security, thanks to runtime status monitoring and path safety checks.
+
+The approach shared in this article is something HagiCode distilled from real development work. If you find this solution valuable, that suggests our engineering practice is doing something right, and HagiCode itself may be worth a closer look. Good tools deserve to be seen by more people.
+
+## References
+
+- HagiCode GitHub: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- HagiCode official website: [hagicode.com](https://hagicode.com)
+- code-server official website: [coder.com/code-server](https://coder.com/code-server)
+- Related code files:
+  - `repos/web/src/services/vscodeServerService.ts`
+  - `repos/hagicode-core/src/PCode.Application/Services/VaultAppService.cs`
+  - `repos/hagicode-core/src/PCode.Application/ProjectAppService.VsCodeServer.cs`
+
+---
+
+If this article helped you:
+
+- Give us a Star on GitHub: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Visit the official website to learn more: [hagicode.com](https://hagicode.com)
+- Watch the 30-minute hands-on demo: [www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)
+- One-click installation guide: [docs.hagicode.com/installation/docker-compose](https://docs.hagicode.com/installation/docker-compose)
+- Quick install for the Desktop app: [hagicode.com/desktop/](https://hagicode.com/desktop/)
+- Public beta has started, and you are welcome to try it
+
+## Copyright Notice
+
+Thank you for reading. If you found this article useful, feel free to like it, save it, and share it.
+This content was created with AI-assisted collaboration, and the final content was reviewed and approved by the author.
+- Author: [newbe36524](https://www.newbe.pro)
+- Original article: [https://docs.hagicode.com/blog/2026-04-12-vscode-web-integration-browser-editing/](https://docs.hagicode.com/blog/2026-04-12-vscode-web-integration-browser-editing/)
+- Copyright notice: Unless otherwise stated, all articles in this blog are licensed under BY-NC-SA. Please include attribution when reposting.
