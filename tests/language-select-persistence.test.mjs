@@ -4,6 +4,7 @@ import path from 'node:path';
 import test from 'node:test';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
+import { DOCS_LOCALE_SELECTOR_OPTIONS } from '../src/i18n/generated/docs-locale-resources.mjs';
 
 const testDir = path.dirname(fileURLToPath(import.meta.url));
 
@@ -123,6 +124,30 @@ test('language selector persists English locale before navigating', async () => 
     path: '/product-overview/',
     lang: 'en',
   });
+});
+
+test('language selector renders the full generated locale set in the header', async () => {
+  const componentPath = path.join(testDir, '..', 'src', 'components', 'StarlightLanguageSelect.astro');
+  const source = await readFile(componentPath, 'utf8');
+
+  assert.match(source, /DOCS_LOCALE_SELECTOR_OPTIONS/);
+  assert.match(source, /label: locale\.label/);
+  assert.match(source, /return true;/);
+  assert.deepEqual(
+    DOCS_LOCALE_SELECTOR_OPTIONS.map(({ code, label }) => ({ code, label })),
+    [
+      { code: 'root', label: '中文' },
+      { code: 'zh-Hant', label: '繁體中文' },
+      { code: 'en', label: 'English' },
+      { code: 'ja-JP', label: '日本語' },
+      { code: 'ko-KR', label: '한국어' },
+      { code: 'de-DE', label: 'Deutsch' },
+      { code: 'fr-FR', label: 'Français' },
+      { code: 'es-ES', label: 'Español' },
+      { code: 'pt-BR', label: 'Português (Brasil)' },
+      { code: 'ru-RU', label: 'Русский' },
+    ],
+  );
 });
 
 test('language selector navigates even when localStorage fails', async () => {

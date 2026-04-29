@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  BLOG_ROUTE_LOCALES,
+  DOCS_LOCALE_METADATA,
+  DOCS_ROUTE_LOCALE_LABELS,
+  DOCS_ROUTE_TO_SOURCE_LOCALE,
   buildDocsRoutePath,
   getStoredDocsLocale,
   parseDocsLocale,
@@ -9,6 +13,24 @@ import {
 } from './i18n';
 
 describe('docs locale helpers', () => {
+  it('exposes generated route locale metadata for Starlight and hagi18n locale names', () => {
+    expect(DOCS_ROUTE_TO_SOURCE_LOCALE).toEqual({
+      root: 'zh-CN',
+      en: 'en-US',
+      'zh-Hant': 'zh-Hant',
+      'ja-JP': 'ja-JP',
+      'ko-KR': 'ko-KR',
+      'de-DE': 'de-DE',
+      'fr-FR': 'fr-FR',
+      'es-ES': 'es-ES',
+      'pt-BR': 'pt-BR',
+      'ru-RU': 'ru-RU',
+    });
+    expect(DOCS_ROUTE_LOCALE_LABELS.root).toBe('中文');
+    expect(DOCS_ROUTE_LOCALE_LABELS.en).toBe('English');
+    expect(DOCS_LOCALE_METADATA.map((locale) => locale.code)).toEqual(BLOG_ROUTE_LOCALES);
+  });
+
   it.each([
     ['en', 'en'],
     ['en-US', 'en'],
@@ -16,8 +38,15 @@ describe('docs locale helpers', () => {
     ['root', 'root'],
     ['zh', 'root'],
     ['zh-CN', 'root'],
-    ['zh-Hant', 'root'],
-    ['fr', null],
+    ['zh-Hant', 'zh-Hant'],
+    ['zh-TW', 'zh-Hant'],
+    ['ja', 'ja-JP'],
+    ['ko-KR', 'ko-KR'],
+    ['de', 'de-DE'],
+    ['fr', 'fr-FR'],
+    ['es-ES', 'es-ES'],
+    ['pt', 'pt-BR'],
+    ['ru_RU', 'ru-RU'],
     ['', null],
   ] as const)('parses %s as %s', (input, expected) => {
     expect(parseDocsLocale(input)).toBe(expected);
@@ -47,9 +76,9 @@ describe('docs locale helpers', () => {
   });
 
   it('resolves browser languages to the first supported docs locale', () => {
-    expect(resolveClientDocsLocale(['fr-FR', 'en-GB', 'zh-CN'])).toBe('en');
-    expect(resolveClientDocsLocale(['ja-JP', 'zh-Hant'])).toBe('root');
-    expect(resolveClientDocsLocale(['de-DE'])).toBeNull();
+    expect(resolveClientDocsLocale(['fr-FR', 'en-GB', 'zh-CN'])).toBe('fr-FR');
+    expect(resolveClientDocsLocale(['ja-JP', 'zh-Hant'])).toBe('ja-JP');
+    expect(resolveClientDocsLocale(['it-IT'])).toBeNull();
   });
 
   it.each([
@@ -61,6 +90,8 @@ describe('docs locale helpers', () => {
     ['root', '/en/install/', '/install/'],
     ['root', '/install/', '/install/'],
     ['root', '/en/install', '/install'],
+    ['ja-JP', '/blog/example/', '/ja-JP/blog/example/'],
+    ['fr-FR', '/en/blog/example/', '/fr-FR/blog/example/'],
   ] as const)('builds %s route for %s', (locale, originalPath, expected) => {
     expect(buildDocsRoutePath(locale, originalPath)).toBe(expected);
   });
