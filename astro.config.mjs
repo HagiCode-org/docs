@@ -9,54 +9,23 @@ import react from "@astrojs/react";
 
 import cachedLinkValidator from "./src/integrations/link-check-result-cache.js";
 import { DOCS_SIDEBAR } from "./src/config/sidebar.ts";
+import {
+  BLOG_PLUGIN_TITLE,
+  BLOG_UI_TRANSLATIONS,
+  DOCS_LOCALE_RESOURCES,
+  DOCS_LOCALES,
+} from "./src/i18n/generated/docs-locale-resources.mjs";
 // rehype-raw 暂时禁用，可能与 MDX 处理冲突
 // import rehypeRaw from "rehype-raw";
 import rehypeExternalLinks from "rehype-external-links";
 
-const DOCS_LOCALES = {
-  root: {
-    label: "中文",
-    lang: "zh-CN",
-  },
-  en: {
-    label: "English",
-    lang: "en",
-  },
-};
+const DEFAULT_DOCS_UI = DOCS_LOCALE_RESOURCES["zh-CN"].starlight;
 
 const BLOG_PLUGIN_CONFIG = {
   rss: false,
   postCount: 20,
   prefix: "blog",
-  title: {
-    root: "博客",
-    "zh-CN": "博客",
-    en: "Blog",
-  },
-};
-
-const BLOG_UI_TRANSLATIONS_ZH_CN = {
-  "starlightBlog.authors.count_one": "{{count}} 篇文章 by {{author}}",
-  "starlightBlog.authors.count_other": "{{count}} 篇文章 by {{author}}",
-  "starlightBlog.metrics.readingTime.minutes": " - {{count}} 分钟阅读",
-  "starlightBlog.metrics.words_one": " - {{count}} 字",
-  "starlightBlog.metrics.words_other": " - {{count}} 字",
-  "starlightBlog.pagination.prev": "更新的文章",
-  "starlightBlog.pagination.next": "更早的文章",
-  "starlightBlog.post.date": "{{date, datetime(dateStyle: medium)}}",
-  "starlightBlog.post.lastUpdate":
-    ' - 最后更新: <time datetime="{{isoDate}}">{{date, datetime(dateStyle: medium)}}</time>',
-  "starlightBlog.post.draft": "草稿",
-  "starlightBlog.post.featured": "推荐",
-  "starlightBlog.post.tags": "标签:",
-  "starlightBlog.sidebar.all": "所有文章",
-  "starlightBlog.sidebar.featured": "推荐文章",
-  "starlightBlog.sidebar.recent": "最新文章",
-  "starlightBlog.sidebar.tags": "标签",
-  "starlightBlog.sidebar.authors": "作者",
-  "starlightBlog.sidebar.rss": "RSS",
-  "starlightBlog.tags.count_one": '{{count}} 篇包含标签 "{{tag}}" 的文章',
-  "starlightBlog.tags.count_other": '{{count}} 篇包含标签 "{{tag}}" 的文章',
+  title: BLOG_PLUGIN_TITLE,
 };
 
 const docsLinkCheckCacheTtlHours = Number.parseInt(
@@ -139,8 +108,8 @@ export default defineConfig({
     }),
 
     starlight({
-      title: "Hagicode Docs",
-      description: "Hagicode 项目文档",
+      title: DEFAULT_DOCS_UI.site.title,
+      description: DEFAULT_DOCS_UI.site.description,
       favicon: "/favicon.ico",
       // i18n configuration - Enable multi-language support
       // Use "root" for Chinese to serve at / paths (no /zh-cn/ prefix)
@@ -149,7 +118,7 @@ export default defineConfig({
       social: [
         {
           icon: "github",
-          label: "GitHub 仓库",
+          label: DEFAULT_DOCS_UI.social.githubRepository,
           href: "https://github.com/HagiCode-org/site",
         },
       ],
@@ -175,11 +144,7 @@ export default defineConfig({
             "i18n:setup": ({ injectTranslations }) => {
               // Starlight can resolve root Chinese routes with different lang tags
               // across environments. Inject all known variants to avoid key leaks.
-              injectTranslations({
-                "zh-CN": BLOG_UI_TRANSLATIONS_ZH_CN,
-                "zh-cn": BLOG_UI_TRANSLATIONS_ZH_CN,
-                zh: BLOG_UI_TRANSLATIONS_ZH_CN,
-              });
+              injectTranslations(BLOG_UI_TRANSLATIONS);
             },
             "config:setup": () => {},
           },
