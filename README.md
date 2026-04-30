@@ -33,6 +33,31 @@ npm run preview
 
 The local docs server runs on `http://localhost:31265` by default.
 
+## Deployment contract
+
+Production publication is handled by GitHub Actions and the `gh-pages` branch.
+
+- `.github/workflows/docs-ci.yml` is validation-only for pushes and pull requests targeting `main`.
+- `.github/workflows/docs-deploy-gh-pages.yml` runs on `main`, executes the repository-defined `npm run build:ci` command, uploads the validated `dist/` snapshot, and publishes only that snapshot to `gh-pages`.
+- `gh-pages` is the only production artifact source for docs hosting. The external EAS host is expected to consume `gh-pages` content and must not rebuild `main` directly.
+- Successful publication runs expose the `docs-production` GitHub environment with the production URL `https://docs.hagicode.com`.
+
+### Maintainer troubleshooting
+
+1. Open the latest `Docs Deploy gh-pages` workflow run in GitHub Actions.
+2. If the `Build validated docs snapshot` job fails, inspect the `Build and verify docs` step logs. In this state the workflow never reaches the branch publication step, so the existing `gh-pages` snapshot stays live.
+3. If the `Publish validated snapshot to gh-pages` job fails, inspect the deploy job logs and confirm the repository allows workflow runs to push with `contents: write`.
+4. After a successful run, verify that `gh-pages` contains the expected static snapshot and that GitHub shows a successful deployment for the `docs-production` environment.
+
+### Rollout verification checklist
+
+- Ensure the repository has a writable `gh-pages` branch managed only by CI output.
+- Confirm `Docs Deploy gh-pages` succeeds on a `main` push and publishes from `dist/` rather than rebuilding in the deploy job.
+- Confirm GitHub Actions shows the `docs-production` environment with `https://docs.hagicode.com`.
+- Confirm the latest `gh-pages` commit contains the validated static snapshot from the successful workflow run.
+- Confirm the external EAS host is configured to deploy from `gh-pages` instead of rebuilding `main`.
+- Confirm `https://docs.hagicode.com` serves the expected snapshot after the `gh-pages` update.
+
 ## hagi18n maintenance workflow
 
 Docs UI strings are maintained with `@hagicode/hagi18n` from this repository. The source of truth is the YAML tree under `src/i18n/locales/<locale>/`; generated runtime resources are committed under `src/i18n/generated/` because `astro.config.mjs` imports them during config evaluation.
