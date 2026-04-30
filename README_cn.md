@@ -33,31 +33,11 @@ npm run preview
 
 本地文档站默认运行在 `http://localhost:31265`。
 
-## 部署契约
+## GitHub Actions
 
-生产发布现在由 GitHub Actions 与 `gh-pages` 分支共同负责。
-
-- `.github/workflows/docs-ci.yml` 只负责针对 `main` 的 push 与 pull request 做校验，不负责生产发布。
-- `.github/workflows/docs-deploy-gh-pages.yml` 只在 `main` 上运行，执行仓库定义的 `npm run build:ci`，上传经过校验的 docs 构建产物，并发布一个 gh-pages payload，而不是把站点直接铺平到分支根目录。
-- 发布后的 `gh-pages` 分支根目录会包含 `/esa.jsonc`，静态站点内容位于 `/dist/`。
-- 根目录下的 `esa.jsonc` 会把 EAS 的发布目录指向 `./dist`，这样 EAS 可以直接使用已提交的静态产物而不再重新构建源码。
-- 成功的发布运行会在 GitHub Actions 中暴露 `docs-production` environment，并关联生产地址 `https://docs.hagicode.com`。
-
-### 维护者排障
-
-1. 在 GitHub Actions 中打开最新的 `Docs Deploy gh-pages` workflow run。
-2. 如果 `Build validated docs snapshot` job 失败，先看 `Build and verify docs` step 日志。这种情况下工作流不会进入分支发布步骤，因此现有的 `gh-pages` 快照会保持不变。
-3. 如果 `Publish validated snapshot to gh-pages` job 失败，检查 deploy job 日志，并确认仓库允许 workflow 使用 `contents: write` 更新分支。
-4. 工作流成功后，确认 `gh-pages` 根目录已经包含 `esa.jsonc`、静态快照位于 `dist/` 下，并确认 GitHub 已显示 `docs-production` environment 的成功部署状态。
-
-### 上线核对清单
-
-- 确认仓库存在可写的 `gh-pages` 分支，并且只由 CI 输出维护。
-- 确认 `Docs Deploy gh-pages` 在 `main` push 后成功，且发布内容是包含 `esa.jsonc` 与 `dist/` 的 gh-pages payload，而不是在 deploy job 内重新构建。
-- 确认 GitHub Actions 显示 `docs-production` environment 和 `https://docs.hagicode.com`。
-- 确认 `gh-pages` 最新提交在根目录包含经过校验的 `esa.jsonc`，并在 `dist/` 下包含经过校验的静态快照。
-- 确认外部 EAS 已切换为读取 `gh-pages/esa.jsonc`，并按其中声明的 `./dist` 作为发布目录，而不是继续从 `main` 重新构建。
-- 确认 `https://docs.hagicode.com` 在 `gh-pages` 更新后提供的是预期内容。
+- `.github/workflows/docs-ci.yml` 负责对 `main` 的 push 与 pull request 做校验。
+- `.github/workflows/compress-images.yml` 和 `.github/workflows/indexnow.yml` 负责仓库维护类自动化。
+- 当前仓库内已经不再保留 `gh-pages` 发布工作流。
 
 ## hagi18n 维护工作流
 

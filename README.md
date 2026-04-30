@@ -33,31 +33,11 @@ npm run preview
 
 The local docs server runs on `http://localhost:31265` by default.
 
-## Deployment contract
+## GitHub Actions
 
-Production publication is handled by GitHub Actions and the `gh-pages` branch.
-
-- `.github/workflows/docs-ci.yml` is validation-only for pushes and pull requests targeting `main`.
-- `.github/workflows/docs-deploy-gh-pages.yml` runs on `main`, executes the repository-defined `npm run build:ci` command, uploads the validated docs output, and publishes a gh-pages payload instead of flattening the site at the branch root.
-- The published `gh-pages` branch now contains `/esa.jsonc` at the root and the validated static site under `/dist/`.
-- The `gh-pages` root `esa.jsonc` points EAS at `./dist` as the asset directory so EAS can publish the committed snapshot directly without rebuilding source.
-- Successful publication runs expose the `docs-production` GitHub environment with the production URL `https://docs.hagicode.com`.
-
-### Maintainer troubleshooting
-
-1. Open the latest `Docs Deploy gh-pages` workflow run in GitHub Actions.
-2. If the `Build validated docs snapshot` job fails, inspect the `Build and verify docs` step logs. In this state the workflow never reaches the branch publication step, so the existing `gh-pages` snapshot stays live.
-3. If the `Publish validated snapshot to gh-pages` job fails, inspect the deploy job logs and confirm the repository allows workflow runs to push with `contents: write`.
-4. After a successful run, verify that `gh-pages` contains `esa.jsonc` at the root, the static snapshot under `dist/`, and that GitHub shows a successful deployment for the `docs-production` environment.
-
-### Rollout verification checklist
-
-- Ensure the repository has a writable `gh-pages` branch managed only by CI output.
-- Confirm `Docs Deploy gh-pages` succeeds on a `main` push and publishes a gh-pages payload containing `esa.jsonc` plus `dist/`, rather than rebuilding in the deploy job.
-- Confirm GitHub Actions shows the `docs-production` environment with `https://docs.hagicode.com`.
-- Confirm the latest `gh-pages` commit contains the validated `esa.jsonc` file at the root and the validated static snapshot under `dist/`.
-- Confirm the external EAS host is configured to read `gh-pages/esa.jsonc` and publish from its configured `./dist` asset directory instead of rebuilding `main`.
-- Confirm `https://docs.hagicode.com` serves the expected snapshot after the `gh-pages` update.
+- `.github/workflows/docs-ci.yml` validates pushes and pull requests targeting `main`.
+- `.github/workflows/compress-images.yml` and `.github/workflows/indexnow.yml` handle repository maintenance automation.
+- This repository no longer includes an in-repo `gh-pages` deployment workflow.
 
 ## hagi18n maintenance workflow
 
