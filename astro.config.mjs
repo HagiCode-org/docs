@@ -37,6 +37,7 @@ const docsLinkCheckCacheTtlMs = Number.isFinite(docsLinkCheckCacheTtlHours)
   : 48 * 60 * 60 * 1000;
 // 默认不在常规构建后执行链接校验；需要时显式设置 DOCS_ENABLE_LINK_CHECK=true。
 const docsEnableLinkCheck = process.env.DOCS_ENABLE_LINK_CHECK === "true";
+const resolvedNodeEnv = process.env.NODE_ENV ?? (process.argv.includes("build") ? "production" : "development");
 
 // 获取 base 路径：文档站点独立部署在 docs.hagicode.com，开发和生产都使用根路径
 const getBasePath = () => {
@@ -80,7 +81,7 @@ export default defineConfig({
     },
     define: {
       'import.meta.env.PROD': JSON.stringify(
-        process.env.NODE_ENV === 'production'
+        resolvedNodeEnv === 'production'
       ),
       "import.meta.env.VITE_CLARITY_PROJECT_ID": JSON.stringify(
         process.env.VITE_CLARITY_PROJECT_ID || "",
