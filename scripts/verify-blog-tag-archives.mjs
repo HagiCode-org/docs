@@ -2,13 +2,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const distDir = path.resolve(process.cwd(), process.env.BLOG_DIST_DIR || 'dist');
-const blogTagSlug = process.env.BLOG_TAG_SLUG || 'hagicode';
 const results = [];
 const failures = [];
-
-function normalizeText(value) {
-  return value.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-}
 
 function assert(condition, route, message) {
   if (!condition) {
@@ -35,46 +30,20 @@ function runCheck(name, route, fn) {
   }
 }
 
-function extractMainContent(html) {
-  const mainMatch = html.match(/<main\b[^>]*>([\s\S]*?)<\/main>/i);
-  return mainMatch?.[1] ?? html;
-}
+function verifyNoTagDirectory(relativePath) {
+  const fullPath = path.join(distDir, relativePath);
 
-function extractPostLinks(mainHtml, hrefPrefix) {
-  const pattern = new RegExp(
-    `<a\\b[^>]*href=["']${hrefPrefix}\\/\\d{4}-\\d{2}-\\d{2}-[^"'#?]+\\/?["'][^>]*>([\\s\\S]*?)<\\/a>`,
-    'gi',
-  );
-  const links = [];
-
-  let match = pattern.exec(mainHtml);
-  while (match) {
-    links.push(normalizeText(match[1]));
-    match = pattern.exec(mainHtml);
-  }
-
-  return links.filter((text) => text.length > 0);
-}
-
-function verifyRoute(route, hrefPrefix) {
-  const html = readDistFile(route);
-  const mainHtml = extractMainContent(html);
-  const postLinks = extractPostLinks(mainHtml, hrefPrefix);
-
-  runCheck('archive_uses_default_renderer', route, () => {
-    assert(
-      !mainHtml.includes('blog-header-promo-container') && !mainHtml.includes('blog-footer-promo'),
-      route,
-      'Tag archive fell back to the blog post ad wrapper instead of archive content.',
-    );
+  runCheck('tag_archive_directory_removed', relativePath, () => {
+    assert(!fs.existsSync(fullPath), relativePath, `Tag archive output should not exist: ${relativePath}`);
   });
+}
 
-  runCheck('archive_contains_post_entries', route, () => {
-    assert(
-      postLinks.length > 0,
-      route,
-      `Expected visible blog post entries in ${route} for tag "${blogTagSlug}".`,
-    );
+function verifyNoTagLinks(route) {
+  const html = readDistFile(route);
+
+  runCheck('tag_links_removed', route, () => {
+    assert(!html.includes('/blog/tags/'), route, `Deprecated tag route link still rendered in ${route}.`);
+    assert(!html.includes('/en/blog/tags/'), route, `Deprecated English tag route link still rendered in ${route}.`);
   });
 }
 
@@ -103,8 +72,10 @@ function main() {
     throw new Error(`dist directory not found: ${distDir}. Run \`npm run build\` first.`);
   }
 
-  verifyRoute(path.posix.join('blog', 'tags', blogTagSlug, 'index.html'), '/blog');
-  verifyRoute(path.posix.join('en', 'blog', 'tags', blogTagSlug, 'index.html'), '/en/blog');
+  verifyNoTagDirectory(path.posix.join('blog', 'tags'));
+  verifyNoTagDirectory(path.posix.join('en', 'blog', 'tags'));
+  verifyNoTagLinks(path.posix.join('blog', 'index.html'));
+  verifyNoTagLinks(path.posix.join('en', 'blog', 'index.html'));
   printSummaryAndExit();
 }
 

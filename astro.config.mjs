@@ -1,6 +1,6 @@
 import { defineConfig } from "astro/config";
 import starlight from "@astrojs/starlight";
-import starlightBlog from "starlight-blog";
+import starlightBlog from "./src/integrations/starlight-blog-no-tags/index.mjs";
 import sitemap from "@astrojs/sitemap";
 import mdx from "@astrojs/mdx";
 import partytown from "@astrojs/partytown";

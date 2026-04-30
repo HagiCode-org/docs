@@ -56,8 +56,6 @@ function verifyCollectionRoutes() {
   const collectionRoutes = [
     'blog/index.html',
     'en/blog/index.html',
-    ...listRenderedHtmlFiles('blog/tags'),
-    ...listRenderedHtmlFiles('en/blog/tags'),
     ...listRenderedHtmlFiles('blog/authors'),
     ...listRenderedHtmlFiles('en/blog/authors'),
   ];
