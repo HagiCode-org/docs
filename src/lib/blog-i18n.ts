@@ -312,16 +312,9 @@ export function deriveBlogLanguageFromContentId(id: string): BlogLanguageCode {
 }
 
 export function getAllBlogRssLinks() {
-  return [
-    {
-      scope: 'all' as const,
-      label: 'All languages',
-      path: '/blog/rss.xml',
-    },
-    ...BLOG_LANGUAGE_OPTIONS.map((language) => ({
-      scope: language.code,
-      label: language.nativeName,
-      path: language.rssPath,
-    })),
-  ];
+  return BLOG_LANGUAGE_OPTIONS.map((language) => ({
+    scope: language.code,
+    label: language.nativeName,
+    path: language.rssPath,
+  }));
 }

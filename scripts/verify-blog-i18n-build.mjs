@@ -27,12 +27,18 @@ function assertIncludes(html, expected, route) {
   }
 }
 
+function assertExcludes(html, unexpected, route) {
+  if (html.includes(unexpected)) {
+    throw new Error(`${route} still renders deprecated blog i18n output: ${unexpected}`);
+  }
+}
+
 function verifyRenderedBlogI18nControls() {
   for (const locale of REQUIRED_BLOG_LOCALES) {
     const route = getBlogIndexPath(locale);
     const html = readBuildFile(route);
 
-    assertIncludes(html, '/blog/rss.xml', route);
+    assertExcludes(html, '/blog/rss.xml', route);
     assertIncludes(html, '/blog/rss.zh-CN.xml', route);
     assertIncludes(html, '/blog/rss.en.xml', route);
     assertIncludes(html, '/blog/rss.ja-JP.xml', route);

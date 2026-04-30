@@ -134,8 +134,8 @@ export const SITE_LINKS = {
 
     /** 博客 RSS 订阅（相对于文档站点） */
     rss: {
-        dev: 'http://localhost:31265/blog/rss.xml',
-        prod: 'https://docs.hagicode.com/blog/rss.xml',
+        dev: 'http://localhost:31265/blog/rss.zh-CN.xml',
+        prod: 'https://docs.hagicode.com/blog/rss.zh-CN.xml',
         external: false,
     } as LinkConfig,
 
