@@ -1,4 +1,5 @@
 import footerSitesSnapshot from '@/data/footer-sites.snapshot.json';
+import { DOCS_ROUTE_TO_SOURCE_LOCALE, parseDocsLocale } from './i18n';
 
 interface FooterCatalogLink {
   siteId: string;
@@ -6,6 +7,16 @@ interface FooterCatalogLink {
   description: string;
   href: string;
 }
+
+type FooterCatalogLocale = 'zh-CN' | 'zh-Hant' | 'en-US' | 'ja-JP' | 'ko-KR' | 'de-DE' | 'fr-FR' | 'es-ES' | 'pt-BR' | 'ru-RU';
+type LocalizedFooterField = string | Readonly<Record<FooterCatalogLocale, string>>;
+
+type FooterSnapshotEntry = {
+  id: string;
+  title: LocalizedFooterField;
+  description: LocalizedFooterField;
+  url: string;
+};
 
 const DEFAULT_RELATED_SITE_ORDER = [
   'hagicode-main',
@@ -26,15 +37,51 @@ function normalizeUrl(url: string) {
   const normalized = new URL(url);
   normalized.hash = '';
   normalized.search = '';
-  const pathname = normalized.pathname.replace(/\/+$/, '');
+  const pathname = normalized.pathname.replace(/\/+$/u, '');
   normalized.pathname = pathname || '/';
   return normalized.toString();
 }
 
-export function resolveDocsFooterSiteLinks(localLinks: ReadonlyArray<{ href: string; siteId?: string }> = []): FooterCatalogLink[] {
+function getFooterLocaleFallbackChain(locale: FooterCatalogLocale): readonly FooterCatalogLocale[] {
+  return locale === 'zh-Hant' ? ['zh-CN', 'en-US'] : ['en-US'];
+}
+
+function resolveLocalizedField(field: LocalizedFooterField, locale: FooterCatalogLocale): string {
+  if (typeof field === 'string') {
+    return field;
+  }
+
+  for (const candidate of [locale, ...getFooterLocaleFallbackChain(locale)]) {
+    const value = field[candidate];
+    if (typeof value === 'string' && value.trim().length > 0) {
+      return value;
+    }
+  }
+
+  for (const value of Object.values(field)) {
+    if (typeof value === 'string' && value.trim().length > 0) {
+      return value;
+    }
+  }
+
+  return '';
+}
+
+function resolveDocsFooterLocale(locale: string | null | undefined): FooterCatalogLocale {
+  const routeLocale = parseDocsLocale(locale) ?? 'root';
+  return (DOCS_ROUTE_TO_SOURCE_LOCALE[routeLocale] ?? 'zh-CN') as FooterCatalogLocale;
+}
+
+export function resolveDocsFooterSiteLinks(
+  locale: string | null | undefined,
+  localLinks: ReadonlyArray<{ href: string; siteId?: string }> = [],
+): FooterCatalogLink[] {
+  const resolvedLocale = resolveDocsFooterLocale(locale);
   const localIds = new Set(localLinks.flatMap((link) => (link.siteId ? [link.siteId] : [])));
   const localUrls = new Set(localLinks.map((link) => normalizeUrl(link.href)));
-  const snapshotById = new Map(footerSitesSnapshot.entries.map((entry) => [entry.id, entry]));
+  const snapshotById = new Map<string, FooterSnapshotEntry>(
+    footerSitesSnapshot.entries.map((entry) => [entry.id, entry as FooterSnapshotEntry]),
+  );
 
   return DEFAULT_RELATED_SITE_ORDER.flatMap((siteId) => {
     const entry = snapshotById.get(siteId);
@@ -49,8 +96,8 @@ export function resolveDocsFooterSiteLinks(localLinks: ReadonlyArray<{ href: str
     return [
       {
         siteId: entry.id,
-        title: entry.title,
-        description: entry.description,
+        title: resolveLocalizedField(entry.title, resolvedLocale),
+        description: resolveLocalizedField(entry.description, resolvedLocale),
         href: entry.url,
       },
     ];
