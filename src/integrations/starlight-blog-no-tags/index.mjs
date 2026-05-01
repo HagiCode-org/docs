@@ -87,6 +87,12 @@ export default function starlightBlogPlugin(userConfig) {
               });
 
               injectRoute({
+                entrypoint: `${LOCAL_ROUTES_BASE}/Tags.astro`,
+                pattern: '/[...prefix]/tags',
+                prerender: true,
+              });
+
+              injectRoute({
                 entrypoint: `${LOCAL_ROUTES_BASE}/Blog.astro`,
                 pattern: '/[...prefix]/[...page]',
                 prerender: true,
@@ -130,7 +136,7 @@ function overrideComponent(components, logger, component) {
   if (components[component]) {
     logger.warn(`It looks like you already have a \`${component}\` component override in your Starlight configuration.`);
     logger.warn(
-      `To use \`starlight-blog\`, either${isNavigationOverride(component) ? ' update the `navigation` plugin option,' : ''} remove your override or update it to render the content from \`starlight-blog/components/${component}.astro\`.`,
+      `To use \`starlight-blog\`, either${isNavigationOverride(component) ? ' update the \`navigation\` plugin option,' : ''} remove your override or update it to render the content from \`starlight-blog/components/${component}.astro\`.`,
     );
     return;
   }

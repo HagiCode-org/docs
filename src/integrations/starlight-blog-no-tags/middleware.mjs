@@ -13,6 +13,7 @@ import {
 import { getMetrics } from '../../../node_modules/starlight-blog/libs/metrics.ts';
 import { isNavigationWithSidebarLink } from '../../../node_modules/starlight-blog/libs/navigation.ts';
 import {
+  getLocaleFromPath,
   getPathWithLocale,
   getRelativeBlogUrl,
   getRelativeUrl,
@@ -93,7 +94,7 @@ async function getBlogPostsData(locale, t) {
         metrics,
         tags: tags.map(({ label, slug }) => ({
           label,
-          href: getRelativeBlogUrl(`/tags/${slug}`, locale),
+          href: getRelativeBlogUrl('/tags', locale) + `#${slug}`,
         })),
         title: entry.data.title,
       };
@@ -122,6 +123,14 @@ async function getBlogSidebar(context) {
 
   sidebar.push(makeSidebarGroup(t('starlightBlog.sidebar.recent'), getSidebarProps(id, recent, locale)));
 
+  sidebar.push(
+    makeSidebarLink(
+      t('starlightBlog.sidebar.tags'),
+      getRelativeBlogUrl('/tags', locale),
+      isBlogTagsOverviewPage(id),
+    ),
+  );
+
   const authors = await getAllAuthors(locale);
   const authorEntries = [...authors].sort(([, a], [, b]) => {
     if (a.entries.length === b.entries.length) {
@@ -147,6 +156,10 @@ async function getBlogSidebar(context) {
   }
 
   return sidebar;
+}
+
+function isBlogTagsOverviewPage(slug) {
+  return slug === getPathWithLocale(`${config.prefix}/tags`, getLocaleFromPath(slug));
 }
 
 function makeSidebarLink(label, href, isCurrent, attrs = {}) {
