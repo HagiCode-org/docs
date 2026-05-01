@@ -8,6 +8,7 @@ import robotsTxt from "astro-robots-txt";
 import react from "@astrojs/react";
 
 import cachedLinkValidator from "./src/integrations/link-check-result-cache.js";
+import { rehypePagefindOptimize } from "./src/integrations/rehype-pagefind-optimize.mjs";
 import { DOCS_SIDEBAR } from "./src/config/sidebar.ts";
 import {
   BLOG_PLUGIN_TITLE,
@@ -50,6 +51,9 @@ const getBasePath = () => {
 export default defineConfig({
   // 站点完整 URL,用于生成 sitemap 和 canonical URL
   site: "https://docs.hagicode.com",
+  build: {
+    inlineStylesheets: "never",
+  },
   // 文档站点部署路径：独立部署在 docs.hagicode.com，使用根路径
   base: getBasePath(),
   // 中间件配置 - 暂时禁用，由页面级别处理重定向
@@ -69,6 +73,7 @@ export default defineConfig({
           rel: ["noopener", "noreferrer"],
         },
       ],
+      [rehypePagefindOptimize],
     ],
   },
   // 配置 Vite 环境变量
