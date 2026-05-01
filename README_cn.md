@@ -36,8 +36,13 @@ npm run preview
 ## GitHub Actions
 
 - `.github/workflows/docs-ci.yml` 负责对 `main` 的 push 与 pull request 做校验。
+- `.github/workflows/docs-deploy-gh-pages.yml` 为 `main` push 与 `workflow_dispatch` 新增了一个基于 artifact handoff 的 `gh-pages` 发布路径。
+- `gh-pages` 的 payload 契约是：分支根目录保留 `esa.jsonc`，并在 `npm run build:ci` 校验通过后把可发布的 Astro 产物组装到 `dist/`。
+- build job 保持只读并上传校验后的 payload artifact；只有 deploy job 获得 `contents: write`，并且只发布下载下来的该 artifact 到 `gh-pages`。
+- 现有工作流保持不变：`.github/workflows/docs-ci.yml`、`.github/workflows/azure-static-web-apps-agreeable-stone-04924c800.yml`、`.github/workflows/compress-images.yml` 与 `.github/workflows/indexnow.yml` 都继续保留，新工作流只是附加能力。
+- 不要把新增工作流等同于生产切换：仅添加工作流，并不能证明 `docs.hagicode.com` 已经开始读取 `gh-pages/esa.jsonc` 和 `gh-pages/dist/`。
+- 在把 `docs.hagicode.com` 视为 `gh-pages` 消费方之前，先完成后续检查：确认工作流实际发布了 `esa.jsonc` 与 `dist/`，确认托管目标仍然指向 `gh-pages`，然后再访问 `https://docs.hagicode.com` 验证部署结果。
 - `.github/workflows/compress-images.yml` 和 `.github/workflows/indexnow.yml` 负责仓库维护类自动化。
-- 当前仓库内已经不再保留 `gh-pages` 发布工作流。
 
 ## hagi18n 维护工作流
 

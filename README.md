@@ -36,8 +36,13 @@ The local docs server runs on `http://localhost:31265` by default.
 ## GitHub Actions
 
 - `.github/workflows/docs-ci.yml` validates pushes and pull requests targeting `main`.
+- `.github/workflows/docs-deploy-gh-pages.yml` adds an artifact-driven `gh-pages` publication path for pushes to `main` and `workflow_dispatch`.
+- The `gh-pages` payload contract is branch-root `esa.jsonc` plus `dist/` containing the validated Astro snapshot assembled after `npm run build:ci` succeeds.
+- The build job stays read-only and uploads the validated payload artifact; only the deploy job receives `contents: write` to publish that downloaded artifact to `gh-pages`.
+- Existing workflows remain in place: `.github/workflows/docs-ci.yml`, `.github/workflows/azure-static-web-apps-agreeable-stone-04924c800.yml`, `.github/workflows/compress-images.yml`, and `.github/workflows/indexnow.yml` are additive peers, not replaced by the new workflow.
+- Treat host cutover as a separate operational step: adding the workflow does not prove `docs.hagicode.com` already reads `gh-pages/esa.jsonc` and `gh-pages/dist/`.
+- Follow-up checks before treating `docs.hagicode.com` as a `gh-pages` consumer: confirm the workflow published `esa.jsonc` and `dist/`, verify the hosting target still points at `gh-pages`, and then load `https://docs.hagicode.com` from the deployed branch snapshot.
 - `.github/workflows/compress-images.yml` and `.github/workflows/indexnow.yml` handle repository maintenance automation.
-- This repository no longer includes an in-repo `gh-pages` deployment workflow.
 
 ## hagi18n maintenance workflow
 
