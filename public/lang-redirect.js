@@ -298,6 +298,7 @@
     },
   };
 
+  window.__HAGICODE_DOCS_ENTRY__ = api;
   api.applyEntryRouting();
 
   if (typeof module === 'object' && module && typeof module.exports === 'object') {

@@ -4,6 +4,8 @@ import path from 'node:path';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 
+import { DOCS_LOCALE_SELECTOR_OPTIONS } from '../src/i18n/generated/docs-locale-resources.mjs';
+
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const docsDir = path.resolve(scriptDir, '..');
 const distDir = path.join(docsDir, 'dist');
@@ -182,6 +184,34 @@ async function main() {
   assertIncludes(enHtml, 'http-equiv="refresh"', 'English landing should expose a non-JS redirect fallback');
   assertIncludes(enHtml, '/lang-redirect.js', 'English landing should load the entry route resolver');
 
+  const localizedEntryLocales = DOCS_LOCALE_SELECTOR_OPTIONS
+    .filter((locale) => locale.code !== 'root' && locale.code !== 'en');
+  const localizedEntryPages = await Promise.all(
+    localizedEntryLocales.map(async (locale) => ({
+      locale: locale.code,
+      htmlLang: locale.htmlLang,
+      html: await readDistFile(path.join(locale.code, 'index.html')),
+    })),
+  );
+
+  for (const { locale, htmlLang, html } of localizedEntryPages) {
+    assertIncludes(
+      html,
+      `<html lang="${htmlLang}"`,
+      `${locale} landing should expose locale metadata`,
+    );
+    assertIncludes(
+      html,
+      `0;url=/${locale}/product-overview/`,
+      `${locale} landing should point to its localized product overview`,
+    );
+    assertIncludes(
+      html,
+      'window.location.replace(targetUrl.toString())',
+      `${locale} landing should preserve query and hash state when redirecting`,
+    );
+  }
+
   const [rootDocsHtml, rootBlogHtml, enDocsHtml, enBlogHtml] = await Promise.all([
     readDistFile(path.join('product-overview', 'index.html')),
     readDistFile(path.join('blog', 'index.html')),
@@ -242,7 +272,7 @@ async function main() {
     },
     {
       name: 'invalid language falls back to browser language product overview',
-      href: 'https://docs.hagicode.com/?lang=fr',
+      href: 'https://docs.hagicode.com/?lang=it',
       storedRouteValue: null,
       navigator: {
         language: 'zh-CN',

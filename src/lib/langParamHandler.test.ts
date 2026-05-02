@@ -125,7 +125,7 @@ describe('docs language route resolution', () => {
 
   it('does not persist an unsupported lang value and falls back to stored preference', () => {
     const result = route(
-      'https://docs.hagicode.com/installation/?lang=fr&tab=cli#download',
+      'https://docs.hagicode.com/installation/?lang=it&tab=cli#download',
       JSON.stringify({ lang: 'root' }),
       ['en-US'],
     );
@@ -144,7 +144,7 @@ describe('docs language route resolution', () => {
   });
 
   it('falls back to configured default locale for unsupported browser languages', () => {
-    const result = route('https://docs.hagicode.com/installation/', null, ['fr-FR']);
+    const result = route('https://docs.hagicode.com/installation/', null, ['it-IT']);
 
     expect(result.resolvedLocale).toBe('en');
     expect(result.shouldPersist).toBe(true);
