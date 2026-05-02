@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { getLink } from '@shared/links';
+import { getLinkWithLocale } from '@shared/links';
 import { getLocalizedNavLinks } from '@/config/navigation';
 import { DOCS_LOCALE_METADATA, buildDocsRoutePath } from '@/lib/i18n';
 
@@ -12,13 +12,13 @@ describe('docs navigation support entry', () => {
     const englishSupportLink = englishLinks.find((link) => link.linkKey === 'about');
 
     expect(chineseSupportLink).toMatchObject({
-      href: getLink('about'),
+      href: getLinkWithLocale('about', 'zh-CN'),
       displayLabel: '获取技术支持',
       icon: 'comment',
       linkKey: 'about',
     });
     expect(englishSupportLink).toMatchObject({
-      href: getLink('about'),
+      href: getLinkWithLocale('about', 'en'),
       displayLabel: 'Get Support',
       icon: 'comment',
       linkKey: 'about',

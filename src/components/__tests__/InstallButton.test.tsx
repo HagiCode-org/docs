@@ -23,6 +23,7 @@ vi.mock('@shared/version-manager', async () => {
 
 vi.mock('@shared/links', () => ({
   getLink: vi.fn(() => '/container/'),
+  getLinkWithLocale: vi.fn((key: string, locale?: string) => (locale === 'en' ? 'https://hagicode.com/container/' : '/container/')),
 }));
 
 vi.mock('@shared/steam-store-link', () => ({

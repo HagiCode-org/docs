@@ -9,6 +9,7 @@ describe('docs footer site links', () => {
     expect(links.find((link) => link.siteId === 'hagicode-main')).toMatchObject({
       title: 'HagiCode Main Site',
       description: 'Primary product entry.',
+      href: 'https://hagicode.com/',
     });
   });
 
@@ -18,6 +19,7 @@ describe('docs footer site links', () => {
     expect(links.find((link) => link.siteId === 'hagicode-main')).toMatchObject({
       title: 'HagiCode 主站',
       description: '產品入口',
+      href: 'https://hagicode.com/zh-Hant/',
     });
   });
 });

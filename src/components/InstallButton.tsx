@@ -35,7 +35,7 @@ import type {
   DesktopVersionData,
   DesktopVersionState,
 } from '@shared/version-manager';
-import { getLink } from '@shared/links';
+import { getLink, getLinkWithLocale } from '@shared/links';
 import { getFallbackSteamStoreLink, loadSteamStoreLink } from '@shared/steam-store-link';
 import { FEATURE_MAC_DOWNLOAD_ENABLED } from '@/config/features';
 
@@ -319,9 +319,7 @@ export default function InstallButton({
         };
   }, [locale]);
 
-  const containerLink = useMemo(() => (
-    locale === 'en' ? 'https://hagicode.com/en/container/' : getLink('container')
-  ), [locale]);
+  const containerLink = useMemo(() => getLinkWithLocale('container', locale), [locale]);
   const steamShortcutLabel = 'Steam';
   const steamShortcutAriaLabel =
     locale === 'en' ? 'Open Hagicode on Steam' : '打开 Hagicode Steam 商店页';

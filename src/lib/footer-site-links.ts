@@ -1,4 +1,5 @@
 import footerSitesSnapshot from '@/data/footer-sites.snapshot.json';
+import { getLinkWithLocale } from '@shared/links';
 import { DOCS_ROUTE_TO_SOURCE_LOCALE, parseDocsLocale } from './i18n';
 
 interface FooterCatalogLink {
@@ -76,6 +77,7 @@ export function resolveDocsFooterSiteLinks(
   locale: string | null | undefined,
   localLinks: ReadonlyArray<{ href: string; siteId?: string }> = [],
 ): FooterCatalogLink[] {
+  const routeLocale = parseDocsLocale(locale) ?? 'root';
   const resolvedLocale = resolveDocsFooterLocale(locale);
   const localIds = new Set(localLinks.flatMap((link) => (link.siteId ? [link.siteId] : [])));
   const localUrls = new Set(localLinks.map((link) => normalizeUrl(link.href)));
@@ -98,7 +100,7 @@ export function resolveDocsFooterSiteLinks(
         siteId: entry.id,
         title: resolveLocalizedField(entry.title, resolvedLocale),
         description: resolveLocalizedField(entry.description, resolvedLocale),
-        href: entry.url,
+        href: entry.id === 'hagicode-main' ? getLinkWithLocale('website', routeLocale) : entry.url,
       },
     ];
   });

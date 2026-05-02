@@ -4,7 +4,7 @@
  * 使用共享链接库管理站点间跳转和公共链接
  * 支持中英文双语显示
  */
-import { getLink, getLinkTarget, getLinkRel, type PublicLinkKey } from '@shared/links';
+import { getLink, getLinkRel, getLinkTarget, getLinkWithLocale, type PublicLinkKey } from '@shared/links';
 import { buildDocsRoutePath, resolveDocsLocale, type DocsLocale } from '@/lib/i18n';
 
 /**
@@ -138,6 +138,8 @@ export function getLocalizedNavLinks(localeInput?: string | null): LocalizedNavL
     href:
       link.linkKey === 'blog'
         ? buildDocsRoutePath(locale, '/blog/')
+        : link.linkKey
+          ? getLinkWithLocale(link.linkKey, locale)
         : link.href,
     displayLabel: getNavLinkLabel(link, locale),
   }));
