@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { DOCS_LOCALE_SELECTOR_OPTIONS } from '../src/i18n/generated/docs-locale-resources.mjs';
 
 const testDir = path.dirname(fileURLToPath(import.meta.url));
+const encodeSelectionValue = (path, locale) => JSON.stringify({ path, locale });
 
 async function readLanguageSelectScript() {
   const componentPath = path.join(testDir, '..', 'src', 'components', 'StarlightLanguageSelect.astro');
@@ -39,7 +40,7 @@ function evaluateLanguageSelectScript(scriptContent, options = {}) {
 
   const select = Object.setPrototypeOf(
     {
-      value: options.selectedValue ?? '/en/product-overview/',
+      value: options.selectedValue ?? encodeSelectionValue('/en/product-overview/', 'en'),
       selectedIndex,
       addEventListener(type, listener) {
         listeners.set(type, listener);
@@ -115,7 +116,7 @@ function evaluateLanguageSelectScript(scriptContent, options = {}) {
 test('language selector persists English locale before navigating', async () => {
   const scriptContent = await readLanguageSelectScript();
   const result = evaluateLanguageSelectScript(scriptContent, {
-    selectedValue: '/en/product-overview/',
+    selectedValue: encodeSelectionValue('/en/product-overview/', 'en'),
     storedRouteValue: JSON.stringify({ path: '/product-overview/', lang: 'root' }),
   });
 
@@ -131,6 +132,8 @@ test('language selector renders the full generated locale set in the header', as
   const source = await readFile(componentPath, 'utf8');
 
   assert.match(source, /DOCS_LOCALE_SELECTOR_OPTIONS/);
+  assert.match(source, /buildDocsRoutePath/);
+  assert.match(source, /stripDocsLocalePrefix/);
   assert.match(source, /label: locale\.label/);
   assert.match(source, /return true;/);
   assert.deepEqual(
@@ -153,10 +156,24 @@ test('language selector renders the full generated locale set in the header', as
 test('language selector navigates even when localStorage fails', async () => {
   const scriptContent = await readLanguageSelectScript();
   const result = evaluateLanguageSelectScript(scriptContent, {
-    selectedValue: '/product-overview/',
+    selectedValue: encodeSelectionValue('/product-overview/', 'root'),
     storageThrows: true,
   });
 
   assert.equal(result.pathname, '/product-overview/');
   assert.equal(result.storedRouteValue, undefined);
+});
+
+test('language selector persists Japanese locale from the encoded route target', async () => {
+  const scriptContent = await readLanguageSelectScript();
+  const result = evaluateLanguageSelectScript(scriptContent, {
+    selectedValue: encodeSelectionValue('/ja-JP/product-overview/', 'ja-JP'),
+    storedRouteValue: JSON.stringify({ path: '/en/product-overview/', lang: 'en' }),
+  });
+
+  assert.equal(result.pathname, '/ja-JP/product-overview/');
+  assert.deepEqual(JSON.parse(result.storedRouteValue), {
+    path: '/en/product-overview/',
+    lang: 'ja-JP',
+  });
 });

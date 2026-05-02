@@ -92,6 +92,7 @@ describe('docs locale helpers', () => {
     ['root', '/en/install/', '/install/'],
     ['root', '/install/', '/install/'],
     ['root', '/en/install', '/install'],
+    ['ja-JP', '/en/product-overview/', '/ja-JP/product-overview/'],
     ['ja-JP', '/blog/example/', '/ja-JP/blog/example/'],
     ['fr-FR', '/en/blog/example/', '/fr-FR/blog/example/'],
   ] as const)('builds %s route for %s', (locale, originalPath, expected) => {
