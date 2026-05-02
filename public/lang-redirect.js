@@ -5,27 +5,40 @@
 
   var DOCS_LANGUAGE_STORAGE_KEY = 'starlight-route';
   var DEFAULT_DOCS_ENTRY_LOCALE = 'en';
+
+  var LOCALE_ROUTES = ['root', 'en', 'zh-Hant', 'ja-JP', 'ko-KR', 'de-DE', 'fr-FR', 'es-ES', 'pt-BR', 'ru-RU'];
+  var LOCALE_ALIASES = {
+    'en': 'en', 'en-us': 'en', 'en-gb': 'en', 'en-au': 'en', 'en-ca': 'en',
+    'root': 'root', 'zh': 'root', 'zh-cn': 'root', 'zh-hans': 'root', 'zh-hans-cn': 'root',
+    'zh-hant': 'zh-Hant', 'zh-tw': 'zh-Hant', 'zh-hk': 'zh-Hant', 'zh-hant-tw': 'zh-Hant', 'zh-hant-hk': 'zh-Hant',
+    'ja': 'ja-JP', 'ja-jp': 'ja-JP',
+    'ko': 'ko-KR', 'ko-kr': 'ko-KR',
+    'de': 'de-DE', 'de-de': 'de-DE', 'de-at': 'de-DE', 'de-ch': 'de-DE',
+    'fr': 'fr-FR', 'fr-fr': 'fr-FR', 'fr-ca': 'fr-FR', 'fr-be': 'fr-FR',
+    'es': 'es-ES', 'es-es': 'es-ES', 'es-mx': 'es-ES', 'es-ar': 'es-ES',
+    'pt': 'pt-BR', 'pt-br': 'pt-BR', 'pt-pt': 'pt-BR',
+    'ru': 'ru-RU', 'ru-ru': 'ru-RU',
+  };
+
   function parseDocsLocale(value) {
     if (!value) {
       return null;
     }
 
-    var normalized = String(value).trim().toLowerCase();
+    var normalized = String(value).trim().toLowerCase().replace(/_/g, '-');
     if (!normalized) {
       return null;
     }
 
-    if (normalized === 'en' || normalized.indexOf('en-') === 0) {
-      return 'en';
+    var mapped = LOCALE_ALIASES[normalized];
+    if (mapped) {
+      return mapped;
     }
 
-    if (
-      normalized === 'root' ||
-      normalized === 'zh' ||
-      normalized === 'zh-cn' ||
-      normalized.indexOf('zh-') === 0
-    ) {
-      return 'root';
+    for (var i = 0; i < LOCALE_ROUTES.length; i++) {
+      if (normalized === LOCALE_ROUTES[i].toLowerCase()) {
+        return LOCALE_ROUTES[i];
+      }
     }
 
     return null;
@@ -36,15 +49,28 @@
   }
 
   function stripDocsLocalePrefix(pathname) {
-    if (!pathname || pathname === '/en') {
+    if (!pathname) {
       return '/';
     }
 
-    if (pathname.indexOf('/en/') === 0) {
-      return pathname.slice(3) || '/';
+    var normalized = pathname.charAt(0) === '/' ? pathname : '/' + pathname;
+
+    for (var i = 0; i < LOCALE_ROUTES.length; i++) {
+      var routeLocale = LOCALE_ROUTES[i];
+      if (routeLocale === 'root') {
+        continue;
+      }
+
+      if (normalized === '/' + routeLocale) {
+        return '/';
+      }
+
+      if (normalized.indexOf('/' + routeLocale + '/') === 0) {
+        return normalized.slice(routeLocale.length + 1) || '/';
+      }
     }
 
-    return pathname;
+    return normalized;
   }
 
   function isLandingRoutePath(pathname) {
@@ -58,7 +84,11 @@
       return normalizedPath === '/' ? '/en/' : '/en' + normalizedPath;
     }
 
-    return normalizedPath || '/';
+    if (locale === 'root') {
+      return normalizedPath || '/';
+    }
+
+    return normalizedPath === '/' ? '/' + locale + '/' : '/' + locale + normalizedPath;
   }
 
   function getStoredDocsLocale(storageValue) {
@@ -203,7 +233,7 @@
       storedLocale: storedLocale,
       isLandingPath: landingPath,
       shouldPersist: shouldPersist,
-      shouldRedirect: targetUrl.toString() !== currentUrl.toString(),
+      shouldRedirect: targetUrl.toString() !== currentUrl.toString() && (landingPath || requestedLang !== null),
     };
   }
 
@@ -268,6 +298,9 @@
     },
   };
 
-  window.__HAGICODE_DOCS_ENTRY__ = api;
-  api.applyEntryRouting(window);
+  api.applyEntryRouting();
+
+  if (typeof module === 'object' && module && typeof module.exports === 'object') {
+    module.exports = api;
+  }
 })();
