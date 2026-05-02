@@ -6,6 +6,8 @@ import {
   DOCS_ROUTE_LOCALE_LABELS,
   DOCS_ROUTE_TO_SOURCE_LOCALE,
   buildDocsRoutePath,
+  getDocsContentLayoutToggleCopy,
+  getDocsFooterCopy,
   getStoredDocsLocale,
   parseDocsLocale,
   resolveClientDocsLocale,
@@ -94,5 +96,31 @@ describe('docs locale helpers', () => {
     ['fr-FR', '/en/blog/example/', '/fr-FR/blog/example/'],
   ] as const)('builds %s route for %s', (locale, originalPath, expected) => {
     expect(buildDocsRoutePath(locale, originalPath)).toBe(expected);
+  });
+
+  it('provides localized docs content layout toggle copy for every supported locale', () => {
+    for (const locale of DOCS_LOCALE_METADATA.map((entry) => entry.code)) {
+      const copy = getDocsContentLayoutToggleCopy(locale);
+
+      expect(copy.label.trim().length).toBeGreaterThan(0);
+      expect(copy.wide.trim().length).toBeGreaterThan(0);
+      expect(copy.narrow.trim().length).toBeGreaterThan(0);
+    }
+  });
+
+  it('provides localized footer copy for every supported locale', () => {
+    for (const locale of DOCS_LOCALE_METADATA.map((entry) => entry.code)) {
+      const copy = getDocsFooterCopy(locale);
+
+      expect(copy.copyright.trim().length).toBeGreaterThan(0);
+      expect(copy.sections.ecosystemSites.trim().length).toBeGreaterThan(0);
+      expect(copy.sections.quickLinks.trim().length).toBeGreaterThan(0);
+      expect(copy.sections.community.trim().length).toBeGreaterThan(0);
+      expect(copy.navigation.ecosystemSites.trim().length).toBeGreaterThan(0);
+      expect(copy.navigation.quickLinks.trim().length).toBeGreaterThan(0);
+      expect(copy.navigation.community.trim().length).toBeGreaterThan(0);
+      expect(copy.filings.icpAriaLabel.trim().length).toBeGreaterThan(0);
+      expect(copy.filings.publicSecurityAriaLabel.trim().length).toBeGreaterThan(0);
+    }
   });
 });

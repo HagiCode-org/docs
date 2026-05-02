@@ -22,6 +22,30 @@ import {
 export type DocsLocale = BlogRouteLocale;
 export type DocsLanguageParam = 'zh-CN' | 'en';
 
+type DocsContentLayoutToggleCopy = {
+  label: string;
+  wide: string;
+  narrow: string;
+};
+
+type DocsFooterCopy = {
+  copyright: string;
+  sections: {
+    ecosystemSites: string;
+    quickLinks: string;
+    community: string;
+  };
+  navigation: {
+    ecosystemSites: string;
+    quickLinks: string;
+    community: string;
+  };
+  filings: {
+    icpAriaLabel: string;
+    publicSecurityAriaLabel: string;
+  };
+};
+
 type GeneratedDocsLocaleOption = {
   code: DocsLocale;
   sourceLocale: string;
@@ -303,6 +327,244 @@ export function resolveDocsEntryLocale(options: {
  */
 export function toInstallButtonLocale(locale: DocsLocale): 'zh' | 'en' {
   return locale === 'en' ? 'en' : 'zh';
+}
+
+const DOCS_CONTENT_LAYOUT_TOGGLE_COPY: Record<DocsLocale, DocsContentLayoutToggleCopy> = {
+  root: {
+    label: '正文宽度',
+    wide: '宽版',
+    narrow: '窄版',
+  },
+  en: {
+    label: 'Content layout',
+    wide: 'Wide',
+    narrow: 'Narrow',
+  },
+  'zh-Hant': {
+    label: '正文寬度',
+    wide: '寬版',
+    narrow: '窄版',
+  },
+  'ja-JP': {
+    label: '本文幅',
+    wide: 'ワイド',
+    narrow: '標準',
+  },
+  'ko-KR': {
+    label: '본문 너비',
+    wide: '넓게',
+    narrow: '좁게',
+  },
+  'de-DE': {
+    label: 'Inhaltsbreite',
+    wide: 'Breit',
+    narrow: 'Schmal',
+  },
+  'fr-FR': {
+    label: 'Largeur du contenu',
+    wide: 'Large',
+    narrow: 'Étroit',
+  },
+  'es-ES': {
+    label: 'Ancho del contenido',
+    wide: 'Ancho',
+    narrow: 'Estrecho',
+  },
+  'pt-BR': {
+    label: 'Largura do conteúdo',
+    wide: 'Largo',
+    narrow: 'Estreito',
+  },
+  'ru-RU': {
+    label: 'Ширина контента',
+    wide: 'Широкий',
+    narrow: 'Узкий',
+  },
+};
+
+const DOCS_FOOTER_COPY: Record<DocsLocale, DocsFooterCopy> = {
+  root: {
+    copyright: 'All rights reserved.',
+    sections: {
+      ecosystemSites: '生态站点',
+      quickLinks: '快速链接',
+      community: '社区',
+    },
+    navigation: {
+      ecosystemSites: '生态站点链接',
+      quickLinks: '快速链接',
+      community: '社区链接',
+    },
+    filings: {
+      icpAriaLabel: '查看 ICP 备案信息',
+      publicSecurityAriaLabel: '查看公安备案信息',
+    },
+  },
+  'zh-Hant': {
+    copyright: '版權所有。',
+    sections: {
+      ecosystemSites: '生態站點',
+      quickLinks: '快速連結',
+      community: '社群',
+    },
+    navigation: {
+      ecosystemSites: '生態站點連結',
+      quickLinks: '快速連結',
+      community: '社群連結',
+    },
+    filings: {
+      icpAriaLabel: '查看 ICP 備案資訊',
+      publicSecurityAriaLabel: '查看公安備案資訊',
+    },
+  },
+  en: {
+    copyright: 'All rights reserved.',
+    sections: {
+      ecosystemSites: 'Ecosystem Sites',
+      quickLinks: 'Quick Links',
+      community: 'Community',
+    },
+    navigation: {
+      ecosystemSites: 'Ecosystem site links',
+      quickLinks: 'Quick links',
+      community: 'Community links',
+    },
+    filings: {
+      icpAriaLabel: 'View ICP filing information',
+      publicSecurityAriaLabel: 'View public security filing information',
+    },
+  },
+  'ja-JP': {
+    copyright: 'All rights reserved.',
+    sections: {
+      ecosystemSites: 'エコシステムサイト',
+      quickLinks: 'クイックリンク',
+      community: 'コミュニティ',
+    },
+    navigation: {
+      ecosystemSites: 'エコシステムサイトへのリンク',
+      quickLinks: 'クイックリンク',
+      community: 'コミュニティリンク',
+    },
+    filings: {
+      icpAriaLabel: 'ICP 登録情報を表示',
+      publicSecurityAriaLabel: '公安登録情報を表示',
+    },
+  },
+  'ko-KR': {
+    copyright: 'All rights reserved.',
+    sections: {
+      ecosystemSites: '에코시스템 사이트',
+      quickLinks: '빠른 링크',
+      community: '커뮤니티',
+    },
+    navigation: {
+      ecosystemSites: '에코시스템 사이트 링크',
+      quickLinks: '빠른 링크',
+      community: '커뮤니티 링크',
+    },
+    filings: {
+      icpAriaLabel: 'ICP 등록 정보 보기',
+      publicSecurityAriaLabel: '공안 등록 정보 보기',
+    },
+  },
+  'de-DE': {
+    copyright: 'Alle Rechte vorbehalten.',
+    sections: {
+      ecosystemSites: 'Ökosystem-Seiten',
+      quickLinks: 'Schnellzugriffe',
+      community: 'Community',
+    },
+    navigation: {
+      ecosystemSites: 'Links zu Ökosystem-Seiten',
+      quickLinks: 'Schnellzugriffe',
+      community: 'Community-Links',
+    },
+    filings: {
+      icpAriaLabel: 'ICP-Registrierungsinformationen anzeigen',
+      publicSecurityAriaLabel: 'Informationen zur Sicherheitsregistrierung anzeigen',
+    },
+  },
+  'fr-FR': {
+    copyright: 'Tous droits réservés.',
+    sections: {
+      ecosystemSites: "Sites de l'écosystème",
+      quickLinks: 'Liens rapides',
+      community: 'Communauté',
+    },
+    navigation: {
+      ecosystemSites: "Liens vers les sites de l'écosystème",
+      quickLinks: 'Liens rapides',
+      community: 'Liens communautaires',
+    },
+    filings: {
+      icpAriaLabel: 'Voir les informations de dépôt ICP',
+      publicSecurityAriaLabel: 'Voir les informations de dépôt de sécurité publique',
+    },
+  },
+  'es-ES': {
+    copyright: 'Todos los derechos reservados.',
+    sections: {
+      ecosystemSites: 'Sitios del ecosistema',
+      quickLinks: 'Enlaces rápidos',
+      community: 'Comunidad',
+    },
+    navigation: {
+      ecosystemSites: 'Enlaces de sitios del ecosistema',
+      quickLinks: 'Enlaces rápidos',
+      community: 'Enlaces de la comunidad',
+    },
+    filings: {
+      icpAriaLabel: 'Ver la información de registro ICP',
+      publicSecurityAriaLabel: 'Ver la información de registro de seguridad pública',
+    },
+  },
+  'pt-BR': {
+    copyright: 'Todos os direitos reservados.',
+    sections: {
+      ecosystemSites: 'Sites do ecossistema',
+      quickLinks: 'Links rápidos',
+      community: 'Comunidade',
+    },
+    navigation: {
+      ecosystemSites: 'Links dos sites do ecossistema',
+      quickLinks: 'Links rápidos',
+      community: 'Links da comunidade',
+    },
+    filings: {
+      icpAriaLabel: 'Ver informações de registro ICP',
+      publicSecurityAriaLabel: 'Ver informações de registro de segurança pública',
+    },
+  },
+  'ru-RU': {
+    copyright: 'Все права защищены.',
+    sections: {
+      ecosystemSites: 'Сайты экосистемы',
+      quickLinks: 'Быстрые ссылки',
+      community: 'Сообщество',
+    },
+    navigation: {
+      ecosystemSites: 'Ссылки на сайты экосистемы',
+      quickLinks: 'Быстрые ссылки',
+      community: 'Ссылки сообщества',
+    },
+    filings: {
+      icpAriaLabel: 'Показать информацию о регистрации ICP',
+      publicSecurityAriaLabel: 'Показать информацию о регистрации в органах общественной безопасности',
+    },
+  },
+};
+
+export function getDocsContentLayoutToggleCopy(
+  localeInput: string | null | undefined,
+): DocsContentLayoutToggleCopy {
+  const locale = resolveDocsLocale(localeInput);
+  return DOCS_CONTENT_LAYOUT_TOGGLE_COPY[locale];
+}
+
+export function getDocsFooterCopy(localeInput: string | null | undefined): DocsFooterCopy {
+  const locale = resolveDocsLocale(localeInput);
+  return DOCS_FOOTER_COPY[locale];
 }
 
 export { BLOG_ROUTE_LOCALES };
