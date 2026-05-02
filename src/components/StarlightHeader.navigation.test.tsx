@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { getLink } from '@shared/links';
 import { getLocalizedNavLinks } from '@/config/navigation';
+import { DOCS_LOCALE_METADATA, buildDocsRoutePath } from '@/lib/i18n';
 
 describe('docs navigation support entry', () => {
   it('localizes the unified support label while keeping the canonical about link', () => {
@@ -44,5 +45,19 @@ describe('docs navigation support entry', () => {
       href: 'https://builder.hagicode.com/',
       displayLabel: 'Builder',
     });
+  });
+
+  it('provides localized header labels for every supported docs locale', () => {
+    const locales = DOCS_LOCALE_METADATA.map((locale) => locale.code);
+
+    for (const locale of locales) {
+      const localizedLinks = getLocalizedNavLinks(locale);
+
+      expect(localizedLinks).toHaveLength(4);
+      expect(localizedLinks.every((link) => link.displayLabel.trim().length > 0)).toBe(true);
+      expect(localizedLinks.find((link) => link.linkKey === 'blog')?.href).toBe(
+        buildDocsRoutePath(locale, '/blog/'),
+      );
+    }
   });
 });

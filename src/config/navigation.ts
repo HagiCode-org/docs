@@ -5,7 +5,7 @@
  * 支持中英文双语显示
  */
 import { getLink, getLinkTarget, getLinkRel, type PublicLinkKey } from '@shared/links';
-import { resolveDocsLocale, type DocsLocale } from '@/lib/i18n';
+import { buildDocsRoutePath, resolveDocsLocale, type DocsLocale } from '@/lib/i18n';
 
 /**
  * 导航链接接口
@@ -15,8 +15,8 @@ export interface NavLink {
   /** 链接显示文本 */
   label: string;
 
-  /** 英文版显示文本 */
-  labelEn?: string;
+  /** 非默认语言显示文本 */
+  translations?: Partial<Record<Exclude<DocsLocale, 'root'>, string>>;
 
   /** 链接地址 (支持相对路径和绝对 URL) */
   href: string;
@@ -44,24 +44,64 @@ export interface LocalizedNavLink extends NavLink {
 export const navLinks: NavLink[] = [
   {
     label: "首页",
-    labelEn: "Home",
+    translations: {
+      en: 'Home',
+      'zh-Hant': '首頁',
+      'ja-JP': 'ホーム',
+      'ko-KR': '홈',
+      'de-DE': 'Startseite',
+      'fr-FR': 'Accueil',
+      'es-ES': 'Inicio',
+      'pt-BR': 'Início',
+      'ru-RU': 'Главная',
+    },
     href: getLink('website'),
     linkKey: 'website',
   },
   {
     label: "部署生成器",
-    labelEn: "Builder",
+    translations: {
+      en: 'Builder',
+      'zh-Hant': '部署產生器',
+      'ja-JP': 'デプロイビルダー',
+      'ko-KR': '배포 빌더',
+      'de-DE': 'Deployment-Builder',
+      'fr-FR': 'Générateur de déploiement',
+      'es-ES': 'Generador de despliegue',
+      'pt-BR': 'Gerador de implantação',
+      'ru-RU': 'Генератор развертывания',
+    },
     href: 'https://builder.hagicode.com/',
   },
   {
     label: "博客",
-    labelEn: "Blog",
+    translations: {
+      en: 'Blog',
+      'zh-Hant': '部落格',
+      'ja-JP': 'ブログ',
+      'ko-KR': '블로그',
+      'de-DE': 'Blog',
+      'fr-FR': 'Blog',
+      'es-ES': 'Blog',
+      'pt-BR': 'Blog',
+      'ru-RU': 'Блог',
+    },
     href: getLink('blog'),
     linkKey: 'blog',
   },
   {
     label: "获取技术支持",
-    labelEn: "Get Support",
+    translations: {
+      en: 'Get Support',
+      'zh-Hant': '獲取技術支援',
+      'ja-JP': 'サポート',
+      'ko-KR': '기술 지원',
+      'de-DE': 'Support',
+      'fr-FR': 'Assistance',
+      'es-ES': 'Soporte',
+      'pt-BR': 'Suporte',
+      'ru-RU': 'Поддержка',
+    },
     href: getLink('about'),
     icon: "comment",
     linkKey: 'about',
@@ -72,16 +112,16 @@ export const navLinks: NavLink[] = [
  * 按 locale 解析导航显示文案，缺失时回退到中文标签。
  */
 export function getNavLinkLabel(link: NavLink, locale: DocsLocale): string {
-  if (locale === 'en' && link.labelEn) {
-    return link.labelEn;
+  if (locale !== 'root' && link.translations?.[locale]) {
+    return link.translations[locale];
   }
 
   if (link.label) {
     return link.label;
   }
 
-  if (link.labelEn) {
-    return link.labelEn;
+  if (link.translations?.en) {
+    return link.translations.en;
   }
 
   // Keep navigation labels non-empty even when upstream config is incomplete.
@@ -97,7 +137,7 @@ export function getLocalizedNavLinks(localeInput?: string | null): LocalizedNavL
     ...link,
     href:
       link.linkKey === 'blog'
-        ? (locale === 'en' ? '/en/blog/' : '/blog/')
+        ? buildDocsRoutePath(locale, '/blog/')
         : link.href,
     displayLabel: getNavLinkLabel(link, locale),
   }));
