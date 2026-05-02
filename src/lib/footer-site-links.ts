@@ -52,7 +52,7 @@ function resolveLocalizedField(field: LocalizedFooterField, locale: FooterCatalo
   }
 
   for (const candidate of [locale, ...getFooterLocaleFallbackChain(locale)]) {
-    const value = field[candidate as SiteLocale];
+    const value = field[candidate];
     if (typeof value === 'string' && value.trim().length > 0) {
       return value;
     }

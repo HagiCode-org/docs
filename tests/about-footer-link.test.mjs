@@ -29,7 +29,8 @@ test('docs footer exposes the local about link entry without importing the site 
   assert.match(footerSource, /<DocsPromoteInfoBanner locale=\{Astro\.locals\?\.starlightRoute\?\.locale\} \/>/);
   assert.match(footerSource, /const aboutLink = getLink\('about'\);/);
   assert.match(footerSource, /const relatedSiteLinks = resolveDocsFooterSiteLinks/);
-  assert.match(footerSource, /<h3 class="unified-footer-section-title">生态站点<\/h3>/);
+  assert.match(footerSource, /const footerCopy = getDocsFooterCopy\(currentRouteLocale\);/);
+  assert.match(footerSource, /<h3 class="unified-footer-section-title">\{footerCopy\.sections\.ecosystemSites\}<\/h3>/);
   assert.match(footerSource, /<span class="unified-footer-link-title">\{link\.title\}<\/span>/);
   assert.match(footerSource, /<span class="unified-footer-link-description">\{link\.description\}<\/span>/);
   assert.equal(footerSource.includes('@/components/home/Footer'), false);
@@ -51,7 +52,7 @@ test('docs header navigation reuses the shared about link registry and keeps dis
   assert.match(footerSource, /<a href=\{discordLink\} class="unified-footer-link" target=\{discordTarget\} rel=\{discordRel\}>Discord<\/a>/);
   assert.match(
     footerSource,
-    /<a href=\{steamLink\} class="unified-footer-link" target="_blank" rel="noopener noreferrer">Steam<\/a>/,
+    /<a href=\{steamLink\} class="unified-footer-link" target="_blank" rel="noopener noreferrer">\{getFooterLinkLabel\('steam'\)\}<\/a>/,
   );
 });
 
