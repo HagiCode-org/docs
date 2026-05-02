@@ -51,6 +51,180 @@ export interface LinkConfig {
     relative?: boolean;
 }
 
+type SiteLocale = 'zh-CN' | 'zh-Hant' | 'en-US' | 'ja-JP' | 'ko-KR' | 'de-DE' | 'fr-FR' | 'es-ES' | 'pt-BR' | 'ru-RU';
+type DocsRouteLocale = 'root' | 'en' | 'zh-Hant' | 'ja-JP' | 'ko-KR' | 'de-DE' | 'fr-FR' | 'es-ES' | 'pt-BR' | 'ru-RU';
+
+const SITE_DEFAULT_LOCALE: SiteLocale = 'en-US';
+const DOCS_DEFAULT_ROUTE_LOCALE: DocsRouteLocale = 'root';
+const DOCS_ROUTE_TO_SITE_LOCALE: Record<DocsRouteLocale, SiteLocale> = {
+    root: 'zh-CN',
+    en: 'en-US',
+    'zh-Hant': 'zh-Hant',
+    'ja-JP': 'ja-JP',
+    'ko-KR': 'ko-KR',
+    'de-DE': 'de-DE',
+    'fr-FR': 'fr-FR',
+    'es-ES': 'es-ES',
+    'pt-BR': 'pt-BR',
+    'ru-RU': 'ru-RU',
+};
+const NORMALIZED_SITE_LOCALE_MAP: Record<string, SiteLocale> = {
+    root: 'zh-CN',
+    zh: 'zh-CN',
+    'zh-cn': 'zh-CN',
+    'zh-hans': 'zh-CN',
+    'zh-tw': 'zh-Hant',
+    'zh-hk': 'zh-Hant',
+    'zh-hant': 'zh-Hant',
+    en: 'en-US',
+    'en-us': 'en-US',
+    'ja-jp': 'ja-JP',
+    'ko-kr': 'ko-KR',
+    'de-de': 'de-DE',
+    'fr-fr': 'fr-FR',
+    'es-es': 'es-ES',
+    'pt-br': 'pt-BR',
+    'ru-ru': 'ru-RU',
+};
+const NORMALIZED_DOCS_ROUTE_LOCALE_MAP: Record<string, DocsRouteLocale> = {
+    root: 'root',
+    zh: 'root',
+    'zh-cn': 'root',
+    'zh-hans': 'root',
+    en: 'en',
+    'en-us': 'en',
+    'zh-tw': 'zh-Hant',
+    'zh-hk': 'zh-Hant',
+    'zh-hant': 'zh-Hant',
+    'ja-jp': 'ja-JP',
+    'ko-kr': 'ko-KR',
+    'de-de': 'de-DE',
+    'fr-fr': 'fr-FR',
+    'es-es': 'es-ES',
+    'pt-br': 'pt-BR',
+    'ru-ru': 'ru-RU',
+};
+
+function normalizeLocaleKey(locale: string): string {
+    return locale.trim().replace(/_/g, '-').toLowerCase();
+}
+
+function normalizeAbsolutePath(pathname: string): string {
+    const normalized = pathname.startsWith('/') ? pathname : `/${pathname}`;
+    const withoutTrailingSlash = normalized.replace(/\/+$/u, '');
+    return withoutTrailingSlash || '/';
+}
+
+function ensureTrailingSlash(pathname: string): string {
+    if (pathname === '/') {
+        return pathname;
+    }
+
+    return pathname.endsWith('/') ? pathname : `${pathname}/`;
+}
+
+function resolveSiteLocale(locale?: string): SiteLocale | null {
+    if (!locale) {
+        return null;
+    }
+
+    return NORMALIZED_SITE_LOCALE_MAP[normalizeLocaleKey(locale)] ?? null;
+}
+
+function resolveDocsRouteLocale(locale?: string): DocsRouteLocale | null {
+    if (!locale) {
+        return null;
+    }
+
+    return NORMALIZED_DOCS_ROUTE_LOCALE_MAP[normalizeLocaleKey(locale)] ?? null;
+}
+
+function stripSiteLocalePrefix(pathname: string): string {
+    const normalized = normalizeAbsolutePath(pathname);
+    const hasLocalePrefix = /^\/(en|zh-CN|zh-Hant|ja-JP|ko-KR|de-DE|fr-FR|es-ES|pt-BR|ru-RU)(?=\/|$)/u.test(normalized);
+
+    if (!hasLocalePrefix) {
+        return ensureTrailingSlash(normalized);
+    }
+
+    const stripped = normalized.replace(/^\/[^/]+(?=\/|$)/u, '');
+    return ensureTrailingSlash(stripped || '/');
+}
+
+function stripDocsLocalePrefix(pathname: string): string {
+    const normalized = normalizeAbsolutePath(pathname);
+    const hasLocalePrefix = /^\/(en|zh-Hant|ja-JP|ko-KR|de-DE|fr-FR|es-ES|pt-BR|ru-RU)(?=\/|$)/u.test(normalized);
+
+    if (!hasLocalePrefix) {
+        return ensureTrailingSlash(normalized);
+    }
+
+    const stripped = normalized.replace(/^\/[^/]+(?=\/|$)/u, '');
+    return ensureTrailingSlash(stripped || '/');
+}
+
+function getLocalizedSitePath(pathname: string, locale?: string): string {
+    const resolvedLocale = resolveSiteLocale(locale) ?? SITE_DEFAULT_LOCALE;
+    const normalizedPath = stripSiteLocalePrefix(pathname);
+
+    if (resolvedLocale === SITE_DEFAULT_LOCALE) {
+        return normalizedPath;
+    }
+
+    if (normalizedPath === '/') {
+        return `/${resolvedLocale}/`;
+    }
+
+    return `/${resolvedLocale}${normalizedPath}`;
+}
+
+function getLocalizedDocsPath(pathname: string, locale?: string): string {
+    const resolvedSiteLocale = resolveSiteLocale(locale);
+    const docsLocale = resolveDocsRouteLocale(locale)
+        ?? (resolvedSiteLocale
+            ? Object.entries(DOCS_ROUTE_TO_SITE_LOCALE).find(([, siteLocale]) => siteLocale === resolvedSiteLocale)?.[0] as DocsRouteLocale | undefined
+            : undefined)
+        ?? DOCS_DEFAULT_ROUTE_LOCALE;
+    const normalizedPath = stripDocsLocalePrefix(pathname);
+
+    if (docsLocale === 'root') {
+        return normalizedPath;
+    }
+
+    if (normalizedPath === '/') {
+        return `/${docsLocale}/`;
+    }
+
+    return `/${docsLocale}${normalizedPath}`;
+}
+
+function getLocalizedDocsRssPath(locale?: string): string {
+    const resolvedLocale = resolveSiteLocale(locale) ?? DOCS_ROUTE_TO_SITE_LOCALE[resolveDocsRouteLocale(locale) ?? DOCS_DEFAULT_ROUTE_LOCALE];
+    return resolvedLocale.startsWith('zh') ? '/blog/rss.zh-CN.xml' : '/blog/rss.en.xml';
+}
+
+function localizeAbsoluteUrl(input: string, locale?: string): string {
+    if (!locale) {
+        return input;
+    }
+
+    const url = new URL(input);
+
+    if (url.hostname === 'hagicode.com') {
+        url.pathname = getLocalizedSitePath(url.pathname, locale);
+        return url.toString();
+    }
+
+    if (url.hostname === 'docs.hagicode.com' || url.port === '31265') {
+        url.pathname = url.pathname.includes('/blog/rss.')
+            ? getLocalizedDocsRssPath(locale)
+            : getLocalizedDocsPath(url.pathname, locale);
+        return url.toString();
+    }
+
+    return input;
+}
+
 /**
  * 站点间链接配置
  */
@@ -244,6 +418,18 @@ export function getDockerComposeGuideUrl(): string {
  * 公共链接类型
  */
 export type PublicLinkKey = keyof typeof SITE_LINKS;
+
+export function getLinkWithLocale(key: PublicLinkKey, locale?: string): string {
+    const config = SITE_LINKS[key];
+    const env = getEnvironment();
+    const url = env === 'development' ? config.dev : config.prod;
+
+    if (config.external) {
+        return url;
+    }
+
+    return localizeAbsoluteUrl(url, locale);
+}
 
 /**
  * 获取指定链接的当前环境 URL
