@@ -103,7 +103,7 @@ function isSupportFile(fileName) {
   return supportFileNames.has(fileName) || !isPostFile(fileName);
 }
 
-function extractFrontmatter(raw) {
+export function extractFrontmatter(raw) {
   if (!raw.startsWith('---')) {
     return {};
   }
@@ -128,7 +128,7 @@ function extractFrontmatter(raw) {
   return values;
 }
 
-function stripFrontmatter(raw) {
+export function stripFrontmatter(raw) {
   if (!raw.startsWith('---')) {
     return raw;
   }
@@ -141,7 +141,7 @@ function stripFrontmatter(raw) {
   return raw.slice(closeIndex + 4);
 }
 
-function normalizeComparableMarkdown(raw) {
+export function normalizeComparableMarkdown(raw) {
   return stripFrontmatter(raw)
     .replace(/```[\s\S]*?```/gu, ' ')
     .replace(/`([^`]+)`/gu, '$1')
@@ -157,11 +157,11 @@ function normalizeComparableMarkdown(raw) {
     .toLowerCase();
 }
 
-function createFingerprint(value) {
+export function createFingerprint(value) {
   return createHash('sha1').update(value).digest('hex');
 }
 
-function createTrigramSet(text) {
+export function createTrigramSet(text) {
   const compact = text.replace(/\s+/gu, ' ').trim();
   if (!compact) {
     return new Set();
@@ -179,7 +179,7 @@ function createTrigramSet(text) {
   return trigrams;
 }
 
-function calculateDiceCoefficient(left, right) {
+export function calculateDiceCoefficient(left, right) {
   if (left.size === 0 && right.size === 0) {
     return 1;
   }
