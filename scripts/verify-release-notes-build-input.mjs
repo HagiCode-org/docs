@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export const RELEASE_NOTES_LOCALES = ['zh-CN', 'en'];
+export const RELEASE_NOTES_LOCALES = ['zh-CN', 'en', 'zh-Hant', 'ja-JP', 'ko-KR', 'de-DE', 'fr-FR', 'es-ES', 'pt-BR', 'ru-RU'];
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_DOCS_ROOT = path.resolve(SCRIPT_DIR, '..');

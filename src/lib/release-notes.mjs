@@ -132,8 +132,8 @@ function pickLocalizedEntry(valueByLocale, locale = 'zh-CN') {
     return '';
   }
 
-  if (locale === 'zh-CN') {
-    return valueByLocale['zh-CN'] ?? valueByLocale.en ?? '';
+  if (valueByLocale[locale]) {
+    return valueByLocale[locale];
   }
 
   return valueByLocale.en ?? valueByLocale['zh-CN'] ?? '';

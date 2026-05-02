@@ -8,12 +8,13 @@ import { materializeReleaseNotes, resolveReleaseNotesConfig } from '../scripts/r
 import { verifyReleaseNotesBuildOutput } from '../scripts/verify-release-notes-build-output.mjs';
 
 function createSnapshot(tag = 'v1.0.0') {
+  const ALL_LOCALES = ['zh-CN', 'en', 'zh-Hant', 'ja-JP', 'ko-KR', 'de-DE', 'fr-FR', 'es-ES', 'pt-BR', 'ru-RU'];
   return {
     generatedAt: '2026-04-14T10:00:00.000Z',
     source: {
       repository: 'HagiCode-org/release-notes',
       githubApiBaseUrl: 'https://api.github.com',
-      locales: ['zh-CN', 'en'],
+      locales: ALL_LOCALES,
     },
     entries: [
       {
@@ -25,22 +26,13 @@ function createSnapshot(tag = 'v1.0.0') {
         synchronizedAt: '2026-04-14T10:00:00.000Z',
         upstreamGeneratedAt: '2026-04-13T07:55:00.000Z',
         anchorId: tag.toLowerCase().startsWith('v') ? tag.toLowerCase() : `v${tag.toLowerCase()}`,
-        summary: {
-          'zh-CN': '统一了 Code Server 的主要入口。',
-          en: 'Unified the main Code Server entry flow.',
-        },
+        summary: Object.fromEntries(ALL_LOCALES.map((locale) => [locale, `${locale} summary for ${tag}.`])),
         repositoryRanges: [],
         totalCommitCount: 0,
         source: {
-          bodies: {
-            'zh-CN': `published/${tag}.zh-CN.md`,
-            en: `published/${tag}.en.md`,
-          },
+          bodies: Object.fromEntries(ALL_LOCALES.map((locale) => [locale, `published/${tag}.${locale}.md`])),
         },
-        bodies: {
-          'zh-CN': '# HagiCode\n\n- 统一了 Code Server 的主要入口。\n',
-          en: '# HagiCode\n\n- Unified the main Code Server entry flow.\n',
-        },
+        bodies: Object.fromEntries(ALL_LOCALES.map((locale) => [locale, `# HagiCode\n\n- ${locale} release note content for ${tag}.\n`])),
       },
     ],
     skipped: [],
@@ -54,23 +46,26 @@ function createSnapshot(tag = 'v1.0.0') {
 }
 
 async function createRepoWithArtifacts() {
+  const ALL_LOCALES = ['zh-CN', 'en', 'zh-Hant', 'ja-JP', 'ko-KR', 'de-DE', 'fr-FR', 'es-ES', 'pt-BR', 'ru-RU'];
   const repoRoot = await mkdtemp(path.join(process.env.TMPDIR ?? '/tmp', 'docs-release-notes-output-'));
   const config = resolveReleaseNotesConfig({ repoRoot });
   const snapshot = createSnapshot('v1.0.0');
   await materializeReleaseNotes({ snapshot, config });
 
   const distDir = path.join(repoRoot, 'dist');
-  const zhArtifact = path.join(distDir, 'release-notes', 'index.html');
-  const enArtifact = path.join(distDir, 'en', 'release-notes', 'index.html');
-  await fs.promises.mkdir(path.dirname(zhArtifact), { recursive: true });
-  await fs.promises.mkdir(path.dirname(enArtifact), { recursive: true });
-  await writeFile(zhArtifact, '<article><h2 id="v1.0.0">v1.0.0</h2><p>统一了 Code Server 的主要入口。</p></article>', 'utf8');
-  await writeFile(enArtifact, '<article><h2 id="v1.0.0">v1.0.0</h2><p>Unified the main Code Server entry flow.</p></article>', 'utf8');
+  const artifacts = {};
+  for (const locale of ALL_LOCALES) {
+    const localeDir = locale === 'zh-CN' ? 'release-notes' : `${locale}/release-notes`;
+    const artifactPath = path.join(distDir, localeDir, 'index.html');
+    await fs.promises.mkdir(path.dirname(artifactPath), { recursive: true });
+    await writeFile(artifactPath, `<article><h2 id="v1.0.0">v1.0.0</h2><p>${locale} summary for v1.0.0.</p></article>`, 'utf8');
+    artifacts[locale] = artifactPath;
+  }
 
-  return { repoRoot, zhArtifact, enArtifact };
+  return { repoRoot, artifacts };
 }
 
-test('release-notes output verification accepts zh-CN and en artifacts that keep latest content', async () => {
+test('release-notes output verification accepts all locale artifacts that keep latest content', async () => {
   const { repoRoot } = await createRepoWithArtifacts();
 
   const result = verifyReleaseNotesBuildOutput({ docsRoot: repoRoot });
@@ -80,9 +75,9 @@ test('release-notes output verification accepts zh-CN and en artifacts that keep
 });
 
 test('release-notes output verification fails when zh-CN artifact loses synchronized content', async () => {
-  const { repoRoot, zhArtifact } = await createRepoWithArtifacts();
+  const { repoRoot, artifacts } = await createRepoWithArtifacts();
 
-  await writeFile(zhArtifact, '<p>当前语言下还没有可浏览的同步版本。</p>', 'utf8');
+  await writeFile(artifacts['zh-CN'], '<p>当前语言下还没有可浏览的同步版本。</p>', 'utf8');
 
   const result = verifyReleaseNotesBuildOutput({ docsRoot: repoRoot });
 
@@ -91,11 +86,11 @@ test('release-notes output verification fails when zh-CN artifact loses synchron
   assert.match(result.issues.join('\n'), /zh-CN artifact .*rendered the empty state/);
 });
 
-test('release-notes output verification fails when en artifact loses synchronized content', async () => {
-  const { repoRoot, enArtifact } = await createRepoWithArtifacts();
-  const original = await readFile(enArtifact, 'utf8');
+test('release-notes output verification fails when en artifact loses localized summary/body', async () => {
+  const { repoRoot, artifacts } = await createRepoWithArtifacts();
+  const original = await readFile(artifacts.en, 'utf8');
 
-  await writeFile(enArtifact, original.replace('Unified the main Code Server entry flow.', 'Unrelated copy.'), 'utf8');
+  await writeFile(artifacts.en, original.replace('en summary for v1.0.0.', 'Unrelated copy.'), 'utf8');
 
   const result = verifyReleaseNotesBuildOutput({ docsRoot: repoRoot });
 

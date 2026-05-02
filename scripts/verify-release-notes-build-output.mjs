@@ -9,10 +9,26 @@ const DEFAULT_DOCS_ROOT = path.resolve(SCRIPT_DIR, '..');
 const EMPTY_COPY = {
   'zh-CN': '当前语言下还没有可浏览的同步版本',
   en: 'No synchronized release notes are available yet',
+  'zh-Hant': '目前這個語系還沒有可瀏覽的同步版本',
+  'ja-JP': 'この言語では、まだ同期済みのリリースノートを表示できません',
+  'ko-KR': '이 언어에서는 아직 동기화된 릴리스 노트를 볼 수 없습니다',
+  'de-DE': 'Für diese Sprache sind noch keine synchronisierten Release-Notes verfügbar',
+  'fr-FR': 'Aucune note de version synchronisée n\'est encore disponible pour cette langue',
+  'es-ES': 'Todavía no hay notas de versión sincronizadas disponibles para este idioma',
+  'pt-BR': 'Ainda não há notas de versão sincronizadas disponíveis para este idioma',
+  'ru-RU': 'Для этого языка пока нет синхронизированных заметок о релизах',
 };
 const LOCALE_ARTIFACTS = {
   'zh-CN': path.join('release-notes', 'index.html'),
   en: path.join('en', 'release-notes', 'index.html'),
+  'zh-Hant': path.join('zh-Hant', 'release-notes', 'index.html'),
+  'ja-JP': path.join('ja-JP', 'release-notes', 'index.html'),
+  'ko-KR': path.join('ko-KR', 'release-notes', 'index.html'),
+  'de-DE': path.join('de-DE', 'release-notes', 'index.html'),
+  'fr-FR': path.join('fr-FR', 'release-notes', 'index.html'),
+  'es-ES': path.join('es-ES', 'release-notes', 'index.html'),
+  'pt-BR': path.join('pt-BR', 'release-notes', 'index.html'),
+  'ru-RU': path.join('ru-RU', 'release-notes', 'index.html'),
 };
 
 function decodeHtmlEntities(value) {
@@ -126,7 +142,7 @@ function main() {
       return;
     }
 
-    console.log(`[release-notes output] verified latest entry ${result.latestEntry.displayTag ?? result.latestEntry.tag} in zh-CN and en artifacts`);
+    console.log(`[release-notes output] verified latest entry ${result.latestEntry.displayTag ?? result.latestEntry.tag} across ${Object.keys(LOCALE_ARTIFACTS).length} locale artifacts`);
   } catch (error) {
     console.error(error.message);
     process.exitCode = 1;

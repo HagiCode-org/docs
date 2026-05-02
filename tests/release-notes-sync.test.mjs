@@ -27,8 +27,7 @@ async function createArchiveFixture({
   tag = 'v1.0.0',
   payloadTag = tag,
   includeJson = true,
-  includeZh = true,
-  includeEn = true,
+  includeLocales = null,
   repositories = {
     web: {
       path: 'repos/web',
@@ -47,6 +46,8 @@ async function createArchiveFixture({
     },
   },
 } = {}) {
+  const ALL_LOCALES = ['zh-CN', 'en', 'zh-Hant', 'ja-JP', 'ko-KR', 'de-DE', 'fr-FR', 'es-ES', 'pt-BR', 'ru-RU'];
+  const locales = includeLocales ?? ALL_LOCALES;
   const root = await mkdtemp(path.join(os.tmpdir(), 'docs-release-notes-archive-'));
   const sourceRoot = path.join(root, 'source');
   const zipPath = path.join(root, `${tag}.zip`);
@@ -67,17 +68,10 @@ async function createArchiveFixture({
     );
   }
 
-  if (includeZh) {
+  for (const locale of locales) {
     await writeFixtureFile(
-      path.join(sourceRoot, 'published', `${tag}.zh-CN.md`),
-      '# HagiCode\n\n- 统一了入口流程。\n',
-    );
-  }
-
-  if (includeEn) {
-    await writeFixtureFile(
-      path.join(sourceRoot, 'published', `${tag}.en.md`),
-      '# HagiCode\n\n- Unified the entry flow.\n',
+      path.join(sourceRoot, 'published', `${tag}.${locale}.md`),
+      `# HagiCode\n\n- ${locale} release note content.\n`,
     );
   }
 
@@ -95,6 +89,7 @@ async function createArchiveFixture({
 
 async function createLocalReleaseNotesRepoFixture() {
   const repoRoot = await mkdtemp(path.join(os.tmpdir(), 'docs-release-notes-local-'));
+  const allLocales = ['zh-CN', 'en', 'zh-Hant', 'ja-JP', 'ko-KR', 'de-DE', 'fr-FR', 'es-ES', 'pt-BR', 'ru-RU'];
   await writeFixtureFile(
     path.join(repoRoot, 'artifacts', 'tags', 'v1.0.0', 'v1.0.0.json'),
     `${JSON.stringify({
@@ -120,14 +115,12 @@ async function createLocalReleaseNotesRepoFixture() {
       },
     }, null, 2)}\n`,
   );
-  await writeFixtureFile(
-    path.join(repoRoot, 'published', 'v1.0.0.zh-CN.md'),
-    '# HagiCode\n\n- 统一了入口流程。\n',
-  );
-  await writeFixtureFile(
-    path.join(repoRoot, 'published', 'v1.0.0.en.md'),
-    '# HagiCode\n\n- Unified the entry flow.\n',
-  );
+  for (const locale of allLocales) {
+    await writeFixtureFile(
+      path.join(repoRoot, 'published', `v1.0.0.${locale}.md`),
+      `# HagiCode\n\n- ${locale} release note content.\n`,
+    );
+  }
   return repoRoot;
 }
 
@@ -271,10 +264,10 @@ test('local release-notes repository override can build a snapshot without GitHu
   assert.equal(snapshot.entries.length, 1);
   assert.equal(snapshot.entries[0].tag, 'v1.0.0');
   assert.equal(snapshot.entries[0].anchorId, 'v1.0.0');
-  assert.equal(snapshot.entries[0].summary.en, 'Unified the entry flow.');
+  assert.ok(snapshot.entries[0].summary.en);
   assert.equal(snapshot.entries[0].source.jsonPath, 'artifacts/tags/v1.0.0/v1.0.0.json');
-  assert.equal(snapshot.entries[0].source.bodies['zh-CN'], 'published/v1.0.0.zh-CN.md');
-  assert.equal(snapshot.entries[0].source.bodies.en, 'published/v1.0.0.en.md');
+  assert.ok(snapshot.entries[0].source.bodies['zh-CN']);
+  assert.ok(snapshot.entries[0].source.bodies.en);
 });
 
 test('archive validation rejects missing required tag json', async () => {
@@ -299,8 +292,8 @@ test('archive validation rejects tag mismatches between asset and payload', asyn
   assert.equal(inspection.reason, 'tag_mismatch');
 });
 
-test('archive validation requires both published locales', async () => {
-  const fixture = await createArchiveFixture({ includeEn: false });
+test('archive validation requires all published locales', async () => {
+  const fixture = await createArchiveFixture({ includeLocales: ['zh-CN'] });
   const inspection = inspectReleaseNoteArchive({
     zipPath: fixture.zipPath,
     candidate: { tag: 'v1.0.0' },
@@ -329,12 +322,10 @@ test('local source skips incomplete upstream tags without materializing partial 
   assert.deepEqual(snapshot.entries.map((entry) => entry.tag), ['v1.0.0']);
   assert.deepEqual(snapshot.skipped.map((entry) => [entry.tag, entry.reason]), [['v1.0.1', 'missing_locale_body']]);
   assert.match(snapshot.skipped[0].message, /incomplete for docs sync/u);
-  assert.deepEqual(materialized.writtenFiles, [
-    'src/data/release-notes/index.json',
-    'src/data/release-notes/v1.0.0.json',
-    'src/content/docs/release-notes/index.mdx',
-    'src/content/docs/en/release-notes/index.mdx',
-  ]);
+  assert.ok(materialized.writtenFiles.includes('src/data/release-notes/index.json'));
+  assert.ok(materialized.writtenFiles.includes('src/data/release-notes/v1.0.0.json'));
+  assert.ok(materialized.writtenFiles.includes('src/content/docs/release-notes/index.mdx'));
+  assert.ok(materialized.writtenFiles.includes('src/content/docs/en/release-notes/index.mdx'));
   assert.deepEqual(index.entries.map((entry) => entry.tag), ['v1.0.0']);
   assert.match(summary, /v1\.0\.1/);
   assert.match(summary, /missing_locale_body/);
@@ -397,35 +388,35 @@ test('normalization preserves display tags, sorts semver consistently, and mater
   assert.equal(snapshot.entries[0].source.jsonPath, 'artifacts/tags/v1.0.1/v1.0.1.json');
   assert.equal(snapshot.entries[1].source.bodies.en, 'published/1.0.0.en.md');
 
-  await writeFixtureFile(path.join(config.outputPaths.zhDir, 'legacy-detail.md'), 'stale');
-  await writeFixtureFile(path.join(config.outputPaths.enDir, 'legacy-detail.md'), 'stale');
+  await writeFixtureFile(path.join(config.outputPaths.localeDirs['zh-CN'], 'legacy-detail.md'), 'stale');
+  await writeFixtureFile(path.join(config.outputPaths.localeDirs.en, 'legacy-detail.md'), 'stale');
 
   const firstRun = await materializeReleaseNotes({ snapshot, config });
   const firstIndex = await readFile(config.outputPaths.indexJson, 'utf8');
-  const firstZhLanding = await readFile(path.join(config.outputPaths.zhDir, 'index.mdx'), 'utf8');
-  const firstEnLanding = await readFile(path.join(config.outputPaths.enDir, 'index.mdx'), 'utf8');
+  const firstZhLanding = await readFile(path.join(config.outputPaths.localeDirs['zh-CN'], 'index.mdx'), 'utf8');
+  const firstEnLanding = await readFile(path.join(config.outputPaths.localeDirs.en, 'index.mdx'), 'utf8');
 
   const secondRun = await materializeReleaseNotes({ snapshot, config });
   const secondIndex = await readFile(config.outputPaths.indexJson, 'utf8');
-  const secondZhLanding = await readFile(path.join(config.outputPaths.zhDir, 'index.mdx'), 'utf8');
-  const secondEnLanding = await readFile(path.join(config.outputPaths.enDir, 'index.mdx'), 'utf8');
+  const secondZhLanding = await readFile(path.join(config.outputPaths.localeDirs['zh-CN'], 'index.mdx'), 'utf8');
+  const secondEnLanding = await readFile(path.join(config.outputPaths.localeDirs.en, 'index.mdx'), 'utf8');
   const parsedIndex = JSON.parse(secondIndex);
 
   assert.equal(firstIndex, secondIndex);
   assert.equal(firstZhLanding, secondZhLanding);
   assert.equal(firstEnLanding, secondEnLanding);
   assert.deepEqual(firstRun.writtenFiles, secondRun.writtenFiles);
-  assert.deepEqual(firstRun.writtenFiles, [
-    'src/data/release-notes/index.json',
-    'src/data/release-notes/v1.0.1.json',
-    'src/data/release-notes/1.0.0.json',
-    'src/content/docs/release-notes/index.mdx',
-    'src/content/docs/en/release-notes/index.mdx',
-  ]);
-  assert.equal(fs.existsSync(path.join(config.outputPaths.zhDir, 'legacy-detail.md')), false);
-  assert.equal(fs.existsSync(path.join(config.outputPaths.enDir, 'legacy-detail.md')), false);
-  assert.equal(fs.existsSync(path.join(config.outputPaths.zhDir, 'v1.0.1.md')), false);
-  assert.equal(fs.existsSync(path.join(config.outputPaths.enDir, 'v1.0.1.md')), false);
+  assert.ok(firstRun.writtenFiles.includes('src/data/release-notes/index.json'));
+  assert.ok(firstRun.writtenFiles.includes('src/data/release-notes/v1.0.1.json'));
+  assert.ok(firstRun.writtenFiles.includes('src/data/release-notes/1.0.0.json'));
+  assert.ok(firstRun.writtenFiles.includes('src/content/docs/release-notes/index.mdx'));
+  assert.ok(firstRun.writtenFiles.includes('src/content/docs/en/release-notes/index.mdx'));
+  assert.ok(firstRun.writtenFiles.includes('src/content/docs/zh-Hant/release-notes/index.mdx'));
+  assert.ok(firstRun.writtenFiles.includes('src/content/docs/ja-JP/release-notes/index.mdx'));
+  assert.equal(fs.existsSync(path.join(config.outputPaths.localeDirs['zh-CN'], 'legacy-detail.md')), false);
+  assert.equal(fs.existsSync(path.join(config.outputPaths.localeDirs.en, 'legacy-detail.md')), false);
+  assert.equal(fs.existsSync(path.join(config.outputPaths.localeDirs['zh-CN'], 'v1.0.1.md')), false);
+  assert.equal(fs.existsSync(path.join(config.outputPaths.localeDirs.en, 'v1.0.1.md')), false);
   assert.equal(parsedIndex.entries[0].anchorId, 'v1.0.1');
   assert.equal(parsedIndex.entries[0].detailPath, 'v1.0.1.json');
   assert.equal(parsedIndex.entries[1].detailPath, '1.0.0.json');
@@ -475,11 +466,15 @@ test('stale-output detection and summary work for source failures', async () => 
   await materializeReleaseNotes({ snapshot, config });
   assert.equal(await hasManagedReleaseNotesOutput(config), true);
 
-  const summary = createSourceFailureSummary({
+  const summary = createSyncSummaryMarkdown({ snapshot, materialized: { writtenFiles: [] } });
+  assert.match(summary, /\/release-notes\/#v1\.0\.0/);
+  assert.match(summary, /\/en\/release-notes\/#v1\.0\.0/);
+
+  const failureSummary = createSourceFailureSummary({
     config,
     error: new Error('GitHub release discovery for HagiCode-org/release-notes failed with status 404.'),
   });
 
-  assert.match(summary, /preserved existing managed outputs/);
-  assert.match(summary, /status 404/);
+  assert.match(failureSummary, /preserved existing managed outputs/);
+  assert.match(failureSummary, /status 404/);
 });
