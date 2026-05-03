@@ -115,6 +115,7 @@ describe('docs locale helpers', () => {
 
   it.each([
     ['/en-US/product-overview/', '/en-US/product-overview/'],
+    ['/en/en-US/product-overview/', '/en-US/product-overview/'],
     ['/en-US/ja-JP/product-overview/', '/ja-JP/product-overview/'],
     ['/zh-CN/product-overview/', '/product-overview/'],
     ['/ja/product-overview/', '/ja-JP/product-overview/'],
