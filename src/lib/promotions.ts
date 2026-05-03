@@ -382,7 +382,7 @@ export function mapDocsLocaleToPromoteLocale(locale: string | null | undefined):
     return 'zh';
   }
 
-  if (docsLocale === 'en') {
+  if (docsLocale === 'en-US') {
     return 'en';
   }
 
@@ -424,7 +424,7 @@ function normalizePromoteContentLocale(locale: string | null | undefined): Promo
     return 'zh-CN';
   }
 
-  if (docsLocale === 'en') {
+  if (docsLocale === 'en-US') {
     return 'en-US';
   }
 

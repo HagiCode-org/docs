@@ -521,6 +521,11 @@ export class DocsPromoteBannerController {
       slide.setAttribute('aria-hidden', isActive ? 'false' : 'true');
       slide.dataset.active = isActive ? 'true' : 'false';
       slide.tabIndex = isActive ? 0 : -1;
+      if (isActive) {
+        slide.removeAttribute('inert');
+      } else {
+        slide.setAttribute('inert', '');
+      }
     });
 
     this.track.style.transform = `translate3d(-${this.currentIndex * 100}%, 0, 0)`;

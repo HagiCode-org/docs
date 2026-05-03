@@ -26,7 +26,7 @@ const DOCS_PROMOTE_FALLBACKS: Record<PromoteLocale, DocsPromoteFallbackConfig> =
     title: 'Explore the HagiCode Product Overview',
     description: 'Open the docs entry for product capabilities, editions, and setup paths.',
     ctaLabel: 'Open Docs',
-    link: '/en/product-overview/',
+    link: '/en-US/product-overview/',
   },
 };
 

@@ -120,7 +120,7 @@ function createFetchMock(promotions: Array<{
 
 function renderBannerShell({
   locale = 'en',
-  path = '/en/product-overview/',
+  path = '/en-US/product-overview/',
 }: {
   locale?: string;
   path?: string;
@@ -148,7 +148,7 @@ function renderBannerShell({
           <div data-promote-banner-spacer></div>
           <section data-promote-banner-shell hidden>
             <div class="docs-promote-banner__inner">
-              <button type="button" data-promote-banner-close aria-label="${labels.close}">×</button>
+              <button type="button" class="docs-promote-banner__close" data-promote-banner-close aria-label="${labels.close}">×</button>
               <div class="docs-promote-banner__body">
                 <div class="docs-promote-banner__viewport">
                   <div data-promote-banner-track></div>
@@ -299,7 +299,7 @@ describe('DocsPromoteBannerController', () => {
     vi.stubGlobal('matchMedia', vi.fn(() => matchMedia));
     const { footer, root } = renderBannerShell({
       locale: 'en',
-      path: '/en/product-overview/',
+      path: '/en-US/product-overview/',
     });
 
     const controller = new DocsPromoteBannerController(root, {
@@ -332,6 +332,7 @@ describe('DocsPromoteBannerController', () => {
     expect(getActiveSlideTitle(root)).toBe('Wishlist Now');
     expect(screen.getByText('Coming April 29, 2026. Add to your Steam wishlist now!')).toBeInTheDocument();
     expect(screen.getByText('Steam')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Dismiss promotion message' })).toBeInTheDocument();
     const promoImage = root.querySelector<HTMLImageElement>('.docs-promote-banner__image');
     expect(promoImage).not.toBeNull();
     expect(promoImage).toHaveAttribute('src', 'https://index.hagicode.com/images/promotions/main-game.webp');
@@ -344,7 +345,7 @@ describe('DocsPromoteBannerController', () => {
     vi.stubGlobal('matchMedia', vi.fn(() => matchMedia));
     const { footer, root, shell } = renderBannerShell({
       locale: 'en',
-      path: '/en/guides/skills/',
+      path: '/en-US/guides/skills/',
     });
 
     const fetchMock = vi.fn(async () => {
@@ -389,7 +390,7 @@ describe('DocsPromoteBannerController', () => {
     vi.stubGlobal('matchMedia', vi.fn(() => matchMedia));
     const { footer, root } = renderBannerShell({
       locale: 'en',
-      path: '/en/product-overview/',
+      path: '/en-US/product-overview/',
     });
 
     const controller = new DocsPromoteBannerController(root, {
@@ -401,6 +402,7 @@ describe('DocsPromoteBannerController', () => {
     await controller.connect();
     fireEvent.click(screen.getByRole('button', { name: 'Dismiss promotion message' }));
 
+    expect(window.open).not.toHaveBeenCalled();
     expect(root).toHaveAttribute('hidden');
     expect(root.dataset.state).toBe('dismissed');
 
@@ -421,7 +423,7 @@ describe('DocsPromoteBannerController', () => {
 
     const firstRender = renderBannerShell({
       locale: 'en',
-      path: '/en/product-overview/',
+      path: '/en-US/product-overview/',
     });
     const fallbackController = new DocsPromoteBannerController(firstRender.root, {
       footer: firstRender.footer,
@@ -435,7 +437,7 @@ describe('DocsPromoteBannerController', () => {
 
     const secondRender = renderBannerShell({
       locale: 'en',
-      path: '/en/product-overview/',
+      path: '/en-US/product-overview/',
     });
     const secondController = new DocsPromoteBannerController(secondRender.root, {
       footer: secondRender.footer,
@@ -449,7 +451,7 @@ describe('DocsPromoteBannerController', () => {
 
     const thirdRender = renderBannerShell({
       locale: 'en',
-      path: '/en/product-overview/',
+      path: '/en-US/product-overview/',
     });
     const remoteController = new DocsPromoteBannerController(thirdRender.root, {
       footer: thirdRender.footer,
@@ -480,7 +482,7 @@ describe('DocsPromoteBannerController', () => {
     vi.stubGlobal('matchMedia', vi.fn(() => matchMedia));
     const { footer, root } = renderBannerShell({
       locale: 'en',
-      path: '/en/guides/skills/',
+      path: '/en-US/guides/skills/',
     });
 
     const controller = new DocsPromoteBannerController(root, {
@@ -512,9 +514,15 @@ describe('DocsPromoteBannerController', () => {
 
     expect(root.querySelector('[data-promote-banner-controls]')).not.toHaveAttribute('hidden');
     expect(screen.getByText('1 / 2')).toBeInTheDocument();
+    const slides = root.querySelectorAll<HTMLElement>('.docs-promote-banner__slide');
+    expect(slides).toHaveLength(2);
+    expect(slides[0]).not.toHaveAttribute('inert');
+    expect(slides[1]).toHaveAttribute('inert');
     fireEvent.click(screen.getByRole('button', { name: 'Show next promotion' }));
     expect(getActiveSlideTitle(root)).toBe('Try the Builder');
     expect(screen.getByText('2 / 2')).toBeInTheDocument();
+    expect(slides[0]).toHaveAttribute('inert');
+    expect(slides[1]).not.toHaveAttribute('inert');
   });
 
   it('pauses automatic rotation while footer-hidden and resumes after the footer leaves the viewport', async () => {
@@ -522,7 +530,7 @@ describe('DocsPromoteBannerController', () => {
     vi.stubGlobal('matchMedia', vi.fn(() => matchMedia));
     const { footer, root } = renderBannerShell({
       locale: 'en',
-      path: '/en/guides/skills/',
+      path: '/en-US/guides/skills/',
     });
 
     const controller = new DocsPromoteBannerController(root, {
@@ -576,7 +584,7 @@ describe('DocsPromoteBannerController', () => {
     vi.stubGlobal('matchMedia', vi.fn(() => matchMedia));
     const { footer, root } = renderBannerShell({
       locale: 'en',
-      path: '/en/guides/skills/',
+      path: '/en-US/guides/skills/',
     });
 
     const controller = new DocsPromoteBannerController(root, {

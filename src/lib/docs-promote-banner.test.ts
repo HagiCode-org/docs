@@ -265,7 +265,7 @@ describe('docs promote banner source', () => {
         id: 'docs-product-overview-fallback-en',
         badgeText: 'Docs',
         title: 'Explore the HagiCode Product Overview',
-        link: '/en/product-overview/',
+        link: '/en-US/product-overview/',
         source: 'fallback',
       }),
     ]);
