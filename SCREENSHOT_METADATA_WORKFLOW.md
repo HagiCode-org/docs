@@ -39,12 +39,12 @@ The `screenshot-management-optimization` change uses this existing workflow to a
   - `src/content/docs/installation/desktop.mdx`
   - `src/content/docs/guides/ai-compose-commit.mdx`
   - `src/content/docs/guides/monospecs.mdx`
-  - `src/content/docs/en/quick-start/create-first-project.mdx`
-  - `src/content/docs/en/quick-start/proposal-session.mdx`
-  - `src/content/docs/en/installation/desktop.mdx`
-  - `src/content/docs/en/guides/ai-compose-commit.mdx`
+  - `src/content/docs/en-US/quick-start/create-first-project.mdx`
+  - `src/content/docs/en-US/quick-start/proposal-session.mdx`
+  - `src/content/docs/en-US/installation/desktop.mdx`
+  - `src/content/docs/en-US/guides/ai-compose-commit.mdx`
 - Known exception recorded during inventory:
-  - Historical inventory found one missing legacy source, `img/ai-compose-commit/✓ 处理完成.png`; `src/content/docs/en/guides/ai-compose-commit.mdx` was switched to text-only confirmation instead of keeping a broken image reference
+  - Historical inventory found one missing legacy source, `img/ai-compose-commit/✓ 处理完成.png`; `src/content/docs/en-US/guides/ai-compose-commit.mdx` was switched to text-only confirmation instead of keeping a broken image reference
 - Explicitly out of scope for this backlog pass:
   - `src/content/docs/img/product-overview/**` illustrations, which are managed as static documentation artwork rather than screenshot assets
 

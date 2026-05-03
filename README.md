@@ -83,7 +83,7 @@ npm run i18n:prune:write
 
 ### Content boundary
 
-hagi18n manages docs UI strings, blog plugin UI labels, Starlight locale metadata, and common selector labels. MDX documentation pages and blog posts remain organized through Starlight locale folders: Chinese content lives under `src/content/docs/`, and English content lives under `src/content/docs/en/`.
+hagi18n manages docs UI strings, blog plugin UI labels, Starlight locale metadata, and common selector labels. MDX documentation pages and blog posts remain organized through Starlight locale folders: Chinese content lives under `src/content/docs/`, and English content lives under `src/content/docs/en-US/`.
 
 ## Screenshot analysis workflow
 
@@ -106,7 +106,7 @@ Repository-scoped update detail pages are no longer hosted in this docs site. A 
 
 ## Release-notes sync workflow
 
-The replacement release-notes surface now lives in this repository under `src/content/docs/release-notes/`, `src/content/docs/en/release-notes/`, and the managed `src/data/release-notes/` directory.
+The replacement release-notes surface now lives in this repository under `src/content/docs/release-notes/`, `src/content/docs/en-US/release-notes/`, and the managed `src/data/release-notes/` directory.
 Managed outputs are generated from the authoritative `repos/release-notes` workspace data.
 For monorepo automation, the preferred path is direct repository-to-repository transfer. GitHub Release assets remain only as an optional fallback source for standalone sync jobs. `hagirepocron` is expected to reach this repo only after `release-notes` has produced a complete bilingual published dataset for each tag.
 
@@ -155,7 +155,7 @@ npm run release-notes:sync
 
 - `.github/workflows/release-notes-sync.yml` runs daily and via `workflow_dispatch`.
 - In the monorepo cron path, `hagirepocron` sets `DOCS_RELEASE_NOTES_SOURCE=local` and passes the sibling `release-notes` checkout root, so docs no longer depends on published release assets to materialize pages.
-- Docs-managed output now uses `src/data/release-notes/index.json` plus `src/data/release-notes/<tag>.json`, together with `src/content/docs/release-notes/index.mdx` and `src/content/docs/en/release-notes/index.mdx`.
+- Docs-managed output now uses `src/data/release-notes/index.json` plus `src/data/release-notes/<tag>.json`, together with `src/content/docs/release-notes/index.mdx` and `src/content/docs/en-US/release-notes/index.mdx`.
 - The lightweight index keeps browse metadata only; detailed rendered bodies live in the per-tag JSON files generated inside this repository.
 - Incomplete upstream tags must not create partial detail files or extra docs routes.
 - `npm run build` runs release-notes input verification before Astro and output verification after Astro. Empty release-notes pages are valid only when `src/data/release-notes/index.json` has zero entries; if entries exist, missing detail JSON, missing localized body HTML, missing anchors, or empty-state output must fail the build.

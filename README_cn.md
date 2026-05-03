@@ -83,7 +83,7 @@ npm run i18n:prune:write
 
 ### 内容边界
 
-hagi18n 只管理 docs UI 文案、博客插件 UI 标签、Starlight locale metadata 和通用语言选择器标签。MDX 文档页与博客正文仍由 Starlight locale 文件夹组织：中文内容位于 `src/content/docs/`，英文内容位于 `src/content/docs/en/`。
+hagi18n 只管理 docs UI 文案、博客插件 UI 标签、Starlight locale metadata 和通用语言选择器标签。MDX 文档页与博客正文仍由 Starlight locale 文件夹组织：中文内容位于 `src/content/docs/`，英文内容位于 `src/content/docs/en-US/`。
 
 ## 截图分析工作流
 
@@ -111,11 +111,11 @@ Desktop 下载数据在运行时直接读取 `repos/index` 发布的 canonical i
 - `src/data/release-notes/index.json`
 - `src/data/release-notes/<tag>.json`
 - `src/content/docs/release-notes/index.mdx`
-- `src/content/docs/en/release-notes/index.mdx`
+- `src/content/docs/en-US/release-notes/index.mdx`
 
 这些文件统一从权威的 `repos/release-notes` 工作区数据生成。
-同步结果不再生成 `src/content/docs/release-notes/<tag>.md` 或 `src/content/docs/en/release-notes/<tag>.md` 这类按 tag 拆分的详情页。
-版本级深链现在统一改为 landing 页面锚点，例如 `/release-notes/#v0.1.0-beta.46` 与 `/en/release-notes/#v0.1.0-beta.46`。
+同步结果不再生成 `src/content/docs/release-notes/<tag>.md` 或 `src/content/docs/en-US/release-notes/<tag>.md` 这类按 tag 拆分的详情页。
+版本级深链现在统一改为 landing 页面锚点，例如 `/release-notes/#v0.1.0-beta.46` 与 `/en-US/release-notes/#v0.1.0-beta.46`。
 对于 monorepo 内的自动化，首选路径是仓库到仓库的直接转移；GitHub Release asset 只保留为无本地 checkout 时的可选 fallback source。
 
 ### 常用命令
@@ -168,7 +168,7 @@ npm run release-notes:sync
 - 工作流优先使用 `DOCS_RELEASE_NOTES_TOKEN` 访问上游 GitHub API；只有当当前仓库默认 `GITHUB_TOKEN` 本身就具备跨仓库可见性时，才会回退到它。
 - 在 CI 中，`DOCS_RELEASE_NOTES_ALLOW_STALE_ON_SOURCE_ERROR=true` 会在上游仓库暂时不可访问、但当前受管输出已存在时保留现状并继续通过工作流。
 - 同步脚本除 Node.js 之外，还依赖系统自带的 `zip` 与 `unzip` 工具。
-- 如果历史同步曾留下 `src/content/docs/release-notes/*.md` 或 `src/content/docs/en/release-notes/*.md`，重新运行 `npm run release-notes:sync` 会自动清理这些旧的受管详情页。
+- 如果历史同步曾留下 `src/content/docs/release-notes/*.md` 或 `src/content/docs/en-US/release-notes/*.md`，重新运行 `npm run release-notes:sync` 会自动清理这些旧的受管详情页。
 - 如果需要排查“为什么页面仍然像旧的多路由模式”，先确认 `src/data/release-notes/index.json` 中是否已经移除了 `routes` 字段、为每个条目生成 `anchorId`，并且 `src/data/release-notes/<tag>.json` 已正确写出详情 HTML。
 - 如果 local 模式下同步日志里出现 skipped tags，优先检查 `release-notes` 源文件；如果是 GitHub 模式，再检查上游 Release asset。
 - 如果 release discovery 返回 `404`，优先按认证或仓库访问问题排查，并确认 `DOCS_RELEASE_NOTES_TOKEN` 是否能读取 `HagiCode-org/release-notes`。
