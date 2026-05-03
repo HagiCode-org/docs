@@ -77,11 +77,11 @@ const runtime = {
             "htmlLang": "zh-Hant",
             "direction": "ltr"
           },
-          "en": {
+          "en-US": {
             "sourceLocale": "en-US",
-            "routeLocale": "en",
+            "routeLocale": "en-US",
             "label": "English",
-            "lang": "en",
+            "lang": "en-US",
             "htmlLang": "en-US",
             "direction": "ltr"
           },
@@ -146,8 +146,8 @@ const runtime = {
           "zh": "root",
           "zh-CN": "root",
           "root": "root",
-          "en": "en",
-          "en-US": "en",
+          "en": "en-US",
+          "en-US": "en-US",
           "zh-Hant": "zh-Hant",
           "zh-TW": "zh-Hant",
           "zh-HK": "zh-Hant",
@@ -256,11 +256,11 @@ const runtime = {
             "htmlLang": "zh-Hant",
             "direction": "ltr"
           },
-          "en": {
+          "en-US": {
             "sourceLocale": "en-US",
-            "routeLocale": "en",
+            "routeLocale": "en-US",
             "label": "English",
-            "lang": "en",
+            "lang": "en-US",
             "htmlLang": "en-US",
             "direction": "ltr"
           },
@@ -325,8 +325,8 @@ const runtime = {
           "zh": "root",
           "zh-CN": "root",
           "root": "root",
-          "en": "en",
-          "en-US": "en",
+          "en": "en-US",
+          "en-US": "en-US",
           "zh-Hant": "zh-Hant",
           "zh-TW": "zh-Hant",
           "zh-HK": "zh-Hant",
@@ -435,11 +435,11 @@ const runtime = {
             "htmlLang": "zh-Hant",
             "direction": "ltr"
           },
-          "en": {
+          "en-US": {
             "sourceLocale": "en-US",
-            "routeLocale": "en",
+            "routeLocale": "en-US",
             "label": "English",
-            "lang": "en",
+            "lang": "en-US",
             "htmlLang": "en-US",
             "direction": "ltr"
           },
@@ -504,8 +504,8 @@ const runtime = {
           "zh": "root",
           "zh-CN": "root",
           "root": "root",
-          "en": "en",
-          "en-US": "en",
+          "en": "en-US",
+          "en-US": "en-US",
           "zh-Hant": "zh-Hant",
           "zh-TW": "zh-Hant",
           "zh-HK": "zh-Hant",
@@ -614,11 +614,11 @@ const runtime = {
             "htmlLang": "zh-Hant",
             "direction": "ltr"
           },
-          "en": {
+          "en-US": {
             "sourceLocale": "en-US",
-            "routeLocale": "en",
+            "routeLocale": "en-US",
             "label": "English",
-            "lang": "en",
+            "lang": "en-US",
             "htmlLang": "en-US",
             "direction": "ltr"
           },
@@ -683,8 +683,8 @@ const runtime = {
           "zh": "root",
           "zh-CN": "root",
           "root": "root",
-          "en": "en",
-          "en-US": "en",
+          "en": "en-US",
+          "en-US": "en-US",
           "zh-Hant": "zh-Hant",
           "zh-TW": "zh-Hant",
           "zh-HK": "zh-Hant",
@@ -793,11 +793,11 @@ const runtime = {
             "htmlLang": "zh-Hant",
             "direction": "ltr"
           },
-          "en": {
+          "en-US": {
             "sourceLocale": "en-US",
-            "routeLocale": "en",
+            "routeLocale": "en-US",
             "label": "English",
-            "lang": "en",
+            "lang": "en-US",
             "htmlLang": "en-US",
             "direction": "ltr"
           },
@@ -862,8 +862,8 @@ const runtime = {
           "zh": "root",
           "zh-CN": "root",
           "root": "root",
-          "en": "en",
-          "en-US": "en",
+          "en": "en-US",
+          "en-US": "en-US",
           "zh-Hant": "zh-Hant",
           "zh-TW": "zh-Hant",
           "zh-HK": "zh-Hant",
@@ -972,11 +972,11 @@ const runtime = {
             "htmlLang": "zh-Hant",
             "direction": "ltr"
           },
-          "en": {
+          "en-US": {
             "sourceLocale": "en-US",
-            "routeLocale": "en",
+            "routeLocale": "en-US",
             "label": "English",
-            "lang": "en",
+            "lang": "en-US",
             "htmlLang": "en-US",
             "direction": "ltr"
           },
@@ -1041,8 +1041,8 @@ const runtime = {
           "zh": "root",
           "zh-CN": "root",
           "root": "root",
-          "en": "en",
-          "en-US": "en",
+          "en": "en-US",
+          "en-US": "en-US",
           "zh-Hant": "zh-Hant",
           "zh-TW": "zh-Hant",
           "zh-HK": "zh-Hant",
@@ -1151,11 +1151,11 @@ const runtime = {
             "htmlLang": "zh-Hant",
             "direction": "ltr"
           },
-          "en": {
+          "en-US": {
             "sourceLocale": "en-US",
-            "routeLocale": "en",
+            "routeLocale": "en-US",
             "label": "English",
-            "lang": "en",
+            "lang": "en-US",
             "htmlLang": "en-US",
             "direction": "ltr"
           },
@@ -1220,8 +1220,8 @@ const runtime = {
           "zh": "root",
           "zh-CN": "root",
           "root": "root",
-          "en": "en",
-          "en-US": "en",
+          "en": "en-US",
+          "en-US": "en-US",
           "zh-Hant": "zh-Hant",
           "zh-TW": "zh-Hant",
           "zh-HK": "zh-Hant",
@@ -1330,11 +1330,11 @@ const runtime = {
             "htmlLang": "zh-Hant",
             "direction": "ltr"
           },
-          "en": {
+          "en-US": {
             "sourceLocale": "en-US",
-            "routeLocale": "en",
+            "routeLocale": "en-US",
             "label": "English",
-            "lang": "en",
+            "lang": "en-US",
             "htmlLang": "en-US",
             "direction": "ltr"
           },
@@ -1399,8 +1399,8 @@ const runtime = {
           "zh": "root",
           "zh-CN": "root",
           "root": "root",
-          "en": "en",
-          "en-US": "en",
+          "en": "en-US",
+          "en-US": "en-US",
           "zh-Hant": "zh-Hant",
           "zh-TW": "zh-Hant",
           "zh-HK": "zh-Hant",
@@ -1509,11 +1509,11 @@ const runtime = {
             "htmlLang": "zh-Hant",
             "direction": "ltr"
           },
-          "en": {
+          "en-US": {
             "sourceLocale": "en-US",
-            "routeLocale": "en",
+            "routeLocale": "en-US",
             "label": "English",
-            "lang": "en",
+            "lang": "en-US",
             "htmlLang": "en-US",
             "direction": "ltr"
           },
@@ -1578,8 +1578,8 @@ const runtime = {
           "zh": "root",
           "zh-CN": "root",
           "root": "root",
-          "en": "en",
-          "en-US": "en",
+          "en": "en-US",
+          "en-US": "en-US",
           "zh-Hant": "zh-Hant",
           "zh-TW": "zh-Hant",
           "zh-HK": "zh-Hant",
@@ -1688,11 +1688,11 @@ const runtime = {
             "htmlLang": "zh-Hant",
             "direction": "ltr"
           },
-          "en": {
+          "en-US": {
             "sourceLocale": "en-US",
-            "routeLocale": "en",
+            "routeLocale": "en-US",
             "label": "English",
-            "lang": "en",
+            "lang": "en-US",
             "htmlLang": "en-US",
             "direction": "ltr"
           },
@@ -1757,8 +1757,8 @@ const runtime = {
           "zh": "root",
           "zh-CN": "root",
           "root": "root",
-          "en": "en",
-          "en-US": "en",
+          "en": "en-US",
+          "en-US": "en-US",
           "zh-Hant": "zh-Hant",
           "zh-TW": "zh-Hant",
           "zh-HK": "zh-Hant",
@@ -1801,9 +1801,9 @@ const runtime = {
       "label": "繁體中文",
       "lang": "zh-Hant"
     },
-    "en": {
+    "en-US": {
       "label": "English",
-      "lang": "en"
+      "lang": "en-US"
     },
     "ja-JP": {
       "label": "日本語",
@@ -1852,10 +1852,10 @@ const runtime = {
       "direction": "ltr"
     },
     {
-      "code": "en",
+      "code": "en-US",
       "sourceLocale": "en-US",
       "label": "English",
-      "lang": "en",
+      "lang": "en-US",
       "htmlLang": "en-US",
       "direction": "ltr"
     },

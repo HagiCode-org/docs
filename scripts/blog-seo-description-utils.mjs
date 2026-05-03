@@ -10,7 +10,7 @@ export const blogLocaleConfigs = [
   {
     locale: 'en',
     label: 'en-US',
-    relativeDir: 'src/content/docs/en/blog',
+    relativeDir: 'src/content/docs/en-US/blog',
   },
 ];
 

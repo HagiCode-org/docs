@@ -104,20 +104,20 @@ function evaluateEntryScript(scriptContent, href, storedRouteValue = null, navig
 
 test('release-notes helper flags only landing routes without confusing other docs pages', () => {
   assert.equal(isReleaseNotesRoutePath('/release-notes/'), true);
-  assert.equal(isReleaseNotesRoutePath('/en/release-notes/'), true);
+  assert.equal(isReleaseNotesRoutePath('/en-US/release-notes/'), true);
   assert.equal(isReleaseNotesRoutePath('/release-notes/v1.0.0/'), false);
-  assert.equal(isReleaseNotesRoutePath('/en/release-notes/v1.0.0/'), false);
+  assert.equal(isReleaseNotesRoutePath('/en-US/release-notes/v1.0.0/'), false);
   assert.equal(isReleaseNotesRoutePath('/product-overview/'), false);
 });
 
 test('release-notes landing follows saved preference and allows explicit ?lang switches', () => {
   const rooted = resolveDocsLandingRoute(
     new URL('https://docs.hagicode.com/release-notes/'),
-    JSON.stringify({ lang: 'en' }),
+    JSON.stringify({ lang: 'en-US' }),
     ['en-US', 'en'],
   );
-  assert.equal(rooted.resolvedLocale, 'en');
-  assert.equal(rooted.targetUrl, 'https://docs.hagicode.com/en/release-notes/');
+  assert.equal(rooted.resolvedLocale, 'en-US');
+  assert.equal(rooted.targetUrl, 'https://docs.hagicode.com/en-US/release-notes/');
   assert.equal(rooted.shouldRedirect, true);
 
   const anchoredLanding = resolveDocsLandingRoute(
@@ -134,13 +134,13 @@ test('release-notes landing follows saved preference and allows explicit ?lang s
     JSON.stringify({ lang: 'root' }),
     ['zh-CN', 'zh'],
   );
-  assert.equal(switchLandingToEnglish.resolvedLocale, 'en');
-  assert.equal(switchLandingToEnglish.targetUrl, 'https://docs.hagicode.com/en/release-notes/#v1.0.0');
+  assert.equal(switchLandingToEnglish.resolvedLocale, 'en-US');
+  assert.equal(switchLandingToEnglish.targetUrl, 'https://docs.hagicode.com/en-US/release-notes/#v1.0.0');
   assert.equal(switchLandingToEnglish.shouldRedirect, true);
 
   const switchToChinese = resolveDocsLandingRoute(
-    new URL('https://docs.hagicode.com/en/release-notes/?lang=zh-CN#v1.0.0'),
-    JSON.stringify({ lang: 'en' }),
+    new URL('https://docs.hagicode.com/en-US/release-notes/?lang=zh-CN#v1.0.0'),
+    JSON.stringify({ lang: 'en-US' }),
     ['en-US', 'en'],
   );
   assert.equal(switchToChinese.resolvedLocale, 'root');
@@ -155,19 +155,19 @@ test('public lang-redirect script redirects release-notes routes by saved or exp
   const rootChinese = evaluateEntryScript(
     scriptContent,
     'https://docs.hagicode.com/release-notes/',
-    JSON.stringify({ lang: 'en' }),
+    JSON.stringify({ lang: 'en-US' }),
     {
       language: 'en-US',
       languages: ['en-US', 'en'],
     },
   );
-  assert.equal(rootChinese.api.lastResolution.resolvedLocale, 'en');
-  assert.equal(rootChinese.finalUrl, 'https://docs.hagicode.com/en/release-notes/');
+  assert.equal(rootChinese.api.lastResolution.resolvedLocale, 'en-US');
+  assert.equal(rootChinese.finalUrl, 'https://docs.hagicode.com/en-US/release-notes/');
   assert.equal(rootChinese.api.lastResolution.shouldRedirect, true);
 
   const english = evaluateEntryScript(
     scriptContent,
-    'https://docs.hagicode.com/en/release-notes/',
+    'https://docs.hagicode.com/en-US/release-notes/',
     JSON.stringify({ lang: 'root' }),
     {
       language: 'zh-CN',
@@ -180,8 +180,8 @@ test('public lang-redirect script redirects release-notes routes by saved or exp
 
   const storedLocaleSwitch = evaluateEntryScript(
     scriptContent,
-    'https://docs.hagicode.com/en/release-notes/?lang=zh-CN',
-    JSON.stringify({ lang: 'en' }),
+    'https://docs.hagicode.com/en-US/release-notes/?lang=zh-CN',
+    JSON.stringify({ lang: 'en-US' }),
     {
       language: 'en-US',
       languages: ['en-US', 'en'],

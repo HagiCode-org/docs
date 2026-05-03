@@ -358,7 +358,7 @@ export function resolveReleaseNotesConfig({ repoRoot = DEFAULT_DOCS_REPO_ROOT, e
       legacyIndexJson: path.join(resolvedRoot, 'src', 'data', 'release-notes.index.json'),
       localeDirs: {
         'zh-CN': path.join(resolvedRoot, 'src', 'content', 'docs', 'release-notes'),
-        en: path.join(resolvedRoot, 'src', 'content', 'docs', 'en', 'release-notes'),
+        en: path.join(resolvedRoot, 'src', 'content', 'docs', 'en-US', 'release-notes'),
         'zh-Hant': path.join(resolvedRoot, 'src', 'content', 'docs', 'zh-Hant', 'release-notes'),
         'ja-JP': path.join(resolvedRoot, 'src', 'content', 'docs', 'ja-JP', 'release-notes'),
         'ko-KR': path.join(resolvedRoot, 'src', 'content', 'docs', 'ko-KR', 'release-notes'),
@@ -744,6 +744,7 @@ const LANDING_DESCRIPTIONS = {
 function createLandingPageContent(locale) {
   const title = LANDING_TITLES[locale] ?? LANDING_TITLES.en;
   const description = LANDING_DESCRIPTIONS[locale] ?? LANDING_DESCRIPTIONS.en;
+  const routeLocale = locale === 'en' ? 'en-US' : locale;
 
   return `---
 title: ${escapeYamlString(title)}
@@ -752,7 +753,7 @@ description: ${escapeYamlString(description)}
 
 import ReleaseNotesLanding from '@/components/ReleaseNotesLanding.astro';
 
-<ReleaseNotesLanding locale=${escapeYamlString(locale)} />
+<ReleaseNotesLanding locale=${escapeYamlString(routeLocale)} />
 `;
 }
 
@@ -961,7 +962,7 @@ export function createSyncSummaryMarkdown({ snapshot, materialized }) {
     for (const entry of snapshot.entries) {
       const anchorId = entry.anchorId ?? normalizeReleaseNotesAnchorId(entry.tag);
       const routes = RELEASE_NOTES_LOCALES
-        .map((locale) => `/${locale === 'zh-CN' ? '' : `${locale}/`}release-notes/#${anchorId}`)
+        .map((locale) => `/${locale === 'zh-CN' ? '' : `${locale === 'en' ? 'en-US' : locale}/`}release-notes/#${anchorId}`)
         .join(' | ');
       lines.push(`- \`${entry.tag}\` -> ${routes}`);
     }

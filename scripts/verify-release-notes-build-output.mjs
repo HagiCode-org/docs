@@ -20,7 +20,7 @@ const EMPTY_COPY = {
 };
 const LOCALE_ARTIFACTS = {
   'zh-CN': path.join('release-notes', 'index.html'),
-  en: path.join('en', 'release-notes', 'index.html'),
+  en: path.join('en-US', 'release-notes', 'index.html'),
   'zh-Hant': path.join('zh-Hant', 'release-notes', 'index.html'),
   'ja-JP': path.join('ja-JP', 'release-notes', 'index.html'),
   'ko-KR': path.join('ko-KR', 'release-notes', 'index.html'),

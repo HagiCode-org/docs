@@ -4,11 +4,11 @@
   }
 
   var DOCS_LANGUAGE_STORAGE_KEY = 'starlight-route';
-  var DEFAULT_DOCS_ENTRY_LOCALE = 'en';
+  var DEFAULT_DOCS_ENTRY_LOCALE = 'en-US';
 
-  var LOCALE_ROUTES = ['root', 'en', 'zh-Hant', 'ja-JP', 'ko-KR', 'de-DE', 'fr-FR', 'es-ES', 'pt-BR', 'ru-RU'];
+  var LOCALE_ROUTES = ['root', 'en-US', 'zh-Hant', 'ja-JP', 'ko-KR', 'de-DE', 'fr-FR', 'es-ES', 'pt-BR', 'ru-RU'];
   var LOCALE_ALIASES = {
-    'en': 'en', 'en-us': 'en', 'en-gb': 'en', 'en-au': 'en', 'en-ca': 'en',
+    'en': 'en-US', 'en-us': 'en-US', 'en-gb': 'en-US', 'en-au': 'en-US', 'en-ca': 'en-US',
     'root': 'root', 'zh': 'root', 'zh-cn': 'root', 'zh-hans': 'root', 'zh-hans-cn': 'root',
     'zh-hant': 'zh-Hant', 'zh-tw': 'zh-Hant', 'zh-hk': 'zh-Hant', 'zh-hant-tw': 'zh-Hant', 'zh-hant-hk': 'zh-Hant',
     'ja': 'ja-JP', 'ja-jp': 'ja-JP',
@@ -48,29 +48,55 @@
     return url.searchParams.get('lang');
   }
 
+  function consumeLeadingDocsLocaleSegments(pathname) {
+    var normalized = pathname && pathname.charAt(0) === '/' ? pathname : '/' + (pathname || '');
+    var remaining = normalized || '/';
+    var resolvedLocale = null;
+
+    while (remaining.charAt(0) === '/') {
+      var match = remaining.match(/^\/([^/]+)(?=\/|$)/);
+      if (!match) {
+        break;
+      }
+
+      var matchedLocale = parseDocsLocale(match[1]);
+      if (!matchedLocale) {
+        break;
+      }
+
+      resolvedLocale = matchedLocale;
+      remaining = remaining.slice(match[0].length) || '/';
+      if (remaining.charAt(0) !== '/') {
+        remaining = '/' + remaining;
+      }
+    }
+
+    return {
+      locale: resolvedLocale,
+      path: remaining || '/',
+    };
+  }
+
   function stripDocsLocalePrefix(pathname) {
     if (!pathname) {
       return '/';
     }
 
-    var normalized = pathname.charAt(0) === '/' ? pathname : '/' + pathname;
+    return consumeLeadingDocsLocaleSegments(pathname).path;
+  }
 
-    for (var i = 0; i < LOCALE_ROUTES.length; i++) {
-      var routeLocale = LOCALE_ROUTES[i];
-      if (routeLocale === 'root') {
-        continue;
-      }
-
-      if (normalized === '/' + routeLocale) {
-        return '/';
-      }
-
-      if (normalized.indexOf('/' + routeLocale + '/') === 0) {
-        return normalized.slice(routeLocale.length + 1) || '/';
-      }
+  function normalizeDocsRoutePath(pathname) {
+    if (!pathname) {
+      return '/';
     }
 
-    return normalized;
+    var normalized = pathname.charAt(0) === '/' ? pathname : '/' + pathname;
+    var consumed = consumeLeadingDocsLocaleSegments(normalized);
+    if (!consumed.locale) {
+      return normalized;
+    }
+
+    return buildDocsRoutePath(consumed.locale, consumed.path || '/');
   }
 
   function isLandingRoutePath(pathname) {
@@ -80,8 +106,8 @@
   function buildDocsRoutePath(locale, originalPath) {
     var normalizedPath = stripDocsLocalePrefix(originalPath || '/');
 
-    if (locale === 'en') {
-      return normalizedPath === '/' ? '/en/' : '/en' + normalizedPath;
+    if (locale === 'en-US') {
+      return normalizedPath === '/' ? '/en-US/' : '/en-US' + normalizedPath;
     }
 
     if (locale === 'root') {
@@ -135,11 +161,21 @@
   }
 
   function resolveRouteLocale(requestedLang, storedLocale, clientLanguages) {
+    var currentRouteLocale = arguments.length > 3 ? arguments[3] : 'root';
+    var isLandingPath = arguments.length > 4 ? arguments[4] : false;
+
     if (requestedLang !== null && requestedLang !== undefined) {
       var requestedLocale = parseDocsLocale(requestedLang);
       return {
         locale: requestedLocale || storedLocale || resolveClientDocsLocale(clientLanguages || []) || DEFAULT_DOCS_ENTRY_LOCALE,
         shouldPersist: requestedLocale !== null,
+      };
+    }
+
+    if (!isLandingPath && currentRouteLocale !== 'root' && currentRouteLocale !== 'en-US') {
+      return {
+        locale: currentRouteLocale,
+        shouldPersist: false,
       };
     }
 
@@ -212,17 +248,41 @@
     return targetUrl;
   }
 
+  function getCurrentRouteLocale(pathname) {
+    var match = pathname.match(/^\/([^/]+)(?=\/|$)/);
+    if (!match) {
+      return 'root';
+    }
+
+    return parseDocsLocale(match[1]) || 'root';
+  }
+
   function resolveDocsLandingRoute(currentUrl, storedRouteValue, clientLanguages, landingTargetPath) {
     var requestedLang = parseLangFromUrl(currentUrl);
     var storedLocale = getStoredDocsLocale(storedRouteValue);
     var currentPath = currentUrl.pathname || '/';
-    var landingPath = isLandingRoutePath(currentPath);
-    var resolved = resolveRouteLocale(requestedLang, storedLocale, clientLanguages);
+    var canonicalCurrentPath = normalizeDocsRoutePath(currentPath);
+    var canonicalPath = canonicalCurrentPath === currentPath;
+    var landingPath = isLandingRoutePath(canonicalCurrentPath);
+    var currentRouteLocale = getCurrentRouteLocale(canonicalCurrentPath);
+    var resolved = resolveRouteLocale(
+      requestedLang,
+      storedLocale,
+      clientLanguages,
+      currentRouteLocale,
+      landingPath,
+    );
     var resolvedLocale = resolved.locale;
     var shouldPersist = resolved.shouldPersist;
-    var targetBasePath = landingTargetPath && landingPath ? landingTargetPath : currentPath;
+    var targetBasePath = landingTargetPath && landingPath ? landingTargetPath : canonicalCurrentPath;
     var targetPath = buildDocsRoutePath(resolvedLocale, targetBasePath);
     var targetUrl = buildTargetUrl(currentUrl, targetPath);
+    var shouldHonorResolvedLocale =
+      landingPath ||
+      requestedLang !== null ||
+      !canonicalPath ||
+      currentRouteLocale === 'root' ||
+      currentRouteLocale === 'en-US';
 
     return {
       currentPath: currentPath,
@@ -233,7 +293,7 @@
       storedLocale: storedLocale,
       isLandingPath: landingPath,
       shouldPersist: shouldPersist,
-      shouldRedirect: targetUrl.toString() !== currentUrl.toString() && (landingPath || requestedLang !== null),
+      shouldRedirect: targetUrl.toString() !== currentUrl.toString() && shouldHonorResolvedLocale,
     };
   }
 
@@ -270,6 +330,7 @@
     DEFAULT_DOCS_ENTRY_LOCALE: DEFAULT_DOCS_ENTRY_LOCALE,
     buildDocsRoutePath: buildDocsRoutePath,
     isLandingRoutePath: isLandingRoutePath,
+    normalizeDocsRoutePath: normalizeDocsRoutePath,
     parseDocsLocale: parseDocsLocale,
     resolveDocsLandingRoute: resolveDocsLandingRoute,
     lastResolution: null,

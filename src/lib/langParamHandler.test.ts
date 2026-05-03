@@ -79,18 +79,18 @@ describe('docs language route resolution', () => {
   it('redirects a saved English preference from a Chinese root path', () => {
     const result = route(
       'https://docs.hagicode.com/installation/',
-      JSON.stringify({ lang: 'en' }),
+      JSON.stringify({ lang: 'en-US' }),
       ['zh-CN'],
     );
 
-    expect(result.resolvedLocale).toBe('en');
-    expect(result.targetUrl).toBe('https://docs.hagicode.com/en/installation/');
+    expect(result.resolvedLocale).toBe('en-US');
+    expect(result.targetUrl).toBe('https://docs.hagicode.com/en-US/installation/');
     expect(result.shouldRedirect).toBe(true);
   });
 
   it('redirects a saved Chinese preference from an English path', () => {
     const result = route(
-      'https://docs.hagicode.com/en/installation/',
+      'https://docs.hagicode.com/en-US/installation/',
       JSON.stringify({ lang: 'root' }),
       ['en-US'],
     );
@@ -102,12 +102,12 @@ describe('docs language route resolution', () => {
 
   it('does not redirect when the current path matches the saved locale', () => {
     const result = route(
-      'https://docs.hagicode.com/en/installation/',
-      JSON.stringify({ lang: 'en' }),
+      'https://docs.hagicode.com/en-US/installation/',
+      JSON.stringify({ lang: 'en-US' }),
       ['zh-CN'],
     );
 
-    expect(result.targetUrl).toBe('https://docs.hagicode.com/en/installation/');
+    expect(result.targetUrl).toBe('https://docs.hagicode.com/en-US/installation/');
     expect(result.shouldRedirect).toBe(false);
   });
 
@@ -118,9 +118,9 @@ describe('docs language route resolution', () => {
       ['zh-CN'],
     );
 
-    expect(result.resolvedLocale).toBe('en');
+    expect(result.resolvedLocale).toBe('en-US');
     expect(result.shouldPersist).toBe(true);
-    expect(result.targetUrl).toBe('https://docs.hagicode.com/en/installation/?tab=cli#download');
+    expect(result.targetUrl).toBe('https://docs.hagicode.com/en-US/installation/?tab=cli#download');
   });
 
   it('does not persist an unsupported lang value and falls back to stored preference', () => {
@@ -136,7 +136,7 @@ describe('docs language route resolution', () => {
   });
 
   it('uses browser language when no saved preference exists', () => {
-    const result = route('https://docs.hagicode.com/en/installation/', null, ['zh-CN']);
+    const result = route('https://docs.hagicode.com/en-US/installation/', null, ['zh-CN']);
 
     expect(result.resolvedLocale).toBe('root');
     expect(result.shouldPersist).toBe(true);
@@ -146,18 +146,36 @@ describe('docs language route resolution', () => {
   it('falls back to configured default locale for unsupported browser languages', () => {
     const result = route('https://docs.hagicode.com/installation/', null, ['it-IT']);
 
-    expect(result.resolvedLocale).toBe('en');
+    expect(result.resolvedLocale).toBe('en-US');
     expect(result.shouldPersist).toBe(true);
-    expect(result.targetUrl).toBe('https://docs.hagicode.com/en/installation/');
+    expect(result.targetUrl).toBe('https://docs.hagicode.com/en-US/installation/');
   });
 
   it('uses landing metadata when resolving root and English landing pages', () => {
     expect(route('https://docs.hagicode.com/', null, ['en-US'], '/product-overview/').targetUrl).toBe(
-      'https://docs.hagicode.com/en/product-overview/',
+      'https://docs.hagicode.com/en-US/product-overview/',
     );
-    expect(route('https://docs.hagicode.com/en/', null, ['zh-CN'], '/product-overview/').targetUrl).toBe(
+    expect(route('https://docs.hagicode.com/en-US/', null, ['zh-CN'], '/product-overview/').targetUrl).toBe(
       'https://docs.hagicode.com/product-overview/',
     );
+  });
+
+  it('canonicalizes alias and stacked locale paths even without an explicit lang parameter', () => {
+    expect(route('https://docs.hagicode.com/en-US/product-overview/', null, ['en-US']).targetUrl).toBe(
+      'https://docs.hagicode.com/en-US/product-overview/',
+    );
+    expect(route('https://docs.hagicode.com/en-US/product-overview/', null, ['en-US']).shouldRedirect).toBe(
+      false,
+    );
+
+    expect(
+      route('https://docs.hagicode.com/en-US/ja-JP/product-overview/', JSON.stringify({ lang: 'en-US' }), ['en-US'])
+        .targetUrl,
+    ).toBe('https://docs.hagicode.com/ja-JP/product-overview/');
+    expect(
+      route('https://docs.hagicode.com/en-US/ja-JP/product-overview/', JSON.stringify({ lang: 'en-US' }), ['en-US'])
+        .shouldRedirect,
+    ).toBe(true);
   });
 });
 
@@ -170,15 +188,15 @@ describe('handleLanguageParameter', () => {
 
     const result = handleLanguageParameter(win);
 
-    expect(result?.resolvedLocale).toBe('en');
-    expect(win.location.replace).toHaveBeenCalledWith('https://docs.hagicode.com/en/installation/');
-    expect(redirects).toEqual(['https://docs.hagicode.com/en/installation/']);
-    expect(JSON.parse(store.get('starlight-route') ?? '{}')).toEqual({ lang: 'en' });
+    expect(result?.resolvedLocale).toBe('en-US');
+    expect(win.location.replace).toHaveBeenCalledWith('https://docs.hagicode.com/en-US/installation/');
+    expect(redirects).toEqual(['https://docs.hagicode.com/en-US/installation/']);
+    expect(JSON.parse(store.get('starlight-route') ?? '{}')).toEqual({ lang: 'en-US' });
   });
 
   it('continues navigation when localStorage throws', () => {
     const { redirects, win } = createMockWindow({
-      href: 'https://docs.hagicode.com/en/installation/',
+      href: 'https://docs.hagicode.com/en-US/installation/',
       languages: ['zh-CN'],
       storageThrows: true,
     });

@@ -28,7 +28,7 @@ describe('blog RSS helpers', () => {
   it.each([
     ['blog/2026-04-29-example', undefined, 'zh-CN'],
     ['zh-Hant/blog/2026-04-29-example', undefined, 'zh-Hant'],
-    ['en/blog/2026-04-29-example', undefined, 'en-US'],
+    ['en-US/blog/2026-04-29-example', undefined, 'en-US'],
     ['ja-JP/blog/2026-04-29-example', undefined, 'ja-JP'],
     ['ko-KR/blog/2026-04-29-example', undefined, 'ko-KR'],
     ['de-DE/blog/2026-04-29-example', undefined, 'de-DE'],
@@ -36,7 +36,7 @@ describe('blog RSS helpers', () => {
     ['es-ES/blog/2026-04-29-example', undefined, 'es-ES'],
     ['pt-BR/blog/2026-04-29-example', undefined, 'pt-BR'],
     ['ru-RU/blog/2026-04-29-example', undefined, 'ru-RU'],
-    ['en/blog/2026-04-29-alias', 'en-GB', 'en-US'],
+    ['en-US/blog/2026-04-29-alias', 'en-GB', 'en-US'],
     ['zh-Hant/blog/2026-04-29-alias', 'zh-TW', 'zh-Hant'],
   ] as const)('normalizes %s with %s to %s', (id, language, expected) => {
     expect(
@@ -53,7 +53,7 @@ describe('blog RSS helpers', () => {
   it('rejects unsupported explicit language metadata', () => {
     expect(() =>
       normalizeBlogPostLanguage({
-        id: 'en/blog/2026-04-29-invalid',
+        id: 'en-US/blog/2026-04-29-invalid',
         data: {
           title: 'invalid',
           language: 'it-IT',
@@ -66,7 +66,7 @@ describe('blog RSS helpers', () => {
     const posts = [
       createPost('blog/2026-04-01-root', '2026-04-01T00:00:00.000Z'),
       createPost('zh-Hant/blog/2026-04-02-zht', '2026-04-02T00:00:00.000Z'),
-      createPost('en/blog/2026-04-03-en', '2026-04-03T00:00:00.000Z'),
+      createPost('en-US/blog/2026-04-03-en', '2026-04-03T00:00:00.000Z'),
       createPost('ja-JP/blog/2026-04-04-ja', '2026-04-04T00:00:00.000Z'),
       createPost('ko-KR/blog/2026-04-05-ko', '2026-04-05T00:00:00.000Z'),
       createPost('de-DE/blog/2026-04-06-de', '2026-04-06T00:00:00.000Z'),
@@ -100,7 +100,7 @@ describe('blog RSS helpers', () => {
   it('applies the item limit after filtering by language scope', () => {
     const englishPosts = Array.from({ length: BLOG_RSS_POST_LIMIT + 5 }, (_, index) =>
       createPost(
-        `en/blog/2026-04-${String(index + 1).padStart(2, '0')}-english-${index}`,
+        `en-US/blog/2026-04-${String(index + 1).padStart(2, '0')}-english-${index}`,
         `2026-04-${String(index + 1).padStart(2, '0')}T00:00:00.000Z`,
       ),
     );

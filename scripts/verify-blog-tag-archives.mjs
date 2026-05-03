@@ -43,7 +43,7 @@ function verifyNoTagLinks(route) {
 
   runCheck('tag_links_removed', route, () => {
     assert(!html.includes('/blog/tags/'), route, `Deprecated tag route link still rendered in ${route}.`);
-    assert(!html.includes('/en/blog/tags/'), route, `Deprecated English tag route link still rendered in ${route}.`);
+    assert(!html.includes('/en-US/blog/tags/'), route, `Deprecated English tag route link still rendered in ${route}.`);
   });
 }
 
@@ -73,9 +73,9 @@ function main() {
   }
 
   verifyNoTagDirectory(path.posix.join('blog', 'tags'));
-  verifyNoTagDirectory(path.posix.join('en', 'blog', 'tags'));
+  verifyNoTagDirectory(path.posix.join('en-US', 'blog', 'tags'));
   verifyNoTagLinks(path.posix.join('blog', 'index.html'));
-  verifyNoTagLinks(path.posix.join('en', 'blog', 'index.html'));
+  verifyNoTagLinks(path.posix.join('en-US', 'blog', 'index.html'));
   printSummaryAndExit();
 }
 

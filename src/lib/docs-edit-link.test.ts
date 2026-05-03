@@ -38,11 +38,11 @@ describe("resolveDocsEditLink", () => {
   it("preserves localized English paths when building edit links", () => {
     const result = resolveDocsEditLink(
       createRoute({
-        id: "en/blog/2026-04-11-border-light-animation-effect",
-        locale: "en",
+        id: "en-US/blog/2026-04-11-border-light-animation-effect",
+        locale: "en-US",
         entry: {
           filePath:
-            "src/content/docs/en/blog/2026-04-11-border-light-animation-effect.mdx",
+            "src/content/docs/en-US/blog/2026-04-11-border-light-animation-effect.mdx",
         },
       }),
     );
@@ -50,10 +50,10 @@ describe("resolveDocsEditLink", () => {
     expect(result).toMatchObject({
       isVisible: true,
       sourcePath:
-        "src/content/docs/en/blog/2026-04-11-border-light-animation-effect.mdx",
+        "src/content/docs/en-US/blog/2026-04-11-border-light-animation-effect.mdx",
       repoPath:
-        "src/content/docs/en/blog/2026-04-11-border-light-animation-effect.mdx",
-      href: "https://github.com/HagiCode-org/docs/edit/main/src/content/docs/en/blog/2026-04-11-border-light-animation-effect.mdx",
+        "src/content/docs/en-US/blog/2026-04-11-border-light-animation-effect.mdx",
+      href: "https://github.com/HagiCode-org/docs/edit/main/src/content/docs/en-US/blog/2026-04-11-border-light-animation-effect.mdx",
     });
   });
 
@@ -68,10 +68,10 @@ describe("resolveDocsEditLink", () => {
     );
     const englishResult = resolveDocsEditLink(
       createRoute({
-        id: "en/release-notes",
-        locale: "en",
+        id: "en-US/release-notes",
+        locale: "en-US",
         entry: {
-          filePath: "src/content/docs/en/release-notes/index.mdx",
+          filePath: "src/content/docs/en-US/release-notes/index.mdx",
         },
       }),
     );
@@ -80,26 +80,26 @@ describe("resolveDocsEditLink", () => {
       "src/content/docs/release-notes/index.mdx",
     );
     expect(englishResult.repoPath).toBe(
-      "src/content/docs/en/release-notes/index.mdx",
+      "src/content/docs/en-US/release-notes/index.mdx",
     );
   });
 
   it("falls back to a locale-aware route lookup when filePath metadata is unavailable", () => {
     const result = resolveDocsEditLink(
       createRoute({
-        id: "en/legal/privacy-policy",
-        locale: "en",
+        id: "en-US/legal/privacy-policy",
+        locale: "en-US",
       }),
       {
         fileExists: (sourcePath) =>
-          sourcePath === "src/content/docs/en/legal/privacy-policy.mdx",
+          sourcePath === "src/content/docs/en-US/legal/privacy-policy.mdx",
       },
     );
 
     expect(result).toMatchObject({
       isVisible: true,
-      sourcePath: "src/content/docs/en/legal/privacy-policy.mdx",
-      repoPath: "src/content/docs/en/legal/privacy-policy.mdx",
+      sourcePath: "src/content/docs/en-US/legal/privacy-policy.mdx",
+      repoPath: "src/content/docs/en-US/legal/privacy-policy.mdx",
     });
   });
 

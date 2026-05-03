@@ -3,13 +3,16 @@ import { docsLoader } from '@astrojs/starlight/loaders';
 import { docsSchema } from '@astrojs/starlight/schema';
 import { slug as githubSlug } from 'github-slugger';
 import { blogSchema } from 'starlight-blog/schema'
-import { DOCS_LOCALES } from './i18n/generated/docs-locale-resources.mjs';
+import {
+  DOCS_LOCALES,
+  DOCS_LOCALE_RESOURCES,
+} from './i18n/generated/docs-locale-resources.mjs';
 import { BLOG_LANGUAGE_INPUTS } from './lib/blog-i18n';
 
 const localeSlugMap = new Map(
-	Object.keys(DOCS_LOCALES)
-		.filter((locale) => locale !== 'root')
-		.map((locale) => [githubSlug(locale), locale]),
+	Object.entries(DOCS_LOCALE_RESOURCES['en-US'].metadata.aliases)
+		.filter(([, routeLocale]) => routeLocale !== 'root')
+		.map(([localeAlias, routeLocale]) => [githubSlug(localeAlias), routeLocale]),
 );
 
 function generateDocsEntryId({ entry, data }: { entry: string; data: Record<string, unknown> }) {

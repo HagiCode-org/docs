@@ -92,7 +92,7 @@ test('materialization writes index plus per-tag detail files and strips legacy o
   assert.match(detailPayload.bodyHtml.en, /en release note content for v1\.0\.0\./);
   assert.equal(Object.hasOwn(indexPayload.entries[0], 'routes'), false);
   assert.match(zhLanding, /<ReleaseNotesLanding locale="zh-CN" \/>/);
-  assert.match(enLanding, /<ReleaseNotesLanding locale="en" \/>/);
+  assert.match(enLanding, /<ReleaseNotesLanding locale="en-US" \/>/);
   assert.equal(path.basename(config.outputPaths.indexJson), 'index.json');
   assert.equal(fs.existsSync(path.join(config.outputPaths.localeDirs['zh-CN'], 'v1.0.0.md')), false);
   assert.equal(fs.existsSync(path.join(config.outputPaths.localeDirs.en, 'v1.0.0.md')), false);
@@ -139,7 +139,7 @@ test('landing helpers expose localized summaries and expanded body HTML only for
 
   assert.equal(enEntries[0].summary, 'en summary for v1.0.0.');
   assert.equal(enEntries[0].anchorId, 'v1.0.0');
-  assert.equal(enEntries[0].anchorHref, '/en/release-notes/#v1.0.0');
+  assert.equal(enEntries[0].anchorHref, '/en-US/release-notes/#v1.0.0');
   assert.match(enEntries[0].bodyHtml, /<ul>/);
   assert.equal(Object.hasOwn(enCopy, 'archiveLinkLabel'), false);
   assert.equal(Object.hasOwn(enEntries[0], 'archiveRoute'), false);
@@ -211,7 +211,7 @@ test('release-notes toc items expose version anchors for all locales', () => {
     {
       text: 'v1.0.0',
       slug: 'v1.0.0',
-      href: '/en/release-notes/#v1.0.0',
+      href: '/en-US/release-notes/#v1.0.0',
     },
   ]);
 

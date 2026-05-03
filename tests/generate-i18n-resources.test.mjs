@@ -79,11 +79,11 @@ async function createFixture() {
           htmlLang: 'zh-CN',
           direction: 'ltr',
         },
-        en: {
+        'en-US': {
           sourceLocale: 'en-US',
-          routeLocale: 'en',
+          routeLocale: 'en-US',
           label: 'English',
-          lang: 'en',
+          lang: 'en-US',
           htmlLang: 'en-US',
           direction: 'ltr',
         },
@@ -154,7 +154,7 @@ test('generates deterministic docs runtime resources from YAML namespaces', asyn
   generatedModuleUrl.search = String(Date.now());
   const generatedModule = await import(generatedModuleUrl.href);
   assert.equal(generatedModule.DOCS_LOCALES.root.label, '中文');
-  assert.equal(generatedModule.DOCS_LOCALES.en.lang, 'en');
+  assert.equal(generatedModule.DOCS_LOCALES['en-US'].lang, 'en-US');
   assert.equal(generatedModule.DOCS_LOCALES['ja-JP'].label, '日本語');
   assert.equal(generatedModule.BLOG_PLUGIN_TITLE.root, '博客');
   assert.deepEqual(Object.keys(generatedModule.DOCS_LOCALE_RESOURCES).sort(), [...desktopLocaleCodes].sort());

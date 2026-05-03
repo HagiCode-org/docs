@@ -14,7 +14,7 @@ export const BLOG_LANGUAGE_CODES = [
 ] as const;
 
 export type BlogLanguageCode = (typeof BLOG_LANGUAGE_CODES)[number];
-export type BlogRouteLocale = 'root' | 'en' | Exclude<BlogLanguageCode, 'zh-CN' | 'en-US'>;
+export type BlogRouteLocale = 'root' | 'en-US' | Exclude<BlogLanguageCode, 'zh-CN' | 'en-US'>;
 export type BlogRssScope = BlogLanguageCode | 'all';
 
 export type BlogLanguageOption = {
@@ -51,8 +51,8 @@ export const BLOG_LANGUAGE_OPTIONS: readonly BlogLanguageOption[] = [
   },
   {
     code: 'en-US',
-    routeLocale: 'en',
-    routePrefix: 'en',
+    routeLocale: 'en-US',
+    routePrefix: 'en-US',
     name: 'English',
     nativeName: 'English',
     shortLabel: 'EN',
@@ -241,8 +241,8 @@ export function getBlogLanguageByRouteLocale(routeLocale: string | null | undefi
     return BLOG_LANGUAGE_BY_ROUTE_LOCALE.get('root') ?? null;
   }
 
-  if (routeLocale === 'en') {
-    return BLOG_LANGUAGE_BY_ROUTE_LOCALE.get('en') ?? null;
+  if (routeLocale === 'en' || routeLocale === 'en-US') {
+    return BLOG_LANGUAGE_BY_ROUTE_LOCALE.get('en-US') ?? null;
   }
 
   const code = normalizeBlogLanguageCode(routeLocale);

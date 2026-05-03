@@ -168,7 +168,7 @@ function verifyScenario(scriptContent, scenario) {
 async function main() {
   const [rootHtml, enHtml, redirectScript] = await Promise.all([
     readDistFile('index.html'),
-    readDistFile(path.join('en', 'index.html')),
+    readDistFile(path.join('en-US', 'index.html')),
     readDistFile('lang-redirect.js'),
   ]);
 
@@ -185,7 +185,7 @@ async function main() {
   assertIncludes(enHtml, '/lang-redirect.js', 'English landing should load the entry route resolver');
 
   const localizedEntryLocales = DOCS_LOCALE_SELECTOR_OPTIONS
-    .filter((locale) => locale.code !== 'root' && locale.code !== 'en');
+    .filter((locale) => locale.code !== 'root' && locale.code !== 'en-US');
   const localizedEntryPages = await Promise.all(
     localizedEntryLocales.map(async (locale) => ({
       locale: locale.code,
@@ -215,8 +215,8 @@ async function main() {
   const [rootDocsHtml, rootBlogHtml, enDocsHtml, enBlogHtml] = await Promise.all([
     readDistFile(path.join('product-overview', 'index.html')),
     readDistFile(path.join('blog', 'index.html')),
-    readDistFile(path.join('en', 'product-overview', 'index.html')),
-    readDistFile(path.join('en', 'blog', 'index.html')),
+    readDistFile(path.join('en-US', 'product-overview', 'index.html')),
+    readDistFile(path.join('en-US', 'blog', 'index.html')),
   ]);
 
   assertIncludes(rootDocsHtml, '/lang-redirect.js', 'root docs pages should load the shared route resolver');
@@ -234,11 +234,11 @@ async function main() {
         languages: ['en-US', 'en'],
       },
       landingTargetPath: '/product-overview/',
-      expectedLocale: 'en',
-      expectedTargetUrl: 'https://docs.hagicode.com/en/product-overview/',
-      expectedFinalUrl: 'https://docs.hagicode.com/en/product-overview/',
+      expectedLocale: 'en-US',
+      expectedTargetUrl: 'https://docs.hagicode.com/en-US/product-overview/',
+      expectedFinalUrl: 'https://docs.hagicode.com/en-US/product-overview/',
       expectRedirect: true,
-      expectedStoredLang: 'en',
+      expectedStoredLang: 'en-US',
     },
     {
       name: 'first-time Chinese browser redirects to Chinese product overview',
@@ -358,7 +358,7 @@ async function main() {
     },
     {
       name: 'English landing redirects to stored Chinese product overview preference',
-      href: 'https://docs.hagicode.com/en/',
+      href: 'https://docs.hagicode.com/en-US/',
       storedRouteValue: JSON.stringify({ lang: 'root' }),
       navigator: {
         language: 'zh-CN',

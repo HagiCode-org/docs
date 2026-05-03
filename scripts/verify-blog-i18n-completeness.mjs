@@ -5,7 +5,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 export const REQUIRED_BLOG_LOCALES = [
   { code: 'zh-CN', routeLocale: 'root', contentPrefix: '', blogDir: 'blog' },
   { code: 'zh-Hant', routeLocale: 'zh-Hant', contentPrefix: 'zh-Hant', blogDir: 'zh-Hant/blog' },
-  { code: 'en-US', routeLocale: 'en', contentPrefix: 'en', blogDir: 'en/blog' },
+  { code: 'en-US', routeLocale: 'en-US', contentPrefix: 'en-US', blogDir: 'en-US/blog' },
   { code: 'ja-JP', routeLocale: 'ja-JP', contentPrefix: 'ja-JP', blogDir: 'ja-JP/blog' },
   { code: 'ko-KR', routeLocale: 'ko-KR', contentPrefix: 'ko-KR', blogDir: 'ko-KR/blog' },
   { code: 'de-DE', routeLocale: 'de-DE', contentPrefix: 'de-DE', blogDir: 'de-DE/blog' },

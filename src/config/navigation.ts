@@ -45,7 +45,7 @@ export const navLinks: NavLink[] = [
   {
     label: "首页",
     translations: {
-      en: 'Home',
+      'en-US': 'Home',
       'zh-Hant': '首頁',
       'ja-JP': 'ホーム',
       'ko-KR': '홈',
@@ -61,7 +61,7 @@ export const navLinks: NavLink[] = [
   {
     label: "部署生成器",
     translations: {
-      en: 'Builder',
+      'en-US': 'Builder',
       'zh-Hant': '部署產生器',
       'ja-JP': 'デプロイビルダー',
       'ko-KR': '배포 빌더',
@@ -76,7 +76,7 @@ export const navLinks: NavLink[] = [
   {
     label: "博客",
     translations: {
-      en: 'Blog',
+      'en-US': 'Blog',
       'zh-Hant': '部落格',
       'ja-JP': 'ブログ',
       'ko-KR': '블로그',
@@ -92,7 +92,7 @@ export const navLinks: NavLink[] = [
   {
     label: "获取技术支持",
     translations: {
-      en: 'Get Support',
+      'en-US': 'Get Support',
       'zh-Hant': '獲取技術支援',
       'ja-JP': 'サポート',
       'ko-KR': '기술 지원',
@@ -120,12 +120,12 @@ export function getNavLinkLabel(link: NavLink, locale: DocsLocale): string {
     return link.label;
   }
 
-  if (link.translations?.en) {
-    return link.translations.en;
+  if (link.translations?.['en-US']) {
+    return link.translations['en-US'];
   }
 
   // Keep navigation labels non-empty even when upstream config is incomplete.
-  return locale === 'en' ? 'Link' : '链接';
+  return locale === 'en-US' ? 'Link' : '链接';
 }
 
 /**

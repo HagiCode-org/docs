@@ -66,7 +66,9 @@ export function resolveDocsSourcePath(
 
   const normalizedRouteId = normalizeRouteId(route.id, route.locale);
   const localePrefix =
-    route.locale && route.locale !== "root" ? `${route.locale}/` : "";
+    route.locale && route.locale !== "root"
+      ? `${toDocsContentLocaleDirectory(route.locale)}/`
+      : "";
 
   const candidateRoot = `${DOCS_CONTENT_PREFIX}${localePrefix}`;
   const candidates =
@@ -80,6 +82,10 @@ export function resolveDocsSourcePath(
         ];
 
   return candidates.find((candidate) => fileExists(candidate));
+}
+
+function toDocsContentLocaleDirectory(locale: string): string {
+  return locale;
 }
 
 export function buildDocsEditHref(

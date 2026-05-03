@@ -55,7 +55,7 @@ async function createRepoWithArtifacts() {
   const distDir = path.join(repoRoot, 'dist');
   const artifacts = {};
   for (const locale of ALL_LOCALES) {
-    const localeDir = locale === 'zh-CN' ? 'release-notes' : `${locale}/release-notes`;
+    const localeDir = locale === 'zh-CN' ? 'release-notes' : `${locale === 'en' ? 'en-US' : locale}/release-notes`;
     const artifactPath = path.join(distDir, localeDir, 'index.html');
     await fs.promises.mkdir(path.dirname(artifactPath), { recursive: true });
     await writeFile(artifactPath, `<article><h2 id="v1.0.0">v1.0.0</h2><p>${locale} summary for v1.0.0.</p></article>`, 'utf8');

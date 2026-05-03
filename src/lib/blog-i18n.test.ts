@@ -28,7 +28,7 @@ describe('blog desktop-language helpers', () => {
     expect(BLOG_LANGUAGE_OPTIONS.map((option) => [option.code, option.routeLocale, option.shortLabel])).toEqual([
       ['zh-CN', 'root', '中'],
       ['zh-Hant', 'zh-Hant', '繁'],
-      ['en-US', 'en', 'EN'],
+      ['en-US', 'en-US', 'EN'],
       ['ja-JP', 'ja-JP', '日'],
       ['ko-KR', 'ko-KR', '한'],
       ['de-DE', 'de-DE', 'DE'],
@@ -60,7 +60,7 @@ describe('blog desktop-language helpers', () => {
 
   it('maps canonical codes to docs route locales and fallback data', () => {
     expect(getBlogRouteLocale('zh-CN')).toBe('root');
-    expect(getBlogRouteLocale('en-US')).toBe('en');
+    expect(getBlogRouteLocale('en-US')).toBe('en-US');
     expect(getBlogRouteLocale('fr-FR')).toBe('fr-FR');
     expect(getBlogLanguageOption('zh-Hant')?.fallbackCodes).toEqual(['zh-CN', 'en-US']);
     expect(getBlogLanguageOption('unknown')).toBeNull();
@@ -68,9 +68,9 @@ describe('blog desktop-language helpers', () => {
 
   it.each([
     ['zh-CN', '/blog/', '/blog/'],
-    ['en-US', '/blog/', '/en/blog/'],
+    ['en-US', '/blog/', '/en-US/blog/'],
     ['zh-Hant', '/blog/example/', '/zh-Hant/blog/example/'],
-    ['ja-JP', '/en/blog/example/', '/ja-JP/blog/example/'],
+    ['ja-JP', '/en-US/blog/example/', '/ja-JP/blog/example/'],
     ['ru-RU', '/zh-Hant/blog/example/', '/ru-RU/blog/example/'],
   ] as const)('builds %s blog route for %s', (language, path, expected) => {
     expect(buildBlogRoutePath(language, path)).toBe(expected);

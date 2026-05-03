@@ -79,11 +79,11 @@ const DOCS_SOURCE_TO_ROUTE_LOCALE = Object.fromEntries(
 ) as Record<string, DocsLocale>;
 
 export const DOCS_LANGUAGE_STORAGE_KEY = 'starlight-route';
-export const DEFAULT_DOCS_ENTRY_LOCALE: DocsLocale = 'en';
+export const DEFAULT_DOCS_ENTRY_LOCALE: DocsLocale = 'en-US';
 export const RELEASE_NOTES_ROUTE_PREFIX = '/release-notes';
 export const DOCS_ENTRY_PATHS: Partial<Record<DocsLocale, string>> = {
   root: '/',
-  en: '/en/',
+  'en-US': '/en-US/',
 };
 
 /**
@@ -175,6 +175,38 @@ export function isValidLanguage(lang: string | null): boolean {
   return mapLanguageParamToDocsLocale(lang) !== null;
 }
 
+function consumeLeadingDocsLocaleSegments(pathname = '/'): {
+  locale: DocsLocale | null;
+  path: string;
+} {
+  const normalizedPath = pathname.startsWith('/') ? pathname : `/${pathname}`;
+  let remainingPath = normalizedPath || '/';
+  let resolvedLocale: DocsLocale | null = null;
+
+  while (remainingPath.startsWith('/')) {
+    const match = remainingPath.match(/^\/([^/]+)(?=\/|$)/);
+    if (!match) {
+      break;
+    }
+
+    const matchedLocale = parseDocsLocale(match[1]);
+    if (!matchedLocale) {
+      break;
+    }
+
+    resolvedLocale = matchedLocale;
+    remainingPath = remainingPath.slice(match[0].length) || '/';
+    if (!remainingPath.startsWith('/')) {
+      remainingPath = `/${remainingPath}`;
+    }
+  }
+
+  return {
+    locale: resolvedLocale,
+    path: remainingPath || '/',
+  };
+}
+
 /**
  * Remove the docs locale prefix from a path.
  */
@@ -183,18 +215,41 @@ export function stripDocsLocalePrefix(pathname = '/'): string {
     return '/';
   }
 
-  return stripBlogLocalePrefix(pathname);
+  const consumedPath = consumeLeadingDocsLocaleSegments(pathname).path;
+  return stripBlogLocalePrefix(consumedPath);
+}
+
+/**
+ * Collapse locale aliases and stacked locale prefixes into a canonical docs path.
+ */
+export function normalizeDocsRoutePath(pathname = '/'): string {
+  if (!pathname) {
+    return '/';
+  }
+
+  const normalizedPath = pathname.startsWith('/') ? pathname : `/${pathname}`;
+  const { locale, path } = consumeLeadingDocsLocaleSegments(normalizedPath);
+  if (!locale) {
+    return normalizedPath;
+  }
+
+  return buildDocsRoutePath(locale, path || '/');
 }
 
 /**
  * Returns true when the path already targets the English docs locale.
  */
 export function isEnglishDocsPath(pathname = '/'): boolean {
-  return pathname === '/en' || pathname.startsWith('/en/');
+  return (
+    pathname === '/en-US' ||
+    pathname.startsWith('/en-US/') ||
+    pathname === '/en' ||
+    pathname.startsWith('/en/')
+  );
 }
 
 /**
- * Returns true when the route is one of the docs landing pages (`/` or `/en/`).
+ * Returns true when the route is one of the docs landing pages (`/` or `/en-US/`).
  */
 export function isLandingRoutePath(pathname = '/'): boolean {
   return stripDocsLocalePrefix(pathname) === '/';
@@ -217,8 +272,8 @@ export function isReleaseNotesRoutePath(pathname = '/'): boolean {
 export function buildDocsRoutePath(locale: DocsLocale, originalPath = '/'): string {
   const normalizedPath = stripDocsLocalePrefix(originalPath || '/');
 
-  if (locale === 'en') {
-    return normalizedPath === '/' ? DOCS_ENTRY_PATHS.en ?? '/en/' : `/en${normalizedPath}`;
+  if (locale === 'en-US') {
+    return normalizedPath === '/' ? DOCS_ENTRY_PATHS['en-US'] ?? '/en-US/' : `/en-US${normalizedPath}`;
   }
 
   if (locale === 'root') {
@@ -326,7 +381,7 @@ export function resolveDocsEntryLocale(options: {
  * Map Docs locale to InstallButton locale prop.
  */
 export function toInstallButtonLocale(locale: DocsLocale): 'zh' | 'en' {
-  return locale === 'en' ? 'en' : 'zh';
+  return locale === 'en-US' ? 'en' : 'zh';
 }
 
 const DOCS_CONTENT_LAYOUT_TOGGLE_COPY: Record<DocsLocale, DocsContentLayoutToggleCopy> = {
@@ -335,7 +390,7 @@ const DOCS_CONTENT_LAYOUT_TOGGLE_COPY: Record<DocsLocale, DocsContentLayoutToggl
     wide: '宽版',
     narrow: '窄版',
   },
-  en: {
+  'en-US': {
     label: 'Content layout',
     wide: 'Wide',
     narrow: 'Narrow',
@@ -417,7 +472,7 @@ const DOCS_FOOTER_COPY: Record<DocsLocale, DocsFooterCopy> = {
       publicSecurityAriaLabel: '查看公安備案資訊',
     },
   },
-  en: {
+  'en-US': {
     copyright: 'All rights reserved.',
     sections: {
       ecosystemSites: 'Ecosystem Sites',

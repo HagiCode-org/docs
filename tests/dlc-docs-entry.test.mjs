@@ -20,9 +20,9 @@ const requiredZhDocsFiles = [
 ];
 
 const requiredEnDocsFiles = [
-  'src/content/docs/en/dlc/all-beauties-pack.mdx',
-  'src/content/docs/en/dlc/turbo-engine-dlc.mdx',
-  'src/content/docs/en/dlc/sponsor-pack.mdx',
+  'src/content/docs/en-US/dlc/all-beauties-pack.mdx',
+  'src/content/docs/en-US/dlc/turbo-engine-dlc.mdx',
+  'src/content/docs/en-US/dlc/sponsor-pack.mdx',
 ];
 
 test('docs sidebar exposes DLC as a first-level auto-generated section', () => {
@@ -70,9 +70,9 @@ test('each DLC detail page uses stronger recommendation copy without overview-pa
 
 test('english DLC detail pages stay in sync with localized sibling links and recommendation-oriented copy', async () => {
   const [allBeautiesSource, turboSource, sponsorSource] = await Promise.all([
-    readFile(resolveDocsPath('src/content/docs/en/dlc/all-beauties-pack.mdx'), 'utf8'),
-    readFile(resolveDocsPath('src/content/docs/en/dlc/turbo-engine-dlc.mdx'), 'utf8'),
-    readFile(resolveDocsPath('src/content/docs/en/dlc/sponsor-pack.mdx'), 'utf8'),
+    readFile(resolveDocsPath('src/content/docs/en-US/dlc/all-beauties-pack.mdx'), 'utf8'),
+    readFile(resolveDocsPath('src/content/docs/en-US/dlc/turbo-engine-dlc.mdx'), 'utf8'),
+    readFile(resolveDocsPath('src/content/docs/en-US/dlc/sponsor-pack.mdx'), 'utf8'),
   ]);
 
   for (const source of [allBeautiesSource, turboSource, sponsorSource]) {

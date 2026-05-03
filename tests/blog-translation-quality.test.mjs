@@ -17,7 +17,7 @@ async function withFixture(fn) {
 }
 
 async function writePost(tmpDir, locale, slug, content) {
-  const blogDir = locale === 'root' ? 'blog' : locale === 'en' ? 'en/blog' : `${locale}/blog`;
+  const blogDir = locale === 'root' ? 'blog' : locale === 'en-US' ? 'en-US/blog' : `${locale}/blog`;
   const fullPath = path.join(tmpDir, blogDir);
   await fs.mkdir(fullPath, { recursive: true });
   const filePath = path.join(fullPath, `${slug}.mdx`);

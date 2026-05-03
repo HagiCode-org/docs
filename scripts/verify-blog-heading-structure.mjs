@@ -55,9 +55,9 @@ function verifyPostRoute(route, expectedTitle) {
 function verifyCollectionRoutes() {
   const collectionRoutes = [
     'blog/index.html',
-    'en/blog/index.html',
+    'en-US/blog/index.html',
     ...listRenderedHtmlFiles('blog/authors'),
-    ...listRenderedHtmlFiles('en/blog/authors'),
+    ...listRenderedHtmlFiles('en-US/blog/authors'),
   ];
 
   if (!collectionRoutes.some((route) => route.includes('/authors/'))) {
@@ -75,7 +75,7 @@ function verifyPostRoutes() {
   }
 
   for (const entry of getBlogSourceEntries({ locale: 'en' })) {
-    verifyPostRoute(path.posix.join('en/blog', entry.slug, 'index.html'), entry.title);
+    verifyPostRoute(path.posix.join('en-US/blog', entry.slug, 'index.html'), entry.title);
   }
 }
 

@@ -124,6 +124,10 @@ function resolveReleaseNotesLandingPath(locale = 'zh-CN') {
     return '/release-notes/';
   }
 
+  if (locale === 'en' || locale === 'en-US') {
+    return '/en-US/release-notes/';
+  }
+
   return `/${locale}/release-notes/`;
 }
 
@@ -134,6 +138,10 @@ function pickLocalizedEntry(valueByLocale, locale = 'zh-CN') {
 
   if (valueByLocale[locale]) {
     return valueByLocale[locale];
+  }
+
+  if (locale === 'en-US' && valueByLocale.en) {
+    return valueByLocale.en;
   }
 
   return valueByLocale.en ?? valueByLocale['zh-CN'] ?? '';

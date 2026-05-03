@@ -10,7 +10,7 @@ export const DOCS_SIDEBAR = [
   {
     label: '产品概述',
     translations: createTranslations({
-      en: 'Product Overview',
+      'en-US': 'Product Overview',
       'zh-Hant': '產品概覽',
       'ja-JP': '製品概要',
       'ko-KR': '제품 개요',
@@ -25,7 +25,7 @@ export const DOCS_SIDEBAR = [
   {
     label: '快速开始',
     translations: createTranslations({
-      en: 'Quick Start',
+      'en-US': 'Quick Start',
       'zh-Hant': '快速開始',
       'ja-JP': 'クイックスタート',
       'ko-KR': '빠른 시작',
@@ -40,7 +40,7 @@ export const DOCS_SIDEBAR = [
   {
     label: '安装指南',
     translations: createTranslations({
-      en: 'Installation Guide',
+      'en-US': 'Installation Guide',
       'zh-Hant': '安裝指南',
       'ja-JP': 'インストールガイド',
       'ko-KR': '설치 가이드',
@@ -55,7 +55,7 @@ export const DOCS_SIDEBAR = [
   {
     label: '常见问题',
     translations: createTranslations({
-      en: 'FAQ',
+      'en-US': 'FAQ',
       'zh-Hant': '常見問題',
       'ja-JP': 'よくある質問',
       'ko-KR': '자주 묻는 질문',
@@ -70,7 +70,7 @@ export const DOCS_SIDEBAR = [
   {
     label: '相关软件安装',
     translations: createTranslations({
-      en: 'Related Software Installation',
+      'en-US': 'Related Software Installation',
       'zh-Hant': '相關軟體安裝',
       'ja-JP': '関連ソフトウェアのインストール',
       'ko-KR': '관련 소프트웨어 설치',
@@ -85,7 +85,7 @@ export const DOCS_SIDEBAR = [
   {
     label: '功能指南',
     translations: createTranslations({
-      en: 'Guides',
+      'en-US': 'Guides',
       'zh-Hant': '功能指南',
       'ja-JP': 'ガイド',
       'ko-KR': '가이드',
@@ -100,7 +100,7 @@ export const DOCS_SIDEBAR = [
   {
     label: '大模型指南',
     translations: createTranslations({
-      en: 'LLM Guide',
+      'en-US': 'LLM Guide',
       'zh-Hant': '大模型指南',
       'ja-JP': 'LLM ガイド',
       'ko-KR': 'LLM 가이드',
@@ -115,7 +115,7 @@ export const DOCS_SIDEBAR = [
   {
     label: 'AI 服务订阅网站',
     translations: createTranslations({
-      en: 'AI Service Subscriptions',
+      'en-US': 'AI Service Subscriptions',
       'zh-Hant': 'AI 服務訂閱網站',
       'ja-JP': 'AI サービス購読サイト',
       'ko-KR': 'AI 서비스 구독 사이트',
@@ -130,7 +130,7 @@ export const DOCS_SIDEBAR = [
   {
     label: '法律文档',
     translations: createTranslations({
-      en: 'Legal',
+      'en-US': 'Legal',
       'zh-Hant': '法律文件',
       'ja-JP': '法的文書',
       'ko-KR': '법률 문서',
@@ -145,7 +145,7 @@ export const DOCS_SIDEBAR = [
   {
     label: '版本更新说明',
     translations: createTranslations({
-      en: 'Release Notes',
+      'en-US': 'Release Notes',
       'zh-Hant': '版本更新說明',
       'ja-JP': 'リリースノート',
       'ko-KR': '릴리스 노트',
@@ -160,7 +160,7 @@ export const DOCS_SIDEBAR = [
   {
     label: 'DLC',
     translations: createTranslations({
-      en: 'DLC',
+      'en-US': 'DLC',
       'zh-Hant': 'DLC',
       'ja-JP': 'DLC',
       'ko-KR': 'DLC',
@@ -175,7 +175,7 @@ export const DOCS_SIDEBAR = [
   {
     label: 'Bundles',
     translations: createTranslations({
-      en: 'Bundles',
+      'en-US': 'Bundles',
       'zh-Hant': '套件組合',
       'ja-JP': 'バンドル',
       'ko-KR': '번들',

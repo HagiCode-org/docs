@@ -89,7 +89,7 @@ function runCheck(name, route, fn) {
 
 function verifyNavigation() {
   const zhRoute = 'blog/index.html';
-  const enRoute = 'en/blog/index.html';
+  const enRoute = 'en-US/blog/index.html';
   const zhBlogIndex = readFile(zhRoute);
   const enBlogIndex = readFile(enRoute);
 
@@ -110,10 +110,10 @@ function verifyNavigation() {
   });
 
   runCheck('route_continuity_zh_to_en', zhRoute, () => {
-    const zhToEnPattern = /(?:href|value)=["']\/en\/blog\/["']/i;
+    const zhToEnPattern = /(?:href|value)=["']\/en-US\/blog\/["']/i;
     assert(
       zhToEnPattern.test(zhBlogIndex),
-      'Chinese blog index is missing route continuity link to /en/blog/.',
+      'Chinese blog index is missing route continuity link to /en-US/blog/.',
       zhRoute
     );
   });
@@ -146,7 +146,7 @@ function verifyNavigation() {
 
 function verifyAdVisibility() {
   const zhPostRoute = pickLatestBlogPostDir('');
-  const enPostRoute = pickLatestBlogPostDir('en');
+  const enPostRoute = pickLatestBlogPostDir('en-US');
 
   for (const route of [zhPostRoute, enPostRoute]) {
     const html = readFile(route);

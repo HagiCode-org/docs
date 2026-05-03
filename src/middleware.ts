@@ -5,7 +5,11 @@
  */
 
 import { defineMiddleware } from 'astro:middleware';
-import { buildDocsRoutePath, mapLanguageParamToDocsLocale } from './lib/i18n';
+import {
+  buildDocsRoutePath,
+  mapLanguageParamToDocsLocale,
+  normalizeDocsRoutePath,
+} from './lib/i18n';
 import {
   TRAFFIC_ENTRY_ROUTE_PATH,
   resolveTrafficEntryRequest,
@@ -26,6 +30,13 @@ export const onRequest = defineMiddleware((context, next) => {
   if (url.pathname === TRAFFIC_ENTRY_ROUTE_PATH) {
     const resolution = resolveTrafficEntryRequest(url);
     return redirect(resolution.redirectUrl, 302);
+  }
+
+  const canonicalPath = normalizeDocsRoutePath(url.pathname);
+  if (canonicalPath !== url.pathname) {
+    const targetUrl = new URL(url);
+    targetUrl.pathname = canonicalPath;
+    return redirect(targetUrl.toString(), 301);
   }
 
   const lang = url.searchParams.get('lang');

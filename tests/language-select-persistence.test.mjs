@@ -40,7 +40,7 @@ function evaluateLanguageSelectScript(scriptContent, options = {}) {
 
   const select = Object.setPrototypeOf(
     {
-      value: options.selectedValue ?? encodeSelectionValue('/en/product-overview/', 'en'),
+      value: options.selectedValue ?? encodeSelectionValue('/en-US/product-overview/', 'en-US'),
       selectedIndex,
       addEventListener(type, listener) {
         listeners.set(type, listener);
@@ -116,14 +116,14 @@ function evaluateLanguageSelectScript(scriptContent, options = {}) {
 test('language selector persists English locale before navigating', async () => {
   const scriptContent = await readLanguageSelectScript();
   const result = evaluateLanguageSelectScript(scriptContent, {
-    selectedValue: encodeSelectionValue('/en/product-overview/', 'en'),
+    selectedValue: encodeSelectionValue('/en-US/product-overview/', 'en-US'),
     storedRouteValue: JSON.stringify({ path: '/product-overview/', lang: 'root' }),
   });
 
-  assert.equal(result.pathname, '/en/product-overview/');
+  assert.equal(result.pathname, '/en-US/product-overview/');
   assert.deepEqual(JSON.parse(result.storedRouteValue), {
     path: '/product-overview/',
-    lang: 'en',
+    lang: 'en-US',
   });
 });
 
@@ -141,7 +141,7 @@ test('language selector renders the full generated locale set in the header', as
     [
       { code: 'root', label: '中文' },
       { code: 'zh-Hant', label: '繁體中文' },
-      { code: 'en', label: 'English' },
+      { code: 'en-US', label: 'English' },
       { code: 'ja-JP', label: '日本語' },
       { code: 'ko-KR', label: '한국어' },
       { code: 'de-DE', label: 'Deutsch' },
@@ -168,12 +168,12 @@ test('language selector persists Japanese locale from the encoded route target',
   const scriptContent = await readLanguageSelectScript();
   const result = evaluateLanguageSelectScript(scriptContent, {
     selectedValue: encodeSelectionValue('/ja-JP/product-overview/', 'ja-JP'),
-    storedRouteValue: JSON.stringify({ path: '/en/product-overview/', lang: 'en' }),
+    storedRouteValue: JSON.stringify({ path: '/en-US/product-overview/', lang: 'en-US' }),
   });
 
   assert.equal(result.pathname, '/ja-JP/product-overview/');
   assert.deepEqual(JSON.parse(result.storedRouteValue), {
-    path: '/en/product-overview/',
+    path: '/en-US/product-overview/',
     lang: 'ja-JP',
   });
 });

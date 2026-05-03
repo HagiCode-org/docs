@@ -11,6 +11,7 @@ import {
   DEFAULT_DOCS_ENTRY_LOCALE,
   getStoredDocsLocale,
   isLandingRoutePath,
+  normalizeDocsRoutePath,
   parseDocsLocale,
   parseLangFromUrl,
   resolveClientDocsLocale,
@@ -34,14 +35,23 @@ function resolveRouteLocale(options: {
   requestedLang: string | null;
   storedLocale: DocsLocale | null;
   clientLanguages: Array<string | null | undefined>;
+  currentRouteLocale: DocsLocale;
+  isLandingPath: boolean;
 }): { locale: DocsLocale; shouldPersist: boolean } {
-  const { requestedLang, storedLocale, clientLanguages } = options;
+  const { requestedLang, storedLocale, clientLanguages, currentRouteLocale, isLandingPath } = options;
 
   if (requestedLang !== null) {
     const requestedLocale = parseDocsLocale(requestedLang);
     return {
       locale: requestedLocale ?? storedLocale ?? resolveClientDocsLocale(clientLanguages) ?? DEFAULT_DOCS_ENTRY_LOCALE,
       shouldPersist: requestedLocale !== null,
+    };
+  }
+
+  if (!isLandingPath && currentRouteLocale !== 'root' && currentRouteLocale !== 'en-US') {
+    return {
+      locale: currentRouteLocale,
+      shouldPersist: false,
     };
   }
 
@@ -99,6 +109,15 @@ function buildTargetUrl(currentUrl: URL, targetPath: string): URL {
   return targetUrl;
 }
 
+function getCurrentRouteLocale(pathname: string): DocsLocale {
+  const match = pathname.match(/^\/([^/]+)(?=\/|$)/);
+  if (!match) {
+    return 'root';
+  }
+
+  return parseDocsLocale(match[1]) ?? 'root';
+}
+
 export function resolveDocsLandingRoute(
   currentUrl: URL,
   storedRouteValue: string | null | undefined,
@@ -108,16 +127,27 @@ export function resolveDocsLandingRoute(
   const requestedLang = parseLangFromUrl(currentUrl);
   const storedLocale = getStoredDocsLocale(storedRouteValue);
   const currentPath = currentUrl.pathname || '/';
-  const isLandingPath = isLandingRoutePath(currentPath);
+  const canonicalCurrentPath = normalizeDocsRoutePath(currentPath);
+  const isCanonicalPath = canonicalCurrentPath === currentPath;
+  const isLandingPath = isLandingRoutePath(canonicalCurrentPath);
+  const currentRouteLocale = getCurrentRouteLocale(canonicalCurrentPath);
   const { locale: resolvedLocale, shouldPersist } = resolveRouteLocale({
     requestedLang,
     storedLocale,
     clientLanguages,
+    currentRouteLocale,
+    isLandingPath,
   });
   const targetBasePath =
-    landingTargetPath && isLandingPath ? landingTargetPath : currentPath;
+    landingTargetPath && isLandingPath ? landingTargetPath : canonicalCurrentPath;
   const targetPath = buildDocsRoutePath(resolvedLocale, targetBasePath);
   const targetUrl = buildTargetUrl(currentUrl, targetPath);
+  const shouldHonorResolvedLocale =
+    isLandingPath ||
+    requestedLang !== null ||
+    !isCanonicalPath ||
+    currentRouteLocale === 'root' ||
+      currentRouteLocale === 'en-US';
 
   return {
     currentPath,
@@ -128,7 +158,7 @@ export function resolveDocsLandingRoute(
     storedLocale,
     isLandingPath,
     shouldPersist,
-    shouldRedirect: targetUrl.toString() !== currentUrl.toString(),
+    shouldRedirect: targetUrl.toString() !== currentUrl.toString() && shouldHonorResolvedLocale,
   };
 }
 
