@@ -14,6 +14,12 @@ async function readDistFile(relativePath) {
   return readFile(path.join(distDir, relativePath), 'utf8');
 }
 
+function extractRedirectScriptPath(html) {
+  const match = html.match(/<script[^>]+src="([^"]*lang-redirect[^"]*\.js)"[^>]*><\/script>/iu);
+  assert.ok(match, 'built HTML should reference a hashed lang-redirect script');
+  return match[1];
+}
+
 function assertIncludes(haystack, needle, message) {
   assert.ok(haystack.includes(needle), message + ` (missing: ${needle})`);
 }
@@ -166,23 +172,22 @@ function verifyScenario(scriptContent, scenario) {
 }
 
 async function main() {
-  const [rootHtml, enHtml, redirectScript] = await Promise.all([
+  const [rootHtml, enHtml] = await Promise.all([
     readDistFile('index.html'),
     readDistFile(path.join('en-US', 'index.html')),
-    readDistFile('lang-redirect.js'),
   ]);
+  const redirectScriptPath = extractRedirectScriptPath(rootHtml);
+  const redirectScript = await readDistFile(redirectScriptPath.replace(/^\//u, ''));
 
-  assertIncludes(rootHtml, 'name="hagicode-docs-default-entry" content="en"', 'root landing should advertise the English default entry');
+  assertIncludes(rootHtml, 'name="hagicode-docs-default-entry" content="en-US"', 'root landing should advertise the English default entry');
   assertIncludes(rootHtml, '<html lang="zh-CN"', 'root landing should keep Chinese metadata');
   assertIncludes(rootHtml, 'name="hagicode-docs-landing-target" content="/product-overview/"', 'root landing should point directly to the product overview route');
   assertIncludes(rootHtml, 'http-equiv="refresh"', 'root landing should expose a non-JS redirect fallback');
-  assertIncludes(rootHtml, '/lang-redirect.js', 'root landing should load the entry route resolver');
+  assertIncludes(rootHtml, redirectScriptPath, 'root landing should load the entry route resolver');
 
-  assertIncludes(enHtml, 'name="hagicode-docs-default-entry" content="en"', 'English landing should advertise the English default entry');
-  assertIncludes(enHtml, '<html lang="en"', 'English landing should expose English metadata');
-  assertIncludes(enHtml, 'name="hagicode-docs-landing-target" content="/product-overview/"', 'English landing should point directly to the product overview route');
+  assertIncludes(enHtml, '<html lang="en-US"', 'English landing should expose English metadata');
   assertIncludes(enHtml, 'http-equiv="refresh"', 'English landing should expose a non-JS redirect fallback');
-  assertIncludes(enHtml, '/lang-redirect.js', 'English landing should load the entry route resolver');
+  assertIncludes(enHtml, '0;url=/en-US/product-overview/', 'English landing should point directly to the product overview route');
 
   const localizedEntryLocales = DOCS_LOCALE_SELECTOR_OPTIONS
     .filter((locale) => locale.code !== 'root' && locale.code !== 'en-US');
@@ -219,10 +224,10 @@ async function main() {
     readDistFile(path.join('en-US', 'blog', 'index.html')),
   ]);
 
-  assertIncludes(rootDocsHtml, '/lang-redirect.js', 'root docs pages should load the shared route resolver');
-  assertIncludes(rootBlogHtml, '/lang-redirect.js', 'root blog pages should load the shared route resolver');
-  assertIncludes(enDocsHtml, '/lang-redirect.js', 'English docs pages should load the shared route resolver');
-  assertIncludes(enBlogHtml, '/lang-redirect.js', 'English blog pages should load the shared route resolver');
+  assertIncludes(rootDocsHtml, redirectScriptPath, 'root docs pages should load the shared route resolver');
+  assertIncludes(rootBlogHtml, redirectScriptPath, 'root blog pages should load the shared route resolver');
+  assertIncludes(enDocsHtml, redirectScriptPath, 'English docs pages should load the shared route resolver');
+  assertIncludes(enBlogHtml, redirectScriptPath, 'English blog pages should load the shared route resolver');
 
   const scenarios = [
     {

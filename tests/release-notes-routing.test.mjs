@@ -149,7 +149,7 @@ test('release-notes landing follows saved preference and allows explicit ?lang s
 });
 
 test('public lang-redirect script redirects release-notes routes by saved or explicit locale', async () => {
-  const scriptPath = path.join(testDir, '..', 'public', 'lang-redirect.js');
+  const scriptPath = path.join(testDir, '..', 'src', 'scripts', 'lang-redirect.js');
   const scriptContent = await readFile(scriptPath, 'utf8');
 
   const rootChinese = evaluateEntryScript(
