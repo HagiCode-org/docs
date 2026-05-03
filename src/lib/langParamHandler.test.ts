@@ -177,6 +177,18 @@ describe('docs language route resolution', () => {
         .shouldRedirect,
     ).toBe(true);
   });
+
+  it('redirects legacy /en docs paths to canonical /en-US targets while preserving query and hash', () => {
+    const result = route(
+      'https://docs.hagicode.com/en/product-overview/?tab=cli#install',
+      null,
+      ['en-US'],
+    );
+
+    expect(result.resolvedLocale).toBe('en-US');
+    expect(result.targetUrl).toBe('https://docs.hagicode.com/en-US/product-overview/?tab=cli#install');
+    expect(result.shouldRedirect).toBe(true);
+  });
 });
 
 describe('handleLanguageParameter', () => {

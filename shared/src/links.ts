@@ -52,13 +52,13 @@ export interface LinkConfig {
 }
 
 type SiteLocale = 'zh-CN' | 'zh-Hant' | 'en-US' | 'ja-JP' | 'ko-KR' | 'de-DE' | 'fr-FR' | 'es-ES' | 'pt-BR' | 'ru-RU';
-type DocsRouteLocale = 'root' | 'en' | 'zh-Hant' | 'ja-JP' | 'ko-KR' | 'de-DE' | 'fr-FR' | 'es-ES' | 'pt-BR' | 'ru-RU';
+type DocsRouteLocale = 'root' | 'en-US' | 'zh-Hant' | 'ja-JP' | 'ko-KR' | 'de-DE' | 'fr-FR' | 'es-ES' | 'pt-BR' | 'ru-RU';
 
 const SITE_DEFAULT_LOCALE: SiteLocale = 'en-US';
 const DOCS_DEFAULT_ROUTE_LOCALE: DocsRouteLocale = 'root';
 const DOCS_ROUTE_TO_SITE_LOCALE: Record<DocsRouteLocale, SiteLocale> = {
     root: 'zh-CN',
-    en: 'en-US',
+    'en-US': 'en-US',
     'zh-Hant': 'zh-Hant',
     'ja-JP': 'ja-JP',
     'ko-KR': 'ko-KR',
@@ -91,8 +91,8 @@ const NORMALIZED_DOCS_ROUTE_LOCALE_MAP: Record<string, DocsRouteLocale> = {
     zh: 'root',
     'zh-cn': 'root',
     'zh-hans': 'root',
-    en: 'en',
-    'en-us': 'en',
+    en: 'en-US',
+    'en-us': 'en-US',
     'zh-tw': 'zh-Hant',
     'zh-hk': 'zh-Hant',
     'zh-hant': 'zh-Hant',
@@ -141,7 +141,7 @@ function resolveDocsRouteLocale(locale?: string): DocsRouteLocale | null {
 
 function stripSiteLocalePrefix(pathname: string): string {
     const normalized = normalizeAbsolutePath(pathname);
-    const hasLocalePrefix = /^\/(en|zh-CN|zh-Hant|ja-JP|ko-KR|de-DE|fr-FR|es-ES|pt-BR|ru-RU)(?=\/|$)/u.test(normalized);
+    const hasLocalePrefix = /^\/(en-US|en|zh-CN|zh-Hant|ja-JP|ko-KR|de-DE|fr-FR|es-ES|pt-BR|ru-RU)(?=\/|$)/u.test(normalized);
 
     if (!hasLocalePrefix) {
         return ensureTrailingSlash(normalized);
@@ -153,7 +153,7 @@ function stripSiteLocalePrefix(pathname: string): string {
 
 function stripDocsLocalePrefix(pathname: string): string {
     const normalized = normalizeAbsolutePath(pathname);
-    const hasLocalePrefix = /^\/(en|zh-Hant|ja-JP|ko-KR|de-DE|fr-FR|es-ES|pt-BR|ru-RU)(?=\/|$)/u.test(normalized);
+    const hasLocalePrefix = /^\/(en-US|en|zh-Hant|ja-JP|ko-KR|de-DE|fr-FR|es-ES|pt-BR|ru-RU)(?=\/|$)/u.test(normalized);
 
     if (!hasLocalePrefix) {
         return ensureTrailingSlash(normalized);
@@ -166,10 +166,6 @@ function stripDocsLocalePrefix(pathname: string): string {
 function getLocalizedSitePath(pathname: string, locale?: string): string {
     const resolvedLocale = resolveSiteLocale(locale) ?? SITE_DEFAULT_LOCALE;
     const normalizedPath = stripSiteLocalePrefix(pathname);
-
-    if (resolvedLocale === SITE_DEFAULT_LOCALE) {
-        return normalizedPath;
-    }
 
     if (normalizedPath === '/') {
         return `/${resolvedLocale}/`;
@@ -200,7 +196,7 @@ function getLocalizedDocsPath(pathname: string, locale?: string): string {
 
 function getLocalizedDocsRssPath(locale?: string): string {
     const resolvedLocale = resolveSiteLocale(locale) ?? DOCS_ROUTE_TO_SITE_LOCALE[resolveDocsRouteLocale(locale) ?? DOCS_DEFAULT_ROUTE_LOCALE];
-    return resolvedLocale.startsWith('zh') ? '/blog/rss.zh-CN.xml' : '/blog/rss.en.xml';
+    return resolvedLocale.startsWith('zh') ? '/blog/rss.zh-CN.xml' : '/blog/rss.en-US.xml';
 }
 
 function localizeAbsoluteUrl(input: string, locale?: string): string {

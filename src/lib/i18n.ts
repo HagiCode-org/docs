@@ -107,7 +107,11 @@ export function parseDocsLocale(lang: string | null | undefined): DocsLocale | n
     return null;
   }
 
-  if (normalized === 'en' || (normalized.startsWith('en-') && normalized !== 'en-us')) {
+  if (normalized === 'en') {
+    return 'en-US';
+  }
+
+  if (normalized.startsWith('en-') && normalized !== 'en-us') {
     return null;
   }
 

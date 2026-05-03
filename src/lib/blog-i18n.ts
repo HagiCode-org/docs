@@ -57,7 +57,7 @@ export const BLOG_LANGUAGE_OPTIONS: readonly BlogLanguageOption[] = [
     nativeName: 'English',
     shortLabel: 'EN',
     fallbackCodes: ['en-US'],
-    rssPath: '/blog/rss.en.xml',
+    rssPath: '/blog/rss.en-US.xml',
   },
   {
     code: 'ja-JP',

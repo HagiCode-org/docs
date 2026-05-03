@@ -9,7 +9,7 @@ describe('docs footer site links', () => {
     expect(links.find((link) => link.siteId === 'hagicode-main')).toMatchObject({
       title: 'HagiCode Main Site',
       description: 'Primary product entry.',
-      href: 'https://hagicode.com/',
+      href: 'https://hagicode.com/en-US/',
     });
   });
 

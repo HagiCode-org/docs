@@ -37,7 +37,7 @@ describe('docs locale helpers', () => {
 
   it.each([
     ['en-US', 'en-US'],
-    ['en', null],
+    ['en', 'en-US'],
     ['en-gb', null],
     ['root', 'root'],
     ['zh', 'root'],
@@ -115,7 +115,8 @@ describe('docs locale helpers', () => {
 
   it.each([
     ['/en-US/product-overview/', '/en-US/product-overview/'],
-    ['/en/en-US/product-overview/', '/en/en-US/product-overview/'],
+    ['/en/product-overview/', '/en-US/product-overview/'],
+    ['/en/en-US/product-overview/', '/en-US/product-overview/'],
     ['/en-US/ja-JP/product-overview/', '/ja-JP/product-overview/'],
     ['/zh-CN/product-overview/', '/product-overview/'],
     ['/ja/product-overview/', '/ja-JP/product-overview/'],
