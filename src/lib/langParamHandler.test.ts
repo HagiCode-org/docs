@@ -113,7 +113,7 @@ describe('docs language route resolution', () => {
 
   it('uses explicit lang before saved preference and preserves query/hash context', () => {
     const result = route(
-      'https://docs.hagicode.com/installation/?lang=en&tab=cli#download',
+      'https://docs.hagicode.com/installation/?lang=en-US&tab=cli#download',
       JSON.stringify({ lang: 'root' }),
       ['zh-CN'],
     );
@@ -160,7 +160,7 @@ describe('docs language route resolution', () => {
     );
   });
 
-  it('canonicalizes alias and stacked locale paths even without an explicit lang parameter', () => {
+  it('canonicalizes stacked supported locale paths even without an explicit lang parameter', () => {
     expect(route('https://docs.hagicode.com/en-US/product-overview/', null, ['en-US']).targetUrl).toBe(
       'https://docs.hagicode.com/en-US/product-overview/',
     );
@@ -176,13 +176,6 @@ describe('docs language route resolution', () => {
       route('https://docs.hagicode.com/en-US/ja-JP/product-overview/', JSON.stringify({ lang: 'en-US' }), ['en-US'])
         .shouldRedirect,
     ).toBe(true);
-
-    expect(route('https://docs.hagicode.com/en/en-US/product-overview/', null, ['en-US']).targetUrl).toBe(
-      'https://docs.hagicode.com/en-US/product-overview/',
-    );
-    expect(route('https://docs.hagicode.com/en/en-US/product-overview/', null, ['en-US']).shouldRedirect).toBe(
-      true,
-    );
   });
 });
 

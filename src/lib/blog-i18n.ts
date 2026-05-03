@@ -241,7 +241,7 @@ export function getBlogLanguageByRouteLocale(routeLocale: string | null | undefi
     return BLOG_LANGUAGE_BY_ROUTE_LOCALE.get('root') ?? null;
   }
 
-  if (routeLocale === 'en' || routeLocale === 'en-US') {
+  if (routeLocale === 'en-US') {
     return BLOG_LANGUAGE_BY_ROUTE_LOCALE.get('en-US') ?? null;
   }
 

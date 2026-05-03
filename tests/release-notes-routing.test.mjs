@@ -130,7 +130,7 @@ test('release-notes landing follows saved preference and allows explicit ?lang s
   assert.equal(anchoredLanding.shouldRedirect, false);
 
   const switchLandingToEnglish = resolveDocsLandingRoute(
-    new URL('https://docs.hagicode.com/release-notes/?lang=en#v1.0.0'),
+    new URL('https://docs.hagicode.com/release-notes/?lang=en-US#v1.0.0'),
     JSON.stringify({ lang: 'root' }),
     ['zh-CN', 'zh'],
   );

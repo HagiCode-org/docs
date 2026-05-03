@@ -383,7 +383,7 @@ async function main() {
   console.log('- root docs/blog paths follow saved preference, then browser language, then English default');
   console.log('- explicit zh-CN keeps the Chinese redirect target');
   console.log('- invalid lang values do not overwrite saved preferences');
-  console.log('- /en/ redirects according to the same preference chain as other routed pages');
+  console.log('- only /en-US/ remains as the supported English route prefix');
 }
 
 main().catch((error) => {

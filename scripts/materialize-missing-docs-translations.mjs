@@ -118,12 +118,12 @@ function createTranslationRegistry() {
 }
 
 function localizeDocsUrl(url, locale) {
-  if (url === '/en') {
+  if (url === '/en-US') {
     return `/${locale}`;
   }
 
-  if (url.startsWith('/en/')) {
-    return `/${locale}${url.slice(3)}`;
+  if (url.startsWith('/en-US/')) {
+    return `/${locale}${url.slice('/en-US'.length)}`;
   }
 
   return url;

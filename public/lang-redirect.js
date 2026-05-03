@@ -8,7 +8,7 @@
 
   var LOCALE_ROUTES = ['root', 'en-US', 'zh-Hant', 'ja-JP', 'ko-KR', 'de-DE', 'fr-FR', 'es-ES', 'pt-BR', 'ru-RU'];
   var LOCALE_ALIASES = {
-    'en': 'en-US', 'en-us': 'en-US', 'en-gb': 'en-US', 'en-au': 'en-US', 'en-ca': 'en-US',
+    'en-us': 'en-US',
     'root': 'root', 'zh': 'root', 'zh-cn': 'root', 'zh-hans': 'root', 'zh-hans-cn': 'root',
     'zh-hant': 'zh-Hant', 'zh-tw': 'zh-Hant', 'zh-hk': 'zh-Hant', 'zh-hant-tw': 'zh-Hant', 'zh-hant-hk': 'zh-Hant',
     'ja': 'ja-JP', 'ja-jp': 'ja-JP',
@@ -27,6 +27,10 @@
 
     var normalized = String(value).trim().toLowerCase().replace(/_/g, '-');
     if (!normalized) {
+      return null;
+    }
+
+    if (normalized === 'en' || (normalized.indexOf('en-') === 0 && normalized !== 'en-us')) {
       return null;
     }
 

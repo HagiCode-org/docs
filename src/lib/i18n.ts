@@ -20,7 +20,7 @@ import {
 } from './blog-i18n';
 
 export type DocsLocale = BlogRouteLocale;
-export type DocsLanguageParam = 'zh-CN' | 'en';
+export type DocsLanguageParam = 'zh-CN' | 'en-US';
 
 type DocsContentLayoutToggleCopy = {
   label: string;
@@ -104,6 +104,10 @@ export function parseDocsLocale(lang: string | null | undefined): DocsLocale | n
 
   const normalized = normalizeLocaleKey(lang);
   if (!normalized) {
+    return null;
+  }
+
+  if (normalized === 'en' || (normalized.startsWith('en-') && normalized !== 'en-us')) {
     return null;
   }
 
@@ -240,12 +244,7 @@ export function normalizeDocsRoutePath(pathname = '/'): string {
  * Returns true when the path already targets the English docs locale.
  */
 export function isEnglishDocsPath(pathname = '/'): boolean {
-  return (
-    pathname === '/en-US' ||
-    pathname.startsWith('/en-US/') ||
-    pathname === '/en' ||
-    pathname.startsWith('/en/')
-  );
+  return pathname === '/en-US' || pathname.startsWith('/en-US/');
 }
 
 /**
@@ -357,7 +356,7 @@ export function resolveDocsLocale(...candidates: Array<string | null | undefined
 
 /**
  * Resolve the docs landing entry locale using
- * `query > stored preference > client language > default en`.
+ * `query > stored preference > client language > default en-US`.
  */
 export function resolveDocsEntryLocale(options: {
   requestedLang?: string | null | undefined;
