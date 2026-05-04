@@ -38,14 +38,14 @@ The local docs server runs on `http://localhost:31265` by default.
 ## GitHub Actions
 
 - `.github/workflows/docs-ci.yml` validates pushes and pull requests targeting `main`.
-- `.github/workflows/docs-deploy-gh-pages.yml` adds an artifact-driven dual-channel publication path for pushes to `main` and `workflow_dispatch`.
-- The `gh-pages` payload contract is branch-root `esa.jsonc` plus `dist/` containing the validated Astro snapshot assembled after `npm run build:ci` succeeds.
-- The build job stays read-only and uploads the validated payload artifact; `gh-pages` remains authoritative, only the deploy job receives `contents: write`, and the downstream `upload-r2` job reuses that same artifact instead of rebuilding.
-- Manual `workflow_dispatch` runs expose `publish_source` with two modes: `latest-gh-pages` replays the latest validated `gh-pages` snapshot without rebuilding, while `current-ref-build` reruns `npm run build:ci`, republishes `gh-pages`, and then uploads the same validated `dist/` payload to R2.
-- Configure `R2_ENDPOINT`, `R2_BUCKET`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, and optional `R2_PREFIX` before enabling production runs. Store them in repository secrets or the `docs-production` environment; when `R2_PREFIX` is set, use a normalized prefix root such as `docs` (no leading or trailing slash) so `.deploy/gh-pages/dist/` contents land directly at the target root without an extra `dist/` segment.
+- `.github/workflows/docs-deploy-gh-pages.yml` publishes a validated `gh-pages` payload for pushes to `main` and `workflow_dispatch`.
+- The `gh-pages` payload contract is branch-root `esa.jsonc`, `wrangler.jsonc`, and `dist/` containing the validated Astro snapshot assembled after `npm run build:ci` succeeds.
+- The build job stays read-only and uploads the validated payload artifact; `gh-pages` remains authoritative and only the deploy job receives `contents: write`.
+- Manual `workflow_dispatch` runs rebuild from the selected ref, validate with `npm run build:ci`, and republish the resulting payload to `gh-pages`.
+- Direct Cloudflare publication is handled outside this workflow; keep `gh-pages/wrangler.jsonc` as the versioned deployment contract used by direct publish operations.
 - Existing workflows remain in place: `.github/workflows/docs-ci.yml`, `.github/workflows/azure-static-web-apps-agreeable-stone-04924c800.yml`, `.github/workflows/compress-images.yml`, and `.github/workflows/indexnow.yml` are additive peers, not replaced by the new workflow.
-- Treat host cutover as a separate operational step: adding the workflow does not prove `docs.hagicode.com` already reads `gh-pages/esa.jsonc` and `gh-pages/dist/`.
-- Follow-up checks before treating `docs.hagicode.com` as a `gh-pages` consumer: confirm the workflow published `esa.jsonc` and `dist/`, verify the hosting target still points at `gh-pages`, and then load `https://docs.hagicode.com` from the deployed branch snapshot.
+- Treat host cutover as a separate operational step: adding the workflow does not prove `docs.hagicode.com` already reads `gh-pages/esa.jsonc`, `gh-pages/wrangler.jsonc`, and `gh-pages/dist/`.
+- Follow-up checks before treating `docs.hagicode.com` as a `gh-pages` consumer: confirm the workflow published `esa.jsonc`, `wrangler.jsonc`, and `dist/`, verify the hosting target still points at `gh-pages`, and then load `https://docs.hagicode.com` from the deployed branch snapshot.
 - This change migrates only `repos/docs`; `repos/awesome-design-md-site`, `repos/cost`, `repos/index`, `repos/soul`, `repos/trait`, and `repos/docker-compose-builder-web` remain unchanged follow-up migration candidates.
 - `.github/workflows/compress-images.yml` and `.github/workflows/indexnow.yml` handle repository maintenance automation.
 
