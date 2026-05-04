@@ -4,12 +4,12 @@ import config from 'virtual:starlight-blog/config';
 import {
   getAllAuthors,
   getEntryAuthors,
-} from '../../../node_modules/starlight-blog/libs/authors.ts';
+} from './libs/authors';
 import { renderBlogEntryToString } from '../../../node_modules/starlight-blog/libs/container.ts';
 import {
   getBlogEntries,
   getSidebarBlogEntries,
-} from '../../../node_modules/starlight-blog/libs/content.ts';
+} from './libs/content';
 import { getMetrics } from '../../../node_modules/starlight-blog/libs/metrics.ts';
 import { isNavigationWithSidebarLink } from '../../../node_modules/starlight-blog/libs/navigation.ts';
 import {
@@ -22,7 +22,7 @@ import {
   isBlogAuthorPage,
   isBlogRoot,
 } from '../../../node_modules/starlight-blog/libs/page.ts';
-import { getEntryTags } from '../../../node_modules/starlight-blog/libs/tags.ts';
+import { getAllTags, getEntryTags } from './libs/tags';
 import { getBlogTitle } from '../../../node_modules/starlight-blog/libs/title.ts';
 
 const blogDataPerLocale = new Map();
@@ -130,6 +130,30 @@ async function getBlogSidebar(context) {
       isBlogTagsOverviewPage(id),
     ),
   );
+
+  const tags = await getAllTags(locale);
+  if (tags.size > 0) {
+    sidebar.push(
+      makeSidebarGroup(
+        t('starlightBlog.sidebar.tags'),
+        [...tags]
+          .toSorted(([, a], [, b]) => {
+            if (a.entries.length === b.entries.length) {
+              return a.label.localeCompare(b.label);
+            }
+
+            return b.entries.length - a.entries.length;
+          })
+          .map(([tagSlug, { entries, label }]) =>
+            makeSidebarLink(
+              `${label} (${entries.length})`,
+              `${getRelativeBlogUrl('/tags', locale)}#${tagSlug}`,
+              false,
+            ),
+          ),
+      ),
+    );
+  }
 
   const authors = await getAllAuthors(locale);
   const authorEntries = [...authors].sort(([, a], [, b]) => {
