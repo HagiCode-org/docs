@@ -20,38 +20,41 @@ import {
 
 describe('docs locale helpers', () => {
   it('exposes generated route locale metadata for Starlight and hagi18n locale names', () => {
-    expect(DOCS_ROUTE_TO_SOURCE_LOCALE).toEqual({
-      root: 'zh-CN',
-      'en-US': 'en-US',
-      'zh-Hant': 'zh-Hant',
-      'ja-JP': 'ja-JP',
-      'ko-KR': 'ko-KR',
-      'de-DE': 'de-DE',
-      'fr-FR': 'fr-FR',
-      'es-ES': 'es-ES',
-      'pt-BR': 'pt-BR',
-      'ru-RU': 'ru-RU',
-    });
-    expect(DOCS_ROUTE_LOCALE_LABELS.root).toBe('中文');
+    expect(DOCS_LOCALE_METADATA).toHaveLength(29);
+    expect(DOCS_ROUTE_TO_SOURCE_LOCALE.root).toBe('zh-CN');
+    expect(DOCS_ROUTE_TO_SOURCE_LOCALE['it-IT']).toBe('it-IT');
+    expect(DOCS_ROUTE_TO_SOURCE_LOCALE['es-419']).toBe('es-419');
+    expect(DOCS_ROUTE_TO_SOURCE_LOCALE['vi-VN']).toBe('vi-VN');
+    expect(DOCS_ROUTE_LOCALE_LABELS.root).toBe('简体中文');
     expect(DOCS_ROUTE_LOCALE_LABELS['en-US']).toBe('English');
+    expect(DOCS_ROUTE_LOCALE_LABELS['es-ES']).toBe('Español (España)');
+    expect(DOCS_ROUTE_LOCALE_LABELS['es-419']).toBe('Español (Latinoamérica)');
     expect(DOCS_LOCALE_METADATA.map((locale) => locale.code)).toEqual(BLOG_ROUTE_LOCALES);
   });
 
   it.each([
     ['en-US', 'en-US'],
     ['en', 'en-US'],
-    ['en-gb', null],
+    ['en-gb', 'en-US'],
     ['root', 'root'],
     ['zh', 'root'],
     ['zh-CN', 'root'],
     ['zh-Hant', 'zh-Hant'],
     ['zh-TW', 'zh-Hant'],
+    ['zh-MO', 'zh-Hant'],
+    ['it', 'it-IT'],
+    ['sv-SE', 'sv-SE'],
+    ['tr-TR', 'tr-TR'],
+    ['es-419', 'es-419'],
+    ['es-latam', 'es-419'],
     ['ja', 'ja-JP'],
     ['ko-KR', 'ko-KR'],
     ['de', 'de-DE'],
     ['fr', 'fr-FR'],
     ['es-ES', 'es-ES'],
     ['pt', 'pt-BR'],
+    ['pt-PT', 'pt-PT'],
+    ['nb', 'nb-NO'],
     ['ru_RU', 'ru-RU'],
     ['', null],
   ] as const)('parses %s as %s', (input, expected) => {
@@ -62,7 +65,8 @@ describe('docs locale helpers', () => {
     ['en', 'en-US'],
     ['zh-CN', 'zh-CN'],
     ['zh-HK', 'zh-Hant'],
-    ['it-IT', null],
+    ['it-IT', 'it-IT'],
+    ['es-latam', 'es-419'],
   ] as const)('maps %s to canonical source locale %s', (input, expected) => {
     expect(getCanonicalDocsSourceLocale(input)).toBe(expected);
   });
@@ -93,7 +97,9 @@ describe('docs locale helpers', () => {
   it('resolves browser languages to the first supported docs locale', () => {
     expect(resolveClientDocsLocale(['fr-FR', 'en-GB', 'zh-CN'])).toBe('fr-FR');
     expect(resolveClientDocsLocale(['ja-JP', 'zh-Hant'])).toBe('ja-JP');
-    expect(resolveClientDocsLocale(['it-IT'])).toBeNull();
+    expect(resolveClientDocsLocale(['it-IT'])).toBe('it-IT');
+    expect(resolveClientDocsLocale(['pt-MZ'])).toBe('pt-BR');
+    expect(resolveClientDocsLocale(['xx-XX'])).toBeNull();
   });
 
   it.each([
@@ -111,6 +117,8 @@ describe('docs locale helpers', () => {
     ['ja-JP', '/en-US/ja-JP/product-overview/', '/ja-JP/product-overview/'],
     ['ja-JP', '/blog/example/', '/ja-JP/blog/example/'],
     ['fr-FR', '/en-US/blog/example/', '/fr-FR/blog/example/'],
+    ['it-IT', '/product-overview/', '/it-IT/product-overview/'],
+    ['es-419', '/product-overview/', '/es-419/product-overview/'],
   ] as const)('builds %s route for %s', (locale, originalPath, expected) => {
     expect(buildDocsRoutePath(locale, originalPath)).toBe(expected);
   });
@@ -119,6 +127,7 @@ describe('docs locale helpers', () => {
     ['en-US', '/en/ja-JP/product-overview/', '/en-US/product-overview/'],
     ['root', '/en-US/product-overview/', '/product-overview/'],
     ['ja-JP', '/en/product-overview/', '/ja-JP/product-overview/'],
+    ['pt-PT', '/pt-BR/product-overview/', '/pt-PT/product-overview/'],
   ] as const)('builds counterpart %s route for %s', (locale, originalPath, expected) => {
     expect(buildDocsCounterpartPath(locale, originalPath)).toBe(expected);
   });
@@ -128,6 +137,8 @@ describe('docs locale helpers', () => {
     ['/en-US/ja-JP/product-overview/', '/product-overview/'],
     ['/zh-CN/release-notes/', '/release-notes/'],
     ['/ja-JP/product-overview/', '/product-overview/'],
+    ['/it-IT/product-overview/', '/product-overview/'],
+    ['/es-419/product-overview/', '/product-overview/'],
   ] as const)('strips locale prefixes from %s', (input, expected) => {
     expect(stripDocsLocalePrefix(input)).toBe(expected);
   });
@@ -139,6 +150,8 @@ describe('docs locale helpers', () => {
     ['/en-US/ja-JP/product-overview/', '/ja-JP/product-overview/'],
     ['/zh-CN/product-overview/', '/product-overview/'],
     ['/ja/product-overview/', '/ja-JP/product-overview/'],
+    ['/it/product-overview/', '/it-IT/product-overview/'],
+    ['/es-latam/product-overview/', '/es-419/product-overview/'],
     ['/product-overview/', '/product-overview/'],
   ] as const)('normalizes %s to %s', (input, expected) => {
     expect(normalizeDocsRoutePath(input)).toBe(expected);

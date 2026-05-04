@@ -146,9 +146,10 @@ function buildDocTranslations(relativeDocPath: string, fallbackLabel: string): S
       continue;
     }
 
-    const translationDirectory = getTranslationDirectoryByRouteLocale(locale.code);
+    const localeCode = locale.code as Exclude<DocsLocale, 'root'>;
+    const translationDirectory = getTranslationDirectoryByRouteLocale(localeCode);
     if (!translationDirectory) {
-      translations[locale.code] = fallbackLabel;
+      translations[localeCode] = fallbackLabel;
       continue;
     }
 
@@ -161,11 +162,11 @@ function buildDocTranslations(relativeDocPath: string, fallbackLabel: string): S
       relativeDocPath
     );
     if (!existsSync(translationPath)) {
-      translations[locale.code] = fallbackLabel;
+      translations[localeCode] = fallbackLabel;
       continue;
     }
 
-    translations[locale.code] =
+    translations[localeCode] =
       readTranslationDocMetadata(translationDirectory, relativeDocPath).title ?? fallbackLabel;
   }
 

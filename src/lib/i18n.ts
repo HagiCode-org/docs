@@ -10,17 +10,39 @@ import {
   DOCS_LOCALE_RESOURCES,
   DOCS_LOCALE_SELECTOR_OPTIONS,
 } from '../i18n/generated/docs-locale-resources.mjs';
-import {
-  BLOG_ROUTE_LOCALES,
-  buildBlogRoutePath,
-  getBlogLanguageByRouteLocale,
-  getBlogRouteLocale,
-  stripBlogLocalePrefix,
-  type BlogRouteLocale,
-} from './blog-i18n.js';
 
-export type DocsLocale = BlogRouteLocale;
-export type DocsLanguageParam = 'zh-CN' | 'en-US';
+export type DocsLocale =
+  | 'root'
+  | 'en-US'
+  | 'zh-Hant'
+  | 'fr-FR'
+  | 'it-IT'
+  | 'de-DE'
+  | 'es-ES'
+  | 'bg-BG'
+  | 'cs-CZ'
+  | 'da-DK'
+  | 'nl-NL'
+  | 'fi-FI'
+  | 'el-GR'
+  | 'hu-HU'
+  | 'id-ID'
+  | 'ja-JP'
+  | 'ko-KR'
+  | 'nb-NO'
+  | 'pl-PL'
+  | 'pt-BR'
+  | 'pt-PT'
+  | 'ro-RO'
+  | 'ru-RU'
+  | 'es-419'
+  | 'sv-SE'
+  | 'th-TH'
+  | 'tr-TR'
+  | 'uk-UA'
+  | 'vi-VN';
+
+export type DocsLanguageParam = string;
 
 type DocsContentLayoutToggleCopy = {
   label: string;
@@ -56,6 +78,7 @@ type GeneratedDocsLocaleOption = {
 };
 
 export const DOCS_LOCALE_METADATA = DOCS_LOCALE_SELECTOR_OPTIONS as GeneratedDocsLocaleOption[];
+export const DOCS_ROUTE_LOCALE_CODES = DOCS_LOCALE_METADATA.map((locale) => locale.code) as DocsLocale[];
 export const DOCS_ROUTE_TO_SOURCE_LOCALE = Object.fromEntries(
   DOCS_LOCALE_METADATA.map((locale) => [locale.code, locale.sourceLocale]),
 ) as Record<DocsLocale, string>;
@@ -63,8 +86,21 @@ export const DOCS_ROUTE_LOCALE_LABELS = Object.fromEntries(
   DOCS_LOCALE_METADATA.map((locale) => [locale.code, locale.label]),
 ) as Record<DocsLocale, string>;
 
+function canonicalizeLocale(locale: string): string {
+  const candidate = locale.trim().replace(/_/g, '-');
+  if (!candidate) {
+    return '';
+  }
+
+  try {
+    return Intl.getCanonicalLocales(candidate)[0] ?? candidate;
+  } catch {
+    return candidate;
+  }
+}
+
 function normalizeLocaleKey(locale: string): string {
-  return locale.trim().replace(/_/g, '-').toLowerCase();
+  return canonicalizeLocale(locale).toLowerCase();
 }
 
 const DOCS_ROUTE_LOCALE_BY_NORMALIZED_KEY = Object.fromEntries(
@@ -77,6 +113,14 @@ const DOCS_SOURCE_TO_ROUTE_LOCALE = Object.fromEntries(
     ['en', 'en-US'],
   ].map(([locale, routeLocale]) => [normalizeLocaleKey(locale), routeLocale]),
 ) as Record<string, DocsLocale>;
+const DOCS_ROUTE_LOCALE_BY_LANGUAGE = new Map<string, DocsLocale>();
+
+for (const locale of DOCS_LOCALE_METADATA) {
+  const languagePart = normalizeLocaleKey(locale.sourceLocale).split('-')[0];
+  if (!DOCS_ROUTE_LOCALE_BY_LANGUAGE.has(languagePart)) {
+    DOCS_ROUTE_LOCALE_BY_LANGUAGE.set(languagePart, locale.code);
+  }
+}
 
 export const DOCS_LANGUAGE_STORAGE_KEY = 'starlight-route';
 export const DEFAULT_DOCS_ENTRY_LOCALE: DocsLocale = 'en-US';
@@ -107,21 +151,18 @@ export function parseDocsLocale(lang: string | null | undefined): DocsLocale | n
     return null;
   }
 
-  if (normalized.startsWith('en-') && normalized !== 'en-us') {
-    return null;
-  }
-
   const generatedRouteLocale = DOCS_SOURCE_TO_ROUTE_LOCALE[normalized];
   if (generatedRouteLocale) {
     return generatedRouteLocale;
   }
 
-  const blogRouteLocale = getBlogRouteLocale(lang);
-  if (blogRouteLocale) {
-    return blogRouteLocale;
+  const directRouteLocale = DOCS_ROUTE_LOCALE_BY_NORMALIZED_KEY[normalized];
+  if (directRouteLocale) {
+    return directRouteLocale;
   }
 
-  return null;
+  const [languagePart] = normalized.split('-');
+  return DOCS_ROUTE_LOCALE_BY_LANGUAGE.get(languagePart) ?? null;
 }
 
 export function getCanonicalDocsRouteLocale(lang: string | null | undefined): DocsLocale | null {
@@ -230,8 +271,7 @@ export function stripDocsLocalePrefix(pathname = '/'): string {
     return '/';
   }
 
-  const consumedPath = consumeLeadingDocsLocaleSegments(pathname).path;
-  return stripBlogLocalePrefix(consumedPath);
+  return consumeLeadingDocsLocaleSegments(pathname).path;
 }
 
 /**
@@ -294,7 +334,7 @@ export function buildDocsRoutePath(locale: DocsLocale, originalPath = '/'): stri
     return normalizedPath || '/';
   }
 
-  return buildBlogRoutePath(getBlogLanguageByRouteLocale(locale)?.code ?? locale, normalizedPath || '/');
+  return normalizedPath === '/' ? `/${locale}/` : `/${locale}${normalizedPath}`;
 }
 
 export function buildDocsCounterpartPath(locale: DocsLocale, originalPath = '/'): string {
@@ -401,16 +441,17 @@ export function toInstallButtonLocale(locale: DocsLocale): 'zh' | 'en' {
   return locale === 'en-US' ? 'en' : 'zh';
 }
 
-const DOCS_CONTENT_LAYOUT_TOGGLE_COPY: Record<DocsLocale, DocsContentLayoutToggleCopy> = {
+const DEFAULT_DOCS_CONTENT_LAYOUT_TOGGLE_COPY: DocsContentLayoutToggleCopy = {
+  label: 'Content layout',
+  wide: 'Wide',
+  narrow: 'Narrow',
+};
+
+const DOCS_CONTENT_LAYOUT_TOGGLE_COPY_OVERRIDES: Partial<Record<DocsLocale, DocsContentLayoutToggleCopy>> = {
   root: {
     label: '正文宽度',
     wide: '宽版',
     narrow: '窄版',
-  },
-  'en-US': {
-    label: 'Content layout',
-    wide: 'Wide',
-    narrow: 'Narrow',
   },
   'zh-Hant': {
     label: '正文寬度',
@@ -454,7 +495,25 @@ const DOCS_CONTENT_LAYOUT_TOGGLE_COPY: Record<DocsLocale, DocsContentLayoutToggl
   },
 };
 
-const DOCS_FOOTER_COPY: Record<DocsLocale, DocsFooterCopy> = {
+const DEFAULT_DOCS_FOOTER_COPY: DocsFooterCopy = {
+  copyright: 'All rights reserved.',
+  sections: {
+    ecosystemSites: 'Ecosystem Sites',
+    quickLinks: 'Quick Links',
+    community: 'Community',
+  },
+  navigation: {
+    ecosystemSites: 'Ecosystem site links',
+    quickLinks: 'Quick links',
+    community: 'Community links',
+  },
+  filings: {
+    icpAriaLabel: 'View ICP filing information',
+    publicSecurityAriaLabel: 'View public security filing information',
+  },
+};
+
+const DOCS_FOOTER_COPY_OVERRIDES: Partial<Record<DocsLocale, DocsFooterCopy>> = {
   root: {
     copyright: 'All rights reserved.',
     sections: {
@@ -487,23 +546,6 @@ const DOCS_FOOTER_COPY: Record<DocsLocale, DocsFooterCopy> = {
     filings: {
       icpAriaLabel: '查看 ICP 備案資訊',
       publicSecurityAriaLabel: '查看公安備案資訊',
-    },
-  },
-  'en-US': {
-    copyright: 'All rights reserved.',
-    sections: {
-      ecosystemSites: 'Ecosystem Sites',
-      quickLinks: 'Quick Links',
-      community: 'Community',
-    },
-    navigation: {
-      ecosystemSites: 'Ecosystem site links',
-      quickLinks: 'Quick links',
-      community: 'Community links',
-    },
-    filings: {
-      icpAriaLabel: 'View ICP filing information',
-      publicSecurityAriaLabel: 'View public security filing information',
     },
   },
   'ja-JP': {
@@ -631,12 +673,12 @@ export function getDocsContentLayoutToggleCopy(
   localeInput: string | null | undefined,
 ): DocsContentLayoutToggleCopy {
   const locale = resolveDocsLocale(localeInput);
-  return DOCS_CONTENT_LAYOUT_TOGGLE_COPY[locale];
+  return DOCS_CONTENT_LAYOUT_TOGGLE_COPY_OVERRIDES[locale] ?? DEFAULT_DOCS_CONTENT_LAYOUT_TOGGLE_COPY;
 }
 
 export function getDocsFooterCopy(localeInput: string | null | undefined): DocsFooterCopy {
   const locale = resolveDocsLocale(localeInput);
-  return DOCS_FOOTER_COPY[locale];
+  return DOCS_FOOTER_COPY_OVERRIDES[locale] ?? DEFAULT_DOCS_FOOTER_COPY;
 }
 
-export { BLOG_ROUTE_LOCALES };
+export const BLOG_ROUTE_LOCALES = DOCS_ROUTE_LOCALE_CODES;

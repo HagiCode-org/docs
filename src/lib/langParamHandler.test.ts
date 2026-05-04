@@ -125,7 +125,7 @@ describe('docs language route resolution', () => {
 
   it('does not persist an unsupported lang value and falls back to stored preference', () => {
     const result = route(
-      'https://docs.hagicode.com/installation/?lang=it&tab=cli#download',
+      'https://docs.hagicode.com/installation/?lang=xx&tab=cli#download',
       JSON.stringify({ lang: 'root' }),
       ['en-US'],
     );
@@ -144,11 +144,25 @@ describe('docs language route resolution', () => {
   });
 
   it('falls back to configured default locale for unsupported browser languages', () => {
-    const result = route('https://docs.hagicode.com/installation/', null, ['it-IT']);
+    const result = route('https://docs.hagicode.com/installation/', null, ['xx-XX']);
 
     expect(result.resolvedLocale).toBe('en-US');
     expect(result.shouldPersist).toBe(true);
     expect(result.targetUrl).toBe('https://docs.hagicode.com/en-US/installation/');
+  });
+
+  it('resolves newly added supported locales from query and browser preferences', () => {
+    const queryDriven = route(
+      'https://docs.hagicode.com/product-overview/?lang=es-latam',
+      null,
+      ['en-US'],
+    );
+    expect(queryDriven.resolvedLocale).toBe('es-419');
+    expect(queryDriven.targetUrl).toBe('https://docs.hagicode.com/es-419/product-overview/');
+
+    const browserDriven = route('https://docs.hagicode.com/installation/', null, ['pt-PT']);
+    expect(browserDriven.resolvedLocale).toBe('pt-PT');
+    expect(browserDriven.targetUrl).toBe('https://docs.hagicode.com/pt-PT/installation/');
   });
 
   it('uses landing metadata when resolving root and English landing pages', () => {

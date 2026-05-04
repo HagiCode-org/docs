@@ -9,8 +9,8 @@ interface FooterCatalogLink {
   href: string;
 }
 
-type FooterCatalogLocale = 'zh-CN' | 'zh-Hant' | 'en-US' | 'ja-JP' | 'ko-KR' | 'de-DE' | 'fr-FR' | 'es-ES' | 'pt-BR' | 'ru-RU';
-type LocalizedFooterField = string | Readonly<Record<FooterCatalogLocale, string>>;
+type FooterCatalogLocale = string;
+type LocalizedFooterField = string | Readonly<Record<string, string>>;
 
 type FooterSnapshotEntry = {
   id: string;

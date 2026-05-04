@@ -8,6 +8,68 @@ const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const docsRoot = path.resolve(scriptDirectory, '..');
 const defaultConfigPath = path.join(docsRoot, 'hagi18n.yaml');
 const defaultGeneratedPath = path.join(docsRoot, 'src/i18n/generated/docs-locale-resources.mjs');
+const EXPECTED_DOCS_LOCALES = [
+  'bg-BG',
+  'cs-CZ',
+  'da-DK',
+  'de-DE',
+  'el-GR',
+  'en-US',
+  'es-419',
+  'es-ES',
+  'fi-FI',
+  'fr-FR',
+  'hu-HU',
+  'id-ID',
+  'it-IT',
+  'ja-JP',
+  'ko-KR',
+  'nb-NO',
+  'nl-NL',
+  'pl-PL',
+  'pt-BR',
+  'pt-PT',
+  'ro-RO',
+  'ru-RU',
+  'sv-SE',
+  'th-TH',
+  'tr-TR',
+  'uk-UA',
+  'vi-VN',
+  'zh-CN',
+  'zh-Hant',
+];
+const EXPECTED_DOCS_ROUTE_LOCALES = [
+  'root',
+  'en-US',
+  'zh-Hant',
+  'fr-FR',
+  'it-IT',
+  'de-DE',
+  'es-ES',
+  'bg-BG',
+  'cs-CZ',
+  'da-DK',
+  'nl-NL',
+  'fi-FI',
+  'el-GR',
+  'hu-HU',
+  'id-ID',
+  'ja-JP',
+  'ko-KR',
+  'nb-NO',
+  'pl-PL',
+  'pt-BR',
+  'pt-PT',
+  'ro-RO',
+  'ru-RU',
+  'es-419',
+  'sv-SE',
+  'th-TH',
+  'tr-TR',
+  'uk-UA',
+  'vi-VN',
+];
 
 function isPlainObject(value) {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -76,8 +138,8 @@ async function resolveConfig(options = {}) {
   const expectedLocales = normalizeNames([config.baseLocale, ...config.targetLocales]);
   assert.deepEqual(
     expectedLocales,
-    ['de-DE', 'en-US', 'es-ES', 'fr-FR', 'ja-JP', 'ko-KR', 'pt-BR', 'ru-RU', 'zh-CN', 'zh-Hant'],
-    'Docs generated resources must match the desktop-supported blog language set',
+    EXPECTED_DOCS_LOCALES,
+    'Docs generated resources must match the 29-language site catalog',
   );
 
   return {
@@ -200,6 +262,11 @@ function buildRouteLocales(resources) {
   const baseMetadata = resources['en-US'].metadata;
   const routeLocales = baseMetadata.locales;
   assert(isPlainObject(routeLocales), 'metadata.locales must be a mapping');
+  assert.deepEqual(
+    Object.keys(routeLocales),
+    EXPECTED_DOCS_ROUTE_LOCALES,
+    'metadata.locales must list the canonical 29 docs route locales',
+  );
 
   for (const [routeLocale, metadata] of Object.entries(routeLocales)) {
     assert(isPlainObject(metadata), `metadata.locales.${routeLocale} must be a mapping`);
@@ -210,6 +277,41 @@ function buildRouteLocales(resources) {
   }
 
   return routeLocales;
+}
+
+function buildResourceAliasMap(resources, routeLocales, selector) {
+  const aliases = resources['en-US'].metadata.aliases;
+  assert(isPlainObject(aliases), 'metadata.aliases must be a mapping');
+
+  const entries = [];
+  const seen = new Set();
+
+  function addAlias(localeLike, routeLocale) {
+    if (typeof localeLike !== 'string' || typeof routeLocale !== 'string' || seen.has(localeLike)) {
+      return;
+    }
+
+    const metadata = routeLocales[routeLocale];
+    if (!metadata) {
+      return;
+    }
+
+    seen.add(localeLike);
+    entries.push([localeLike, selector(resources[metadata.sourceLocale])]);
+  }
+
+  for (const [routeLocale, metadata] of Object.entries(routeLocales)) {
+    addAlias(routeLocale, routeLocale);
+    addAlias(metadata.sourceLocale, routeLocale);
+    addAlias(metadata.sourceLocale.toLowerCase(), routeLocale);
+  }
+
+  for (const [localeLike, routeLocale] of Object.entries(aliases)) {
+    addAlias(localeLike, routeLocale);
+    addAlias(localeLike.toLowerCase(), routeLocale);
+  }
+
+  return Object.fromEntries(entries);
 }
 
 function buildRuntimeResources(resources) {
@@ -234,35 +336,8 @@ function buildRuntimeResources(resources) {
       htmlLang: locale.htmlLang,
       direction: locale.direction,
     })),
-    blogPluginTitle: {
-      root: resources['zh-CN'].blog.plugin.title,
-      'zh-CN': resources['zh-CN'].blog.plugin.title,
-      en: resources['en-US'].blog.plugin.title,
-      'en-US': resources['en-US'].blog.plugin.title,
-      'zh-Hant': resources['zh-Hant'].blog.plugin.title,
-      'ja-JP': resources['ja-JP'].blog.plugin.title,
-      'ko-KR': resources['ko-KR'].blog.plugin.title,
-      'de-DE': resources['de-DE'].blog.plugin.title,
-      'fr-FR': resources['fr-FR'].blog.plugin.title,
-      'es-ES': resources['es-ES'].blog.plugin.title,
-      'pt-BR': resources['pt-BR'].blog.plugin.title,
-      'ru-RU': resources['ru-RU'].blog.plugin.title,
-    },
-    blogUiTranslations: {
-      'zh-CN': resources['zh-CN'].blog.ui,
-      'zh-cn': resources['zh-CN'].blog.ui,
-      zh: resources['zh-CN'].blog.ui,
-      en: resources['en-US'].blog.ui,
-      'en-US': resources['en-US'].blog.ui,
-      'zh-Hant': resources['zh-Hant'].blog.ui,
-      'ja-JP': resources['ja-JP'].blog.ui,
-      'ko-KR': resources['ko-KR'].blog.ui,
-      'de-DE': resources['de-DE'].blog.ui,
-      'fr-FR': resources['fr-FR'].blog.ui,
-      'es-ES': resources['es-ES'].blog.ui,
-      'pt-BR': resources['pt-BR'].blog.ui,
-      'ru-RU': resources['ru-RU'].blog.ui,
-    },
+    blogPluginTitle: buildResourceAliasMap(resources, routeLocales, (localeResources) => localeResources.blog.plugin.title),
+    blogUiTranslations: buildResourceAliasMap(resources, routeLocales, (localeResources) => localeResources.blog.ui),
   };
 }
 
