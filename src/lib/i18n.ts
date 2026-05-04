@@ -17,7 +17,7 @@ import {
   getBlogRouteLocale,
   stripBlogLocalePrefix,
   type BlogRouteLocale,
-} from './blog-i18n';
+} from './blog-i18n.js';
 
 export type DocsLocale = BlogRouteLocale;
 export type DocsLanguageParam = 'zh-CN' | 'en-US';
@@ -72,10 +72,10 @@ const DOCS_ROUTE_LOCALE_BY_NORMALIZED_KEY = Object.fromEntries(
 ) as Record<string, DocsLocale>;
 
 const DOCS_SOURCE_TO_ROUTE_LOCALE = Object.fromEntries(
-  Object.entries(DOCS_LOCALE_RESOURCES['en-US'].metadata.aliases).map(([locale, routeLocale]) => [
-    normalizeLocaleKey(locale),
-    routeLocale,
-  ]),
+  [
+    ...Object.entries(DOCS_LOCALE_RESOURCES['en-US'].metadata.aliases),
+    ['en', 'en-US'],
+  ].map(([locale, routeLocale]) => [normalizeLocaleKey(locale), routeLocale]),
 ) as Record<string, DocsLocale>;
 
 export const DOCS_LANGUAGE_STORAGE_KEY = 'starlight-route';
@@ -107,10 +107,6 @@ export function parseDocsLocale(lang: string | null | undefined): DocsLocale | n
     return null;
   }
 
-  if (normalized === 'en') {
-    return 'en-US';
-  }
-
   if (normalized.startsWith('en-') && normalized !== 'en-us') {
     return null;
   }
@@ -126,6 +122,17 @@ export function parseDocsLocale(lang: string | null | undefined): DocsLocale | n
   }
 
   return null;
+}
+
+export function getCanonicalDocsRouteLocale(lang: string | null | undefined): DocsLocale | null {
+  return parseDocsLocale(lang);
+}
+
+export function getCanonicalDocsSourceLocale(
+  lang: string | null | undefined,
+): string | null {
+  const routeLocale = getCanonicalDocsRouteLocale(lang);
+  return routeLocale ? DOCS_ROUTE_TO_SOURCE_LOCALE[routeLocale] : null;
 }
 
 /**
@@ -244,6 +251,10 @@ export function normalizeDocsRoutePath(pathname = '/'): string {
   return buildDocsRoutePath(locale, path || '/');
 }
 
+export function getCanonicalDocsPath(pathname = '/'): string {
+  return stripDocsLocalePrefix(normalizeDocsRoutePath(pathname));
+}
+
 /**
  * Returns true when the path already targets the English docs locale.
  */
@@ -273,7 +284,7 @@ export function isReleaseNotesRoutePath(pathname = '/'): boolean {
  * Build the localized docs route path.
  */
 export function buildDocsRoutePath(locale: DocsLocale, originalPath = '/'): string {
-  const normalizedPath = stripDocsLocalePrefix(originalPath || '/');
+  const normalizedPath = getCanonicalDocsPath(originalPath || '/');
 
   if (locale === 'en-US') {
     return normalizedPath === '/' ? DOCS_ENTRY_PATHS['en-US'] ?? '/en-US/' : `/en-US${normalizedPath}`;
@@ -284,6 +295,10 @@ export function buildDocsRoutePath(locale: DocsLocale, originalPath = '/'): stri
   }
 
   return buildBlogRoutePath(getBlogLanguageByRouteLocale(locale)?.code ?? locale, normalizedPath || '/');
+}
+
+export function buildDocsCounterpartPath(locale: DocsLocale, originalPath = '/'): string {
+  return buildDocsRoutePath(locale, getCanonicalDocsPath(originalPath));
 }
 
 /**
@@ -307,8 +322,7 @@ export function getStoredDocsLocale(storageValue: string | null | undefined): Do
       return null;
     }
 
-    const normalizedRouteLocale = normalizeLocaleKey(parsed.lang);
-    return DOCS_ROUTE_LOCALE_BY_NORMALIZED_KEY[normalizedRouteLocale] ?? null;
+    return parseDocsLocale(parsed.lang);
   } catch {
     return null;
   }

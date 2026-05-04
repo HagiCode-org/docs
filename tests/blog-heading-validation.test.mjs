@@ -44,7 +44,7 @@ test('hiddenFirstPanelRuleExists detects hidden title panel CSS', () => {
 test('getBlogSourceEntries reads localized blog titles from the matching locale directory', () => {
   const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'docs-blog-heading-'));
   fs.mkdirSync(path.join(rootDir, 'src/content/docs/blog'), { recursive: true });
-  fs.mkdirSync(path.join(rootDir, 'src/content/docs/en-US/blog'), { recursive: true });
+  fs.mkdirSync(path.join(rootDir, 'src/content/translations/docs/en-US/blog'), { recursive: true });
 
   fs.writeFileSync(
     path.join(rootDir, 'src/content/docs/blog/example.mdx'),
@@ -52,7 +52,7 @@ test('getBlogSourceEntries reads localized blog titles from the matching locale 
     'utf8',
   );
   fs.writeFileSync(
-    path.join(rootDir, 'src/content/docs/en-US/blog/example.mdx'),
+    path.join(rootDir, 'src/content/translations/docs/en-US/blog/example.mdx'),
     '---\ntitle: English Title\n---\n\nBody\n',
     'utf8',
   );

@@ -5,7 +5,9 @@ import {
   DOCS_LOCALE_METADATA,
   DOCS_ROUTE_LOCALE_LABELS,
   DOCS_ROUTE_TO_SOURCE_LOCALE,
+  buildDocsCounterpartPath,
   buildDocsRoutePath,
+  getCanonicalDocsSourceLocale,
   getDocsContentLayoutToggleCopy,
   getDocsFooterCopy,
   getStoredDocsLocale,
@@ -56,6 +58,15 @@ describe('docs locale helpers', () => {
     expect(parseDocsLocale(input)).toBe(expected);
   });
 
+  it.each([
+    ['en', 'en-US'],
+    ['zh-CN', 'zh-CN'],
+    ['zh-HK', 'zh-Hant'],
+    ['it-IT', null],
+  ] as const)('maps %s to canonical source locale %s', (input, expected) => {
+    expect(getCanonicalDocsSourceLocale(input)).toBe(expected);
+  });
+
   it('preserves unrelated Starlight route fields when serializing a locale', () => {
     const serialized = serializeStoredDocsLocale(
       JSON.stringify({ path: '/en-US/install/', lang: 'en-US', version: 'latest' }),
@@ -69,10 +80,10 @@ describe('docs locale helpers', () => {
     });
   });
 
-  it('ignores invalid stored lang values without discarding valid JSON fields', () => {
+  it('normalizes stored lang aliases without discarding valid JSON fields', () => {
     const storedValue = JSON.stringify({ lang: 'fr', path: '/fr/install/' });
 
-    expect(getStoredDocsLocale(storedValue)).toBeNull();
+    expect(getStoredDocsLocale(storedValue)).toBe('fr-FR');
     expect(JSON.parse(serializeStoredDocsLocale(storedValue, 'en-US'))).toEqual({
       lang: 'en-US',
       path: '/fr/install/',
@@ -102,6 +113,14 @@ describe('docs locale helpers', () => {
     ['fr-FR', '/en-US/blog/example/', '/fr-FR/blog/example/'],
   ] as const)('builds %s route for %s', (locale, originalPath, expected) => {
     expect(buildDocsRoutePath(locale, originalPath)).toBe(expected);
+  });
+
+  it.each([
+    ['en-US', '/en/ja-JP/product-overview/', '/en-US/product-overview/'],
+    ['root', '/en-US/product-overview/', '/product-overview/'],
+    ['ja-JP', '/en/product-overview/', '/ja-JP/product-overview/'],
+  ] as const)('builds counterpart %s route for %s', (locale, originalPath, expected) => {
+    expect(buildDocsCounterpartPath(locale, originalPath)).toBe(expected);
   });
 
   it.each([

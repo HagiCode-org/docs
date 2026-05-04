@@ -42,7 +42,7 @@ describe("resolveDocsEditLink", () => {
         locale: "en-US",
         entry: {
           filePath:
-            "src/content/docs/en-US/blog/2026-04-11-border-light-animation-effect.mdx",
+            "src/content/translations/docs/en-US/blog/2026-04-11-border-light-animation-effect.mdx",
         },
       }),
     );
@@ -50,10 +50,10 @@ describe("resolveDocsEditLink", () => {
     expect(result).toMatchObject({
       isVisible: true,
       sourcePath:
-        "src/content/docs/en-US/blog/2026-04-11-border-light-animation-effect.mdx",
+        "src/content/translations/docs/en-US/blog/2026-04-11-border-light-animation-effect.mdx",
       repoPath:
-        "src/content/docs/en-US/blog/2026-04-11-border-light-animation-effect.mdx",
-      href: "https://github.com/HagiCode-org/docs/edit/main/src/content/docs/en-US/blog/2026-04-11-border-light-animation-effect.mdx",
+        "src/content/translations/docs/en-US/blog/2026-04-11-border-light-animation-effect.mdx",
+      href: "https://github.com/HagiCode-org/docs/edit/main/src/content/translations/docs/en-US/blog/2026-04-11-border-light-animation-effect.mdx",
     });
   });
 
@@ -71,7 +71,7 @@ describe("resolveDocsEditLink", () => {
         id: "en-US/release-notes",
         locale: "en-US",
         entry: {
-          filePath: "src/content/docs/en-US/release-notes/index.mdx",
+          filePath: "src/content/translations/docs/en-US/release-notes/index.mdx",
         },
       }),
     );
@@ -80,7 +80,7 @@ describe("resolveDocsEditLink", () => {
       "src/content/docs/release-notes/index.mdx",
     );
     expect(englishResult.repoPath).toBe(
-      "src/content/docs/en-US/release-notes/index.mdx",
+      "src/content/translations/docs/en-US/release-notes/index.mdx",
     );
   });
 
@@ -92,14 +92,14 @@ describe("resolveDocsEditLink", () => {
       }),
       {
         fileExists: (sourcePath) =>
-          sourcePath === "src/content/docs/en-US/legal/privacy-policy.mdx",
+          sourcePath === "src/content/translations/docs/en-US/legal/privacy-policy.mdx",
       },
     );
 
     expect(result).toMatchObject({
       isVisible: true,
-      sourcePath: "src/content/docs/en-US/legal/privacy-policy.mdx",
-      repoPath: "src/content/docs/en-US/legal/privacy-policy.mdx",
+      sourcePath: "src/content/translations/docs/en-US/legal/privacy-policy.mdx",
+      repoPath: "src/content/translations/docs/en-US/legal/privacy-policy.mdx",
     });
   });
 

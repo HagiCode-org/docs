@@ -25,7 +25,7 @@ function readSteamUrls(source) {
 test('product overview pages keep the generic Steam entry on the base app while routing Hagicode Plus to the bundle page', async () => {
   const [zhSource, enSource] = await Promise.all([
     readFile(resolveDocsPath('src/content/docs/product-overview.mdx'), 'utf8'),
-    readFile(resolveDocsPath('src/content/docs/en-US/product-overview.mdx'), 'utf8'),
+    readFile(resolveDocsPath('src/content/translations/docs/en-US/product-overview.mdx'), 'utf8'),
   ]);
 
   for (const source of [zhSource, enSource]) {
@@ -38,7 +38,7 @@ test('product overview pages keep the generic Steam entry on the base app while 
 test('product overview pages do not embed product artwork or standalone preview sections', async () => {
   const [zhSource, enSource] = await Promise.all([
     readFile(resolveDocsPath('src/content/docs/product-overview.mdx'), 'utf8'),
-    readFile(resolveDocsPath('src/content/docs/en-US/product-overview.mdx'), 'utf8'),
+    readFile(resolveDocsPath('src/content/translations/docs/en-US/product-overview.mdx'), 'utf8'),
   ]);
 
   for (const source of [zhSource, enSource]) {
@@ -52,7 +52,7 @@ test('product overview pages do not embed product artwork or standalone preview 
 test('Turbo Engine DLC detail pages do not expose a direct purchase CTA back to the base app store page', async () => {
   const [zhSource, enSource] = await Promise.all([
     readFile(resolveDocsPath('src/content/docs/dlc/turbo-engine-dlc.mdx'), 'utf8'),
-    readFile(resolveDocsPath('src/content/docs/en-US/dlc/turbo-engine-dlc.mdx'), 'utf8'),
+    readFile(resolveDocsPath('src/content/translations/docs/en-US/dlc/turbo-engine-dlc.mdx'), 'utf8'),
   ]);
 
   for (const source of [zhSource, enSource]) {
@@ -65,9 +65,9 @@ test('Turbo Engine DLC detail pages do not expose a direct purchase CTA back to 
 test('DLC and bundle detail pages use matching product artwork without promotion copy', async () => {
   const pages = await Promise.all([
     readFile(resolveDocsPath('src/content/docs/dlc/turbo-engine-dlc.mdx'), 'utf8'),
-    readFile(resolveDocsPath('src/content/docs/en-US/dlc/turbo-engine-dlc.mdx'), 'utf8'),
+    readFile(resolveDocsPath('src/content/translations/docs/en-US/dlc/turbo-engine-dlc.mdx'), 'utf8'),
     readFile(resolveDocsPath('src/content/docs/bundles/hagicode-plus.mdx'), 'utf8'),
-    readFile(resolveDocsPath('src/content/docs/en-US/bundles/hagicode-plus.mdx'), 'utf8'),
+    readFile(resolveDocsPath('src/content/translations/docs/en-US/bundles/hagicode-plus.mdx'), 'utf8'),
   ]);
 
   for (const source of pages) {

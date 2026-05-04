@@ -1,0 +1,343 @@
+---
+title: "GitHub Issues Integration"
+date: 2026-01-22
+truncate: true
+tags: [GitHub, GitHub Issues, OAuth, Frontend Architecture, HagiCode]
+description: "This article documents the full process of integrating GitHub Issues into the HagiCode platform. We explore how a frontend-direct plus minimal-backend architecture enables secure OAuth authentication and efficient issue synchronization while keeping the backend lightweight."
+---
+
+## Building a GitHub Issues Integration from Scratch: HagiCode's Frontend-Direct Approach
+
+> This article documents the full process of integrating GitHub Issues into the HagiCode platform. We explore how a "frontend-direct + minimal backend" architecture can deliver secure OAuth authentication and efficient issue synchronization while keeping the backend lightweight.
+
+## Background: Why Integrate GitHub?
+
+As an AI-assisted development platform, HagiCode's core value is connecting ideas to implementation. But in real usage, we found that after users finish a Proposal in HagiCode, they often need to manually copy that content into GitHub Issues for project tracking.
+
+That creates several obvious pain points:
+
+1.  **Fragmented workflow**: Users have to keep switching between two systems. The experience is not smooth, and important information can easily get lost during copy and paste.
+2.  **Inconvenient collaboration**: Other team members are used to checking tasks on GitHub, so they cannot directly see proposal progress inside HagiCode.
+3.  **Repeated manual work**: Every time a proposal changes, someone has to manually update the corresponding GitHub Issue, which adds unnecessary maintenance overhead.
+
+To solve this, we decided to introduce a **GitHub Issues Integration** feature that connects HagiCode sessions to GitHub repositories and enables "one-click sync."
+
+## About HagiCode
+
+> Hey, let us introduce what we're building
+
+We're building **HagiCode**, an AI-powered coding assistant that makes the development experience smarter, more convenient, and more fun.
+
+**Smarter**: AI assists throughout the entire flow, from idea to code, multiplying development efficiency. **More convenient**: Multi-threaded concurrent operations make full use of resources and keep the workflow smooth. **More fun**: Gamified mechanics and an achievement system make coding less tedious and far more rewarding.
+
+The project is evolving quickly. If you're interested in technical writing, knowledge management, or AI-assisted development, feel free to visit [GitHub](https://github.com/HagiCode-org/site).
+
+---
+
+## Technical Direction: Frontend-Direct vs. Backend Proxy
+
+When designing the integration, we had two paths in front of us: the traditional "backend proxy model" and the more aggressive "frontend-direct model."
+
+### Comparing the Options
+
+In the traditional **backend proxy model**, every request from the frontend first goes through our backend, and then the backend calls the GitHub API. This centralizes the logic, but it also puts a substantial burden on the backend:
+
+1.  **Bloated backend**: We would need dedicated GitHub API client wrappers and would also have to handle OAuth's complex state machine.
+2.  **Token risk**: Users' GitHub tokens would need to be stored in the backend database. Even with encryption, that still expands the security risk surface.
+3.  **Development cost**: We would need database migrations to store tokens and would also need to maintain an additional synchronization service.
+
+The **frontend-direct model** is much lighter. In this approach, the backend is used only for the most sensitive "secret exchange" step of OAuth, namely the callback that exchanges the code for a token. After the token is obtained, it is stored directly in the browser's `localStorage`. From that point on, operations such as creating Issues and updating comments are handled by the frontend through direct HTTP requests to GitHub.
+
+| Comparison Dimension | Backend Proxy Model | Frontend-Direct Model |
+| :--- | :--- | :--- |
+| **Backend Complexity** | Requires a complete OAuth service and GitHub API client | Only needs an OAuth callback endpoint |
+| **Token Management** | Must be encrypted and stored in the database, with leakage risk | Stored in the browser and visible only to the user |
+| **Implementation Cost** | Requires database migrations and multiple services | Mainly frontend implementation work |
+| **User Experience** | Unified logic, but server latency may be higher | Extremely responsive, with direct GitHub interaction |
+
+Since our priority was fast integration with minimal backend changes, **we ultimately chose the "frontend-direct model"**. It is like giving the browser a "temporary pass." Once it has the pass, it can go to GitHub and do the work on its own without asking a backend administrator for approval every time.
+
+---
+
+## Core Design: Data Flow and Security
+
+Once the architecture was decided, we needed to design the actual data flow. The core of the entire synchronization process is how to obtain the token securely and use it efficiently.
+
+### Overall Architecture Diagram
+
+The whole system can be abstracted into three roles: the browser (frontend), the HagiCode backend, and GitHub.
+
+```text
++--------------+        +--------------+        +--------------+
+| Frontend React|        |   Backend    |        |    GitHub    |
+|              |        |   ASP.NET    |        |    REST API  |
+|  +--------+  |        |              |        |              |
+|  |  OAuth |--+--------> /callback    |        |              |
+|  |  Flow  |  |        |              |        |              |
+|  +--------+  |        |              |        |              |
+|              |        |              |        |              |
+|  +--------+  |        |  +--------+  |        |  +--------+  |
+|  |GitHub  |  +------------>Session |  +----------> Issues |  |
+|  |API     |  |        |  |Metadata|  |        |  |        |  |
+|  |Direct  |  |        |  +--------+  |        |  +--------+  |
+|  +--------+  |        |              |        |              |
++--------------+        +--------------+        +--------------+
+```
+
+**The key point is this**: only a small part of OAuth, the code-for-token exchange, needs to go through the backend. The heavy lifting after that, such as creating Issues, happens through direct communication between the frontend and GitHub.
+
+### Detailed Synchronization Data Flow
+
+When a user clicks the "Sync to GitHub" button in the HagiCode interface, a series of complex actions takes place:
+
+```text
+User clicks "Sync to GitHub"
+         │
+         ▼
+1. Frontend checks localStorage for the GitHub token
+         │
+         ▼
+2. Format the Issue content (convert the Proposal into Markdown)
+         │
+         ▼
+3. Frontend directly calls the GitHub API to create or update the Issue
+         │
+         ▼
+4. Call the HagiCode backend API to update Session.metadata (store the Issue URL and related info)
+         │
+         ▼
+5. Backend broadcasts a SessionUpdated event through SignalR
+         │
+         ▼
+6. Frontend receives the event and updates the UI to show the "Synced" status
+```
+
+### Security Design
+
+Security is always a top priority when integrating third-party services. We considered the following points:
+
+1.  **CSRF protection**: During the OAuth redirect, generate a random `state` parameter and store it in `sessionStorage`. On callback, validate the state strictly to prevent forged requests.
+2.  **Isolated token storage**: The token is stored only in the browser's `localStorage`. Thanks to the Same-Origin Policy, only HagiCode scripts can read it, which avoids exposing users to server-side database leaks.
+3.  **Error boundaries**: We designed dedicated error-handling logic for common GitHub API errors such as 401 token expiration, 422 validation failure, and 429 rate limiting, so users receive clear and friendly feedback.
+
+---
+
+## In Practice: Implementation Details
+
+Theory only goes so far, so let's look at how the code actually works.
+
+### 1. Minimal Backend Changes
+
+The backend only needs to do two things: store synchronization data and handle the OAuth callback.
+
+**Database change**
+We only need to add a `Metadata` column to the `Sessions` table to store JSON-formatted extension data.
+
+```sql
+-- Add the metadata column to the Sessions table
+ALTER TABLE "Sessions" ADD COLUMN "Metadata" text NULL;
+```
+
+**Entity and DTO definitions**
+
+```csharp
+// src/HagiCode.DomainServices.Contracts/Entities/Session.cs
+public class Session : AuditedAggregateRoot<SessionId>
+{
+    // ... other properties ...
+
+    /// <summary>
+    /// JSON metadata for storing extension data like GitHub integration
+    /// </summary>
+    public string? Metadata { get; set; }
+}
+
+// DTO definitions to make frontend serialization easier
+public class GitHubIssueMetadata
+{
+    public required string Owner { get; set; }
+    public required string Repo { get; set; }
+    public int IssueNumber { get; set; }
+    public required string IssueUrl { get; set; }
+    public DateTime SyncedAt { get; set; }
+    public string LastSyncStatus { get; set; } = "success";
+}
+
+public class SessionMetadata
+{
+    public GitHubIssueMetadata? GitHubIssue { get; set; }
+}
+```
+
+### 2. Frontend OAuth Flow
+
+This is the entry point for the connection. We use the standard Authorization Code Flow.
+
+```typescript
+// src/HagiCode.Client/src/services/githubOAuth.ts
+
+// Generate the authorization URL and redirect
+export async function generateAuthUrl(): Promise<string> {
+  const state = generateRandomString(); // Generate a random string for CSRF protection
+  sessionStorage.setItem('hagicode_github_state', state);
+  
+  const params = new URLSearchParams({
+    client_id: clientId,
+    redirect_uri: window.location.origin + '/settings?tab=github&oauth=callback',
+    scope: ['repo', 'public_repo'].join(' '),
+    state: state,
+  });
+  
+  return `https://github.com/login/oauth/authorize?${params.toString()}`;
+}
+
+// Handle the code-for-token exchange on the callback page
+export async function exchangeCodeForToken(code: string, state: string): Promise<GitHubToken> {
+  // 1. Validate state to prevent CSRF
+  const savedState = sessionStorage.getItem('hagicode_github_state');
+  if (state !== savedState) throw new Error('Invalid state parameter');
+
+  // 2. Call the backend API to exchange the token
+  // Note: this must go through the backend because it requires ClientSecret,
+  // which cannot be exposed to the frontend.
+  const response = await fetch('/api/GitHubOAuth/callback', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ code, state, redirectUri: window.location.origin + '/settings?tab=github&oauth=callback' }),
+  });
+
+  if (!response.ok) throw new Error('Failed to exchange token');
+  
+  const token = await response.json();
+  
+  // 3. Store it in LocalStorage
+  saveToken(token);
+  return token;
+}
+```
+
+### 3. GitHub API Client Wrapper
+
+Once we have the token, we need a solid tool for calling the GitHub API.
+
+```typescript
+// src/HagiCode.Client/src/services/githubApiClient.ts
+
+const GITHUB_API_BASE = 'https://api.github.com';
+
+// Core request wrapper
+async function githubApi<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
+  const token = localStorage.getItem('gh_token');
+  if (!token) throw new Error('Not connected to GitHub');
+  
+  const response = await fetch(`${GITHUB_API_BASE}${endpoint}`, {
+    ...options,
+    headers: {
+      ...options.headers,
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/vnd.github.v3+json', // Specify the API version
+    },
+  });
+  
+  // Error handling logic
+  if (!response.ok) {
+    if (response.status === 401) throw new Error('GitHub token expired, please reconnect');
+    if (response.status === 403) throw new Error('No permission to access this repository or rate limit exceeded');
+    if (response.status === 422) throw new Error('Issue validation failed, possibly because the title is duplicated');
+    throw new Error(`GitHub API Error: ${response.statusText}`);
+  }
+  
+  return response.json();
+}
+
+// Create an Issue
+export async function createIssue(owner: string, repo: string, data: { title: string, body: string, labels: string[] }) {
+  return githubApi(`/repos/${owner}/${repo}/issues`, {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+}
+```
+
+### 4. Content Formatting and Synchronization
+
+The final step is converting HagiCode session data into the format expected by a GitHub Issue. In a sense, it is a translation task of its own.
+
+```typescript
+// Convert a Session object into a Markdown string
+function formatIssueForSession(session: Session): string {
+  let content = `# ${session.title}\n\n`;
+  content += `**> HagiCode Session:** #${session.code}\n`;
+  content += `**> Status:** ${session.status}\n\n`;
+  content += `## Description\n\n${session.description || 'No description provided.'}\n\n`;
+  
+  // If it is a Proposal session, append extra fields
+  if (session.type === 'proposal') {
+    content += `## Chief Complaint\n\n${session.chiefComplaint || ''}\n\n`;
+    // Add a deep link so users can jump back from GitHub to HagiCode
+    content += `---\n\n**[View in HagiCode](hagicode://sessions/${session.id})**\n`;
+  }
+  
+  return content;
+}
+
+// Main logic behind the sync button
+const handleSync = async (session: Session) => {
+  try {
+    const repoInfo = parseRepositoryFromUrl(session.repoUrl); // Parse the repository URL
+    if (!repoInfo) throw new Error('Invalid repository URL');
+
+    toast.loading('Syncing to GitHub...');
+    
+    // 1. Format the content
+    const issueBody = formatIssueForSession(session);
+    
+    // 2. Call the API
+    const issue = await githubApiClient.createIssue(repoInfo.owner, repoInfo.repo, {
+      title: `[HagiCode] ${session.title}`,
+      body: issueBody,
+      labels: ['hagicode', 'proposal', `status:${session.status}`],
+    });
+    
+    // 3. Update Session Metadata (save the Issue link)
+    await SessionsService.patchApiSessionsSessionId(session.id, {
+      metadata: {
+        githubIssue: {
+          owner: repoInfo.owner,
+          repo: repoInfo.repo,
+          issueNumber: issue.number,
+          issueUrl: issue.html_url,
+          syncedAt: new Date().toISOString(),
+        }
+      }
+    });
+
+    toast.success('Sync successful!');
+  } catch (err) {
+    console.error(err);
+    toast.error('Sync failed, please check your token or network');
+  }
+};
+```
+
+---
+
+## Summary and Next Steps
+
+With this "frontend-direct" approach, we achieved seamless GitHub Issues integration with the least possible amount of backend code.
+
+### What We Gained
+1.  **High development efficiency**: Backend changes were minimal, mainly adding one database field and one simple OAuth callback endpoint, while most of the logic lives in the frontend.
+2.  **Stronger security**: The token never passes through the server database, which reduces leakage risk.
+3.  **Better user experience**: Requests are initiated directly from the frontend, so responses are fast and do not require backend relay.
+
+### Things to Watch For
+There are a few pitfalls to keep in mind in real deployments:
+- **OAuth App settings**: Remember to set the correct `Authorization callback URL` in your GitHub OAuth App settings, usually `http://localhost:3000/settings?tab=github&oauth=callback`.
+- **Rate limiting**: GitHub API limits are much stricter for unauthenticated requests, but a token is usually enough to work comfortably at 5000 requests per hour.
+- **URL parsing**: Users enter repository URLs in all kinds of formats, so make sure your regular expressions handle `.git` suffixes, SSH formats, and similar cases.
+
+### Future Enhancements
+The current feature still provides one-way synchronization only, from HagiCode to GitHub. In the future, we plan to implement two-way synchronization through GitHub Webhooks. For example, if an Issue is closed on GitHub, the session status in HagiCode could update automatically as well. That would require exposing a webhook receiver endpoint in the backend, which is also an interesting next step for us.
+
+We hope this article gives you some inspiration for your own third-party integration work. If you have questions, feel free to open an Issue on [HagiCode GitHub](https://github.com/HagiCode-org/site).

@@ -325,7 +325,7 @@ test('local source skips incomplete upstream tags without materializing partial 
   assert.ok(materialized.writtenFiles.includes('src/data/release-notes/index.json'));
   assert.ok(materialized.writtenFiles.includes('src/data/release-notes/v1.0.0.json'));
   assert.ok(materialized.writtenFiles.includes('src/content/docs/release-notes/index.mdx'));
-  assert.ok(materialized.writtenFiles.includes('src/content/docs/en-US/release-notes/index.mdx'));
+  assert.ok(materialized.writtenFiles.includes('src/content/translations/docs/en-US/release-notes/index.mdx'));
   assert.deepEqual(index.entries.map((entry) => entry.tag), ['v1.0.0']);
   assert.match(summary, /v1\.0\.1/);
   assert.match(summary, /missing_locale_body/);
@@ -410,9 +410,9 @@ test('normalization preserves display tags, sorts semver consistently, and mater
   assert.ok(firstRun.writtenFiles.includes('src/data/release-notes/v1.0.1.json'));
   assert.ok(firstRun.writtenFiles.includes('src/data/release-notes/1.0.0.json'));
   assert.ok(firstRun.writtenFiles.includes('src/content/docs/release-notes/index.mdx'));
-  assert.ok(firstRun.writtenFiles.includes('src/content/docs/en-US/release-notes/index.mdx'));
-  assert.ok(firstRun.writtenFiles.includes('src/content/docs/zh-Hant/release-notes/index.mdx'));
-  assert.ok(firstRun.writtenFiles.includes('src/content/docs/ja-JP/release-notes/index.mdx'));
+  assert.ok(firstRun.writtenFiles.includes('src/content/translations/docs/en-US/release-notes/index.mdx'));
+  assert.ok(firstRun.writtenFiles.includes('src/content/translations/docs/zh-Hant/release-notes/index.mdx'));
+  assert.ok(firstRun.writtenFiles.includes('src/content/translations/docs/ja-JP/release-notes/index.mdx'));
   assert.equal(fs.existsSync(path.join(config.outputPaths.localeDirs['zh-CN'], 'legacy-detail.md')), false);
   assert.equal(fs.existsSync(path.join(config.outputPaths.localeDirs.en, 'legacy-detail.md')), false);
   assert.equal(fs.existsSync(path.join(config.outputPaths.localeDirs['zh-CN'], 'v1.0.1.md')), false);

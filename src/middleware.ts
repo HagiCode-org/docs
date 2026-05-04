@@ -6,7 +6,7 @@
 
 import { defineMiddleware } from 'astro:middleware';
 import {
-  buildDocsRoutePath,
+  buildDocsCounterpartPath,
   mapLanguageParamToDocsLocale,
   normalizeDocsRoutePath,
 } from './lib/i18n';
@@ -51,7 +51,7 @@ export const onRequest = defineMiddleware((context, next) => {
     return redirect(cleanUrl.toString(), 301);
   }
 
-  const targetPath = buildDocsRoutePath(mappedLang, url.pathname);
+  const targetPath = buildDocsCounterpartPath(mappedLang, url.pathname);
   const targetUrl = new URL(url.origin + targetPath);
   url.searchParams.forEach((value, key) => {
     if (key !== 'lang') {

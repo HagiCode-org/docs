@@ -4,33 +4,29 @@ import { createHash } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { DOCS_LOCALE_SELECTOR_OPTIONS } from '../src/i18n/generated/docs-locale-resources.mjs';
+import {
+  DOCS_BASELINE_AUTHORING_ROOT,
+  DOCS_BASELINE_SOURCE_LOCALE,
+  DOCS_TRANSLATIONS_AUTHORING_ROOT,
+  isDocsLocaleDirectory,
+} from '../src/lib/docs-content-paths.mjs';
 
 const docsRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const defaultContentRoot = path.join(docsRoot, 'src/content/docs');
+const defaultContentRoot = path.join(docsRoot, DOCS_BASELINE_AUTHORING_ROOT);
+const defaultTranslationRoot = path.join(docsRoot, DOCS_TRANSLATIONS_AUTHORING_ROOT);
 const DEFAULT_REPORT_PATH = '.tmp/docs-translation-report.json';
 const DEFAULT_HIGH_SIMILARITY_THRESHOLD = 0.98;
 const DEFAULT_SAMPLE_LIMIT = 12;
-const BASELINE_LOCALE = 'zh-CN';
+const BASELINE_LOCALE = DOCS_BASELINE_SOURCE_LOCALE;
 const markdownFilePattern = /\.(?:md|mdx)$/u;
 const alternateMarkdownExtensions = ['.md', '.mdx'];
 
 export const REQUIRED_DOCS_LOCALES = DOCS_LOCALE_SELECTOR_OPTIONS.map((locale) => ({
   code: locale.sourceLocale,
   routeLocale: locale.code,
-  contentPrefix: locale.code === 'root' ? '' : locale.code,
+  contentDirectory: locale.sourceLocale === BASELINE_LOCALE ? '' : locale.sourceLocale,
 }));
-
-const localePrefixes = new Set(
-  REQUIRED_DOCS_LOCALES
-    .map((locale) => locale.contentPrefix)
-    .filter(Boolean),
-);
-
-const ignoredTopLevelDirectories = new Set([
-  ...localePrefixes,
-  'blog',
-  'img',
-]);
+const ignoredTopLevelDirectories = new Set(['blog', 'img']);
 
 function toPosixPath(filePath) {
   return filePath.split(path.sep).join('/');
@@ -46,7 +42,7 @@ function inferProjectRoot(rootDirectory, explicitProjectRoot) {
   }
 
   const normalized = toPosixPath(rootDirectory);
-  if (normalized.endsWith('src/content/docs')) {
+  if (normalized.endsWith(DOCS_BASELINE_AUTHORING_ROOT)) {
     return path.resolve(rootDirectory, '..', '..', '..');
   }
 
@@ -56,6 +52,7 @@ function inferProjectRoot(rootDirectory, explicitProjectRoot) {
 function parseArgs(argv) {
   const options = {
     contentRoot: defaultContentRoot,
+    translationRoot: defaultTranslationRoot,
     reportPath: DEFAULT_REPORT_PATH,
     highSimilarityThreshold: DEFAULT_HIGH_SIMILARITY_THRESHOLD,
     sampleLimit: DEFAULT_SAMPLE_LIMIT,
@@ -73,6 +70,12 @@ function parseArgs(argv) {
 
     if (argument === '--report-json') {
       options.reportPath = argv[index + 1] ?? options.reportPath;
+      index += 1;
+      continue;
+    }
+
+    if (argument === '--translations-root-dir') {
+      options.translationRoot = path.resolve(argv[index + 1] ?? options.translationRoot);
       index += 1;
       continue;
     }
@@ -227,7 +230,10 @@ async function walkBaselineDocs(rootDirectory, currentDirectory = rootDirectory,
     const nextRelativePath = relativeDirectory ? path.posix.join(relativeDirectory, entry.name) : entry.name;
 
     if (entry.isDirectory()) {
-      if (!relativeDirectory && ignoredTopLevelDirectories.has(entry.name)) {
+      if (
+        !relativeDirectory
+        && (ignoredTopLevelDirectories.has(entry.name) || isDocsLocaleDirectory(entry.name))
+      ) {
         continue;
       }
 
@@ -274,10 +280,12 @@ async function readDoc(filePath, rootDirectory) {
   };
 }
 
-async function resolveLocalizedDoc(rootDirectory, locale, baselineDoc) {
-  const stemPath = locale.contentPrefix
-    ? path.join(rootDirectory, locale.contentPrefix, baselineDoc.docKey)
-    : path.join(rootDirectory, baselineDoc.docKey);
+async function resolveLocalizedDoc(translationRoot, locale, baselineDoc) {
+  if (!locale.contentDirectory) {
+    return baselineDoc.filePath;
+  }
+
+  const stemPath = path.join(translationRoot, locale.contentDirectory, baselineDoc.docKey);
 
   const candidateExtensions = [
     baselineDoc.extension,
@@ -294,12 +302,12 @@ async function resolveLocalizedDoc(rootDirectory, locale, baselineDoc) {
   return null;
 }
 
-async function countLocaleDocs(rootDirectory, locale) {
-  if (!locale.contentPrefix) {
+async function countLocaleDocs(rootDirectory, translationRoot, locale) {
+  if (!locale.contentDirectory) {
     return (await walkBaselineDocs(rootDirectory)).length;
   }
 
-  const localeDirectory = path.join(rootDirectory, locale.contentPrefix);
+  const localeDirectory = path.join(translationRoot, locale.contentDirectory);
   if (!(await pathExists(localeDirectory))) {
     return 0;
   }
@@ -312,13 +320,13 @@ function createLocaleIssueMap(locales) {
   return new Map(
     locales.map((locale) => [
       locale.code,
-      {
-        code: locale.code,
-        routeLocale: locale.routeLocale,
-        directory: locale.contentPrefix || '.',
-        docCount: 0,
-        missingCount: 0,
-        duplicateDocCount: 0,
+        {
+          code: locale.code,
+          routeLocale: locale.routeLocale,
+          directory: locale.contentDirectory || '.',
+          docCount: 0,
+          missingCount: 0,
+          duplicateDocCount: 0,
         similarDocCount: 0,
       },
     ]),
@@ -336,6 +344,7 @@ function incrementLocaleIssue(localeIssues, localeCode, key) {
 
 export async function generateDocsTranslationReport(options = {}) {
   const rootDirectory = path.resolve(options.contentRoot ?? defaultContentRoot);
+  const translationRoot = path.resolve(options.translationRoot ?? defaultTranslationRoot);
   const projectRoot = inferProjectRoot(rootDirectory, options.projectRoot);
   const reportPath = options.reportPath ?? DEFAULT_REPORT_PATH;
   const highSimilarityThreshold = options.highSimilarityThreshold ?? DEFAULT_HIGH_SIMILARITY_THRESHOLD;
@@ -350,7 +359,7 @@ export async function generateDocsTranslationReport(options = {}) {
   const localeIssues = createLocaleIssueMap(REQUIRED_DOCS_LOCALES);
 
   for (const locale of REQUIRED_DOCS_LOCALES) {
-    const count = await countLocaleDocs(rootDirectory, locale);
+    const count = await countLocaleDocs(rootDirectory, translationRoot, locale);
     const localeEntry = localeIssues.get(locale.code);
     if (localeEntry) {
       localeEntry.docCount = count;
@@ -378,7 +387,7 @@ export async function generateDocsTranslationReport(options = {}) {
         continue;
       }
 
-      const localizedFilePath = await resolveLocalizedDoc(rootDirectory, locale, baselineDoc);
+      const localizedFilePath = await resolveLocalizedDoc(translationRoot, locale, baselineDoc);
       if (!localizedFilePath) {
         missingLocales.push(locale.code);
         incrementLocaleIssue(localeIssues, locale.code, 'missingCount');
@@ -437,6 +446,7 @@ export async function generateDocsTranslationReport(options = {}) {
   const report = {
     generatedAt: new Date().toISOString(),
     rootDirectory: relativePath(rootDirectory, projectRoot) || '.',
+    translationRoot: relativePath(translationRoot, projectRoot) || '.',
     reportPath,
     baselineLocale: BASELINE_LOCALE,
     highSimilarityThreshold,

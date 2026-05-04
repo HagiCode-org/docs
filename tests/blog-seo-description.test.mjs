@@ -14,7 +14,7 @@ import {
 function makeTempBlogRepo() {
   const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'docs-blog-seo-'));
   fs.mkdirSync(path.join(rootDir, 'src/content/docs/blog'), { recursive: true });
-  fs.mkdirSync(path.join(rootDir, 'src/content/docs/en-US/blog'), { recursive: true });
+  fs.mkdirSync(path.join(rootDir, 'src/content/translations/docs/en-US/blog'), { recursive: true });
   return rootDir;
 }
 
@@ -39,7 +39,7 @@ test('analyzeBlogSeoEntry preserves manual description over generated candidates
     locale: 'en',
     localeLabel: 'en-US',
     fullPath: '/tmp/example.mdx',
-    relativePath: 'src/content/docs/en-US/blog/example.mdx',
+    relativePath: 'src/content/translations/docs/en-US/blog/example.mdx',
     slug: 'example',
     source: 'unused',
     frontmatter: 'title: Example title\ndescription: Manual description',
@@ -86,7 +86,7 @@ test('verify script writes a machine-readable report and fails on unusable descr
     'utf8',
   );
   fs.writeFileSync(
-    path.join(rootDir, 'src/content/docs/en-US/blog/passing.mdx'),
+    path.join(rootDir, 'src/content/translations/docs/en-US/blog/passing.mdx'),
     `---\ntitle: Useful English Title\ndescription: Helpful summary about the verified English blog workflow.\n---\n\n## Useful English Title\n\nBody.\n`,
     'utf8',
   );

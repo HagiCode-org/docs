@@ -8,6 +8,11 @@ import { fileURLToPath } from 'node:url';
 import { createMarkdownProcessor } from '@astrojs/markdown-remark';
 import semver from 'semver';
 
+import {
+  DOCS_BASELINE_AUTHORING_ROOT,
+  DOCS_TRANSLATIONS_AUTHORING_ROOT,
+} from '../src/lib/docs-content-paths.mjs';
+
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 export const DEFAULT_DOCS_REPO_ROOT = path.resolve(SCRIPT_DIR, '..');
 export const DEFAULT_RELEASE_NOTES_REPOSITORY = 'HagiCode-org/release-notes';
@@ -357,16 +362,16 @@ export function resolveReleaseNotesConfig({ repoRoot = DEFAULT_DOCS_REPO_ROOT, e
       indexJson: path.join(resolvedRoot, 'src', 'data', 'release-notes', 'index.json'),
       legacyIndexJson: path.join(resolvedRoot, 'src', 'data', 'release-notes.index.json'),
       localeDirs: {
-        'zh-CN': path.join(resolvedRoot, 'src', 'content', 'docs', 'release-notes'),
-        en: path.join(resolvedRoot, 'src', 'content', 'docs', 'en-US', 'release-notes'),
-        'zh-Hant': path.join(resolvedRoot, 'src', 'content', 'docs', 'zh-Hant', 'release-notes'),
-        'ja-JP': path.join(resolvedRoot, 'src', 'content', 'docs', 'ja-JP', 'release-notes'),
-        'ko-KR': path.join(resolvedRoot, 'src', 'content', 'docs', 'ko-KR', 'release-notes'),
-        'de-DE': path.join(resolvedRoot, 'src', 'content', 'docs', 'de-DE', 'release-notes'),
-        'fr-FR': path.join(resolvedRoot, 'src', 'content', 'docs', 'fr-FR', 'release-notes'),
-        'es-ES': path.join(resolvedRoot, 'src', 'content', 'docs', 'es-ES', 'release-notes'),
-        'pt-BR': path.join(resolvedRoot, 'src', 'content', 'docs', 'pt-BR', 'release-notes'),
-        'ru-RU': path.join(resolvedRoot, 'src', 'content', 'docs', 'ru-RU', 'release-notes'),
+        'zh-CN': path.join(resolvedRoot, DOCS_BASELINE_AUTHORING_ROOT, 'release-notes'),
+        en: path.join(resolvedRoot, DOCS_TRANSLATIONS_AUTHORING_ROOT, 'en-US', 'release-notes'),
+        'zh-Hant': path.join(resolvedRoot, DOCS_TRANSLATIONS_AUTHORING_ROOT, 'zh-Hant', 'release-notes'),
+        'ja-JP': path.join(resolvedRoot, DOCS_TRANSLATIONS_AUTHORING_ROOT, 'ja-JP', 'release-notes'),
+        'ko-KR': path.join(resolvedRoot, DOCS_TRANSLATIONS_AUTHORING_ROOT, 'ko-KR', 'release-notes'),
+        'de-DE': path.join(resolvedRoot, DOCS_TRANSLATIONS_AUTHORING_ROOT, 'de-DE', 'release-notes'),
+        'fr-FR': path.join(resolvedRoot, DOCS_TRANSLATIONS_AUTHORING_ROOT, 'fr-FR', 'release-notes'),
+        'es-ES': path.join(resolvedRoot, DOCS_TRANSLATIONS_AUTHORING_ROOT, 'es-ES', 'release-notes'),
+        'pt-BR': path.join(resolvedRoot, DOCS_TRANSLATIONS_AUTHORING_ROOT, 'pt-BR', 'release-notes'),
+        'ru-RU': path.join(resolvedRoot, DOCS_TRANSLATIONS_AUTHORING_ROOT, 'ru-RU', 'release-notes'),
       },
     },
   };

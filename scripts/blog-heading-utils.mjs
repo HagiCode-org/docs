@@ -2,11 +2,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 export const blogContentDir = path.resolve(process.cwd(), 'src/content/docs/blog');
-export const englishBlogContentDir = path.resolve(process.cwd(), 'src/content/docs/en-US/blog');
+export const englishBlogContentDir = path.resolve(process.cwd(), 'src/content/translations/docs/en-US/blog');
 export const distDir = path.resolve(process.cwd(), 'dist');
 export const blogLocaleDirs = {
   zh: 'src/content/docs/blog',
-  en: 'src/content/docs/en-US/blog',
+  en: 'src/content/translations/docs/en-US/blog',
 };
 
 export function normalizeText(value) {

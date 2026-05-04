@@ -1,7 +1,14 @@
 import { existsSync } from "node:fs";
 import path from "node:path";
 
-export const DOCS_CONTENT_PREFIX = "src/content/docs/";
+import {
+  DOCS_BASELINE_AUTHORING_ROOT,
+  DOCS_TRANSLATIONS_AUTHORING_ROOT,
+  getTranslationDirectoryByRouteLocale,
+} from "./docs-content-paths.mjs";
+
+export const DOCS_CONTENT_PREFIX = `${DOCS_BASELINE_AUTHORING_ROOT}/`;
+export const DOCS_TRANSLATIONS_PREFIX = `${DOCS_TRANSLATIONS_AUTHORING_ROOT}/`;
 export const DOCS_REPO_PREFIX = "";
 export const DOCS_LEGACY_MONOREPO_PREFIX = "repos/docs/";
 export const DOCS_GITHUB_EDIT_BASE_URL =
@@ -65,27 +72,45 @@ export function resolveDocsSourcePath(
   }
 
   const normalizedRouteId = normalizeRouteId(route.id, route.locale);
-  const localePrefix =
-    route.locale && route.locale !== "root"
-      ? `${toDocsContentLocaleDirectory(route.locale)}/`
-      : "";
-
-  const candidateRoot = `${DOCS_CONTENT_PREFIX}${localePrefix}`;
-  const candidates =
-    normalizedRouteId.length === 0
-      ? [`${candidateRoot}index.mdx`, `${candidateRoot}index.md`]
-      : [
-          `${candidateRoot}${normalizedRouteId}.mdx`,
-          `${candidateRoot}${normalizedRouteId}.md`,
-          `${candidateRoot}${normalizedRouteId}/index.mdx`,
-          `${candidateRoot}${normalizedRouteId}/index.md`,
-        ];
+  const candidates = buildDocsSourceCandidates(normalizedRouteId, route.locale);
 
   return candidates.find((candidate) => fileExists(candidate));
 }
 
-function toDocsContentLocaleDirectory(locale: string): string {
-  return locale;
+function buildDocsSourceCandidates(
+  normalizedRouteId: string,
+  locale?: string | undefined,
+): string[] {
+  const relativeCandidates =
+    normalizedRouteId.length === 0
+      ? ["index.mdx", "index.md"]
+      : [
+          `${normalizedRouteId}.mdx`,
+          `${normalizedRouteId}.md`,
+          `${normalizedRouteId}/index.mdx`,
+          `${normalizedRouteId}/index.md`,
+        ];
+
+  const candidateRoots = [buildLocalizedRoot(locale), DOCS_CONTENT_PREFIX].filter(
+    (value): value is string => Boolean(value),
+  );
+
+  return candidateRoots.flatMap((root) =>
+    relativeCandidates.map((relativeCandidate) => `${root}${relativeCandidate}`),
+  );
+}
+
+function buildLocalizedRoot(locale?: string | undefined): string | null {
+  if (!locale || locale === "root") {
+    return null;
+  }
+
+  const translationDirectory = getTranslationDirectoryByRouteLocale(locale);
+  if (!translationDirectory) {
+    return null;
+  }
+
+  return `${DOCS_TRANSLATIONS_PREFIX}${translationDirectory}/`;
 }
 
 export function buildDocsEditHref(
@@ -109,10 +134,13 @@ function normalizeSourcePath(filePath?: string): string | undefined {
   }
 
   let normalized = filePath.replaceAll("\\", "/");
-  const contentPrefixIndex = normalized.indexOf(DOCS_CONTENT_PREFIX);
+  const knownPrefixIndex = [DOCS_CONTENT_PREFIX, DOCS_TRANSLATIONS_PREFIX]
+    .map((prefix) => normalized.indexOf(prefix))
+    .filter((index) => index >= 0)
+    .reduce((smallest, index) => Math.min(smallest, index), Number.POSITIVE_INFINITY);
 
-  if (contentPrefixIndex >= 0) {
-    normalized = normalized.slice(contentPrefixIndex);
+  if (Number.isFinite(knownPrefixIndex)) {
+    normalized = normalized.slice(knownPrefixIndex);
   } else {
     normalized = normalized.replace(/^\/+/, "").replace(/^\.\//, "");
 
@@ -163,7 +191,8 @@ function isSupportedDocsSourcePath(
 ): sourcePath is string {
   return (
     typeof sourcePath === "string" &&
-    sourcePath.startsWith(DOCS_CONTENT_PREFIX) &&
+    (sourcePath.startsWith(DOCS_CONTENT_PREFIX) ||
+      sourcePath.startsWith(DOCS_TRANSLATIONS_PREFIX)) &&
     MARKDOWN_FILE_PATTERN.test(sourcePath)
   );
 }

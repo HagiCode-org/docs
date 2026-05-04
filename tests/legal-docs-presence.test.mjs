@@ -48,8 +48,8 @@ test('root locale legal docs include required frontmatter and section headings',
 });
 
 test('english legal docs stay aligned to the localized legal routes and required sections', async () => {
-  const eula = await readDoc('src/content/docs/en-US/legal/eula.mdx');
-  const privacyPolicy = await readDoc('src/content/docs/en-US/legal/privacy-policy.mdx');
+  const eula = await readDoc('src/content/translations/docs/en-US/legal/eula.mdx');
+  const privacyPolicy = await readDoc('src/content/translations/docs/en-US/legal/privacy-policy.mdx');
 
   assert.match(eula, /^---[\s\S]*title: End User License Agreement \(EULA\)/m);
   assertFrontmatterValue(eula, 'sidebar_label', 'EULA');

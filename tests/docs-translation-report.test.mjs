@@ -21,7 +21,7 @@ async function withFixture(fn) {
 }
 
 function getLocalePrefix(locale) {
-  return locale.contentPrefix || '';
+  return locale.contentDirectory || '';
 }
 
 async function writeDoc(root, locale, relativeDocPath, body, frontmatter = {}) {
@@ -61,6 +61,7 @@ test('reports missing localized docs files', async () => {
 
     const report = await generateDocsTranslationReport({
       contentRoot: root,
+      translationRoot: root,
       reportPath: '.tmp/docs-report.json',
     });
 
@@ -84,6 +85,7 @@ test('reports exact duplicate bodies against zh-CN baseline', async () => {
 
     const report = await generateDocsTranslationReport({
       contentRoot: root,
+      translationRoot: root,
       reportPath: '.tmp/docs-report.json',
     });
 
@@ -118,6 +120,7 @@ test('reports highly similar docs against zh-CN baseline and writes a JSON repor
 
     const report = await generateDocsTranslationReport({
       contentRoot: root,
+      translationRoot: root,
       reportPath: '.tmp/docs-translation-report.json',
       highSimilarityThreshold: 0.8,
     });
@@ -142,9 +145,9 @@ test('covers the full configured locale set including zh-CN baseline', async () 
   const actualCodes = REQUIRED_DOCS_LOCALES.map((locale) => locale.code);
   assert.deepEqual(actualCodes, expectedLocales);
 
-  const contentPrefixes = REQUIRED_DOCS_LOCALES.filter((locale) => locale.contentPrefix).map((locale) => locale.contentPrefix);
-  const expectedPrefixes = ['zh-Hant', 'en', 'ja-JP', 'ko-KR', 'de-DE', 'fr-FR', 'es-ES', 'pt-BR', 'ru-RU'];
-  assert.deepEqual(contentPrefixes, expectedPrefixes);
+  const contentDirectories = REQUIRED_DOCS_LOCALES.filter((locale) => locale.contentDirectory).map((locale) => locale.contentDirectory);
+  const expectedDirectories = ['zh-Hant', 'en-US', 'ja-JP', 'ko-KR', 'de-DE', 'fr-FR', 'es-ES', 'pt-BR', 'ru-RU'];
+  assert.deepEqual(contentDirectories, expectedDirectories);
 });
 
 test('reports no findings when all locales are present and translated', async () => {
@@ -154,6 +157,7 @@ test('reports no findings when all locales are present and translated', async ()
 
     const report = await generateDocsTranslationReport({
       contentRoot: root,
+      translationRoot: root,
       reportPath: null,
     });
 
@@ -176,7 +180,15 @@ test('fail-on-findings exits non-zero when findings remain', async () => {
     const originalExitCode = process.exitCode;
     process.exitCode = 0;
 
-    await main(['--root-dir', root, '--fail-on-findings', '--report-json', '/dev/null']);
+    await main([
+      '--root-dir',
+      root,
+      '--translations-root-dir',
+      root,
+      '--fail-on-findings',
+      '--report-json',
+      '/dev/null',
+    ]);
 
     assert.equal(process.exitCode, 1);
     process.exitCode = originalExitCode;

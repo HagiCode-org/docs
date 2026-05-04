@@ -17,7 +17,9 @@
 
 ## 仓库结构
 
-- `src/content/docs/` - 文档页面与博客内容
+- `src/content/docs/` - 中文基线文档与共享 docs 资源
+- `src/content/translations/docs/<locale>/` - 使用 canonical source locale 命名的非基线本地化作者目录
+- `src/content/.generated/docs/` - 由 `npm run prepare:docs-content` 生成、供 Starlight 消费的组装内容树
 - `src/components/` 与 `src/layouts/` - 站点 UI 组件与布局
 - `public/` - 静态资源、可下载预设和共享媒体文件
 - `scripts/` 与 `tests/` - 文档质量与路由行为的校验工具
@@ -63,7 +65,7 @@ npm run i18n:check
 
 修改 `src/i18n/locales/en-US/` 与 `src/i18n/locales/zh-CN/` 下的 YAML 文件。两个语言目录必须保持 namespace 文件、标量 key 路径和 `{{placeholder}}` 占位符一致。修改后先运行 `npm run i18n:audit` 或 `npm run i18n:doctor`，再运行 `npm run i18n:generate` 刷新 `src/i18n/generated/docs-locale-resources.mjs`。
 
-`npm run i18n:check` 会同时执行 hagi18n 校验和 generated resource stale check。`npm run dev`、`npm run build` 与 `npm run typecheck` 会先执行 `prepare:i18n`，确保 Astro 或 TypeScript 读取资源前生成文件已存在。
+`npm run i18n:check` 会同时执行 hagi18n 校验和 generated resource stale check。`npm run dev`、`npm run build` 与 `npm run typecheck` 会先执行 `prepare:docs-runtime`，确保 locale 资源和组装后的 docs 内容树都已生成，再交给 Astro 或 TypeScript 读取。
 
 ### 安全的 sync 与 prune 命令
 
@@ -83,7 +85,13 @@ npm run i18n:prune:write
 
 ### 内容边界
 
-hagi18n 只管理 docs UI 文案、博客插件 UI 标签、Starlight locale metadata 和通用语言选择器标签。MDX 文档页与博客正文仍由 Starlight locale 文件夹组织：中文内容位于 `src/content/docs/`，英文内容位于 `src/content/docs/en-US/`。
+hagi18n 只管理 docs UI 文案、博客插件 UI 标签、Starlight locale metadata 和通用语言选择器标签。MDX 文档页与博客正文现在采用“基线内容 + 翻译作者目录 + 构建期组装”的结构：
+
+- 中文基线内容位于 `src/content/docs/`
+- 非基线翻译作者文件位于 `src/content/translations/docs/<source-locale>/`
+- Astro/Starlight 实际读取的是 `src/content/.generated/docs/` 这棵由 `npm run prepare:docs-content` 组装出的内容树
+
+新增或修改翻译文档时，请保持与基线文件一致的 canonical doc key，并使用 `en-US`、`ja-JP`、`zh-Hant` 这类 canonical locale 目录名。
 
 ## 截图分析工作流
 
@@ -111,10 +119,10 @@ Desktop 下载数据在运行时直接读取 `repos/index` 发布的 canonical i
 - `src/data/release-notes/index.json`
 - `src/data/release-notes/<tag>.json`
 - `src/content/docs/release-notes/index.mdx`
-- `src/content/docs/en-US/release-notes/index.mdx`
+- `src/content/translations/docs/en-US/release-notes/index.mdx`
 
 这些文件统一从权威的 `repos/release-notes` 工作区数据生成。
-同步结果不再生成 `src/content/docs/release-notes/<tag>.md` 或 `src/content/docs/en-US/release-notes/<tag>.md` 这类按 tag 拆分的详情页。
+同步结果不再生成 `src/content/docs/release-notes/<tag>.md` 或 `src/content/translations/docs/en-US/release-notes/<tag>.md` 这类按 tag 拆分的详情页。
 版本级深链现在统一改为 landing 页面锚点，例如 `/release-notes/#v0.1.0-beta.46` 与 `/en-US/release-notes/#v0.1.0-beta.46`。
 对于 monorepo 内的自动化，首选路径是仓库到仓库的直接转移；GitHub Release asset 只保留为无本地 checkout 时的可选 fallback source。
 
@@ -168,7 +176,7 @@ npm run release-notes:sync
 - 工作流优先使用 `DOCS_RELEASE_NOTES_TOKEN` 访问上游 GitHub API；只有当当前仓库默认 `GITHUB_TOKEN` 本身就具备跨仓库可见性时，才会回退到它。
 - 在 CI 中，`DOCS_RELEASE_NOTES_ALLOW_STALE_ON_SOURCE_ERROR=true` 会在上游仓库暂时不可访问、但当前受管输出已存在时保留现状并继续通过工作流。
 - 同步脚本除 Node.js 之外，还依赖系统自带的 `zip` 与 `unzip` 工具。
-- 如果历史同步曾留下 `src/content/docs/release-notes/*.md` 或 `src/content/docs/en-US/release-notes/*.md`，重新运行 `npm run release-notes:sync` 会自动清理这些旧的受管详情页。
+- 如果历史同步曾留下 `src/content/docs/release-notes/*.md` 或 `src/content/translations/docs/en-US/release-notes/*.md`，重新运行 `npm run release-notes:sync` 会自动清理这些旧的受管详情页。
 - 如果需要排查“为什么页面仍然像旧的多路由模式”，先确认 `src/data/release-notes/index.json` 中是否已经移除了 `routes` 字段、为每个条目生成 `anchorId`，并且 `src/data/release-notes/<tag>.json` 已正确写出详情 HTML。
 - 如果 local 模式下同步日志里出现 skipped tags，优先检查 `release-notes` 源文件；如果是 GitHub 模式，再检查上游 Release asset。
 - 如果 release discovery 返回 `404`，优先按认证或仓库访问问题排查，并确认 `DOCS_RELEASE_NOTES_TOKEN` 是否能读取 `HagiCode-org/release-notes`。

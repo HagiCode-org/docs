@@ -6,7 +6,7 @@
  */
 
 import {
-  buildDocsRoutePath,
+  buildDocsCounterpartPath,
   DOCS_LANGUAGE_STORAGE_KEY,
   DEFAULT_DOCS_ENTRY_LOCALE,
   getStoredDocsLocale,
@@ -17,7 +17,7 @@ import {
   resolveClientDocsLocale,
   serializeStoredDocsLocale,
   type DocsLocale,
-} from './i18n';
+} from './i18n.js';
 
 export interface LandingRouteResolution {
   currentPath: string;
@@ -140,7 +140,7 @@ export function resolveDocsLandingRoute(
   });
   const targetBasePath =
     landingTargetPath && isLandingPath ? landingTargetPath : canonicalCurrentPath;
-  const targetPath = buildDocsRoutePath(resolvedLocale, targetBasePath);
+  const targetPath = buildDocsCounterpartPath(resolvedLocale, targetBasePath);
   const targetUrl = buildTargetUrl(currentUrl, targetPath);
   const shouldHonorResolvedLocale =
     isLandingPath ||

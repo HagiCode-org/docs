@@ -2,21 +2,17 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import {
+  DOCS_BASELINE_AUTHORING_ROOT,
+  DOCS_TRANSLATIONS_AUTHORING_ROOT,
+  isDocsLocaleDirectory,
+} from '../src/lib/docs-content-paths.mjs';
+
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const docsRoot = path.resolve(scriptDirectory, '..');
-const contentRoot = path.join(docsRoot, 'src/content/docs');
-const englishRoot = path.join(contentRoot, 'en');
-const localePrefixes = new Set([
-  'en',
-  'zh-Hant',
-  'ja-JP',
-  'ko-KR',
-  'de-DE',
-  'fr-FR',
-  'es-ES',
-  'pt-BR',
-  'ru-RU',
-]);
+const contentRoot = path.join(docsRoot, DOCS_BASELINE_AUTHORING_ROOT);
+const translationsRoot = path.join(docsRoot, DOCS_TRANSLATIONS_AUTHORING_ROOT);
+const englishRoot = path.join(translationsRoot, 'en-US');
 const targetLocales = [
   { code: 'zh-Hant', translateCode: 'zh-TW' },
   { code: 'ja-JP', translateCode: 'ja' },
@@ -71,7 +67,10 @@ async function collectBaselineDocs(currentDirectory, relativeDirectory = '') {
     const relativePath = relativeDirectory ? `${relativeDirectory}/${entry.name}` : entry.name;
 
     if (entry.isDirectory()) {
-      if (!relativeDirectory && (localePrefixes.has(entry.name) || entry.name === 'blog' || entry.name === 'img')) {
+      if (
+        !relativeDirectory
+        && (isDocsLocaleDirectory(entry.name) || entry.name === 'blog' || entry.name === 'img')
+      ) {
         continue;
       }
 
@@ -449,14 +448,15 @@ async function main() {
   for (const locale of targetLocales) {
     for (const relativeDocPath of baselineDocs) {
       const destinationPath = path.join(contentRoot, locale.code, relativeDocPath);
-      if (await pathExists(destinationPath)) {
+      const localizedOutputPath = path.join(translationsRoot, locale.code, relativeDocPath);
+      if (await pathExists(localizedOutputPath)) {
         continue;
       }
 
       const englishSourcePath = path.join(englishRoot, relativeDocPath);
       const source = await fs.readFile(englishSourcePath, 'utf8');
       const template = buildTranslatedTemplate(source, locale.code, registry);
-      pendingFiles.push({ locale: locale.code, relativeDocPath, destinationPath, template });
+      pendingFiles.push({ locale: locale.code, relativeDocPath, destinationPath: localizedOutputPath, template });
     }
   }
 

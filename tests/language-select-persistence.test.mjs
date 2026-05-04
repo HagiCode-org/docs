@@ -21,7 +21,7 @@ async function readLanguageSelectScript() {
 function evaluateLanguageSelectScript(scriptContent, options = {}) {
   const listeners = new Map();
   const store = new Map();
-  let pathname = '/product-overview/';
+  let currentUrl = new URL(options.currentUrl ?? 'https://docs.hagicode.com/product-overview/');
   let selectedIndex = 0;
 
   if (options.storedRouteValue) {
@@ -82,17 +82,30 @@ function evaluateLanguageSelectScript(scriptContent, options = {}) {
 
   const window = {
     location: {
-      get pathname() {
-        return pathname;
+      get href() {
+        return currentUrl.toString();
       },
-      set pathname(value) {
-        pathname = value;
+      set href(value) {
+        currentUrl = new URL(value, currentUrl);
+      },
+      get pathname() {
+        return currentUrl.pathname;
+      },
+      get search() {
+        return currentUrl.search;
+      },
+      get hash() {
+        return currentUrl.hash;
+      },
+      get origin() {
+        return currentUrl.origin;
       },
     },
     addEventListener() {},
   };
 
   const context = vm.createContext({
+    URL,
     customElements,
     HTMLElement,
     HTMLSelectElement,
@@ -108,7 +121,8 @@ function evaluateLanguageSelectScript(scriptContent, options = {}) {
   listeners.get('change')?.({ currentTarget: select });
 
   return {
-    pathname,
+    pathname: currentUrl.pathname,
+    href: currentUrl.toString(),
     storedRouteValue: store.get('starlight-route'),
   };
 }
@@ -132,8 +146,8 @@ test('language selector renders the full generated locale set in the header', as
   const source = await readFile(componentPath, 'utf8');
 
   assert.match(source, /DOCS_LOCALE_SELECTOR_OPTIONS/);
-  assert.match(source, /buildDocsRoutePath/);
-  assert.match(source, /stripDocsLocalePrefix/);
+  assert.match(source, /buildDocsCounterpartPath/);
+  assert.match(source, /normalizeDocsRoutePath/);
   assert.match(source, /label: locale\.label/);
   assert.match(source, /return true;/);
   assert.deepEqual(
@@ -176,4 +190,16 @@ test('language selector persists Japanese locale from the encoded route target',
     path: '/en-US/product-overview/',
     lang: 'ja-JP',
   });
+});
+
+test('language selector preserves query parameters and hashes when switching locale', async () => {
+  const scriptContent = await readLanguageSelectScript();
+  const result = evaluateLanguageSelectScript(scriptContent, {
+    currentUrl: 'https://docs.hagicode.com/product-overview/?tab=pricing#install',
+    selectedValue: encodeSelectionValue('/en-US/product-overview/', 'en-US'),
+    storedRouteValue: JSON.stringify({ path: '/product-overview/', lang: 'root' }),
+  });
+
+  assert.equal(result.pathname, '/en-US/product-overview/');
+  assert.equal(result.href, 'https://docs.hagicode.com/en-US/product-overview/?tab=pricing#install');
 });
