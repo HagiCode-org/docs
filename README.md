@@ -42,9 +42,9 @@ The local docs server runs on `http://localhost:31265` by default.
 - The `gh-pages` payload contract is branch-root `esa.jsonc`, `wrangler.jsonc`, and `dist/` containing the validated Astro snapshot assembled after `npm run build:ci` succeeds.
 - The build job stays read-only and uploads the validated payload artifact; `gh-pages` remains authoritative and only the deploy job receives `contents: write`.
 - Manual `workflow_dispatch` runs rebuild from the selected ref, validate with `npm run build:ci`, and republish the resulting payload to `gh-pages`.
-- Direct Cloudflare publication is handled outside this workflow; keep `gh-pages/wrangler.jsonc` as the versioned deployment contract used by direct publish operations.
+- Direct Cloudflare publication is handled outside this workflow; keep `gh-pages/wrangler.jsonc` as the versioned Wrangler contract used by direct publish operations.
 - Existing workflows remain in place: `.github/workflows/docs-ci.yml`, `.github/workflows/azure-static-web-apps-agreeable-stone-04924c800.yml`, `.github/workflows/compress-images.yml`, and `.github/workflows/indexnow.yml` are additive peers, not replaced by the new workflow.
-- Treat host cutover as a separate operational step: adding the workflow does not prove `docs.hagicode.com` already reads `gh-pages/esa.jsonc`, `gh-pages/wrangler.jsonc`, and `gh-pages/dist/`.
+- Treat host cutover as a separate operational step: adding the workflow does not prove `docs.hagicode.com` already reads `gh-pages/esa.jsonc`, the Wrangler contract in `gh-pages/wrangler.jsonc`, and `gh-pages/dist/`.
 - Follow-up checks before treating `docs.hagicode.com` as a `gh-pages` consumer: confirm the workflow published `esa.jsonc`, `wrangler.jsonc`, and `dist/`, verify the hosting target still points at `gh-pages`, and then load `https://docs.hagicode.com` from the deployed branch snapshot.
 - This change migrates only `repos/docs`; `repos/awesome-design-md-site`, `repos/cost`, `repos/index`, `repos/soul`, `repos/trait`, and `repos/docker-compose-builder-web` remain unchanged follow-up migration candidates.
 - `.github/workflows/compress-images.yml` and `.github/workflows/indexnow.yml` handle repository maintenance automation.

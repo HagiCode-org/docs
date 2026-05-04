@@ -42,9 +42,9 @@ npm run preview
 - `gh-pages` 的 payload 契约是：分支根目录保留 `esa.jsonc`、`wrangler.jsonc`，并在 `npm run build:ci` 校验通过后把可发布的 Astro 产物组装到 `dist/`。
 - build job 保持只读并上传校验后的 payload artifact；`gh-pages` 仍然是权威发布面，只有 deploy job 获得 `contents: write`。
 - 手动 `workflow_dispatch` 会基于所选 ref 重新执行 `npm run build:ci`，并把生成的 payload 重新发布到 `gh-pages`。
-- Cloudflare 直接发布现在在这个 workflow 之外处理；请把 `gh-pages/wrangler.jsonc` 视为直接发布操作使用的受版本控制契约。
+- Cloudflare 直接发布现在在这个 workflow 之外处理；请把 `gh-pages/wrangler.jsonc` 视为直接发布操作使用的、受版本控制的 Wrangler 契约。
 - 现有工作流保持不变：`.github/workflows/docs-ci.yml`、`.github/workflows/azure-static-web-apps-agreeable-stone-04924c800.yml`、`.github/workflows/compress-images.yml` 与 `.github/workflows/indexnow.yml` 都继续保留，新工作流只是附加能力。
-- 不要把新增工作流等同于生产切换：仅添加工作流，并不能证明 `docs.hagicode.com` 已经开始读取 `gh-pages/esa.jsonc`、`gh-pages/wrangler.jsonc` 和 `gh-pages/dist/`。
+- 不要把新增工作流等同于生产切换：仅添加工作流，并不能证明 `docs.hagicode.com` 已经开始读取 `gh-pages/esa.jsonc`、`gh-pages/wrangler.jsonc` 这份 Wrangler 契约，以及 `gh-pages/dist/`。
 - 在把 `docs.hagicode.com` 视为 `gh-pages` 消费方之前，先完成后续检查：确认工作流实际发布了 `esa.jsonc`、`wrangler.jsonc` 与 `dist/`，确认托管目标仍然指向 `gh-pages`，然后再访问 `https://docs.hagicode.com` 验证部署结果。
 - 这次变更只迁移 `repos/docs`；`repos/awesome-design-md-site`、`repos/cost`、`repos/index`、`repos/soul`、`repos/trait` 与 `repos/docker-compose-builder-web` 继续保持不变，作为后续迁移候选项。
 - `.github/workflows/compress-images.yml` 和 `.github/workflows/indexnow.yml` 负责仓库维护类自动化。
