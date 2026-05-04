@@ -38,12 +38,15 @@ npm run preview
 ## GitHub Actions
 
 - `.github/workflows/docs-ci.yml` 负责对 `main` 的 push 与 pull request 做校验。
-- `.github/workflows/docs-deploy-gh-pages.yml` 为 `main` push 与 `workflow_dispatch` 新增了一个基于 artifact handoff 的 `gh-pages` 发布路径。
+- `.github/workflows/docs-deploy-gh-pages.yml` 为 `main` push 与 `workflow_dispatch` 新增了一个基于 artifact handoff 的双通道发布路径。
 - `gh-pages` 的 payload 契约是：分支根目录保留 `esa.jsonc`，并在 `npm run build:ci` 校验通过后把可发布的 Astro 产物组装到 `dist/`。
-- build job 保持只读并上传校验后的 payload artifact；只有 deploy job 获得 `contents: write`，并且只发布下载下来的该 artifact 到 `gh-pages`。
+- build job 保持只读并上传校验后的 payload artifact；`gh-pages` 仍然是权威发布面，只有 deploy job 获得 `contents: write`，下游 `upload-r2` job 也只会复用同一个 artifact，而不会再次构建。
+- 手动 `workflow_dispatch` 现在提供 `publish_source` 两种模式：`latest-gh-pages` 直接复用最近一次 `gh-pages` 快照而不重建；`current-ref-build` 则重新执行 `npm run build:ci`、重发 `gh-pages`，再把同一个校验过的 `dist/` payload 上传到 R2。
+- 在启用生产运行前，先配置 `R2_ENDPOINT`、`R2_BUCKET`、`R2_ACCESS_KEY_ID`、`R2_SECRET_ACCESS_KEY`，以及可选的 `R2_PREFIX`。这些值可以放在仓库 secrets 或 `docs-production` environment 中；如果设置 `R2_PREFIX`，请使用类似 `docs` 这种去掉首尾 `/` 的前缀，让 `.deploy/gh-pages/dist/` 的内容直接落在目标根路径下，而不是额外生成一层 `dist/`。
 - 现有工作流保持不变：`.github/workflows/docs-ci.yml`、`.github/workflows/azure-static-web-apps-agreeable-stone-04924c800.yml`、`.github/workflows/compress-images.yml` 与 `.github/workflows/indexnow.yml` 都继续保留，新工作流只是附加能力。
 - 不要把新增工作流等同于生产切换：仅添加工作流，并不能证明 `docs.hagicode.com` 已经开始读取 `gh-pages/esa.jsonc` 和 `gh-pages/dist/`。
 - 在把 `docs.hagicode.com` 视为 `gh-pages` 消费方之前，先完成后续检查：确认工作流实际发布了 `esa.jsonc` 与 `dist/`，确认托管目标仍然指向 `gh-pages`，然后再访问 `https://docs.hagicode.com` 验证部署结果。
+- 这次变更只迁移 `repos/docs`；`repos/awesome-design-md-site`、`repos/cost`、`repos/index`、`repos/soul`、`repos/trait` 与 `repos/docker-compose-builder-web` 继续保持不变，作为后续迁移候选项。
 - `.github/workflows/compress-images.yml` 和 `.github/workflows/indexnow.yml` 负责仓库维护类自动化。
 
 ## hagi18n 维护工作流
