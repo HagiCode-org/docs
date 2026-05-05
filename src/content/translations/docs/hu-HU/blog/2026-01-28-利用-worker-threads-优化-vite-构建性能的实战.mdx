@@ -1,0 +1,353 @@
+---
+title: "Gyakorlati útmutató a Vite építési teljesítményének dolgozói szálakkal történő optimalizálásához"
+date: 2026-01-28
+truncate: true
+tags: [Vite, Worker Threads, Build Performance, Node.js, Frontend Engineering]
+description: "Ha nagy frontend projektekkel dolgozik, az éles összeállítások fájdalmasan lassúnak tűnhetnek. Ez a cikk megosztja, hogyan használtuk a Node.js Worker Threads szálakat a"
+---
+
+## 120 másodperctől 45 másodpercig: Gyakorlati útmutató a Vite építési teljesítmény optimalizálásához dolgozó szálakkal
+
+> Ha nagy frontend projektekkel dolgozik, az éles összeállítások fájdalmasan lassúnak tűnhetnek. Ez a cikk bemutatja, hogyan használtuk a Node.js Worker Threads segítségével az elhomályosítási szakaszt a Vite buildben 120 másodpercről 45 másodpercre, valamint a megvalósítás részleteit és a HagiCode projekt tanulságait.
+
+## Háttér
+
+Frontend mérnöki gyakorlatunkban a projekt növekedésével egyre hangsúlyosabbá váltak az építési hatékonysággal kapcsolatos problémák. Különösen az éles összeállítási folyamat során szoktunk bevezetni JavaScript obfuszkáló eszközöket, mint pl `javascript-obfuscator` hogy megvédjük a forráskód logikáját. Ez a lépés szükséges, de számításilag költséges és erősen CPU-hoz kötött.
+
+A **HagiCode** korai fejlesztési szakaszában egy nagyon trükkös teljesítménybeli szűk keresztmetszetbe ütköztünk: a gyártási idők gyorsan romlottak a kódbázis növekedésével.
+
+**A konkrét fájdalompontok a következők voltak**:
+- Az obfuszkációs feladatok sorosan futottak egyetlen szálon, max. egy CPU magot, míg a többi tétlen volt
+- Az építési idő az eredeti 30 másodpercről 110-120 másodpercre nőtt
+- A változtatás utáni build ellenőrzési ciklus rendkívül hosszú lett, ami komolyan lelassította a fejlesztési iterációt
+- A CI/CD folyamatban az építési szakasz lett a legidőigényesebb rész
+
+**Miért kellett ez a HagiCode-nak?**
+A HagiCode egy mesterséges intelligencia által vezérelt kódasszisztens, amelynek frontend architektúrája összetett üzleti logikát és AI interakciós modulokat tartalmaz. Alapkódunk biztonságának biztosítása érdekében nagy intenzitású homályosítást alkalmaztunk az éles kiadásokban. A két percet megközelítő felépítési várakozással szembesülve úgy döntöttünk, hogy végrehajtjuk a build rendszer teljesítményének mélyreható optimalizálását.
+
+## A HagiCode-ról
+
+> Mivel már említettük a projektet, hadd mondjak még egy kicsit róla.
+
+Ha a fejlesztés során ehhez hasonló csalódásokba ütközik:
+- Több projekt és több technológiai halom magas karbantartási költségekkel a szkriptek létrehozásához
+- Bonyolult CI/CD folyamatkonfiguráció, amely arra kényszeríti, hogy minden változtatáskor ellenőrizze a dokumentumokat
+- Végtelen sok platform kompatibilitási probléma
+- Szeretne AI segíteni a kódírásban, de a meglévő eszközöket nem találja elég okosnak
+
+Akkor az általunk épített **HagiCode** felkeltheti érdeklődését.
+
+**Mi az a HagiCode?**
+- AI-vezérelt kódasszisztens
+- Támogatja a többnyelvű, többplatformos kódgenerálást és -optimalizálást
+- Beépített játékmódosítással rendelkezik, így a kódolás kevésbé fárasztó
+
+**Miért kell itt megemlíteni?**
+Az ebben a cikkben megosztott **párhuzamos JavaScript obfuszkációs megoldás** pontosan az, amit a HagiCode felépítése során finomítottunk. Ha értékesnek találja ezt a mérnöki megközelítést, az azt sugallja, hogy műszaki ízlésünk valószínűleg elég jó, és magát a HagiCode-ot is érdemes lehet megnézni.
+
+**Többet szeretne tudni?**
+- GitHub: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site) (kérjük, adjon nekünk egy csillagot)
+- Hivatalos honlap: [hagicode.com](https://hagicode.com)
+- Videó bemutató: [www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/) (30 perces gyakorlati bemutató)
+- Telepítési útmutató: [hagicode.com/installation/docker-compose](https://hagicode.com/installation/docker-compose)
+- A nyilvános béta most megnyílt: telepítse most, hogy csatlakozzon a bétaverzióhoz
+
+---
+
+## Elemzés: Az áttörési pont megtalálása a teljesítmény szűk keresztmetszetében
+
+A teljesítményprobléma megoldása előtt először tisztáznunk kellett a gondolkodásunkat, és meg kellett találnunk a legjobb műszaki megoldást.
+
+### Alapvető döntés: Miért válasszunk dolgozói szálakat?
+
+Három fő módja van a párhuzamos számítások megvalósításának a Node.js-ben:
+1. **child_process**: önálló gyermekfolyamatok létrehozása
+2. **Web Workers**: főleg a böngésző oldalon használatos
+3. **worker_threads**: natív többszálú támogatás a Node.js-ben
+
+A lehetőségek összehasonlítása után a HagiCode végül a **Worker Threads** lehetőséget választotta a következő okok miatt:
+- **Nulla sorozási költség**: A Worker Threadek ugyanabban a folyamatban futnak, és megoszthatják a memóriát `SharedArrayBuffer` vagy átruházzák a tulajdonjogot, elkerülve a folyamatok közötti kommunikáció súlyos sorozatosítási költségeit.
+- **Natív támogatás**: a Node.js 12+-ba beépítve, nincs szükség extra nehéz függőségekre.
+- **Egységes kontextus**: a hibakeresés és a naplózás kényelmesebb, mint a gyermekfolyamatoknál.
+
+### Feladat részletessége: Hogyan kell felosztani az obfuszkációs feladatokat?
+
+Nehéz párhuzamosítani egy hatalmas JS-csomagfájl elhomályosítását, mert a kódnak vannak függőségei, de a Vite build kimenete több **darabból** áll. Ez ad nekünk egy természetes párhuzamos határt:
+
+- **Függetlenség**: a Vite csomagolás után a különböző darabok közötti függőségek már leválasztottak, így azok biztonságosan párhuzamosan feldolgozhatók.
+- **Megfelelő részletesség**: a projektek általában 10-30 darabból állnak, ami kiváló skála a párhuzamos ütemezéshez.
+- **Könnyű integráció**: a `generateBundle` A hook in Vite bővítmények lehetővé teszik, hogy elfogjuk és feldolgozzuk ezeket a darabokat, mielőtt a fájlok kibocsátásra kerülnek.
+
+### Építészeti tervezés
+
+Párhuzamos feldolgozórendszert terveztünk négy fő összetevővel:
+
+1. **Task Splitter**: iterál a Vite kötegobjektumán, kiszűri azokat a fájlokat, amelyek nem igényelnek elhomályosítást, például a szállítói darabokat, és feladatsort hoz létre.
+2. **Worker Pool Manager**: kezeli a Dolgozók életciklusát, valamint kezeli a feladatok elosztását, újrahasznosítását és hiba esetén az újrapróbálkozást.
+3. **Haladásriporter**: a kimenetek valós időben építik fel a fejlődést a várakozási szorongás csökkentése érdekében.
+4. **ObfuscationWorker**: az a Worker szál, amely ténylegesen végrehajtja az obfuszkációs logikát.
+
+## Megoldás: gyakorlati megvalósítás
+
+A fenti elemzés alapján megkezdtük ennek a párhuzamos obfuszkációs rendszernek a megvalósítását.
+
+### 1. Konfigurálja a Vite beépülő modult
+
+Először integráltuk a párhuzamos obfuszkációs beépülő modult `vite.config.ts`. A konfiguráció egyértelmű. Csak a dolgozók számát és az elhomályosítási szabályokat kell megadnia.
+
+```typescript
+import { defineConfig } from 'vite'
+import { parallelJavascriptObfuscator } from './buildTools/plugin'
+
+export default defineConfig(({ mode }) => {
+  const isProduction = mode === 'production'
+  
+  return {
+    build: {
+      rollupOptions: {
+        ...(isProduction
+          ? {
+              plugins: [
+                parallelJavascriptObfuscator({
+                  enabled: true,
+                  // Automatically adjust based on CPU core count; leave one core for the main thread
+                  workerCount: 4, 
+                  retryAttempts: 3,
+                  fallbackToMainThread: true, // Automatically degrade to single-thread mode on failure
+                  // Filter out vendor chunks; third-party libraries usually do not need obfuscation
+                  isVendorChunk: (fileName: string) => fileName.includes('vendor-'),
+                  obfuscationConfig: {
+                    compact: true,
+                    controlFlowFlattening: true,
+                    deadCodeInjection: true,
+                    disableConsoleOutput: true,
+                    // ... more obfuscation options
+                  },
+                }),
+              ],
+            }
+          : {}),
+      },
+    },
+  }
+})
+```
+
+### 2. A Worker Logic megvalósítása
+
+A dolgozó az az egység, amely feladatokat hajt végre. Világosan meg kell határoznunk a bemeneti és kimeneti adatstruktúrákat.
+
+**Megjegyzés**: bár az itt található kód egyszerű, számos buktatóra kell figyelni, például ellenőrizni kell, hogy `parentPort` nulla, és megfelelően kezeli a hibákat. A HagiCode megvalósításában azt találtuk, hogy bizonyos speciális ES6 szintaktikai minták az obfuszkátor összeomlását okozhatják, ezért hozzáadtuk `try-catch` védelmet.
+
+```typescript
+import { parentPort } from 'worker_threads'
+import javascriptObfuscator from 'javascript-obfuscator'
+
+export interface ObfuscationTask {
+  chunkId: string
+  code: string
+  config: any
+}
+
+export interface ObfuscationResult {
+  chunkId: string
+  obfuscatedCode: string
+  error?: string
+}
+
+// Listen for tasks sent from the main thread
+if (parentPort) {
+  parentPort.on('message', async (task: ObfuscationTask) => {
+    try {
+      // Perform obfuscation
+      const obfuscated = javascriptObfuscator.obfuscate(task.code, task.config)
+      const result: ObfuscationResult = {
+        chunkId: task.chunkId,
+        obfuscatedCode: obfuscated.getObfuscatedCode(),
+      }
+      // Send the result back to the main thread
+      parentPort?.postMessage(result)
+    } catch (error) {
+      // Handle exceptions so one Worker crash does not block the whole build
+      const result: ObfuscationResult = {
+        chunkId: task.chunkId,
+        obfuscatedCode: '',
+        error: error instanceof Error ? error.message : 'Unknown error',
+      }
+      parentPort?.postMessage(result)
+    }
+  })
+}
+```
+
+### 3. Munkatárs-vezető
+
+Ez az egész megoldás magja. Fenn kell tartanunk egy fix méretű dolgozói készletet, és a **FIFO (first in, first out)** stratégia használatával ütemeznünk kell a feladatokat.
+
+```typescript
+import { Worker } from 'worker_threads'
+import os from 'os'
+
+export class WorkerPool {
+  private workers: Worker[] = []
+  private taskQueue: Array<{
+    task: ObfuscationTask
+    resolve: (result: ObfuscationResult) => void
+    reject: (error: Error) => void
+  }> = []
+  
+  constructor(options: WorkerPoolOptions = {}) {
+    // Default to core count - 1 so the main thread still has some breathing room
+    const workerCount = options.workerCount ?? Math.max(1, (os.cpus().length || 4) - 1)
+    
+    for (let i = 0; i < workerCount; i++) {
+      this.createWorker()
+    }
+  }
+
+  private createWorker() {
+    const worker = new Worker('./worker.ts')
+    
+    worker.on('message', (result) => {
+      // After one task finishes, take the next task from the queue
+      const nextTask = this.taskQueue.shift()
+      if (nextTask) {
+        this.dispatchTask(worker, nextTask)
+      } else {
+        // If there are no pending tasks, mark the Worker as idle
+        this.activeWorkers.delete(worker)
+      }
+    })
+    
+    this.workers.push(worker)
+  }
+
+  // Submit a task to the pool
+  public runTask(task: ObfuscationTask): Promise<ObfuscationResult> {
+    return new Promise((resolve, reject) => {
+      const job = { task, resolve, reject }
+      const idleWorker = this.workers.find(w => !this.activeWorkers.has(w))
+      
+      if (idleWorker) {
+        this.dispatchTask(idleWorker, job)
+      } else {
+        this.taskQueue.push(job)
+      }
+    })
+  }
+
+  private dispatchTask(worker: Worker, job: any) {
+    this.activeWorkers.set(worker, job.task)
+    worker.postMessage(job.task)
+  }
+}
+```
+
+### 4. Jelentés az előrehaladásról
+
+A várakozás fájdalmas, különösen akkor, ha fogalma sincs, mennyi ideig tart még. Ezért hozzáadtunk egy egyszerű folyamatjelentést, amely valós idejű visszajelzést ad az aktuális állapotról.
+
+```typescript
+export class ProgressReporter {
+  private completed = 0
+  private readonly total: number
+  private readonly startTime: number
+
+  constructor(total: number) {
+    this.total = total
+    this.startTime = Date.now()
+  }
+
+  increment(): void {
+    this.completed++
+    this.report()
+  }
+
+  private report(): void {
+    const now = Date.now()
+    const elapsed = now - this.startTime
+    const percentage = (this.completed / this.total) * 100
+    
+    // Simple ETA estimate
+    const avgTimePerChunk = elapsed / this.completed
+    const remaining = (this.total - this.completed) * avgTimePerChunk
+
+    console.log(
+      `[Parallel Obfuscation] ${this.completed}/${this.total} chunks completed (${percentage.toFixed(1)}%) | ETA: ${(remaining / 1000).toFixed(1)}s`
+    )
+  }
+}
+```
+
+## Gyakorlat: Eredmények és tanulságok
+
+A megoldás bevezetése után a HagiCode projekt összeállítási teljesítménye azonnal javult.
+
+### Teljesítmény-benchmark adatok
+
+A következő környezetben teszteltük:
+- CPU: Intel Core i7-12700K (12 mag / 20 szál)
+- RAM: 32 GB DDR4
+- Node.js: v18.17.0
+- OS: Ubuntu 22.04
+
+**Eredmények összehasonlítása**:
+- **Egyszálas (optimalizálás előtt)**: 118 másodperc
+- **4 dolgozó**: 55 másodperc (**53%-os** javulás)
+- **8 dolgozó**: 48 másodperc (**60%-os** javulás)
+- **12 dolgozó**: 45 másodperc (**62%** javulás)
+
+Amint látható, a nyereség nem volt lineáris. Amint a dolgozók száma meghaladta a 8-at, a javulás kisebb lett. Ennek főként a feladatelosztás egyenletessége és a memória sávszélességének szűk keresztmetszete korlátozta.
+
+### Gyakori problémák és megoldások
+
+A HagiCode valós használatában több buktatóba is belefutottunk, ezért itt vannak referenciaként:
+
+**1. kérdés: Az építési idő nem csökkent sokat, sőt lassabb lett?**
+- **Ok**: a Workers létrehozásának saját többletköltsége van, vagy túl sok dolgozó lett konfigurálva, ami gyakori kontextusváltást okoz.
+- **Megoldás**: javasoljuk, hogy állítsa a Dolgozók számát értékre `CPU core count - 1`. Azt is ellenőrizze, hogy például valamelyik darab különösen nagy-e `> 5MB`. Ez a fajta "szörny" fájl lesz a szűk keresztmetszet, ezért előfordulhat, hogy optimalizálnia kell a kódfelosztási stratégiát.
+
+**2. kérdés: A dolgozók időnként összeomlanak, és összeállítási hibákat okoznak?**
+- **Ok**: egyes speciális kódszintaktikai minták belső hibákat okozhatnak az obfuszkátoron belül.
+- **Megoldás**: bevezettünk egy **automatikus lebontási mechanizmust**. Amikor egy dolgozó eléri a meghibásodási küszöböt, a beépülő modul automatikusan visszavált egyszálas módba, hogy biztosítsa, hogy a felépítés ne álljon le. Ezzel egyidejűleg rögzíti a hibát okozó fájlnevet, így később javítható.
+
+**3. kérdés: Túl magas a memóriahasználat (OOM)?**
+- **Ok**: minden dolgozónak saját memóriaterületre van szüksége az obfuszkátor betöltéséhez és az AST elemzéséhez.
+- **Megoldás**:
+  - Csökkentse a dolgozók számát.
+  - Növelje a Node.js memóriakorlátot: `NODE_OPTIONS="--max-old-space-size=4096" npm run build`.
+  - Győződjön meg arról, hogy a dolgozók nem tartanak fenn szükségtelen hivatkozásokat nagy objektumokra.
+
+## Következtetés
+
+A Node.js Worker Threads bevezetésével sikeresen csökkentettük a HagiCode projekt éles felépítési idejét 120 másodpercről körülbelül 45 másodpercre, nagymértékben javítva a fejlesztési élményt és a CI/CD hatékonyságát.
+
+Ennek a megoldásnak a lényege:
+1. **A feladatok megfelelő felosztása**: használja a Vite darabokat párhuzamos egységként.
+2. **Erőforrások vezérlése**: használjon Worker-készletet az erőforrások kimerülésének elkerülése érdekében.
+3. **Hibatűrő kialakítás**: az automatikus lebontási mechanizmus biztosítja az építkezés stabilitását.
+
+Ha Ön is küzd a frontend build hatékonyságával, vagy a projektje is nehéz kódfeldolgozást végez, akkor ezt a megoldást érdemes kipróbálni. Természetesen azt javasoljuk, hogy nézze meg közvetlenül a HagiCode-ot, ahol ezek a műszaki részletek már integrálva vannak.
+
+Ha ez a cikk segített Önnek, bátran adjon nekünk egy csillagot a GitHubon, vagy csatlakozzon a nyilvános bétaverzióhoz, és próbálja ki.
+
+## Hivatkozások
+
+- A Node.js Worker Threads hivatalos dokumentációja: [nodejs.org/api/worker_threads.html](https://nodejs.org/api/worker_threads.html)
+- javascript-obfuscator dokumentáció: [github.com/javascript-obfuscator/javascript-obfuscator](https://github.com/javascript-obfuscator/javascript-obfuscator)
+- Vite bővítmény fejlesztési útmutató: [vitejs.dev/guide/api-plugin.html](https://vitejs.dev/guide/api-plugin.html)
+- **HagiCode GitHub**: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- **A HagiCode hivatalos weboldala**: [hagicode.com](https://hagicode.com)
+- **Telepítési útmutató**: [hagicode.com/installation/docker-compose](https://hagicode.com/installation/docker-compose)
+
+
+
+---
+
+Köszönöm, hogy elolvastad. Ha hasznosnak találta ezt a cikket, kérjük, kattintson a Tetszik gombra, hogy többen felfedezzék.
+
+Ez a tartalom mesterséges intelligencia által támogatott együttműködéssel készült, én ellenőriztem, és tükrözi saját nézeteimet és álláspontomat.
+
+- **Szerző:** [newbe36524](https://www.newbe.pro)
+- **Cikk linkje:** [https://hagicode.com/blog/2026/01/27/optimizing-vite-build-with-worker-threads](https://hagicode.com/blog/2026/01/27/optimizing-vite-build-with-worker-threads)
+- **Szerzői jogi megjegyzés:** Ha nincs másképp jelezve, a blogon található összes cikk a BY-NC-SA licence alá tartozik. Az újraküldésnél kérjük feltüntetni a forrást.

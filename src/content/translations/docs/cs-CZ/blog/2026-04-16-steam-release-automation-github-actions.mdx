@@ -1,0 +1,378 @@
+---
+title: Jak automatizovat vydání na Steamu pomocí akcí GitHub
+date: 2026-04-16
+tags: [GitHub Actions, Steam, Automated Release, DevOps, CI/CD]
+description: "Tento článek sdílí kompletní řešení, které jsme implementovali pro automatizované verze Steam v projektu HagiCode Desktop, pokrývající celý proces automatizace"
+---
+
+## Jak automatizovat vydání na Steamu pomocí akcí GitHub
+
+> Tento článek sdílí kompletní řešení, které jsme implementovali pro automatizovaná vydání Steamu v projektu HagiCode Desktop a pokrývá celý proces automatizace z vydání GitHub na platformu Steam, včetně klíčových technických detailů, jako je ověřování Steam Guard a nahrávání na více platformách Depot.
+
+## Pozadí
+
+Pracovní postup vydání na Steamu je ve skutečnosti zcela odlišný od tradiční distribuce aplikací. Steam má svůj vlastní kompletní systém doručování aktualizací. Vývojáři potřebují použít SteamCMD k nahrání artefaktů sestavení do sítě CDN Steamu, místo aby jednoduše vložili odkaz ke stažení jako na jiných platformách.
+
+Projekt HagiCode Desktop se připravuje na vydání Steam, které přineslo několik nových výzev do našeho pracovního postupu vydání:
+
+1. Potřebovali jsme převést existující artefakty sestavení do formátu kompatibilního se službou Steam.
+2. Museli jsme je nahrát na Steam přes SteamCMD.
+3. Museli jsme také zvládnout autentizaci Steam Guard.
+4. Potřebovali jsme podporovat multiplatformní nahrávání Depot pro Linux, Windows a macOS.
+5. Chtěli jsme plně automatizovaný tok z GitHub Release na Steam.
+
+Projekt již implementoval „režim přenosné verze“, který umožňuje aplikaci detekovat pevné zatížení služeb zabalené v `extra` adresář. Naším cílem bylo bezproblémově integrovat režim přenosné verze s distribucí Steam.
+
+## O HagiCode
+
+Řešení sdílené v tomto článku pochází z našich praktických zkušeností v [HagiCode](https://hagicode.com) projekt. HagiCode je asistent kódování AI, který podporuje použití stolního počítače. Vzhledem k tomu, že aktivně pracujeme na spuštění na Steamu, potřebovali jsme vytvořit spolehlivý pracovní postup pro automatické vydávání.
+
+## Architektura Design
+
+Jádrem celého procesu vydávání na Steamu je pracovní postup GitHub Actions, který rozděluje proces do tří hlavních fází:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ GitHub Actions Workflow (Steam Release)                    │
+├─────────────────────────────────────────────────────────────┤
+│ 1. Preparation Stage:                                      │
+│    - Check out portable-version code                       │
+│    - Download build artifacts from GitHub Release          │
+│    - Extract and prepare the Steam content directory       │
+│                                                             │
+│ 2. SteamCMD Setup:                                         │
+│    - Install or reuse SteamCMD                             │
+│    - Authenticate with Steam Guard                         │
+│                                                             │
+│ 3. Release Stage:                                          │
+│    - Generate Depot VDF configuration files                │
+│    - Generate App Build VDF configuration files            │
+│    - Invoke SteamCMD to upload to Steam                    │
+└─────────────────────────────────────────────────────────────┘
+```
+
+Tento design nabízí několik výhod:
+- Znovu používá existující artefakty GitHub Release a vyhýbá se přestavbě stejných výstupů.
+- Pro bezpečnou izolaci používá samoobslužné běžce.
+- Podporuje přepínání mezi režimem náhledu a větvemi formálního vydání.
+- Zahrnuje kompletní zpracování chyb a protokolování, což usnadňuje diagnostiku poruch.
+
+## Implementace pracovního postupu
+
+### Návrh parametrů spouště
+
+Náš pracovní postup podporuje následující klíčové parametry:
+
+```yaml
+inputs:
+  release:           # Portable Version release tag
+    description: 'Version tag to release (for example v1.0.0)'
+    required: true
+  steam_preview:     # Whether to generate a preview build
+    description: 'Whether to use preview mode'
+    required: false
+    default: 'false'
+  steam_branch:      # Steam branch to set live
+    description: 'Target Steam branch'
+    required: false
+    default: 'preview'
+  steam_description: # Build description override
+    description: 'Build description'
+    required: false
+```
+
+### Samoobslužná konfigurace Runner
+
+Z bezpečnostních důvodů používáme self-hosted runner s `steam` štítek:
+
+```yaml
+runs-on:
+  - self-hosted
+  - Linux
+  - X64
+  - steam
+```
+
+To zajišťuje, že vydání Steam běží na vyhrazeném runneru a udržuje citlivé přihlašovací údaje bezpečně izolované.
+
+### Kontrola souběžnosti
+
+Abychom zabránili vzájemnému ovlivňování vydání stejné verze, nakonfigurovali jsme řízení souběžnosti:
+
+```yaml
+concurrency:
+  group: portable-version-steam-${{ github.event.inputs.release }}
+  cancel-in-progress: false
+```
+
+Všimněte si toho `cancel-in-progress: false` je zde nastaveno, protože vydání na Steamu může chvíli trvat a nechceme, aby nově spuštěný běh zrušil ten, který se již nahrává.
+
+## Implementace základního skriptu
+
+### Příprava uvolnění vstupů
+
+The `prepare-steam-release-input.mjs` skript je zodpovědný za přípravu vstupů požadovaných pro vydání:
+
+```javascript
+// Download the GitHub Release build manifest and artifact inventory
+const buildManifest = await downloadBuildManifest(releaseTag);
+const artifactInventory = await downloadArtifactInventory(releaseTag);
+
+// Download compressed archives for each platform
+for (const platform of ['linux-x64', 'win-x64', 'osx-universal']) {
+  const artifactUrl = getArtifactUrl(artifactInventory, platform);
+  await downloadArtifact(artifactUrl, platform);
+}
+
+// Extract into the Steam content directory structure
+await extractToSteamContent(sources, contentRoot);
+```
+
+### Ověření Steam Guard
+
+Steam vyžaduje, aby byly účty chráněny pomocí Steam Guard, a proto jsme implementovali algoritmus generování kódu založený na sdíleném tajemství:
+
+```javascript
+function generateSteamGuardCode(sharedSecret, timestamp = Date.now()) {
+  const secret = decodeSharedSecret(sharedSecret);
+  const time = Math.floor(timestamp / 1000 / 30);
+
+  const timeBuffer = Buffer.alloc(8);
+  timeBuffer.writeBigUInt64BE(BigInt(time));
+
+  // Use HMAC-SHA1 to generate a time-based one-time code
+  const hash = crypto.createHmac('sha1', secret)
+    .update(timeBuffer)
+    .digest();
+
+  // Convert it into a 5-character Steam Guard code
+  const code = steamGuardCode(hash);
+  return code;
+}
+```
+
+Tato implementace je založena na mechanismu TOTP (Time-based One-Time Password) Steam Guard, který generuje každých 30 sekund nový ověřovací kód.
+
+### Generování konfigurace VDF
+
+VDF (Valve Data Format) je konfigurační formát používaný službou Steam. Potřebujeme vygenerovat dva typy souborů VDF:
+
+**Depot VDF** se používá ke konfiguraci obsahu pro každou platformu:
+
+```javascript
+function buildDepotVdf(depotId, contentRoot) {
+  return [
+    '"DepotBuildConfig"',
+    '{',
+    `  "DepotID" "${escapeVdf(depotId)}"`,
+    `  "ContentRoot" "${escapeVdf(contentRoot)}"`,
+    '  "FileMapping"',
+    '  {',
+    '    "LocalPath" "*"',
+    '    "DepotPath" "."',
+    '    "recursive" "1"',
+    '  }',
+    '}'
+  ].join('\n');
+}
+```
+
+**Sestavení aplikace VDF** se používá ke konfiguraci celého sestavení aplikace:
+
+```javascript
+function buildAppBuildVdf(appId, depotBuilds, description, setLive) {
+  const vdf = [
+    '"appbuild"',
+    '{',
+    `  "appid" "${appId}"`,
+    `  "desc" "${escapeVdf(description)}"`,
+    `  "contentroot" "${escapeVdf(contentRoot)}"`,
+    '  "buildoutput" "build_output"',
+    '  "depots"',
+    '  {'
+  ];
+
+  for (const [depotId, depotVdfPath] of Object.entries(depotBuilds)) {
+    vdf.push(`    "${depotId}" "${depotVdfPath}"`);
+  }
+
+  if (setLive) {
+    vdf.push(`  }`);
+    vdf.push(`  "setlive" "${setLive}"`);
+  }
+
+  vdf.push('}');
+  return vdf.join('\n');
+}
+```
+
+### Vyvolání SteamCMD
+
+Nakonec se nahrání provede vyvoláním SteamCMD:
+
+```javascript
+await runCommand(steamcmdPath, [
+  '+login', steamUsername, steamPassword, steamGuardCode,
+  '+run_app_build', appBuildPath,
+  '+quit'
+]);
+```
+
+Toto je poslední skok v celém pracovním postupu. Jakmile se to podaří, je vydání hotovo.
+
+## Multiplatformní Depot Handling
+
+Steam používá systém Depot ke správě obsahu pro různé platformy. Podporujeme tři hlavní depa:
+
+| Platforma | Identifikátor skladu | Podpora architektury |
+|-----|-----------|---------|
+| Linux | `linux-x64` | x64_64 |
+| Windows | `win-x64` | x64_64 |
+| macOS | `osx-universal` | univerzální, x64_64, rameno64 |
+
+Každý Depot má svůj vlastní obsahový adresář a konfigurační soubor VDF. To zajišťuje, že uživatelé na různých platformách stahují pouze obsah, který skutečně potřebují.
+
+## Pracovní postup uvolnění
+
+### Krok 1: Připravte vydání GitHubu
+
+Nejprve vytvořte vydání GitHub v `portable-version` úložiště, které obsahuje:
+- Komprimované archivy pro každou platformu
+- Sestavit manifest (`{tag}.build-manifest.json`)
+- inventář artefaktů (`{tag}.artifact-inventory.json`)
+
+### Krok 2: Spusťte pracovní postup vydání Steam
+
+Spusťte pracovní postup ručně prostřednictvím akcí GitHub a vyplňte požadované parametry:
+- `release`: značka verze k publikování, jako např `v1.0.0`
+- `steam_branch`: cílová větev, jako např `preview` nebo `public`
+- `steam_preview`: zda použít režim náhledu
+
+### Krok 3: Automaticky proveďte uvolnění
+
+Pracovní postup automaticky provede následující kroky:
+
+1. Stáhněte a extrahujte artefakty vydání GitHub.
+2. Nainstalujte nebo aktualizujte SteamCMD.
+3. Vygenerujte konfigurační soubory Steam VDF.
+4. Ověření pomocí Steam Guard.
+5. Nahrajte obsah na Steam CDN.
+6. Nastavte zadanou větev živě.
+
+Po dokončení této sekvence je pokryta celá cesta uvolnění.
+
+## Průvodce konfigurací
+
+### Požadovaná konfigurace tajných klíčů
+
+Nakonfigurujte následující tajné klíče v nastavení úložiště GitHub:
+
+| Tajné jméno | Popis |
+|-----------|------|
+| `STEAM_USERNAME` | Uživatelské jméno účtu Steam |
+| `STEAM_PASSWORD` | Heslo účtu Steam |
+| `STEAM_SHARED_SECRET` | Sdílené tajemství Steam Guard (volitelné) |
+| `STEAM_GUARD_CODE` | Kód Steam Guard (volitelné) |
+| `STEAM_APP_ID` | ID aplikace Steam |
+| `STEAM_DEPOT_ID_LINUX` | ID Linux Depot |
+| `STEAM_DEPOT_ID_WINDOWS` | ID Windows Depot |
+| `STEAM_DEPOT_ID_MACOS` | ID skladu macOS |
+
+Na těchto nastaveních není nic zvláštního. Jednoduše potřebujete všechny očekávané hodnoty na místě.
+
+### Konfigurace proměnné prostředí
+
+| Název proměnné | Popis | Výchozí hodnota |
+|---------|------|--------|
+| `PORTABLE_VERSION_STEAMCMD_ROOT` | instalační adresář SteamCMD | `~/.local/share/portable-version/steamcmd` |
+
+## Nejlepší postupy
+
+### Správa ověřování Steam Guard
+
+Při prvním spuštění musíte ručně zadat kód Steam Guard. Poté se doporučuje nakonfigurovat sdílený tajný klíč, aby bylo možné kód vygenerovat automaticky. Tím se vyhnete ručnímu zásahu při každém uvolnění.
+
+SteamCMD uloží přihlašovací token a může jej znovu použít při pozdějších spuštěních. Stále musíte dávat pozor na vypršení platnosti tokenu, protože po vypršení platnosti tokenu je vyžadováno opětovné ověření.
+
+### Struktura adresáře obsahu
+
+Ujistěte se, že struktura adresářů obsahu Steam je správná:
+
+```
+steam-content/
+├── linux-x64/     # Linux platform content
+├── win-x64/       # Windows platform content
+└── osx-universal/ # macOS universal binary content
+```
+
+Každý adresář by měl obsahovat úplné soubory aplikace pro příslušnou platformu.
+
+### Použití režimu náhledu
+
+Režim náhledu nenastavuje žádnou větev živě, takže je vhodný pro testování a ověřování:
+
+```yaml
+if [ "$STEAM_PREVIEW_INPUT" = 'true' ]; then
+  cmd+=(--preview)
+fi
+```
+
+To vám umožní nejprve nahrát na Steam pro ověření a poté, co se vše zkontroluje, přepnout na formální větev.
+
+### Zpracování chyb a protokolování
+
+Skripty zahrnují kompletní zpracování chyb a protokolování:
+- Ověřte, že vydání GitHub existuje.
+- Zkontrolujte požadované soubory metadat.
+- Zajistěte přítomnost obsahu platformy.
+- Vygenerujte souhrnnou zprávu GitHub Actions.
+
+Tyto informace jsou velmi cenné jak pro ladění, tak pro auditování.
+
+### Správa artefaktů
+
+Pracovní postup generuje dva druhy artefaktů:
+- `portable-steam-release-preparation-{tag}`: metadata přípravy vydání
+- `portable-steam-build-metadata-{tag}`: Metadata sestavení Steam
+
+Tyto artefakty lze použít pro pozdější auditování a ladění. Období uchování 30 dní je praktickou výchozí hodnotou.
+
+## Použití v reálném světě
+
+V projektu HagiCode již tento pracovní postup automatizovaného vydání úspěšně běžel ve více verzích. Celá cesta od vydání GitHub k platformě Steam je plně automatizovaná a nevyžaduje žádný ruční zásah.
+
+To výrazně zlepšilo účinnost a spolehlivost uvolňování. V minulosti trvalo ruční publikování jedné verze více než 30 minut. Nyní celý proces skončí během několika minut.
+
+Ještě důležitější je, že automatizovaný pracovní postup snižuje možnost lidské chyby. Každé vydání se řídí stejným standardizovaným procesem, díky čemuž jsou výsledky předvídatelnější.
+
+## Shrnutí
+
+S přístupem popsaným v tomto článku jsme dosáhli:
+1. Plná automatizace z vydání GitHub na platformu Steam.
+2. Multiplatformní nahrávání Depot.
+3. Bezpečné ověřování založené na Steam Guard.
+4. Flexibilní přepínání mezi režimem náhledu a formálním vydáním.
+5. Kompletní zpracování chyb a protokolování.
+
+Toto řešení je vhodné nejen pro projekt HagiCode, ale může také sloužit jako reference pro další projekty, které plánují spustit na Steamu. Pokud také uvažujete o automatizaci vydávání Steamu, doufám, že se vám tato praktická zkušenost bude hodit.
+
+Technologie se může zdát složitá nebo jednoduchá v závislosti na zvolené cestě. Klíčem je najít pracovní postup, který vyhovuje vašim potřebám.
+
+Pokud vám tento článek pomohl, označte úložiště HagiCode GitHub hvězdičkou nebo navštivte oficiální web, kde se dozvíte více.
+
+## Reference
+
+- [SteamCMD dokumentace](https://developer.valvesoftware.com/wiki/SteamCMD)
+- [Steamworks SDK](https://partner.steamgames.com/)
+- [Úložiště projektu HagiCode](https://github.com/HagiCode-org/site)
+- [Oficiální webové stránky HagiCode](https://hagicode.com)
+- [Průvodce instalací HagiCode](https://docs.hagicode.com/installation/docker-compose)
+- [HagiCode Desktop](https://hagicode.com/desktop/)
+
+## Upozornění na autorská práva
+
+Děkuji za přečtení. Pokud se vám tento článek zdál užitečný, můžete jej lajkovat, přidat do záložek a sdílet.
+Tento obsah byl vytvořen ve spolupráci s umělou inteligencí a konečný obsah byl zkontrolován a potvrzen autorem.
+- autor: [newbe36524](https://www.newbe.pro)
+- Původní článek: [https://docs.hagicode.com/blog/2026-04-16-steam-release-automation-github-actions/](https://docs.hagicode.com/blog/2026-04-16-steam-release-automation-github-actions/)
+- Upozornění na autorská práva: Pokud není uvedeno jinak, všechny články v tomto blogu jsou licencovány podle BY-NC-SA. Při opětovném odeslání prosím uveďte zdroj.

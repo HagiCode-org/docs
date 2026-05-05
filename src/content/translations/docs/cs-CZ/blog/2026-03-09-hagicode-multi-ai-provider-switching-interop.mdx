@@ -1,0 +1,1128 @@
+---
+title: HagiCode Multi-AI Provider Switching and Interoperability Implementation Plan
+date: 2026-03-09
+tags: [HagiCode, AI Provider, Claude, Codex, Architecture, Interoperability]
+description: "HagiCode Multi-AI Provider Switching and Interoperability Implementation Plan: V moderním vývojářském ekosystému vývojáři často potřebují používat různé"
+---
+
+## HagiCode Multi-AI Provider Switching and Interoperability Implementation Plan
+
+V moderním ekosystému vývojářských nástrojů potřebují vývojáři k podpoře své práce často používat různé asistenty kódování AI. CLI Claude Code CLI od Anthropic a Codex CLI OpenAI mají každý své vlastní silné stránky: Claude je známý vynikajícím porozuměním kódu a zpracováním dlouhého kontextu, zatímco Codex exceluje v generování kódu a používání nástrojů.
+
+Tento článek se podrobně zabývá tím, jak projekt HagiCode dosahuje bezproblémového přepínání a interoperability mezi více poskytovateli umělé inteligence, včetně základního architektonického návrhu, klíčových detailů implementace a praktických úvah.
+
+## Pozadí
+
+### Problémová doména
+
+Hlavní výzvou, které čelí projekt HagiCode, je podpora více AI CLI na stejné platformě, takže uživatelé mohou:
+
+1. Flexibilně přepínejte mezi poskytovateli AI na základě jejich potřeb
+2. Během přepínání poskytovatele udržujte kontinuitu relace
+3. Sjednoťte rozdíly API napříč různými CLI za společnou abstrakci
+4. Rezervujte si body rozšíření pro budoucí přidávání nových poskytovatelů umělé inteligence
+
+### Technické výzvy
+
+1. **Sjednocení rozdílů v rozhraní**: Claude Code CLI se vyvolává prostřednictvím volání příkazového řádku, zatímco Codex CLI používá proud událostí JSON
+2. **Zpracování odpovědí streamování**: Oba poskytovatelé podporují odpovědi streamování, ale s různými formáty dat
+3. **Sémantika volání nástrojů**: Claude a Codex se liší v tom, jak reprezentují volání nástrojů a řídí jejich životní cyklus
+4. **Životní cyklus relace**: Systém musí správně spravovat vytváření, obnovení a ukončení relace pro každého poskytovatele
+
+## Analýza
+
+### Architektonický designový přístup
+
+HagiCode používá **Vzor poskytovatele** v kombinaci s **Factory Pattern** k abstraktnímu vyvolání služby AI. Hlavní myšlenky tohoto designu jsou:
+
+1. **Abstrakce jednotného rozhraní**: Definujte `IAIProvider` rozhraní jako společná abstrakce pro všechny poskytovatele AI
+2. **Instance vytvořené v továrně**: Použijte `AIProviderFactory` dynamicky vytvořit odpovídající instanci poskytovatele na základě typu
+3. **Logika inteligentního výběru**: Použijte `AIProviderSelector` automaticky vybrat nejvhodnějšího poskytovatele na základě scénáře a konfigurace
+4. **Správa stavu relace**: Přetrvává vazba mezi relacemi a vlákny CLI v databázi
+
+### Klíčové komponenty
+
+| Komponenta | Zodpovědnost | Jazyk |
+|------|--------|------|
+| `IAIProvider` | Jednotné rozhraní poskytovatele | C# |
+| `AIProviderFactory` | Vytvářejte a spravujte instance poskytovatelů | C# |
+| `AIProviderSelector` | Vyberte poskytovatele inteligentně | C# |
+| `ClaudeCodeCliProvider` | Claude Code CLI implementace | C# |
+| `CodexCliProvider` | Implementace Codex CLI | C# |
+| `AgentCliManager` | Správa CLI na straně počítače | TypeScript |
+
+## Řešení
+
+### 1. Návrh rozhraní jádra
+
+**`IAIProvider` rozhraní** definuje jednotnou abstrakci poskytovatele:
+
+```csharp
+public interface IAIProvider
+{
+    /// <summary>
+    /// Provider display name
+    /// </summary>
+    string Name { get; }
+
+    /// <summary>
+    /// Whether streaming responses are supported
+    /// </summary>
+    bool SupportsStreaming { get; }
+
+    /// <summary>
+    /// Provider capability description
+    /// </summary>
+    ProviderCapabilities Capabilities { get; }
+
+    /// <summary>
+    /// Execute a single AI request
+    /// </summary>
+    Task<AIResponse> ExecuteAsync(AIRequest request, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Execute a streaming AI request
+    /// </summary>
+    IAsyncEnumerable<AIStreamingChunk> StreamAsync(AIRequest request, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Check provider connectivity and responsiveness
+    /// </summary>
+    Task<ProviderTestResult> PingAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Send a message with an embedded command
+    /// </summary>
+    IAsyncEnumerable<AIStreamingChunk> SendMessageAsync(
+        AIRequest request,
+        string? embeddedCommandPrompt = null,
+        CancellationToken cancellationToken = default);
+}
+```
+
+Klíčové vlastnosti tohoto designu rozhraní:
+- **Sjednocený model požadavku/odpovědi**: Všichni poskytovatelé používají stejný `AIRequest` a `AIResponse` typy
+- **Podpora streamování**: Standardizujte výstup streamování `IAsyncEnumerable<AIStreamingChunk>`
+- **Popis schopností**: `ProviderCapabilities` popisuje funkce podporované poskytovatelem (streamování, nástroje, maximální tokeny atd.)
+- **Vložené příkazy**: `SendMessageAsync` podporuje vkládání příkazů OpenSpec do výzev
+
+### 2. Výčet typu poskytovatele
+
+```csharp
+public enum AIProviderType
+{
+    ClaudeCodeCli,   // Anthropic Claude Code
+    OpenCodeCli,     // Other CLIs (extensible)
+    GitHubCopilot,    // GitHub Copilot
+    CodebuddyCli,    // Codebuddy
+    CodexCli         // OpenAI Codex
+}
+```
+
+Tento výčet poskytuje typově bezpečnou reprezentaci pro všechny poskytovatele podporované systémem.
+
+### 3. Implementace továrního vzoru
+
+**`AIProviderFactory`** odpovídá za vytváření a správu instancí poskytovatelů:
+
+```csharp
+public class AIProviderFactory : IAIProviderFactory
+{
+    private readonly ConcurrentDictionary<AIProviderType, IAIProvider> _cache;
+    private readonly IOptions<AIProviderOptions> _options;
+    private readonly IServiceProvider _serviceProvider;
+
+    public Task<IAIProvider?> GetProviderAsync(AIProviderType providerType)
+    {
+        // Use caching to avoid duplicate creation
+        if (_cache.TryGetValue(providerType, out var cached))
+            return Task.FromResult<IAIProvider?>(cached);
+
+        // Get provider configuration from settings
+        var aiOptions = _options.Value;
+        if (!aiOptions.Providers.TryGetValue(providerType, out var config))
+        {
+            _logger.LogWarning("Provider '{ProviderType}' not found in configuration", providerType);
+            return Task.FromResult<IAIProvider?>(null);
+        }
+
+        // Create provider by type
+        var provider = providerType switch
+        {
+            AIProviderType.ClaudeCodeCli =>
+                _serviceProvider.GetService(typeof(ClaudeCodeCliProvider)) as IAIProvider,
+            AIProviderType.CodexCli =>
+                _serviceProvider.GetService(typeof(CodexCliProvider)) as IAIProvider,
+            AIProviderType.GitHubCopilot =>
+                _serviceProvider.GetService(typeof(CopilotAIProvider)) as IAIProvider,
+            _ => null
+        };
+
+        if (provider != null)
+        {
+            _cache[providerType] = provider;
+        }
+
+        return Task.FromResult<IAIProvider?>(provider);
+    }
+}
+```
+
+Výhody továrního vzoru:
+- **Ukládání instancí do mezipaměti**: Vyhněte se opakovanému vytváření stejného typu poskytovatele
+- **Injekce závislosti**: Vytvářejte instance prostřednictvím `IServiceProvider`s podporou vkládání závislostí
+- **Na základě konfigurace**: Načte nastavení poskytovatele z konfiguračních souborů
+- **Ošetření výjimek**: Návrat `null` když se vytvoření nezdaří, což usnadňuje horním vrstvám zpracování chyb
+
+### 4. Inteligentní volič
+
+**`AIProviderSelector`** implementuje strategie výběru poskytovatelů:
+
+```csharp
+public class AIProviderSelector : IAIProviderSelector
+{
+    private readonly BusinessLayerConfiguration _configuration;
+    private readonly IAIProviderFactory _providerFactory;
+    private readonly IMemoryCache _cache;
+
+    public async Task<AIProviderType> SelectProviderAsync(
+        BusinessScenario scenario,
+        CancellationToken cancellationToken = default)
+    {
+        // 1. Try getting a provider from scenario mapping
+        if (_configuration.ScenarioProviderMapping.TryGetValue(scenario, out var providerType))
+        {
+            if (await IsProviderAvailableAsync(providerType, cancellationToken))
+            {
+                _logger.LogDebug("Selected provider '{Provider}' for scenario '{Scenario}'",
+                    providerType, scenario);
+                return providerType;
+            }
+
+            _logger.LogWarning("Configured provider '{Provider}' for scenario '{Scenario}' is not available",
+                providerType, scenario);
+        }
+
+        // 2. Try the default provider
+        if (await IsProviderAvailableAsync(_configuration.DefaultProvider, cancellationToken))
+        {
+            _logger.LogDebug("Using default provider '{Provider}' for scenario '{Scenario}'",
+                _configuration.DefaultProvider, scenario);
+            return _configuration.DefaultProvider;
+        }
+
+        // 3. Try the fallback chain
+        foreach (var fallbackProvider in _configuration.FallbackChain)
+        {
+            if (await IsProviderAvailableAsync(fallbackProvider, cancellationToken))
+            {
+                _logger.LogInformation("Using fallback provider '{Provider}' for scenario '{Scenario}'",
+                    fallbackProvider, scenario);
+                return fallbackProvider;
+            }
+        }
+
+        // 4. No available provider can be found
+        throw new InvalidOperationException(
+            $"No available AI provider found for scenario '{scenario}'");
+    }
+
+    public async Task<bool> IsProviderAvailableAsync(
+        AIProviderType providerType,
+        CancellationToken cancellationToken = default)
+    {
+        var cacheKey = $"provider_available_{providerType}";
+
+        // Use caching to reduce Ping calls
+        if (_configuration.EnableCache &&
+            _cache.TryGetValue<bool>(cacheKey, out var cached))
+        {
+            return cached;
+        }
+
+        var provider = await _providerFactory.GetProviderAsync(providerType);
+        var isAvailable = provider != null;
+
+        if (_configuration.EnableCache && isAvailable)
+        {
+            _cache.Set(cacheKey, isAvailable,
+                TimeSpan.FromSeconds(_configuration.CacheExpirationSeconds));
+        }
+
+        return isAvailable;
+    }
+}
+```
+
+Strategie výběru:
+- **Mapování scénáře nejprve**: Nejprve zkontrolujte, zda má obchodní scénář konkrétní mapování poskytovatele
+- **Záložní informace k výchozímu poskytovateli**: Pokud mapování scénáře selže, použijte výchozího poskytovatele
+- **Záložní řetězec jako poslední ochrana**: Vyzkoušejte poskytovatele v záložním řetězci jednoho po druhém
+- **Ukládání dostupnosti do mezipaměti**: Kontroly dostupnosti poskytovatele ukládat do mezipaměti, aby se snížily hovory Ping
+
+### 5. Implementace poskytovatele CLI kódu Claude
+
+```csharp
+public class ClaudeCodeCliProvider : IAIProvider
+{
+    private readonly ILogger<ClaudeCodeCliProvider> _logger;
+    private readonly IClaudeStreamManager _streamManager;
+    private readonly ProviderConfiguration _config;
+
+    public string Name => "ClaudeCodeCli";
+    public bool SupportsStreaming => true;
+
+    public ProviderCapabilities Capabilities { get; }
+
+    public async Task<AIResponse> ExecuteAsync(AIRequest request, CancellationToken cancellationToken = default)
+    {
+        _logger.LogInformation("Executing AI request with provider: {Provider}", Name);
+
+        var sessionOptions = ClaudeRequestMapper.MapToSessionOptions(request, _config);
+
+        var messages = _streamManager.SendMessageAsync(request.Prompt, sessionOptions, cancellationToken);
+
+        var responseBuilder = new StringBuilder();
+        ResultMessage? finalResult = null;
+
+        await foreach (var streamMessage in messages)
+        {
+            switch (streamMessage.Message)
+            {
+                case ResultMessage result:
+                    finalResult = result;
+                    responseBuilder.Append(result.Result);
+                    break;
+            }
+        }
+
+        if (finalResult != null)
+        {
+            return ClaudeResponseMapper.MapToAIResponse(finalResult, Name);
+        }
+
+        return new AIResponse
+        {
+            Content = responseBuilder.ToString(),
+            FinishReason = FinishReason.Unknown,
+            Provider = Name
+        };
+    }
+}
+```
+
+Charakteristika poskytovatele Claude Code CLI:
+- **Integrace správce streamování**: Použijte `IClaudeStreamManager` komunikovat s Claude CLI
+- **`CessionId` izolace relace**: Použijte `CessionId` jako jedinečný identifikátor relace, odlišný od systému `sessionId`
+- **Konfigurace pracovního adresáře**: Podpora konfigurace pracovního adresáře, režim oprávnění a další
+- **Podpora nástrojů**: Podpora nastavení oprávnění nástroje, jako je např `AllowedTools` a `DisallowedTools`
+
+### 6. Implementace poskytovatele Codex CLI
+
+```csharp
+public class CodexCliProvider : IAIProvider
+{
+    private readonly ILogger<CodexCliProvider> _logger;
+    private readonly CodexSettings _settings;
+    private readonly ConcurrentDictionary<string, string> _sessionThreadBindings;
+
+    public string Name => "CodexCli";
+    public bool SupportsStreaming => true;
+
+    public ProviderCapabilities Capabilities { get; }
+
+    public async IAsyncEnumerable<AIStreamingChunk> StreamAsync(
+        AIRequest request,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        _logger.LogInformation("Executing streaming AI request with provider: {Provider}", Name);
+
+        var codex = CreateCodexClient();
+        var thread = ResolveThread(codex, request);
+
+        var currentTurn = 0;
+        var activeToolCalls = new Dictionary<string, AIToolCallDelta>();
+
+        await foreach (var threadEvent in thread.RunStreamedAsync(BuildPrompt(request), cancellationToken))
+        {
+            if (threadEvent is TurnStartedEvent)
+            {
+                currentTurn++;
+            }
+
+            switch (threadEvent)
+            {
+                case ItemCompletedEvent { Item: AgentMessageItem message }:
+                    var messageText = message.Text ?? string.Empty;
+                    yield return new AIStreamingChunk
+                    {
+                        Content = messageText,
+                        Type = StreamingChunkType.ContentDelta,
+                        IsComplete = false
+                    };
+                    break;
+
+                case ItemStartedEvent or ItemUpdatedEvent or ItemCompletedEvent:
+                    var toolChunk = BuildToolChunk(threadEvent, currentTurn);
+                    if (toolChunk?.ToolCallDelta != null)
+                    {
+                        yield return toolChunk;
+                    }
+                    break;
+
+                case TurnCompletedEvent turnCompleted:
+                    activeToolCalls.Clear();
+                    yield return new AIStreamingChunk
+                    {
+                        Content = string.Empty,
+                        Type = StreamingChunkType.Metadata,
+                        IsComplete = true,
+                        Usage = MapUsage(turnCompleted.Usage)
+                    };
+                    break;
+            }
+        }
+
+        BindSessionThread(request.SessionId, thread.Id);
+    }
+
+    private CodexThread ResolveThread(Codex codex, AIRequest request)
+    {
+        var sessionId = request.SessionId;
+
+        // Check whether there is already a bound thread
+        if (!string.IsNullOrWhiteSpace(sessionId) &&
+            _sessionThreadBindings.TryGetValue(sessionId, out var threadId) &&
+            !string.IsNullOrWhiteSpace(threadId))
+        {
+            _logger.LogInformation("Resuming Codex thread {ThreadId} for session {SessionId}", threadId, sessionId);
+            return codex.ResumeThread(threadId, threadOptions);
+        }
+
+        _logger.LogInformation("Starting new Codex thread for session {SessionId}", sessionId ?? "(none)");
+        return codex.StartThread(threadOptions);
+    }
+}
+```
+
+Charakteristika poskytovatele Codex CLI:
+- **Zpracování streamu událostí JSON**: Analýza streamů událostí Codex JSON (`TurnStarted`, `ItemStarted`, `TurnCompleted`, a tak dále)
+- **Vazba relace-vlákno**: Přetrvává vazba mezi relacemi a vlákny s databází SQLite
+- **Opětovné použití vlákna**: Podpora obnovení stávajících vláken, aby byla zachována kontinuita relace
+- **Sledování volání nástroje**: Sledujte aktivní stav volání nástroje a správně zpracujte životní cyklus nástroje
+
+### 7. Mechanismus vázání relací-vlákna
+
+Codex CLI používá databázi SQLite k zachování vazby mezi relacemi a vlákny:
+
+```csharp
+public class CodexCliProvider : IAIProvider
+{
+    private const int SessionThreadBindingRetentionDays = 30;
+    private readonly ConcurrentDictionary<string, string> _sessionThreadBindings;
+    private readonly string _sessionThreadBindingDatabaseConnectionString;
+    private readonly string _sessionThreadBindingDatabasePath;
+
+    private void BindSessionThread(string? sessionId, string? threadId)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId) || string.IsNullOrWhiteSpace(threadId))
+        {
+            return;
+        }
+
+        // In-memory cache
+        _sessionThreadBindings.AddOrUpdate(sessionId, threadId, (_, _) => threadId);
+
+        // Persist to SQLite
+        PersistSessionThreadBinding(sessionId, threadId);
+    }
+
+    private void PersistSessionThreadBinding(string sessionId, string threadId)
+    {
+        try
+        {
+            using var connection = new SqliteConnection(_sessionThreadBindingDatabaseConnectionString);
+            connection.Open();
+
+            using var upsertCommand = connection.CreateCommand();
+            upsertCommand.CommandText =
+                """
+                INSERT INTO SessionThreadBindings (SessionId, ThreadId, CreatedAtUtc, UpdatedAtUtc)
+                VALUES ($sessionId, $threadId, $createdAtUtc, $updatedAtUtc)
+                ON CONFLICT(SessionId) DO UPDATE SET
+                    ThreadId = excluded.ThreadId,
+                    UpdatedAtUtc = excluded.UpdatedAtUtc;
+                """;
+            var nowUtc = DateTimeOffset.UtcNow.ToString("O");
+            upsertCommand.Parameters.AddWithValue("$sessionId", sessionId);
+            upsertCommand.Parameters.AddWithValue("$threadId", threadId);
+            upsertCommand.Parameters.AddWithValue("$createdAtUtc", nowUtc);
+            upsertCommand.Parameters.AddWithValue("$updatedAtUtc", nowUtc);
+            upsertCommand.ExecuteNonQuery();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "Failed to persist Codex session-thread binding for session {SessionId} to {DatabasePath}",
+                sessionId,
+                _sessionThreadBindingDatabasePath);
+        }
+    }
+
+    private void LoadPersistedSessionThreadBindings()
+    {
+        using var connection = new SqliteConnection(_sessionThreadBindingDatabaseConnectionString);
+        connection.Open();
+
+        using var loadCommand = connection.CreateCommand();
+        loadCommand.CommandText = "SELECT SessionId, ThreadId FROM SessionThreadBindings;";
+        using var reader = loadCommand.ExecuteReader();
+        while (reader.Read())
+        {
+            var sessionId = reader.GetString(0);
+            var threadId = reader.GetString(1);
+            _sessionThreadBindings[sessionId] = threadId;
+        }
+    }
+}
+```
+
+Výhody vazby session-thread:
+- **Obnovení relace**: Předchozí relace lze obnovit po restartu systému
+- **Opětovné použití vlákna**: Stejná relace může znovu použít existující vlákno Codex
+- **Automatické čištění**: Vazby starší než 30 dní jsou vyčištěny automaticky
+
+### 8. Správa CLI na straně počítače
+
+`hagicode-desktop` spravuje výběr CLI prostřednictvím `AgentCliManager`:
+
+```typescript
+export enum AgentCliType {
+  ClaudeCode = 'claude-code',
+  Codex = 'codex',
+  // Future extensions: other CLIs such as Aider and Cursor
+}
+
+export class AgentCliManager {
+  private static readonly STORE_KEY = 'agentCliSelection';
+  private static readonly EXECUTOR_TYPE_MAP: Record<AgentCliType, string> = {
+    [AgentCliType.ClaudeCode]: 'ClaudeCodeCli',
+    [AgentCliType.Codex]: 'CodexCli',
+  };
+
+  constructor(private store: any) {}
+
+  async saveSelection(cliType: AgentCliType): Promise<void> {
+    const selection: StoredAgentCliSelection = {
+      cliType,
+      isSkipped: false,
+      selectedAt: new Date().toISOString(),
+    };
+
+    this.store.set(AgentCliManager.STORE_KEY, selection);
+  }
+
+  loadSelection(): StoredAgentCliSelection {
+    return this.store.get(AgentCliManager.STORE_KEY, {
+      cliType: null,
+      isSkipped: false,
+      selectedAt: null,
+    });
+  }
+
+  getCommandName(cliType: AgentCliType): string {
+    switch (cliType) {
+      case AgentCliType.ClaudeCode:
+        return 'claude';
+      case AgentCliType.Codex:
+        return 'codex';
+      default:
+        return 'claude';
+    }
+  }
+
+  getExecutorType(cliType: AgentCliType | null): string {
+    if (!cliType) return 'ClaudeCodeCli';
+    return this.EXECUTOR_TYPE_MAP[cliType] || 'ClaudeCodeCli';
+  }
+}
+```
+
+Příklad obslužného programu IPC na straně počítače:
+
+```typescript
+ipcMain.handle('llm:call-api', async (event, manifestPath, region) => {
+  if (!state.llmInstallationManager) {
+    return { success: false, error: 'LLM Installation Manager not initialized' };
+  }
+
+  try {
+    const prompt = await state.llmInstallationManager.loadPrompt(manifestPath, region);
+
+    // Determine the CLI command based on the user's selection
+    let commandName = 'claude';
+    if (state.agentCliManager) {
+      const selectedCliType = state.agentCliManager.getSelectedCliType();
+      if (selectedCliType) {
+        commandName = state.agentCliManager.getCommandName(selectedCliType);
+      }
+    }
+
+    // Execute with the selected CLI
+    const result = await state.llmInstallationManager.callApi(
+      prompt.filePath,
+      event.sender,
+      commandName
+    );
+
+    return result;
+  } catch (error) {
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error'
+    };
+  }
+});
+```
+
+### 9. Systém poskytovatele interního modelu Codexu
+
+Samotný Codex také podporuje více poskytovatelů modelů prostřednictvím `ModelProviderInfo` konfigurace:
+
+```rust
+pub const OPENAI_PROVIDER_NAME: &str = "OpenAI";
+pub const OLLAMA_OSS_PROVIDER_ID: &str = "ollama";
+pub const LMSTUDIO_OSS_PROVIDER_ID: &str = "lmstudio";
+
+pub fn built_in_model_providers() -> HashMap<String, ModelProviderInfo> {
+    use ModelProviderInfo as P;
+
+    [
+        ("openai", P::create_openai_provider()),
+        (OLLAMA_OSS_PROVIDER_ID, create_oss_provider(DEFAULT_OLLAMA_PORT, WireApi::Responses)),
+        (LMSTUDIO_OSS_PROVIDER_ID, create_oss_provider(DEFAULT_LMSTUDIO_PORT, WireApi::Responses)),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v))
+    .collect()
+}
+
+pub struct ModelProviderInfo {
+    pub name: String,
+    pub base_url: Option<String>,
+    pub env_key: Option<String>,
+    pub query_params: Option<HashMap<String, String>>,
+    pub http_headers: Option<HashMap<String, String>>,
+    pub request_max_retries: Option<u64>,
+    pub stream_max_retries: Option<u64>,
+    pub stream_idle_timeout_ms: Option<u64>,
+    pub requires_openai_auth: bool,
+    pub supports_websockets: bool,
+}
+```
+
+Podpora poskytovatele modelů Codex zahrnuje:
+- **Vestavění poskytovatelé**: OpenAI, Ollama a LM Studio
+- **Vlastní poskytovatelé**: Uživatelé mohou přidat vlastní poskytovatele `config.toml`
+- **Strategie opakování**: Konfigurovatelné počty opakování pro požadavky a streamy
+- **Podpora WebSocket**: Někteří poskytovatelé podporují přenos WebSocket
+
+## Praxe
+
+### Příklad konfigurace
+
+Nakonfigurujte více poskytovatelů v **`appsettings.json`**:
+
+```json
+{
+  "AI": {
+    "Providers": {
+      "DefaultProvider": "ClaudeCodeCli",
+      "Providers": {
+        "ClaudeCodeCli": {
+          "Type": "ClaudeCodeCli",
+          "Model": "claude-sonnet-4-20250514",
+          "WorkingDirectory": "/path/to/workspace",
+          "PermissionMode": "acceptEdits",
+          "AllowedTools": ["file-edit", "command-run", "bash"]
+        },
+        "CodexCli": {
+          "Type": "CodexCli",
+          "Model": "gpt-4.1",
+          "ExecutablePath": "codex",
+          "SandboxMode": "enabled",
+          "WebSearchMode": "auto",
+          "NetworkAccessEnabled": false
+        }
+      },
+      "ScenarioProviderMapping": {
+        "CodeAnalysis": "ClaudeCodeCli",
+        "CodeGeneration": "CodexCli",
+        "Refactoring": "ClaudeCodeCli",
+        "Debugging": "CodexCli"
+      },
+      "FallbackChain": ["CodexCli", "ClaudeCodeCli"]
+    },
+    "Selector": {
+      "EnableCache": true,
+      "CacheExpirationSeconds": 300
+    }
+  }
+}
+```
+
+### Příklad použití - Backend Service
+
+```csharp
+public class AIOrchestrator
+{
+    private readonly IAIProviderFactory _providerFactory;
+    private readonly IAIProviderSelector _providerSelector;
+    private readonly ILogger<AIOrchestrator> _logger;
+
+    public AIOrchestrator(
+        IAIProviderFactory providerFactory,
+        IAIProviderSelector providerSelector,
+        ILogger<AIOrchestrator> logger)
+    {
+        _providerFactory = providerFactory;
+        _providerSelector = providerSelector;
+        _logger = logger;
+    }
+
+    public async Task<AIResponse> ProcessRequestAsync(
+        AIRequest request,
+        BusinessScenario scenario)
+    {
+        _logger.LogInformation("Processing request for scenario: {Scenario}", scenario);
+
+        try
+        {
+            // Select a provider intelligently
+            var providerType = await _providerSelector.SelectProviderAsync(scenario, request.CancellationToken);
+
+            // Get the provider instance
+            var provider = await _providerFactory.GetProviderAsync(providerType);
+            if (provider == null)
+            {
+                throw new InvalidOperationException($"Provider {providerType} not available");
+            }
+
+            _logger.LogInformation("Using provider: {Provider} for request", provider.Name);
+
+            // Execute the request
+            var response = await provider.ExecuteAsync(request, request.CancellationToken);
+
+            _logger.LogInformation("Request completed with provider: {Provider}, tokens used: {Tokens}",
+                provider.Name,
+                response.Usage?.TotalTokens ?? 0);
+
+            return response;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to process request for scenario: {Scenario}", scenario);
+            throw;
+        }
+    }
+}
+```
+
+### Příklad použití - Streamování odpovědí
+
+```csharp
+public async IAsyncEnumerable<AIStreamingChunk> StreamResponseAsync(
+    AIRequest request,
+    BusinessScenario scenario)
+{
+    var providerType = await _providerSelector.SelectProviderAsync(scenario);
+    var provider = await _providerFactory.GetProviderAsync(providerType);
+
+    if (provider == null)
+    {
+        throw new InvalidOperationException($"Provider {providerType} not available");
+    }
+
+    await foreach (var chunk in provider.StreamAsync(request))
+    {
+        // Process streaming chunks
+        switch (chunk.Type)
+        {
+            case StreamingChunkType.ContentDelta:
+                // Show text content in real time
+                await SendToClientAsync(chunk.Content);
+                break;
+
+            case StreamingChunkType.ToolCallDelta:
+                // Handle tool calls
+                await HandleToolCallAsync(chunk.ToolCallDelta);
+                break;
+
+            case StreamingChunkType.Metadata:
+                // Handle completion events and stats
+                if (chunk.IsComplete)
+                {
+                    _logger.LogInformation("Stream completed, usage: {@Usage}", chunk.Usage);
+                }
+                break;
+
+            case StreamingChunkType.Error:
+                // Handle errors
+                _logger.LogError("Stream error: {Error}", chunk.ErrorMessage);
+                throw new InvalidOperationException(chunk.ErrorMessage);
+        }
+    }
+}
+```
+
+### Příklad použití - Příkazy OpenSpec
+
+```csharp
+public async Task<string> ExecuteOpenSpecCommandAsync(
+    string command,
+    string arguments,
+    BusinessScenario scenario)
+{
+    var providerType = await _providerSelector.SelectProviderAsync(scenario);
+    var provider = await _providerFactory.GetProviderAsync(providerType);
+
+    // Build an embedded command prompt
+    var commandPrompt = $"""
+        Execute the following OpenSpec command:
+        Command: {command}
+        Arguments: {arguments}
+
+        Please execute this command and return the results.
+        """;
+
+    var request = new AIRequest
+    {
+        Prompt = "Process this command request",
+        EmbeddedCommandPrompt = commandPrompt,
+        WorkingDirectory = Directory.GetCurrentDirectory()
+    };
+
+    var response = await provider.SendMessageAsync(request, commandPrompt);
+
+    return response.Content;
+}
+```
+
+## Úvahy
+
+### 1. Zdravotní kontroly poskytovatele
+
+Před změnou poskytovatele se doporučuje zavolat `PingAsync` nejprve se ujistěte, že je k dispozici cílový poskytovatel:
+
+```csharp
+public async Task<bool> IsProviderHealthyAsync(AIProviderType providerType)
+{
+    var provider = await _providerFactory.GetProviderAsync(providerType);
+    if (provider == null) return false;
+
+    var testResult = await provider.PingAsync();
+
+    return testResult.Success &&
+           testResult.ResponseTimeMs < 5000; // A response within 5 seconds is considered healthy
+}
+```
+
+### 2. Izolace relace
+
+Použijte `CessionId` (Claude) nebo `ThreadId` (Codex), abyste zajistili izolaci relace:
+
+- Claude Code CLI: použití `CessionId` jako jedinečný identifikátor relace
+- Codex CLI: použití `ThreadId` jako identifikátor relace
+
+```csharp
+// Claude Code CLI session options
+var claudeSessionOptions = new ClaudeSessionOptions
+{
+    CessionId = CessionId.New(),  // Generate a unique ID
+    WorkingDirectory = workspacePath,
+    AllowedTools = allowedTools,
+    PermissionMode = PermissionMode.acceptEdits
+};
+
+// Codex thread options
+var codexThreadOptions = new ThreadOptions
+{
+    Model = "gpt-4.1",
+    SandboxMode = "enabled",
+    WorkingDirectory = workspacePath
+};
+```
+
+### 3. Zpracování chyb
+
+Záložní mechanismy musí být robustní, když je poskytovatel nedostupný, a zajistit, aby alespoň jeden poskytovatel zůstal použitelný:
+
+```csharp
+public async Task<AIResponse> ExecuteWithFallbackAsync(
+    AIRequest request,
+    List<AIProviderType> preferredProviders)
+{
+    Exception? lastException = null;
+
+    foreach (var providerType in preferredProviders)
+    {
+        try
+        {
+            var provider = await _providerFactory.GetProviderAsync(providerType);
+            if (provider == null) continue;
+
+            // Try execution
+            return await provider.ExecuteAsync(request);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Provider {ProviderType} failed, trying next", providerType);
+            lastException = ex;
+        }
+    }
+
+    // All providers failed
+    throw new InvalidOperationException(
+        "All preferred providers failed. Last error: " + lastException?.Message,
+        lastException);
+}
+```
+
+### 4. Ověření konfigurace
+
+Při spuštění ověřte nastavení pro všechny nakonfigurované poskytovatele, abyste předešli chybám za běhu:
+
+```csharp
+public void ValidateConfiguration(AIProviderOptions options)
+{
+    foreach (var (providerType, config) in options.Providers)
+    {
+        // Validate executable paths (for CLI-based providers)
+        if (IsCliBasedProvider(providerType))
+        {
+            if (string.IsNullOrWhiteSpace(config.ExecutablePath))
+            {
+                throw new ConfigurationException(
+                    $"Provider {providerType} requires ExecutablePath");
+            }
+
+            if (!File.Exists(config.ExecutablePath))
+            {
+                throw new ConfigurationException(
+                    $"Executable not found for {providerType}: {config.ExecutablePath}");
+            }
+        }
+
+        // Validate API keys (for API-based providers)
+        if (IsApiBasedProvider(providerType))
+        {
+            if (string.IsNullOrWhiteSpace(config.ApiKey))
+            {
+                throw new ConfigurationException(
+                    $"Provider {providerType} requires ApiKey");
+            }
+        }
+
+        // Validate model names
+        if (string.IsNullOrWhiteSpace(config.Model))
+        {
+            _logger.LogWarning("No model configured for {ProviderType}, using default", providerType);
+        }
+    }
+}
+```
+
+### 5. Správa mezipaměti
+
+Instance poskytovatele jsou uloženy v mezipaměti, takže věnujte pozornost správě životního cyklu a využití paměti:
+
+```csharp
+// Clean up the cache periodically
+public void ClearInactiveProviders(TimeSpan inactiveThreshold)
+{
+    var now = DateTimeOffset.UtcNow;
+    var keysToRemove = new List<AIProviderType>();
+
+    foreach (var (type, instance) in _cache)
+    {
+        // Assume providers have a LastUsedTime property
+        if (instance.LastUsedTime.HasValue &&
+            now - instance.LastUsedTime.Value > inactiveThreshold)
+        {
+            keysToRemove.Add(type);
+        }
+    }
+
+    foreach (var key in keysToRemove)
+    {
+        _cache.TryRemove(key, out _);
+        _logger.LogInformation("Cleared inactive provider: {Provider}", key);
+    }
+}
+```
+
+### 6. Logování
+
+Podrobně protokolujte výběr poskytovatele, přepínání a provádění, abyste usnadnili ladění:
+
+```csharp
+public class AIProviderLogging
+{
+    private readonly ILogger _logger;
+
+    public void LogProviderSelection(
+        BusinessScenario scenario,
+        AIProviderType selectedProvider,
+        SelectionReason reason)
+    {
+        _logger.LogInformation(
+            "[ProviderSelection] Scenario={Scenario}, Provider={Provider}, Reason={Reason}",
+            scenario,
+            selectedProvider,
+            reason);
+    }
+
+    public void LogProviderSwitch(
+        AIProviderType fromProvider,
+        AIProviderType toProvider,
+        string reason)
+    {
+        _logger.LogWarning(
+            "[ProviderSwitch] From={FromProvider} To={ToProvider}, Reason={Reason}",
+            fromProvider,
+            toProvider,
+            reason);
+    }
+
+    public void LogProviderError(
+        AIProviderType provider,
+        Exception error,
+        AIRequest request)
+    {
+        _logger.LogError(error,
+            "[ProviderError] Provider={Provider}, RequestLength={Length}, Error={Message}",
+            provider,
+            request.Prompt.Length,
+            error.Message);
+    }
+}
+```
+
+### 7. Bezpečnost závitu
+
+Pomocí souběžných kolekcí jako např `ConcurrentDictionary` zajišťuje bezpečnost nití:
+
+```csharp
+public class ThreadSafeProviderCache
+{
+    private readonly ConcurrentDictionary<AIProviderType, IAIProvider> _cache;
+    private readonly ReaderWriterLockSlim _lock = new();
+
+    public IAIProvider? GetProvider(AIProviderType type)
+    {
+        // Read operations do not require a lock
+        if (_cache.TryGetValue(type, out var provider))
+            return provider;
+
+        // Creation requires a write lock
+        _lock.EnterWriteLock();
+        try
+        {
+            // Double-check
+            if (_cache.TryGetValue(type, out provider))
+                return provider;
+
+            var newProvider = CreateProvider(type);
+            if (newProvider != null)
+            {
+                _cache[type] = newProvider;
+            }
+            return newProvider;
+        }
+        finally
+        {
+            _lock.ExitWriteLock();
+        }
+    }
+}
+```
+
+### 8. Migrace databáze
+
+Když se změní schéma databáze vazby vlákna relace, je třeba zvážit migraci dat:
+
+```csharp
+public class SessionThreadMigration
+{
+    public async Task MigrateAsync(string dbPath)
+    {
+        var version = await GetSchemaVersionAsync(dbPath);
+
+        if (version >= 2) return; // Already the latest version
+
+        using var connection = new SqliteConnection(dbPath);
+        connection.Open();
+
+        // Migrate to v2: add the CreatedAtUtc column
+        if (version < 2)
+        {
+            _logger.LogInformation("Migrating SessionThreadBindings to v2...");
+
+            using var addColumnCommand = connection.CreateCommand();
+            addColumnCommand.CommandText = "ALTER TABLE SessionThreadBindings ADD COLUMN CreatedAtUtc TEXT;";
+            addColumnCommand.ExecuteNonQuery();
+
+            using var backfillCommand = connection.CreateCommand();
+            backfillCommand.CommandText =
+                """
+                UPDATE SessionThreadBindings
+                SET CreatedAtUtc = COALESCE(NULLIF(UpdatedAtUtc, ''), $nowUtc)
+                WHERE CreatedAtUtc IS NULL OR CreatedAtUtc = '';
+                """;
+            backfillCommand.Parameters.AddWithValue("$nowUtc", DateTimeOffset.UtcNow.ToString("O"));
+            backfillCommand.ExecuteNonQuery();
+        }
+
+        await UpdateSchemaVersionAsync(dbPath, 2);
+        _logger.LogInformation("Migration to v2 completed");
+    }
+}
+```
+
+## Závěr
+
+HagiCode kombinuje vzor poskytovatele, tovární vzor a vzor voliče k implementaci flexibilní a rozšiřitelné architektury multi-AI poskytovatele:
+
+- **Abstrakce jednotného rozhraní**: The `IAIProvider` rozhraní skrývá rozdíly mezi CLI
+- **Vytvoření dynamické instance**: `AIProviderFactory` podporuje vytváření instancí poskytovatelů za běhu
+- **Strategie inteligentního výběru**: `AIProviderSelector` implementuje výběr poskytovatelů řízený scénářem
+- **Stálost stavu relace**: Vazby databáze zajišťují kontinuitu relace
+- **Integrace s počítačem**: `AgentCliManager` podporuje výběr a konfiguraci uživatele
+
+Výhody této architektury jsou:
+1. **Rozšiřitelnost**: Přidání nového poskytovatele AI vyžaduje pouze implementaci `IAIProvider` rozhraní
+2. **Testovatelnost**: Poskytovatele lze testovat a zesměšňovat nezávisle
+3. **Udržovatelnost**: Každá implementace poskytovatele je izolovaná a má jedinou odpovědnost
+4. **Uživatelská přívětivost**: Podpora automatického výběru na základě scénáře i ručního přepínání
+
+Díky tomuto designu HagiCode úspěšně umožňuje bezproblémové přepínání a interoperabilitu mezi Claude Code CLI a Codex CLI, což vývojářům poskytuje flexibilní a výkonné zkušenosti s asistentem kódování AI.
+
+## Reference
+
+- Úložiště projektu HagiCode: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Oficiální stránky HagiCode: [hagicode.com](https://hagicode.com)
+- Oficiální dokumentace Claude Code: [docs.anthropic.com](https://docs.anthropic.com)
+- Dokumentace kodexu OpenAI: [platform.openai.com](https://platform.openai.com)
+- Oficiální úložiště Codex SDK: [github.com/openai/codex](https://github.com/openai/codex)
+- Podpora multiplatformního rozhraní CLI HagiCode: [https://docs.hagicode.com/blog/hagicode-ai-cli-multi-platform-support/](https://docs.hagicode.com/blog/hagicode-ai-cli-multi-platform-support/)
+
+---
+
+Děkuji za přečtení. Pokud se vám tento článek zdál užitečný, klikněte na tlačítko To se mi líbí níže 👍, aby jej mohlo objevit více lidí.
+
+Tento obsah byl vytvořen ve spolupráci s umělou inteligencí, zkontrolován mnou a odráží mé vlastní názory a postoj.
+
+- autor: [newbe36524](https://www.newbe.pro)
+- Odkaz na článek: [https://docs.hagicode.com/blog/2026-03-09-hagicode-multi-ai-provider-switching-interop/](https://docs.hagicode.com/blog/2026-03-09-hagicode-multi-ai-provider-switching-interop/)
+- Upozornění na autorská práva: Pokud není uvedeno jinak, všechny blogové příspěvky na tomto webu jsou licencovány podle BY-NC-SA. Při opětovném tisku prosím uveďte zdroj!

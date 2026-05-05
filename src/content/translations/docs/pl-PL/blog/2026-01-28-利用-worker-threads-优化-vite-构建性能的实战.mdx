@@ -1,0 +1,353 @@
+---
+title: "Praktyczny przewodnik dotyczący optymalizacji wydajności kompilacji Vite za pomocą wątków roboczych"
+date: 2026-01-28
+truncate: true
+tags: [Vite, Worker Threads, Build Performance, Node.js, Frontend Engineering]
+description: "Podczas pracy z dużymi projektami frontendowymi kompilacje produkcyjne mogą wydawać się boleśnie powolne. W tym artykule opisano, jak wykorzystaliśmy wątki robocze Node.js, aby zmniejszyć"
+---
+
+## Od 120 sekund do 45 sekund: praktyczny przewodnik dotyczący optymalizacji wydajności kompilacji Vite za pomocą wątków roboczych
+
+> Podczas pracy z dużymi projektami frontendowymi kompilacje produkcyjne mogą wydawać się boleśnie powolne. W tym artykule opisano, jak wykorzystaliśmy wątki robocze Node.js, aby skrócić etap zaciemniania w kompilacji Vite ze 120 sekund do 45 sekund, wraz ze szczegółami implementacji i wnioskami wyciągniętymi w projekcie HagiCode.
+
+## Tło
+
+W naszej praktyce inżynierii frontendowej problemy związane z wydajnością kompilacji stawały się coraz bardziej widoczne w miarę rozwoju projektu. W szczególności podczas procesu kompilacji produkcyjnej zwykle wprowadzamy narzędzia zaciemniające JavaScript, takie jak `javascript-obfuscator` w celu ochrony logiki kodu źródłowego. Ten krok jest konieczny, ale jest również kosztowny obliczeniowo i mocno obciąża procesor.
+
+Na wczesnym etapie rozwoju **HagiCode** napotkaliśmy bardzo trudne wąskie gardło w wydajności: czas tworzenia wersji produkcyjnej gwałtownie się pogarszał wraz ze wzrostem bazy kodu.
+
+**Konkretnymi problemami były**:
+- Zadania zaciemniania działały szeregowo w jednym wątku, maksymalnie obciążając jeden rdzeń procesora, podczas gdy inne pozostawały bezczynne
+- Czas budowy wzrósł z pierwotnych 30 sekund do 110-120 sekund
+- Pętla weryfikacji kompilacji po zmianie stała się niezwykle długa, co poważnie spowalniało iterację programistyczną
+- W procesie CI/CD etap kompilacji stał się najbardziej czasochłonną częścią
+
+**Dlaczego HagiCode tego potrzebował?**
+HagiCode to asystent kodu oparty na sztucznej inteligencji, którego architektura frontendowa obejmuje złożoną logikę biznesową i moduły interakcji AI. Aby zapewnić bezpieczeństwo naszego podstawowego kodu, w wersjach produkcyjnych wymusiliśmy zaciemnianie o dużej intensywności. W obliczu oczekiwania na kompilację zbliżającego się do dwóch minut, zdecydowaliśmy się przeprowadzić głęboką optymalizację wydajności systemu kompilacji.
+
+## O HagiCodzie
+
+> Skoro już wspomnieliśmy o projekcie, to kilka słów o nim.
+
+Jeśli podczas programowania napotkałeś takie frustracje:
+- Wiele projektów i wiele stosów technologii, z wysokimi kosztami utrzymania skryptów kompilacji
+- Skomplikowana konfiguracja potoku CI/CD, zmuszająca do sprawdzania dokumentacji za każdym razem, gdy wprowadzasz zmianę
+- Niekończące się problemy ze zgodnością między platformami
+- Chcą, aby sztuczna inteligencja pomogła w pisaniu kodu, ale istniejące narzędzia nie są wystarczająco inteligentne
+
+W takim razie **HagiCode**, który budujemy, może Cię zainteresować.
+
+**Co to jest HagiCode?**
+- Asystent kodu oparty na sztucznej inteligencji
+- Obsługuje wielojęzyczne, wieloplatformowe generowanie i optymalizację kodu
+- Ma wbudowaną gamifikację, dzięki czemu kodowanie jest mniej nudne
+
+**Po co o tym wspominać tutaj?**
+**Rozwiązanie do równoległego zaciemniania kodu JavaScript** udostępnione w tym artykule jest dokładnie tym, co udoskonaliliśmy podczas tworzenia HagiCode. Jeśli uznasz to podejście inżynieryjne za wartościowe, oznacza to, że prawdopodobnie mamy całkiem niezły gust techniczny, a sam HagiCode również może być warty uwagi.
+
+**Chcesz dowiedzieć się więcej?**
+- GitHub: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site) (proszę dać nam gwiazdkę)
+- Oficjalna strona internetowa: [hagicode.com](https://hagicode.com)
+- Demo wideo: [www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/) (30-minutowe praktyczne demo)
+- Instrukcja instalacji: [hagicode.com/installation/docker-compose](https://hagicode.com/installation/docker-compose)
+- Publiczna wersja beta jest już otwarta: zainstaluj teraz, aby dołączyć do wersji beta
+
+---
+
+## Analiza: znajdowanie punktu przełomowego w wąskim gardle wydajności
+
+Przed rozwiązaniem problemu z wydajnością musieliśmy najpierw wyjaśnić nasz sposób myślenia i określić najlepsze rozwiązanie techniczne.
+
+### Podstawowa decyzja: dlaczego warto wybrać wątki robocze?
+
+Istnieją trzy główne sposoby osiągnięcia obliczeń równoległych w Node.js:
+1. **proces_dziecko**: utwórz niezależne procesy potomne
+2. **Web Workers**: używane głównie po stronie przeglądarki
+3. **worker_threads**: natywna obsługa wielowątkowości w Node.js
+
+Po porównaniu opcji HagiCode ostatecznie wybrał **Wątki robocze** z następujących powodów:
+- **Zerowy narzut serializacji**: Wątki robocze działają w tym samym procesie i mogą współużytkować pamięć `SharedArrayBuffer` lub przenieść własność, unikając wysokich kosztów serializacji komunikacji między procesami.
+- **Natywna obsługa**: wbudowana w Node.js 12+ bez potrzeby stosowania dodatkowych, ciężkich zależności.
+- **Ujednolicony kontekst**: debugowanie i rejestrowanie są wygodniejsze niż w przypadku procesów potomnych.
+
+### Szczegółowość zadań: jak należy dzielić zadania zaciemniania?
+
+Trudno jest zrównoleglić zaciemnianie jednego ogromnego pliku pakietu JS, ponieważ kod ma zależności, ale dane wyjściowe kompilacji Vite składają się z wielu **części**. To daje nam naturalną równoległą granicę:
+
+- **Niezależność**: po spakowaniu Vite zależności pomiędzy różnymi fragmentami są już rozdzielone, dzięki czemu można je bezpiecznie przetwarzać równolegle.
+- **Odpowiednia szczegółowość**: projekty zwykle składają się z 10–30 fragmentów, co stanowi doskonałą skalę do planowania równoległego.
+- **Łatwa integracja**: `generateBundle` hook in Vite pozwala nam przechwytywać i przetwarzać te fragmenty przed emisją plików.
+
+### Projekt Architektury
+
+Zaprojektowaliśmy system przetwarzania równoległego składający się z czterech podstawowych komponentów:
+
+1. **Rozdzielanie zadań**: iteruje po obiekcie pakietu Vite, odfiltrowuje pliki, które nie wymagają zaciemniania, takie jak fragmenty dostawcy, i generuje kolejkę zadań.
+2. **Menedżer puli procesów roboczych**: zarządza cyklem życia pracownika i obsługuje dystrybucję zadań, recykling i ponowne podjęcie próby w przypadku niepowodzenia.
+3. **Raporter postępu**: wyniki generują postęp w czasie rzeczywistym, aby zmniejszyć niepokój związany z oczekiwaniem.
+4. **ObfuscationWorker**: wątek roboczy, który faktycznie wykonuje logikę zaciemniania.
+
+## Rozwiązanie: praktyczne wdrożenie
+
+Na podstawie powyższej analizy rozpoczęliśmy wdrażanie tego równoległego systemu zaciemniania.
+
+### 1. Skonfiguruj wtyczkę Vite
+
+Najpierw zintegrowaliśmy wtyczkę do zaciemniania równoległego `vite.config.ts`. Konfiguracja jest prosta. Wystarczy określić liczbę pracowników i zasady zaciemniania.
+
+```typescript
+import { defineConfig } from 'vite'
+import { parallelJavascriptObfuscator } from './buildTools/plugin'
+
+export default defineConfig(({ mode }) => {
+  const isProduction = mode === 'production'
+  
+  return {
+    build: {
+      rollupOptions: {
+        ...(isProduction
+          ? {
+              plugins: [
+                parallelJavascriptObfuscator({
+                  enabled: true,
+                  // Automatically adjust based on CPU core count; leave one core for the main thread
+                  workerCount: 4, 
+                  retryAttempts: 3,
+                  fallbackToMainThread: true, // Automatically degrade to single-thread mode on failure
+                  // Filter out vendor chunks; third-party libraries usually do not need obfuscation
+                  isVendorChunk: (fileName: string) => fileName.includes('vendor-'),
+                  obfuscationConfig: {
+                    compact: true,
+                    controlFlowFlattening: true,
+                    deadCodeInjection: true,
+                    disableConsoleOutput: true,
+                    // ... more obfuscation options
+                  },
+                }),
+              ],
+            }
+          : {}),
+      },
+    },
+  }
+})
+```
+
+### 2. Wdrażaj logikę pracownika
+
+Robotnik to jednostka wykonująca zadania. Musimy jasno zdefiniować struktury danych wejściowych i wyjściowych.
+
+**Uwaga**: chociaż kod jest prosty, istnieje kilka pułapek, na które należy zwrócić uwagę, takich jak sprawdzanie, czy `parentPort` ma wartość null i poprawnie obsługuje błędy. W implementacji HagiCode odkryliśmy, że pewne specjalne wzorce składni ES6 mogą powodować awarię obfuscatora, więc dodaliśmy `try-catch` ochrona.
+
+```typescript
+import { parentPort } from 'worker_threads'
+import javascriptObfuscator from 'javascript-obfuscator'
+
+export interface ObfuscationTask {
+  chunkId: string
+  code: string
+  config: any
+}
+
+export interface ObfuscationResult {
+  chunkId: string
+  obfuscatedCode: string
+  error?: string
+}
+
+// Listen for tasks sent from the main thread
+if (parentPort) {
+  parentPort.on('message', async (task: ObfuscationTask) => {
+    try {
+      // Perform obfuscation
+      const obfuscated = javascriptObfuscator.obfuscate(task.code, task.config)
+      const result: ObfuscationResult = {
+        chunkId: task.chunkId,
+        obfuscatedCode: obfuscated.getObfuscatedCode(),
+      }
+      // Send the result back to the main thread
+      parentPort?.postMessage(result)
+    } catch (error) {
+      // Handle exceptions so one Worker crash does not block the whole build
+      const result: ObfuscationResult = {
+        chunkId: task.chunkId,
+        obfuscatedCode: '',
+        error: error instanceof Error ? error.message : 'Unknown error',
+      }
+      parentPort?.postMessage(result)
+    }
+  })
+}
+```
+
+### 3. Menedżer puli pracowników
+
+To jest istota całego rozwiązania. Musimy utrzymywać pulę pracowników o stałej wielkości i planować zadania, stosując strategię **FIFO (pierwsze weszło, pierwsze wyszło)**.
+
+```typescript
+import { Worker } from 'worker_threads'
+import os from 'os'
+
+export class WorkerPool {
+  private workers: Worker[] = []
+  private taskQueue: Array<{
+    task: ObfuscationTask
+    resolve: (result: ObfuscationResult) => void
+    reject: (error: Error) => void
+  }> = []
+  
+  constructor(options: WorkerPoolOptions = {}) {
+    // Default to core count - 1 so the main thread still has some breathing room
+    const workerCount = options.workerCount ?? Math.max(1, (os.cpus().length || 4) - 1)
+    
+    for (let i = 0; i < workerCount; i++) {
+      this.createWorker()
+    }
+  }
+
+  private createWorker() {
+    const worker = new Worker('./worker.ts')
+    
+    worker.on('message', (result) => {
+      // After one task finishes, take the next task from the queue
+      const nextTask = this.taskQueue.shift()
+      if (nextTask) {
+        this.dispatchTask(worker, nextTask)
+      } else {
+        // If there are no pending tasks, mark the Worker as idle
+        this.activeWorkers.delete(worker)
+      }
+    })
+    
+    this.workers.push(worker)
+  }
+
+  // Submit a task to the pool
+  public runTask(task: ObfuscationTask): Promise<ObfuscationResult> {
+    return new Promise((resolve, reject) => {
+      const job = { task, resolve, reject }
+      const idleWorker = this.workers.find(w => !this.activeWorkers.has(w))
+      
+      if (idleWorker) {
+        this.dispatchTask(idleWorker, job)
+      } else {
+        this.taskQueue.push(job)
+      }
+    })
+  }
+
+  private dispatchTask(worker: Worker, job: any) {
+    this.activeWorkers.set(worker, job.task)
+    worker.postMessage(job.task)
+  }
+}
+```
+
+### 4. Sprawozdawczość z postępu
+
+Czekanie jest bolesne, zwłaszcza gdy nie masz pojęcia, ile czasu zajmie. Dlatego dodaliśmy prosty raport postępu, który zapewnia informacje zwrotne na temat bieżącego stanu w czasie rzeczywistym.
+
+```typescript
+export class ProgressReporter {
+  private completed = 0
+  private readonly total: number
+  private readonly startTime: number
+
+  constructor(total: number) {
+    this.total = total
+    this.startTime = Date.now()
+  }
+
+  increment(): void {
+    this.completed++
+    this.report()
+  }
+
+  private report(): void {
+    const now = Date.now()
+    const elapsed = now - this.startTime
+    const percentage = (this.completed / this.total) * 100
+    
+    // Simple ETA estimate
+    const avgTimePerChunk = elapsed / this.completed
+    const remaining = (this.total - this.completed) * avgTimePerChunk
+
+    console.log(
+      `[Parallel Obfuscation] ${this.completed}/${this.total} chunks completed (${percentage.toFixed(1)}%) | ETA: ${(remaining / 1000).toFixed(1)}s`
+    )
+  }
+}
+```
+
+## Przećwicz: Wyniki i wyciągnięte wnioski
+
+Po wdrożeniu tego rozwiązania wydajność kompilacji projektu HagiCode natychmiast uległa poprawie.
+
+### Dane porównawcze wydajności
+
+Testowaliśmy w następującym środowisku:
+- Procesor: Intel Core i7-12700K (12 rdzeni / 20 wątków)
+- RAM: 32 GB DDR4
+- Node.js: wersja 18.17.0
+- System operacyjny: Ubuntu 22.04
+
+**Porównanie wyników**:
+- **Jednowątkowy (przed optymalizacją)**: 118 sekund
+- **4 Robotników**: 55 sekund (**poprawa o 53%**)
+- **8 pracowników**: 48 sekund (**poprawa o 60%**)
+- **12 pracowników**: 45 sekund (**poprawa 62%**)
+
+Jak widać, zyski nie były liniowe. Gdy liczba Robotników przekroczyła 8, poprawa stała się mniejsza. Było to ograniczone głównie przez równomierny rozkład zadań i wąskie gardła w przepustowości pamięci.
+
+### Typowe problemy i rozwiązania
+
+W rzeczywistym użyciu HagiCode również natrafiliśmy na kilka pułapek, dlatego przedstawiamy je w celach informacyjnych:
+
+**Pyt. 1: Czas kompilacji nie skrócił się zbytnio, a nawet stał się wolniejszy?**
+- **Powód**: tworzenie pracowników wiąże się z dodatkowymi kosztami lub skonfigurowano zbyt wielu pracowników, co powoduje częste przełączanie kontekstu.
+- **Rozwiązanie**: zalecamy ustawienie liczby pracowników na `CPU core count - 1`. Sprawdź także, czy jakiś pojedynczy fragment nie jest szczególnie duży, np `> 5MB`. Tego rodzaju „potworny” plik stanie się wąskim gardłem, więc może być konieczne zoptymalizowanie strategii dzielenia kodu.
+
+**Pyt. 2: Pracownicy czasami ulegają awariom i powodują błędy w kompilacji?**
+- **Powód**: niektóre specjalne wzorce składni kodu mogą powodować błędy wewnętrzne w zaciemniaczu.
+- **Rozwiązanie**: wdrożyliśmy **mechanizm automatycznej degradacji**. Gdy proces roboczy osiągnie próg awarii, wtyczka automatycznie powraca do trybu jednowątkowego, aby mieć pewność, że kompilacja nie zostanie zatrzymana. Jednocześnie zapisuje nazwę pliku, który spowodował błąd, aby można było go później naprawić.
+
+**Pyt.3: Użycie pamięci jest zbyt wysokie (OOM)?**
+- **Powód**: każdy Worker potrzebuje własnej przestrzeni pamięci, aby załadować obfuscator i przeanalizować AST.
+- **Rozwiązanie**:
+  - Zmniejsz liczbę pracowników.
+  - Zwiększ limit pamięci Node.js: `NODE_OPTIONS="--max-old-space-size=4096" npm run build`.
+  - Upewnij się, że Pracownicy nie przechowują niepotrzebnych odniesień do dużych obiektów.
+
+## Wniosek
+
+Wprowadzając wątki robocze Node.js, z powodzeniem skróciliśmy czas kompilacji produkcyjnej projektu HagiCode ze 120 sekund do około 45 sekund, znacznie poprawiając środowisko programistyczne i wydajność CI/CD.
+
+Istotą tego rozwiązania jest:
+1. **Podziel zadania prawidłowo**: użyj fragmentów Vite jako jednostki równoległej.
+2. **Kontroluj zasoby**: użyj puli pracowników, aby uniknąć wyczerpania zasobów.
+3. **Projekt zapewniający odporność na uszkodzenia**: automatyczny mechanizm degradacji zapewnia stabilność konstrukcji.
+
+Jeśli również Ty zmagasz się z wydajnością budowania frontendu lub Twój projekt wymaga również intensywnego przetwarzania kodu, warto wypróbować to rozwiązanie. Oczywiście zalecamy bezpośrednie spojrzenie na HagiCode, gdzie te szczegóły inżynieryjne są już zintegrowane.
+
+Jeśli ten artykuł Ci pomógł, możesz dać nam gwiazdkę na GitHubie lub dołączyć do publicznej wersji beta i wypróbować ją.
+
+## Referencje
+
+- Oficjalna dokumentacja wątków roboczych Node.js: [https://nodejs.org/api/worker_threads.html](https://nodejs.org/api/worker_threads.html)
+- dokumentacja zaciemniacza JavaScript: [github.com/javascript-obfuscator/javascript-obfuscator](https://github.com/javascript-obfuscator/javascript-obfuscator)
+- Przewodnik tworzenia wtyczek Vite: [https://vitejs.dev/guide/api-plugin.html](https://vitejs.dev/guide/api-plugin.html)
+- **HagiCode GitHub**: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- **Oficjalna strona HagiCode**: [hagicode.com](https://hagicode.com)
+- **Instrukcja instalacji**: [hagicode.com/installation/docker-compose](https://hagicode.com/installation/docker-compose)
+
+
+
+---
+
+Dziękuję za przeczytanie. Jeśli ten artykuł był dla Ciebie przydatny, kliknij przycisk „Lubię to” poniżej, aby więcej osób mogło go odkryć.
+
+Ta treść została stworzona we współpracy z wykorzystaniem sztucznej inteligencji, sprawdzona przeze mnie i odzwierciedla moje własne poglądy i stanowisko.
+
+- **Autor:** [nowość36524](https://www.newbe.pro)
+- **Link do artykułu:** [https://hagicode.com/blog/2026/01/27/optimizing-vite-build-with-worker-threads](https://hagicode.com/blog/2026/01/27/optimizing-vite-build-with-worker-threads)
+- **Informacja o prawach autorskich:** O ile nie zaznaczono inaczej, wszystkie artykuły na tym blogu są objęte licencją BY-NC-SA. Przy ponownym zamieszczaniu proszę podać źródło.

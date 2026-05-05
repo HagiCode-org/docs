@@ -1,0 +1,375 @@
+---
+title: "SQLite Sharding a gyakorlatban: Három megosztási stratégia mélyreható összehasonlítása"
+date: 2026-04-17
+tags: [SQLite, Sharding, Performance Optimization, Architecture Design, HagiCode]
+description: "Amikor egy egyfájlos SQLite-adatbázis ütközik a párhuzamosság szűk keresztmetszeteivel, hogyan törhetjük át? Ez a cikk három SQLite-felosztási megközelítést oszt meg a HagiCode-ból"
+---
+
+## SQLite Sharding a gyakorlatban: Három megosztási stratégia mélyreható összehasonlítása
+
+> Amikor egy egyfájlos SQLite-adatbázis ütközik a párhuzamosság szűk keresztmetszeteivel, hogyan törhetjük át? Ez a cikk a HagiCode projekt három SQLite felosztási megközelítését osztja meg különböző forgatókönyvekben, és segít megérteni, hogyan válassza ki a megfelelő felosztási stratégiát.
+
+Üdv mindenkinek, Yu Kun vagyok, a HagiCode megalkotója.
+
+## Háttér
+
+Nagy teljesítményű alkalmazások készítésekor az egyfájlos SQLite adatbázisok nagyon gyakorlati problémákba ütköznek. Amint a felhasználók száma és az adatmennyiség növekszik, ezek a problémák sorakoznak fel egymás után:
+
+- Az írási műveletek sorba állnak, és a válaszidők láthatóan nőnek
+- A lekérdezések teljesítménye az adatmennyiség növekedésével csökken
+- Gyakori `database is locked` hibák jelennek meg a többszálú hozzáférés alatt
+
+Sokan ösztönösen kérdezik: csak közvetlenül a PostgreSQL-re vagy a MySQL-re kell migrálnunk? Ez megoldhatja a problémát, de a telepítés bonyolultsága meredeken növekszik. Van valami könnyebb választás?
+
+A válasz a sharding. A mérnöki problémákat végül mégiscsak mérnöki módszerekkel kell megoldani. Az adatok több SQLite fájl között történő elosztásával jelentősen javíthatjuk a párhuzamosságot és a lekérdezési teljesítményt, miközben megőrizzük az SQLite könnyű jellemzőit.
+
+## A HagiCode-ról
+
+Az ebben a cikkben megosztott megközelítések a gyakorlati tapasztalatainkból származnak [HagiCode](https://hagicode.com) projekt. AI kódolási asszisztens projektként a HagiCode-nak nagy mennyiségű beszélgetési üzenetet, állapotmegmaradást és eseménytörténeti rekordot kell kezelnie. Ezeknek a valódi problémáknak a megoldásán keresztül foglaltunk össze három felosztási megközelítést a különböző forgatókönyvekhez.
+
+A jó eszközök számítanak, de használatuk módja a ténylegesen elvégzendő munkától függ.
+
+A kódtárunk a címen található [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site). Nyugodtan nézd meg mélyebben, ha érdekel.
+
+## Három megosztási megközelítés áttekintése
+
+A HagiCode kódbázis elemzése után három SQLite felosztási megközelítést azonosítottunk a különböző üzleti forgatókönyvekhez:
+
+1. **Session Message megosztott tárhely**: mesterséges intelligencia beszélgetési üzeneteinek tárolója, amelyet nagyfrekvenciás írások és munkamenet-alapú elszigetelt lekérdezések jellemeznek
+2. **Orleans Grain szaggatott tárhely**: állapotmegmaradás elosztott keretrendszer esetén, amelyet csomópontok közötti hozzáférés és determinisztikus útválasztás szükségessége jellemez.
+3. **Hero History megosztott tárhely**: történelmi eseményrekordok egy gamified rendszerhez, amelyet eseményforrások és migrációs kompatibilitás szükségessége jellemez.
+
+Bár üzleti forgatókönyveik eltérőek, mindhárom ugyanazokat az alapvető tervezési elveket követi:
+
+- **Determinisztikus útválasztás**: a szilánkot közvetlenül az üzleti azonosítóból számítja ki, metaadattábla nélkül
+- **Átlátszó hozzáférés**: a felső rétegek egységes felületet használnak, és nem ismerik a mögöttes szilánkokat
+- **Független tárhely**: minden szilánk egy teljesen független SQLite fájl
+- **Parakuurencia optimalizálás**: WAL mód plusz `busy_timeout` csökkenti a zárolási vitát
+
+Sokan kérdezik: miért nem építünk egyetlen általános sharling megoldást? Ez egy nagyon gyakorlatias kérdés, és a következtetés egyértelmű: a mérnöki területen nincs univerzális megoldás, csak az, amelyik a legjobban illeszkedik a jelenlegi üzleti forgatókönyvhöz. Ezt követően részletesen összehasonlítjuk e három megközelítés konkrét megvalósításait.
+
+## A megosztási stratégiák összehasonlítása
+
+### A szilánkok számának és elnevezésének szabályai
+
+| Aspect | Munkamenet üzenete | Orleans Grain | Hős története |
+|------|----------------|---------------|--------------|
+| **Shard count** | 256 (16²) | 100 | 10 |
+| **Elnevezési szabály** | Hexadecimális (00-tól) | Tizedes (00-99) | Tizedes (0-9) |
+| **Tárolókönyvtár** | `DataDir/messages/` | `DataDir/orleans/grains/` | `DataDir/hero-history/` |
+| **Fájlnév minta** | `{shard}.db` | `grains-{shard}.db` | `{shard}.db` |
+
+Miért van ekkora különbség a szilánkok számában? Ez az üzleti jellemzőktől függ. Másképpen fogalmazva, a modellek változnak, az eszközök fejlődnek, és a munkafolyamatok javulnak, de a mérnöki alapok ugyanazok maradnak: először értse meg azt a problémát, amelyet valójában meg akar oldani.
+
+- A **Session Message** 256 szilánkot használ, mivel a beszélgetési üzenetek írási gyakorisága a legmagasabb, és több szilánkra van szükség a terhelés szétosztásához
+- Az **Orleans Grain** 100 szilánkot használ, egyensúlyban tartva a párhuzamos teljesítményt és a műveleti összetettséget
+- A **Hero History** csak 10 szilánkot használ, mert a történelmi eseményeket ritkábban írják le, és figyelembe kell venni a migrációs költségeket
+
+### Különbségek az útválasztási algoritmusokban
+
+Az útválasztási algoritmus a felosztási séma magja. Meghatározza, hogy az adatok hogyan oszlanak el a szilánkok között. A három megközelítés különböző útválasztási stratégiákat használ:
+
+```csharp
+// Session Message: last two hexadecimal characters of the GUID
+var normalized = Guid.Parse(sessionId.Value).ToString("N").ToLowerInvariant();
+return normalized[^2..];  // Take the last two hexadecimal characters
+
+// Orleans Grain: extract digits, then use the last two digits modulo shard count
+var digits = ExtractDigits(grainId);  // Extract all digits
+var lastTwoDigits = (digits[^2] * 10) + digits[^1];
+return lastTwoDigits % shardCount;
+
+// Hero History: modulo 10 using the ASCII value of the last character
+return heroId[^1] % 10;
+```
+
+**Tervezési elemzés**:
+
+- **A munkamenet üzenet** azonosítói GUID-ok. A hexadecimálisra konvertálás után az utolsó két karaktert véve egyenletes eloszlást kapunk 256 szilánk között
+- Az **Orleans Grain** azonosítók nem konzisztens formátumúak, és tartalmazhatnak betűket és számjegyeket is, ezért minden számjegyet kivonnak a modulo felvétele előtt
+- A **Hero History** azonosítók karakterláncok, így az utolsó karakter ASCII-értékét közvetlenül a modulo használja. Ez egyszerű, de az eloszlás kevésbé egyenletes
+
+**Kulcspont**: függetlenül attól, hogy melyik algoritmust használja, mindig ugyanannak az azonosítónak kell leképeznie ugyanarra a szilánkra. Ez az egyik legalapvetőbb követelmény az elosztott rendszerekben. Ellenkező esetben elkerülhetetlen az adatok következetlensége. Ha az útválasztás instabil, minden más erőfeszítés nullára omlik.
+
+### Az inicializálási stratégiák különbségei
+
+| Aspect | Munkamenet üzenete | Orleans Grain | Hős története |
+|------|----------------|---------------|--------------|
+| **Inicializálás időzítése** | Igény szerint lustán töltve | Teljes párhuzamos inicializálás indításkor | Igény szerint lustán töltve |
+| **Pontosságú vezérlés** | `Lazy<Task>` megakadályozza a párhuzamos inicializálást | `Parallel.ForEachAsync` | `Lazy<Task>` megakadályozza a párhuzamos inicializálást |
+
+**Miért választja az Orleans Grain a teljes inicializálást indításkor?**
+
+Mivel az Orleans egy elosztott keretrendszer, a Grain bármely csomóponthoz ütemezhető. Ha egy szilánkfájl csak futás közben hiányzik, a kérések meghiúsulhatnak. A teljes inicializálás indításkor meghosszabbítja az indítási időt, de garantálja a futásidejű stabilitást. A beindítás csak a kezdet; karbantartható tartása az igazi készség.
+
+**A lusta betöltés előnyei**:
+
+A Session Message és Hero History esetében a lusta betöltés csökkenti az indítási időt. A fájlok és a sémák csak akkor jönnek létre, ha ténylegesen szükség van egy szilánkra. Használata `Lazy<Task>` megakadályozza a versenyfeltételeket is az egyidejű inicializálás során. A dizájn egyszerűnek tűnik, de a valós projekteknél sok felesleges problémát megkímél.
+
+### Sématervezési jellemzők
+
+A három megközelítés sématervei tükrözik a megfelelő üzleti jellemzőket:
+
+**Munkamenet üzenet**:
+- Támogatja az Event Sourcing modellt (eseménytábla és pillanatkép táblázat)
+- Tartalmaz egy gyermek táblázatot az üzenettartalom blokkokhoz (`MessageContentBlocks`)
+- Tömörítési és tömörítési jelző mezőkkel rendelkezik a jövőbeli optimalizálás támogatására
+
+**Orleans Grain**:
+- Minimalista design: egyetlen `GrainState` táblázat
+- Az állapotot szerializált JSON-ként tárolja
+- ETag-alapú optimista egyidejű vezérlést használ
+
+**Hősök története**:
+- Idővonal lekérdezésoptimalizálási indexek
+- Egy egyedi `DedupeKey` megszorítás megakadályozza a párhuzamosságot
+- Több eseménytípust és állapotot támogat
+
+Ezek a tervek azt mutatják, hogy a sématervezésnek szorosan az üzleti követelményekhez kell igazodnia, nem pedig az általánosságra törekedni. Az Orleans Grain éppen azért egyszerű, mert csak a soros állapotot kell tárolnia, és nem igényel bonyolult lekérdezési képességeket. Ez nem miszticizmus. Ez mérnöki munka. Ne rohanjon valami nagy nevet adni, mielőtt ellenőrizné, hogy képes-e túlélni két iterációt egy igazi csapaton belül.
+
+### Egyidejűségi konfiguráció összehasonlítása
+
+Mindhárom megközelítés ugyanazokat az SQLite párhuzamosság-optimalizálási beállításokat használja:
+
+```sql
+PRAGMA journal_mode=WAL;      -- Write-ahead logging mode
+PRAGMA synchronous=NORMAL;     -- Reduce persistence overhead
+PRAGMA busy_timeout=5000;      -- 5-second busy wait
+PRAGMA foreign_keys=ON;        -- Foreign key constraints
+```
+
+**A WAL mód előnyei**:
+
+A hagyományos visszagörgetési naplómód zárolási versengést okoz az írás során, míg a WAL mód lehetővé teszi az olvasás és az írás egyidejű folytatását. Nagy adatforgalmú forgatókönyvek esetén ez jelentősen javíthatja a teljesítményt. Sok fejlesztő figyelmen kívül hagyja ezt a beállítást, de sokkal többet számít, mint gondolják.
+
+** A kompromisszum a `synchronous=NORMAL`**:
+
+Ennek beállítása `FULL` maximális biztonságot nyújt, de jelentősen csökkenti a teljesítményt. `NORMAL` egyensúlyt teremt a biztonság és a teljesítmény között, így a legtöbb alkalmazáshoz megfelelő választás. Ezt nem kell túlgondolni. `NORMAL` elég.
+
+## Hogyan válasszunk megosztási stratégiát
+
+A HagiCode három megközelítésének elemzése alapján a következő döntési mátrixot foglalhatjuk össze:
+
+```
+High-throughput scenarios -> more shards (for example, Message uses 256)
+Simple maintainability   -> fewer shards (for example, Hero History uses 10)
+Mostly numeric IDs       -> modulo algorithm (Orleans Grain)
+Mostly GUIDs             -> hexadecimal suffix (Session Message)
+String IDs               -> ASCII modulo (Hero History)
+```
+
+**A szilánkok számának kiválasztására vonatkozó ökölszabályok**:
+
+- Túl kevés (`< 10`): korlátozott az egyidejűség javítása, ami kevésbé értelmessé teszi a felosztást
+- Túl sok (`> 1000`): a fájlkezelés bonyolulttá válik, és a kapcsolati készlet többletköltsége nő
+- Ökölszabály: 10-100 szilánk illeszkedik a legtöbb forgatókönyvhöz
+- Rendkívül magas egyidejűségi forgatókönyvek: 256 szilánk jöhet szóba
+
+Ha csak a demókat nézed, könnyen elragadtathatod. De amint belép a gyártásba, minden költséget alaposan ki kell számítani. Sok minden nem lehetetlen, csak nincs becsületes ár.
+
+## Gyakorlati útmutató
+
+### Valósítson meg egy szabványos szilánkfeloldót
+
+```csharp
+public interface IShardResolver<TId>
+{
+    string ResolveShardKey(TId id);
+}
+
+// Hexadecimal sharding (for GUIDs)
+public class HexSuffixShardResolver : IShardResolver<string>
+{
+    private readonly int _suffixLength;
+
+    public HexSuffixShardResolver(int suffixLength = 2)
+    {
+        _suffixLength = suffixLength;
+    }
+
+    public string ResolveShardKey(string id)
+    {
+        var normalized = id.Replace("-", "").ToLowerInvariant();
+        return normalized[^_suffixLength..];
+    }
+}
+
+// Numeric modulo sharding (for purely numeric IDs)
+public class NumericModuloShardResolver : IShardResolver<long>
+{
+    private readonly int _shardCount;
+
+    public NumericModuloShardResolver(int shardCount)
+    {
+        _shardCount = shardCount;
+    }
+
+    public string ResolveShardKey(long id)
+    {
+        return (id % _shardCount).ToString("D2");
+    }
+}
+```
+
+### Egységes csatlakozási gyári minta
+
+```csharp
+public class ShardedConnectionFactory<TOptions>
+{
+    private readonly ConcurrentDictionary<string, Lazy<Task>> _initializationTasks = new();
+    private readonly TOptions _options;
+    private readonly IShardSchemaInitializer _initializer;
+
+    public ShardedConnectionFactory(
+        TOptions options,
+        IShardSchemaInitializer initializer)
+    {
+        _options = options;
+        _initializer = initializer;
+    }
+
+    public async Task<TDbContext> CreateAsync(string shardKey, CancellationToken ct)
+    {
+        var connectionString = BuildConnectionString(shardKey);
+
+        // Use Lazy<Task> to prevent concurrent initialization
+        var initTask = _initializationTasks.GetOrAdd(
+            connectionString,
+            _ => new Lazy<Task>(() => InitializeShardAsync(connectionString, ct))
+        );
+
+        await initTask.Value;
+        return CreateDbContext(connectionString);
+    }
+
+    private async Task InitializeShardAsync(string connectionString, CancellationToken ct)
+    {
+        await _initializer.InitializeAsync(connectionString, ct);
+    }
+
+    private string BuildConnectionString(string shardKey)
+    {
+        var shardPath = Path.Combine(_options.BaseDirectory, $"{shardKey}.db");
+        return $"Data Source={shardPath}";
+    }
+
+    private TDbContext CreateDbContext(string connectionString)
+    {
+        // Create the DbContext according to the specific ORM
+        return Activator.CreateInstance(typeof(TDbContext), connectionString) as TDbContext;
+    }
+}
+```
+
+### A séma inicializálásának legjobb gyakorlatai
+
+```csharp
+public class SqliteShardInitializer : IShardSchemaInitializer
+{
+    public async Task InitializeAsync(string connectionString, CancellationToken ct)
+    {
+        await using var connection = new SqliteConnection(connectionString);
+        await connection.OpenAsync(ct);
+
+        // Concurrency optimization settings
+        await connection.ExecuteAsync("""
+            PRAGMA journal_mode=WAL;
+            PRAGMA synchronous=NORMAL;
+            PRAGMA busy_timeout=5000;
+            PRAGMA foreign_keys=ON;
+        """);
+
+        // Create table schema
+        await connection.ExecuteAsync("""
+            CREATE TABLE IF NOT EXISTS Entities (
+                Id TEXT PRIMARY KEY,
+                CreatedAt TEXT NOT NULL,
+                UpdatedAt TEXT NOT NULL,
+                Data TEXT NOT NULL,
+                ETag TEXT
+            );
+        """);
+
+        // Create indexes
+        await connection.ExecuteAsync("""
+            CREATE INDEX IF NOT EXISTS IX_Entities_CreatedAt
+            ON Entities(CreatedAt DESC);
+
+            CREATE INDEX IF NOT EXISTS IX_Entities_UpdatedAt
+            ON Entities(UpdatedAt DESC);
+        """);
+    }
+}
+```
+
+### Kulcsfontosságú szempontok
+
+**1. Útvonalstabilitás**
+
+Az útválasztási algoritmusnak garantálnia kell, hogy mindig ugyanaz az azonosító legyen leképezve ugyanarra a szilánkra. Kerülje a véletlenszerű vagy időfüggő számításokat, és ne vezessen be változó paramétereket az algoritmusba.
+
+**2. A szilánkok számának kiválasztása**
+
+A szilánkok számát a tervezési szakaszban kell eldönteni. Később nagyon nehéz megváltoztatni. Fontolja meg:
+- Jelenlegi és jövőbeli egyidejűség mennyisége
+- Az egyes szilánkok kezelési költsége
+- Az adatmigráció összetettsége
+
+**3. Migrációs tervezés**
+
+A Hero History megközelítés egy teljes migrációs utat mutat be:
+
+1. Építse fel az új, szilánkos tárolási infrastruktúrát
+2. Valósítson meg egy áttelepítési szolgáltatást az adatok másolásához az elsődleges adatbázisból a szilánkokba
+3. Az áttelepítés után ellenőrizze a lekérdezések kompatibilitását
+4. Váltson olvasási és írási útvonalat a szilánkok felé
+5. Tisztítsa meg a régi táblákat az elsődleges adatbázisban
+
+A felosztási séma kialakításakor figyelembe kell venni a jövőbeli migrációs követelményeket. A beszéd olcsó. Mutasd a kódot. De a kód önmagában nem elég. Szüksége van egy teljes migrációs útvonalra is. Az egyszeri siker nem rendszer; tartós siker az.
+
+**4. Felügyelet és működés**
+
+- Figyelje a méreteloszlást a szilánkok között, hogy korán észlelje az adattorzulást
+- Állítson be riasztásokat a szilánkos forró pontokra, hogy megakadályozza, hogy egyetlen szilánk is szűk keresztmetszetté váljon
+- A túlzott lemezhasználat elkerülése érdekében rendszeresen ellenőrizze a WAL-fájlok méretét
+- Hozzon létre szilánkos állapot-ellenőrzési mechanizmusokat
+
+**5. Tesztlefedettség**
+
+- Tesztelje a peremfeltételeket, például üres azonosítókat, speciális karaktereket és túl hosszú azonosítókat
+- Ellenőrizze az útválasztási determinizmust, hogy mindig ugyanaz az azonosító legyen leképezve ugyanarra a szilánkra
+- Futtasson egyidejű írási stresszteszteket, hogy megbizonyosodjon arról, hogy a zárolási versengés hatékonyan csökken
+- Futtasson áttelepítési teszteket az adatok integritásának és konzisztenciájának biztosítása érdekében
+
+## Összegzés
+
+A HagiCode projekt három SQLite felosztási megközelítésének összehasonlításával láthatjuk, hogy:
+
+1. **Nincs univerzális megoldás**: a különböző üzleti forgatókönyvek eltérő felosztási stratégiákat igényelnek
+2. **Az alapelvek közösek**: determinisztikus útválasztás, átlátható hozzáférés, független tárolás és párhuzamosság-optimalizálás
+3. **A tervezésnek a jövőbe kell néznie**: vegye figyelembe a migrációs útvonalakat és a működési költségeket
+
+Ha a projektje SQLite-ot használ, és elkezdett ütközni a párhuzamosság szűk keresztmetszeteivel, remélem, ez a cikk hasznos ötleteket ad. Nem kell sietni a nehézsúlyú adatbázisokra való átállással. Néha a megfelelő felosztási stratégia elegendő a probléma megoldásához.
+
+Természetesen a szilánkolás nem egy ezüstgolyó. A felosztási stratégia kiválasztása előtt először győződjön meg a következőkről:
+- Már optimalizálta az egytáblás lekérdezések teljesítményét
+- Már hozzáadta a megfelelő indexeket
+- Már engedélyezte a WAL módot
+
+Csak miután ezek az optimalizálások megtörténtek, és továbbra is fennáll a teljesítmény szűk keresztmetszete, érdemes megfontolni a szilánkolás bevezetését. Az egyszerű dolgokat jól csinálni, az önmagában is képesség.
+
+Néha a munka egyszeri elvégzése többet mond, mint tízszer elmagyarázni. Innentől beszéljenek magukért a mérnöki eredmények.
+
+## Hivatkozások
+
+- HagiCode projekt tároló: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- SQLite WAL mód dokumentáció: [sqlite.org/wal.html](https://www.sqlite.org/wal.html)
+- Orleans elosztott keretrendszer: [dotnet.github.io/orleans](https://dotnet.github.io/orleans/)
+
+## Szerzői jogi megjegyzés
+
+Köszönöm, hogy elolvastad. Ha hasznosnak találtad ezt a cikket, lájkold, jelöld be a könyvjelzők közé és oszd meg.
+Ez a tartalom mesterséges intelligencia által támogatott együttműködéssel készült, és a végső tartalmat a szerző felülvizsgálta és megerősítette.
+- Szerző: [newbe36524](https://www.newbe.pro)
+- Eredeti link: [https://docs.hagicode.com/blog/2026-04-17-sqlite-sharding-strategies-comparison/](https://docs.hagicode.com/blog/2026-04-17-sqlite-sharding-strategies-comparison/)
+- Szerzői jog: Eltérő rendelkezés hiányában minden blogcikk a BY-NC-SA licence alá tartozik. Kérjük, az újra közzétételkor hivatkozzon a forrásra.

@@ -1,0 +1,300 @@
+---
+title: Jak zaimplementować automatyczne ponawianie prób dla interfejsów CLI agenta, takich jak Claude Code i Codex
+date: 2026-04-18
+tags: [Agent CLI, Claude Code, Codex, Automatic Retry, HagiCode]
+description: "Wyrażenie automatyczne ponawianie prób wygląda jak mały przełącznik, ale gdy umieścisz go w prawdziwym środowisku inżynierskim, niczym takim nie jest. Witam wszystkich, ja"
+---
+
+## Jak zaimplementować automatyczne ponawianie prób dla interfejsów CLI agenta, takich jak Claude Code i Codex
+
+> Wyrażenie automatyczne ponawianie prób wygląda jak mały przełącznik, ale gdy umieścisz go w prawdziwym środowisku inżynierskim, niczym takim nie jest. Witam wszystkich, jestem twórcą HagiCode, Yu Kun. Dziś nie chcę handlować pustymi gadkami. Chcę porozmawiać o tym, jak w rzeczywistości powinno odbywać się automatyczne ponawianie prób dla interfejsów CLI agenta, takich jak Claude Code i Codex, aby można było zarówno odzyskać siły po wyjątkach, jak i uniknąć przeciągania systemu w nieskończone, powtarzające się wykonywanie.
+
+## Tło
+
+Jeśli ostatnio zajmowałeś się kodowaniem AI, prawdopodobnie napotkałeś już tego rodzaju problem: zadanie nie kończy się natychmiastowym niepowodzeniem, ale przerywa w połowie jego wykonania.
+
+W zwykłym żądaniu HTTP często oznacza to po prostu wysłanie go ponownie, być może z pewnym wykładniczym wycofaniem. Ale interfejsy CLI agenta są inne. Narzędzia takie jak Claude Code i Codex zwykle działają w sposób strumieniowy, wypychając dane wyjściowe fragment po fragmencie. Podczas tego procesu mogą również powiązać się z wątkiem, sesją lub tokenem wznowienia. Innymi słowy, pytanie nie brzmi po prostu: „Czy to żądanie zakończyło się niepowodzeniem, czy nie?” Staje się:
+
+- Czy treści, które zostały już wyemitowane, nadal się liczą?
+- Czy bieżący kontekst może nadal działać?
+- Czy ta awaria powinna zostać naprawiona automatycznie?
+- Jeśli należy go odzyskać, jak długo powinniśmy czekać przed ponowną próbą, co powinniśmy wysłać podczas ponownej próby i czy nadal powinniśmy używać oryginalnego kontekstu?
+
+Kiedy wiele zespołów buduje tę część po raz pierwszy, instynktownie pisze najbardziej naiwną wersję: jeśli wystąpi błąd, spróbuj jeszcze raz. Pomysł ten jest całkowicie naturalny, ale gdy zostanie zrealizowany w rzeczywistym projekcie, na światło dzienne wychodzą jeden problem po drugim.
+
+- Niektóre błędy są wyraźnie tymczasowymi awariami, ale są traktowane jako awarie ostateczne
+- Niektórych błędów w ogóle nie warto powtarzać, mimo to system odtwarza je w kółko
+- Żądania z wątkiem i żądania bez wątku są traktowane dokładnie tak samo
+- Strategia wycofywania nie ma granic, a żądania w tle same się przeciążają
+
+Integrując wiele interfejsów CLI agentów, HagiCode również wkroczył w te pułapki. W szczególności po stronie Kodeksu pierwszym ujawnionym problemem był fakt, że określony typ komunikatu o ponownym połączeniu nie był rozpoznawany jako stan terminala, który można było ponowić, więc mechanizm odzyskiwania, który już wcześniej nie miał szansy zadziałać. Mówiąc wprost, nie oznaczało to, że w systemie brakowało automatycznego ponawiania prób. System po prostu nie rozpoznał, że warto powtórzyć tę konkretną awarię.
+
+Zatem główna myśl tego artykułu jest bardzo jasna: **automatyczne ponawianie prób nie jest przyciskiem, ale procesem wielowarstwowym.**
+
+## O HagiCodzie
+
+Podejście przedstawione w tym artykule wynika z prawdziwej praktyki w naszym kraju [Kod Hagi](https://hagicode.com) projekt. To, co próbuje zrobić HagiCode, to nie tylko połączenie jednego modelu i zamknięcie go. Chodzi o ujednolicenie przesyłania strumieniowego komunikatów, wywołań narzędzi, odzyskiwania po awarii i kontekstu sesji wielu interfejsów CLI agentów w jeden model wykonawczy, który można utrzymywać przez długi czas.
+
+Jedną z rzeczy, na których najbardziej mi zależy, jest to, aby kodowanie AI rzeczywiście znalazło zastosowanie w prawdziwej pracy inżynierskiej. Napisanie demo nie jest trudne. Najtrudniejszą częścią jest przekształcenie tego demo w coś, z czego zespół będzie naprawdę chciał korzystać przez długi czas. HagiCode poważnie podchodzi do automatycznego ponawiania prób nie dlatego, że funkcja wygląda na wyrafinowaną, ale dlatego, że jeśli długotrwałe, strumieniowe i wznawiane wykonanie CLI nie jest stabilne, użytkownicy widzą nie inteligentnego asystenta, ale opakowanie poleceń, które zrywa połączenie w połowie co drugiego uruchomienia.
+
+Jeśli chcesz najpierw przyjrzeć się punktom wejścia projektu, oto dwa z nich:
+
+- GitHub: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Oficjalna strona internetowa: [hagicode.com](https://hagicode.com)
+
+Idąc o krok dalej, HagiCode jest teraz także na Steamie. Jeśli korzystasz ze Steam, możesz najpierw dodać go do swojej listy życzeń:
+
+- [Strona sklepu Steam (dodaj do listy życzeń / wyświetl szczegóły)](https://store.steampowered.com/app/4625540/Hagicode/)
+
+## Dlaczego automatyczna ponowna próba dla interfejsu wiersza polecenia agenta jest trudniejsza niż zwykła ponowna próba
+
+To bardzo praktyczne pytanie, więc przejdźmy od razu do wniosku: trudność automatycznego ponawiania próby w przypadku interfejsu CLI agenta nie polega na tym, że „spróbuj ponownie po kilku sekundach”, ale na tym, „czy nadal można kontynuować w oryginalnym kontekście?”
+
+Można to potraktować jako długą rozmowę. Zwykła ponowna próba API przypomina raczej ponowne wybieranie numeru, gdy linia telefoniczna jest zajęta. Ponowna próba agenta CLI przypomina raczej zanik sygnału, gdy druga strona jest w połowie zdania, a następnie musisz zdecydować, czy oddzwonić, czy zacząć od nowa, gdy to zrobisz, i czy druga strona nadal pamięta, gdzie przerwała się rozmowa. To wcale nie jest ten sam problem inżynieryjny.
+
+Mówiąc dokładniej, istnieją cztery szczególnie typowe trudności.
+
+### 1. Trwa transmisja strumieniowa
+
+Gdy dane wyjściowe zostaną już wysłane do użytkownika, nie możesz już poradzić sobie z niepowodzeniem w taki sam sposób, jak w przypadku zwykłego żądania, gdzie po cichu przełykasz błąd i po cichu próbujesz ponownie. Dzieje się tak dlatego, że wcześniejsza treść została już wyświetlona. Jeśli strategia odtwarzania jest niewłaściwa, frontend może łatwo pokazać zduplikowany tekst i niespójny stan, a cykl życia wywołań narzędzi również może się zagmatwać. To nie jest metafizyka. To jest inżynieria.
+
+### 2. Zwykle wiąże się z kontekstem sesji
+
+Dostawcy tacy jak Codex wiążą się z wątkiem, a implementacje takie jak Claude Code również mają cel kontynuacji lub równoważny kontekst, który można wznowić. Prawdziwym warunkiem automatycznego ponawiania próby jest nie tylko to, że błąd wygląda jak tymczasowa awaria, ale także to, że nadal istnieje nośnik umożliwiający kontynuację tego wykonywania.
+
+### 3. Nie każdy błąd jest warty ponawiania próby
+
+Zwykle warto spróbować jeszcze raz, wahania sieci, przekroczenia limitu czasu bezczynności SSE i tymczasowe awarie przesyłania danych. Jeśli jednak masz do czynienia z niepowodzeniem uwierzytelnienia, utratą kontekstu lub dostawcą, który w ogóle nie ma możliwości wznowienia, ponowna próba zwykle nie oznacza odzyskania. Jest to wytwarzanie hałasu.
+
+### 4. Potrzebuje granic
+
+Nieograniczone automatyczne ponowne próby prawie zawsze kończą się niepowodzeniem. Trendy technologiczne mogą być głośne przez jakiś czas, ale przepisy inżynieryjne często pozostają niezmienne przez wiele lat. Jednym z nich jest to, że odzyskiwanie po awarii musi mieć granice. System musi wiedzieć, ile maksymalnie może ponowić próbę, jak długo za każdym razem powinien czekać, a kiedy powinien się zatrzymać i przyznać, że tak naprawdę nie da się odzyskać.
+
+Ze względu na te cechy HagiCode ostatecznie nie zaimplementował automatycznego ponawiania próby w kilku wierszach `try/catch` wewnątrz konkretnego dostawcy. Zamiast tego wyodrębniliśmy go do warstwy współdzielonych możliwości. Ostatecznie problemy inżynieryjne nadal należy rozwiązywać metodami inżynieryjnymi.
+
+## Podejście HagiCode: Wyciągnij ponowną próbę z dostawcy
+
+Obecną implementację HagiCode w świecie rzeczywistym można skompresować w jednym zdaniu:
+
+**Warstwa wspólna zarządza w sposób jednolity przepływem ponownych prób, a każdy konkretny dostawca jest odpowiedzialny tylko za udzielenie odpowiedzi tylko na dwa pytania: czy warto ponowić ten stan końcowy i czy bieżący kontekst może nadal trwać?**
+
+Nie jest to skomplikowane, ale ma kluczowe znaczenie. Po rozdzieleniu obowiązków w ten sposób Claude Code, Codex, a nawet inne interfejsy CLI agentów będą mogły ponownie używać tego samego szkieletu. Modele będą się zmieniać, narzędzia będą ewoluować, przepływy pracy zostaną ulepszone, ale podstawy inżynieryjne pozostaną takie same.
+
+### Warstwa 1: Użyj ujednoliconego koordynatora do zarządzania pętlą ponownych prób
+
+Główny fragment implementacyjny w projekcie wygląda mniej więcej tak:
+
+```csharp
+internal static class ProviderErrorAutoRetryCoordinator
+{
+    public static async IAsyncEnumerable<CliMessage> ExecuteAsync(
+        string prompt,
+        ProviderErrorAutoRetrySettings? settings,
+        Func<string, IAsyncEnumerable<CliMessage>> executeAttemptAsync,
+        Func<bool> canRetryInSameContext,
+        Func<TimeSpan, CancellationToken, Task> delayAsync,
+        Func<CliMessage, bool> isRetryableTerminalMessage,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        var normalizedSettings = ProviderErrorAutoRetrySettings.Normalize(settings);
+        var retrySchedule = normalizedSettings.Enabled
+            ? normalizedSettings.GetRetrySchedule()
+            : [];
+
+        for (var attempt = 0; ; attempt++)
+        {
+            var attemptPrompt = attempt == 0
+                ? prompt
+                : ProviderErrorAutoRetrySettings.ContinuationPrompt;
+
+            CliMessage? terminalFailure = null;
+
+            await foreach (var message in executeAttemptAsync(attemptPrompt)
+                               .WithCancellation(cancellationToken))
+            {
+                if (isRetryableTerminalMessage(message))
+                {
+                    terminalFailure = message;
+                    break;
+                }
+
+                yield return message;
+            }
+
+            if (terminalFailure is null)
+            {
+                yield break;
+            }
+
+            if (attempt >= retrySchedule.Count || !canRetryInSameContext())
+            {
+                yield return terminalFailure;
+                yield break;
+            }
+
+            await delayAsync(retrySchedule[attempt], cancellationToken);
+        }
+    }
+}
+```
+
+Działanie tego kodu jest w rzeczywistości bardzo proste, ale także bardzo skuteczne.
+
+- Nie przepuszczaj na początku pośrednich awarii bezpośrednio; koordynator decyduje, czy odzyskanie środków jest nadal możliwe
+- Dopiero po wyczerpaniu budżetu na ponowne próby ostateczna awaria faktycznie powraca do wyższej warstwy
+- Począwszy od drugiej próby, oryginalny monit nie jest już wysyłany; zamiast tego monit o kontynuację jest wysyłany w sposób jednolity
+
+Dlatego też wcześniej podkreślałem, że automatyczna ponowna próba nie polega po prostu na „ponownym wysłaniu żądania”. Nie chodzi tylko o łatanie gałęzi wyjątków. Zarządza cyklem życia wykonania. Może to brzmieć jak język menedżera produktu, ale z inżynierskiego punktu widzenia dokładnie tak jest.
+
+### Warstwa 2: Zrób migawkę zasad ponawiania prób
+
+Kolejną kwestią, którą bardzo łatwo przeoczyć, jest: kto decyduje, czy dla tego żądania włączona jest automatyczna ponowna próba?
+
+Odpowiedzią HagiCode nie jest poleganie na jakiejś „bieżącej konfiguracji globalnej”, ale przekształcenie polityki w migawkę i umożliwienie jej podróżowania razem z tym żądaniem. W ten sposób kolejkowanie sesji, utrwalanie komunikatów, przekazywanie wykonania i dostosowywanie dostawcy nie utracą po drodze zasad. Jeden udany przebieg to nie system. Trwały sukces to system.
+
+Podstawową strukturę można uprościć w następujący sposób:
+
+```csharp
+public sealed record ProviderErrorAutoRetrySnapshot
+{
+    public const string DefaultStrategy = "default";
+
+    public bool Enabled { get; init; }
+
+    public string Strategy { get; init; } = DefaultStrategy;
+
+    public static ProviderErrorAutoRetrySnapshot Normalize(bool? enabled, string? strategy)
+    {
+        return new ProviderErrorAutoRetrySnapshot
+        {
+            Enabled = enabled ?? true,
+            Strategy = string.IsNullOrWhiteSpace(strategy)
+                ? DefaultStrategy
+                : strategy.Trim()
+        };
+    }
+}
+```
+
+Następnie po stronie wykonania jest on mapowany na obiekt ustawień faktycznie używany przez dostawcę. Wartość tego podejścia jest bardzo bezpośrednia:
+
+- Warstwa biznesowa decyduje, czy zezwolić na ponowną próbę
+- Środowisko wykonawcze decyduje, w jaki sposób należy przeprowadzić ponowną próbę
+
+Każda ze stron radzi sobie ze swoimi problemami, nie kolidując z drugą. Wiele problemów nie jest niemożliwych do rozwiązania. Ich koszt po prostu nie został podany jednoznacznie. Przekształcenie polityki w migawkę jest zasadniczo sposobem na wcześniejsze rozliczenie tych kosztów.
+
+### Warstwa 3: Dostawcy decydują jedynie o stanie terminala i żywotności kontekstu
+
+Kiedy już dotrzemy do konkretnego dostawcy Kodeksu Claude’a lub dostawcy Kodeksu, odpowiedzialność w tym zakresie staje się w rzeczywistości bardzo cienka. Można to traktować jako ulepszenie, a nie zastąpienie.
+
+Biorąc za przykład Codex, kiedy podłącza się do współdzielonego koordynatora, tak naprawdę musi zapewnić tylko trzy rzeczy:
+
+```csharp
+await foreach (var message in ProviderErrorAutoRetryCoordinator.ExecuteAsync(
+                   prompt,
+                   options.ProviderErrorAutoRetry,
+                   retryPrompt => ExecuteCodexAttemptAsync(...),
+                   () => !string.IsNullOrWhiteSpace(resolvedThreadId),
+                   DelayAsync,
+                   IsRetryableTerminalFailure,
+                   cancellationToken))
+{
+    yield return message;
+}
+```
+
+Zauważysz, że decyzje dotyczące konkretnego dostawcy to tak naprawdę tylko te dwie:
+
+- `IsRetryableTerminalFailure`
+- `canRetryInSameContext`
+
+Codex sprawdza, czy wątek może nadal być kontynuowany, podczas gdy Claude Code sprawdza, czy cel kontynuacji nadal istnieje. Zasady wycofywania, liczba ponownych prób i monity nie powinny być wymyślane na nowo przez każdego dostawcę z osobna.
+
+Po oddzieleniu tej warstwy koszt integracji większej liczby CLI z HagiCode znacznie spada. Nie trzeba duplikować całego komputera stanu ponawiania próby. Wystarczy podłączyć warunki brzegowe tego dostawcy. Szybkie pisanie to nie to samo, co pisanie solidnie. Umieć coś połączyć, to nie to samo, co dobrze to połączyć. Uruchomienie go również nie jest tym samym, co umożliwienie jego konserwacji w miarę upływu czasu.
+
+## Łatwy do popełnienia błąd: nie traktuj każdego błędu jako możliwego do ponowienia
+
+W tej analizie najbardziej chcę podkreślić nie to, „jak wdrożyć ponawianie prób”, ale „jak uniknąć błędnych ponownych prób”.
+
+Pierwotnym punktem wyjścia do problemu był fakt, że Codex nie rozpoznał jednej wiadomości o ponownym połączeniu. Intuicyjnie wiele osób wybrałoby najmniejszą możliwą poprawkę: dodałby jeszcze jeden prefiks ciągu do białej listy. Pomysł ten nie jest do końca błędny, ale bardziej przypomina rozwiązanie na etapie demonstracyjnym niż rozwiązanie, które można utrzymać w dłuższej perspektywie.
+
+Od obecnej implementacji HagiCode system zrobił już krok w solidniejszym kierunku. Nie wpatruje się już tylko w jeden dosłowny ciąg znaków. Zamiast tego w jednolity sposób przekazuje możliwe do odzyskania stany końcowe wspólnemu koordynatorowi. Korzyści są oczywiste:
+
+- Jest mniej prawdopodobne, że całkowicie się nie powiedzie z powodu niewielkiej zmiany sformułowań w jednej wiadomości
+- Pokrycie testowe można zbudować wokół obwiedni stanu terminala, a nie pojedynczej, zakodowanej na stałe linii tekstu
+- Logika ponawiania prób staje się bardziej spójna w ramach tego samego dostawcy
+
+Oczywiście musi tu być wyraźna granica: bycie bardziej ogólnym nie oznacza bycia bardziej liberalnym. **Jeśli bieżący kontekst nie może być kontynuowany, nawet jeśli błąd wygląda na tymczasową awarię, nie należy go odtwarzać na ślepo.**
+
+Ten punkt jest krytyczny. Tym, co naprawdę sprawia, że ​​ludzie ufają systemowi, nie jest to, że czasami działa, ale to, że jest niezawodny przez większość czasu. Jeśli przepływ mogą utrzymać jedynie eksperci, do prawdziwego przyjęcia jest jeszcze daleka droga.
+
+## Trzy najcenniejsze lekcje, które należy zastosować w praktyce
+
+W tym momencie sensowne jest rozpoczęcie dyskusji z powrotem do praktyki wdrożeniowej. Jeśli planujesz zbudować podobną możliwość we własnym projekcie, oto trzy zasady, które zdecydowanie zalecam chronić w pierwszej kolejności.
+
+### 1. Budżet ponownej próby musi mieć granice
+
+Obecny domyślny rytm wycofywania HagiCode to:
+
+- 10 sekund
+- 20 sekund
+- 60 sekund
+
+Rytm ten może nie pasować do każdego systemu, ale istnienie granic musi pozostać. W przeciwnym razie automatyczna ponowna próba szybko przestanie być mechanizmem odzyskiwania i zamieni się w wzmacniacz incydentu. Nie spiesz się, aby nadać mu imponującą nazwę. Najpierw upewnij się, że rzecz może przetrwać dwie iteracje w prawdziwym zespole.
+
+### 2. Podpowiedź kontynuacji powinna być ujednolicona
+
+W projekcie zastosowano stały monit o kontynuację, dzięki czemu późniejsze próby wyraźnie podążają ścieżką kontynuacji bieżącego kontekstu, a nie rozpoczynają zupełnie nowe, kompletne żądanie. Ta funkcja nie jest olśniewająca, ale kiedy budujesz prawdziwy projekt, nie możesz się bez niej obejść. Wiele rzeczy, które wyglądają jak magia, po rozbiciu na kawałki, pozostaje jedynie dopracowanym procesem inżynieryjnym.
+
+### 3. Zarówno biblioteka współdzielona, jak i warstwa adaptera wymagają testów lustrzanych
+
+Szczególnie chcę powiedzieć trochę więcej na ten temat. Wiele zespołów napisze jedną warstwę testów we współdzielonym środowisku wykonawczym i uzna, że ​​to prawdopodobnie wystarczy. Tak nie jest.
+
+Powodem, dla którego czuję się stosunkowo pewnie co do implementacji HagiCode, jest to, że obie warstwy mają pokrycie testowe:
+
+- Dostawca współdzielony sprawdza, czy rzeczywiście nastąpiła automatyczna kontynuacja
+- Warstwa adaptera sprawdza, czy błędy końcowe i komunikaty przesyłane strumieniowo zostały poprawnie zachowane
+
+Tym razem ponownie przeprowadziłem dwie powiązane grupy testowe i w obu przypadkach przeszło pomyślnie wszystkie 31 przypadków testowych. Sam ten wynik nie dowodzi, że projekt jest doskonały, ale dowodzi co najmniej jednej rzeczy: obecna automatyczna ponowna próba nie jest projektem papierowym. Jest to możliwość ograniczona zarówno przez kod, jak i testy. Rozmowa jest tania. Pokaż mi kod. Pasuje tu idealnie.
+
+## Podsumowanie
+
+Gdyby cały artykuł trzeba było streścić w jednym zdaniu, brzmiałoby ono tak:
+
+**W przypadku interfejsów CLI agenta, takich jak Claude Code i Codex, automatyczne ponawianie prób nie powinno być implementowane jako lokalna sztuczka ukryta w ramach jednego dostawcy. Powinien być zbudowany jako połączenie wspólnego koordynatora, migawki polityki, kontroli wykonalności kontekstu i testów lustrzanych.**
+
+Korzyści z takiego rozwiązania są bardzo praktyczne:
+
+- Logika jest zapisywana raz i używana ponownie u wielu dostawców
+- To, czy żądanie może zostać ponowione, może być stabilnie przesyłane w łańcuchu wykonawczym
+- Kontynuuj bieg, gdy kontekst istnieje i zatrzymaj się, gdy go nie ma
+- To, co ostatecznie widzi frontend, to stabilny stan ukończony lub stan awarii, a nie sterta porzuconych pośrednich szumów
+
+Rozwiązanie to było stopniowo udoskonalane, podczas gdy HagiCode integrował wiele interfejsów CLI agentów w rzeczywistych scenariuszach. Kto powiedział, że programowanie wspomagane sztuczną inteligencją nie jest nową erą programowania w parach? Modele pomagają rozpocząć, ukończyć kod i rozgałęziać się, ale to, co często określa górną granicę doświadczenia, to nadal kontekst, proces i ograniczenia.
+
+Jeśli ten artykuł był dla Ciebie pomocny, możesz także zapoznać się z publicznymi punktami wejścia HagiCode:
+
+- GitHub: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Oficjalna strona internetowa: [hagicode.com](https://hagicode.com)
+- 30-minutowe praktyczne demo: [www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)
+- Wpis dotyczący instalacji na komputerze stacjonarnym: [hagicode.com/desktop/](https://hagicode.com/desktop/)
+- Parowa: [Strona sklepu Steam (dodaj do listy życzeń / wyświetl szczegóły)](https://store.steampowered.com/app/4625540/Hagicode/)
+
+HagiCode jest już na Steamie. To nie jest vaporware i umieściłem link tutaj. Jeśli korzystasz ze Steam, śmiało dodaj go do swojej listy życzeń. Kliknięcie, aby samemu się temu przyjrzeć, jest bardziej bezpośrednie niż wysłuchanie, jak wypowiadam się na ten temat jeszcze dziesięć linijek.
+
+Na razie tyle w tym temacie. Będziemy nadal spotykać się w realnych projektach.
+
+## Referencje
+
+- Strona główna projektu HagiCode: [https://hagicode.com](https://hagicode.com)
+- Repozytorium HagiCode na GitHubie: [https://github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Oficjalny film demonstracyjny: [https://www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)
+- Instrukcje instalacji na komputerze stacjonarnym: [https://hagicode.com/desktop/](https://hagicode.com/desktop/)
+
+## Informacja o prawach autorskich
+
+Dziękuję za przeczytanie. Jeśli ten artykuł był dla Ciebie przydatny, możesz go polubić, dodać do zakładek i udostępnić.
+Ta treść została stworzona we współpracy ze sztuczną inteligencją, a ostateczna treść została sprawdzona i zatwierdzona przez autora.
+- Autor: [nowość36524](https://www.newbe.pro)
+- Oryginalny artykuł: [https://docs.hagicode.com/blog/2026-02-11-agent-cli-automatic-retry/](https://docs.hagicode.com/blog/2026-02-11-agent-cli-automatic-retry/)
+- Informacja o prawach autorskich: O ile nie zaznaczono inaczej, wszystkie artykuły na tym blogu są objęte licencją BY-NC-SA. Przy ponownym zamieszczaniu proszę podać źródło.

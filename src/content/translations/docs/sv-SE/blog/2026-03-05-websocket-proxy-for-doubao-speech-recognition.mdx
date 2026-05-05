@@ -1,0 +1,502 @@
+---
+title: "Att lösa webbläsarutmaningar med webbsocketautentisering: ett praktiskt proxymönster för Doubao taligenkänning"
+date: 2026-03-05
+tags: [WebSocket, Proxy, Speech Recognition, Authentication, Backend]
+description: "Webbläsarens WebSocket API stöder inte anpassade HTTP-rubriker, vilket skapar en utmaning för taligenkänningstjänster som kräver autentiseringsdata i"
+---
+
+## Att lösa webbläsarutmaningar med webbsocketautentisering: ett praktiskt proxymönster för Doubao taligenkänning
+
+> Webbläsarens WebSocket API stöder inte anpassade HTTP-rubriker, vilket skapar en utmaning för taligenkänningstjänster som kräver autentiseringsdata i rubriker. Den här artikeln delar med oss ​​av hur vi löste det problemet i HagiCode-projektet med ett backend-proxymönster, och hur tillvägagångssättet utvecklades från lekplatsexperiment till produktionsanvändning.
+
+
+## Bakgrund
+
+När vi började bygga taligenkänning för HagiCode-projektet valde vi med tillförsikt ByteDances Taligenkänningstjänst Doubao. Den initiala designen var enkel: låt fronten ansluta direkt till Doubaos WebSocket-tjänst. Hur svårt kan det vara? Öppna bara en anslutning och skicka lite data, eller hur?
+
+Sedan kom överraskningen: Doubaos API kräver att autentiseringsinformation skickas genom HTTP-rubriker, inklusive saker som `accessToken` och `secretKey`. Det blev omedelbart besvärligt, eftersom webbläsarens WebSocket API helt enkelt inte stöder inställning av anpassade rubriker.
+
+Så vad gör du när webbläsaren inte låter dig skicka dem?
+
+Vid den tiden vägde vi två alternativ:
+
+1. Sätt in autentiseringsuppgifterna i URL-frågeparametrar - enkelt och trubbigt
+2. Lägg till ett proxylager på backend - mer arbete vid första anblicken
+
+Det första alternativet exponerar autentiseringsuppgifter direkt i frontend-kod och lokal lagring. Är det verkligen säkert? Jag var inte bekväm med det. Utöver det kräver vissa API:er rubrikbaserad verifiering, så detta tillvägagångssätt är inte ens genomförbart.
+
+Till slut valde vi det andra alternativet: implementera en WebSocket-proxy på backend. Av en slump validerades detta mönster först i vår lekplatsmiljö, och först efter att vi bekräftat dess stabilitet flyttade vi det till produktion. När allt kommer omkring vill ingen att produktionen ska fungera som ett labbexperiment.
+
+## Om HagiCode
+
+Tillvägagångssättet som delas i den här artikeln kommer från vår praktiska erfarenhet av [HagiCode](https://github.com/HagiCode-org/site) projekt.
+
+HagiCode är ett AI-kodningsassistentprojekt med stöd för röstinteraktion. Eftersom vi behövde anropa en taligenkänningstjänst från frontend, stötte vi direkt på det här WebSocket-autentiseringsproblemet, vilket ledde oss till lösningen som beskrivs här. Ibland är dessa tekniska vägspärrar frustrerande, men de tvingar dig också att lära dig mönster som visar sig vara användbara senare.
+
+## Teknisk utmaningsanalys
+
+### Webbläsare WebSocket begränsningar
+
+Standard WebSocket API ser underbart enkelt ut:
+
+```javascript
+const ws = new WebSocket('wss://example.com/ws');
+```
+
+Men den enkelheten är precis där problemet ligger - den skickar bara parametrar i URL:en och den kan inte ställa in rubriker som en HTTP-förfrågan kan:
+
+```javascript
+// This is not supported in the WebSocket API
+const ws = new WebSocket('wss://example.com/ws', {
+  headers: {
+    'Authorization': 'Bearer token'
+  }
+});
+```
+
+Och det är kärnfrågan. För tjänster som Doubao taligenkänning som är beroende av header-baserad autentisering är denna begränsning en hård blockerare.
+
+När du väl accepterar den begränsningen måste arkitekturen förändras.
+
+### Beslut om arkitektoniska design
+
+När vi utformade lösningen jämförde vi avvägningarna noggrant.
+
+**Beslut 1: Välja proxymönster**
+
+Vi jämförde två metoder:
+
+| Alternativ | Proffs | Nackdelar | Beslut |
+|------|------|------|------|
+| Native WebSocket | Lätt, enkel, direktsändning | Anslutningshantering måste hanteras manuellt | Vald |
+| SignalR | Automatisk återanslutning, stark skrivning | Alltför komplexa, extra beroenden | Avvisad |
+
+Vi valde till slut inbyggd WebSocket. För att vara ärlig var det det lättaste alternativet och en bättre passform för enkel dubbelriktad binär strömsändning. Att dra in SignalR skulle ha känts som överteknik för detta användningsfall, och det kan lägga till extra latens.
+
+**Beslut 2: Anslutningshanteringsstrategi**
+
+Vi antog en modell för "en anslutning, en session" - varje frontend WebSocket-anslutning mappas till sin egen oberoende Doubao-backend-anslutning.
+
+Fördelarna är enkla:
+- Enkel att implementera och anpassad till det vanliga användningsmönstret
+- Lättare att felsöka och felsöka
+- Bra resursisolering som förhindrar störningar mellan sessionerna
+
+Enkelt uttryckt är den direkta lösningen ibland den bästa. Komplexitet gör inte automatiskt en design bättre.
+
+**Beslut 3: Lagra autentiseringsdata**
+
+Inloggningsuppgifter lagras i backend-konfigurationsfiler (`appsettings.yml` eller miljövariabler) och laddas genom beroendeinjektion:
+
+- Enkel konfigurationsmodell som matchar befintliga backend-konventioner
+- Känslig data når aldrig frontend
+- Stöder multimiljöinställningar för utveckling, testning och produktion
+
+Den nivån av separation spelar roll. Ingen vill ha meriter som flyter runt på platser de inte borde vara.
+
+### Dataflödesdesign
+
+Det övergripande dataflödet ser ut så här:
+
+```
+Frontend (browser)
+  │
+  │ ws://backend/api/voice/ws
+  │ WebSocket (binary)
+  ▼
+Backend (proxy)
+  │
+  │ wss://openspeech.bytedance.com/
+  │ (with authentication headers)
+  ▼
+Doubao API
+```
+
+Flödet i sig är inte komplicerat:
+1. Frontend ansluter till backend-proxyn via WebSocket
+2. Backend-proxyn tar emot ljuddata och ansluter till Doubao API med autentiserade rubriker
+3. Doubao API returnerar igenkänningsresultat och proxyn vidarebefordrar dem till frontend
+4. Hela processen förblir helt asynkron med dubbelriktad streaming
+
+När ansvaret väl delas tydligt blir designen ganska naturlig.
+
+## Implementering av kärnkomponenter
+
+### 1. WebSocket-ändpunktskonfiguration
+
+```csharp
+app.Map("/ws", async context =>
+{
+    if (context.WebSockets.IsWebSocketRequest)
+    {
+        // Read configuration from query parameters
+        var appId = context.Request.Query["appId"];
+        var accessToken = context.Request.Query["accessToken"];
+
+        // Validate required parameters
+        if (string.IsNullOrEmpty(appId) || string.IsNullOrEmpty(accessToken))
+        {
+            context.Response.StatusCode = 400;
+            return;
+        }
+
+        // Accept the WebSocket connection
+        using var webSocket = await context.WebSockets.AcceptWebSocketAsync();
+
+        // Message handling loop
+        var buffer = new byte[4096];
+        while (!webSocket.CloseStatus.HasValue)
+        {
+            var result = await webSocket.ReceiveAsync(buffer, CancellationToken.None);
+
+            if (result.MessageType == WebSocketMessageType.Close)
+            {
+                await webSocket.CloseAsync(
+                    result.CloseStatus.Value,
+                    result.CloseStatusDescription,
+                    CancellationToken.None);
+                break;
+            }
+
+            // Process audio data
+            await HandleAudioDataAsync(buffer, result.Count);
+        }
+    }
+});
+```
+
+### 2. Sessionshantering
+
+```csharp
+public class DoubaoSessionManager : IDoubaoSessionManager
+{
+    private readonly ConcurrentDictionary<string, DoubaoSession> _sessions = new();
+
+    public DoubaoSession CreateSession(string connectionId)
+    {
+        var session = new DoubaoSession(connectionId);
+        _sessions[connectionId] = session;
+        return session;
+    }
+
+    public async Task SendAudioAsync(string connectionId, byte[] audioData)
+    {
+        if (_sessions.TryGetValue(connectionId, out var session))
+        {
+            await session.SendAudioAsync(audioData);
+        }
+    }
+
+    public void RemoveSession(string connectionId)
+    {
+        if (_sessions.TryRemove(connectionId, out var session))
+        {
+            session.Dispose();
+        }
+    }
+}
+```
+
+Använder `ConcurrentDictionary` för sessionshantering innebär att trådsäkerheten till stor del hanteras för oss. Varje inkommande anslutning får sin egen session och rensning sker automatiskt vid frånkoppling.
+
+### 3. Konfigurationsvalidering
+
+```csharp
+public class ClientConfigDto
+{
+    public string AppId { get; set; } = null!;
+    public string Access set; } =Token { get; null!;
+    public string? ServiceUrl { get; set; }
+    public string? ResourceId { get; set; }
+    public int? SampleRate { get; set; }
+    public int? BitsPerSample { get; set; }
+    public int? Channels { get; set; }
+
+    public void Validate()
+    {
+        if (string.IsNullOrWhiteSpace(AppId))
+            throw new ArgumentException("AppId is required");
+        if (string.IsNullOrWhiteSpace(AccessToken))
+            throw new ArgumentException("AccessToken is required");
+    }
+}
+```
+
+Konfigurationsvalidering hjälper till att upptäcka problem under uppstart istället för att låta dem misslyckas senare under körning. Det skyddet är värt att ha.
+
+## Utformning av meddelandeprotokoll
+
+Frontend och backend använder JSON-textmeddelanden för kontroll, medan binära meddelanden bär ljuddata.
+
+Exempel på kontrollmeddelande:
+
+```json
+{
+    "type": "control",
+    "messageId": "msg_123",
+    "timestamp": "2026-03-03T10:00:00Z",
+    "payload": {
+        "command": "StartRecognition",
+        "parameters": {
+            "hotwordId": "hotword1",
+            "boosting_table_id": "table123"
+        }
+    }
+}
+```
+
+Exempel på igenkänningsresultat:
+
+```json
+{
+    "type": "result",
+    "timestamp": "2026-03-03T10:00:03Z",
+    "payload": {
+        "text": "Hello world",
+        "confidence": 0.95,
+        "duration": 1500,
+        "isFinal": true,
+        "utterances": [
+            {
+                "text": "Hello",
+                "startTime": 0,
+                "endTime": 800,
+                "definite": true
+            }
+        ]
+    }
+}
+```
+
+Denna design separerar styrsignaler från ljudnyttolaster, vilket gör systemet lättare att resonera kring och implementera. Att dela ansvar rent är ofta rätt uppmaning.
+
+## Frontend-integration i praktiken
+
+### WebSocket-anslutning
+
+```javascript
+class DoubaoVoiceClient {
+    constructor(config) {
+        this.config = config;
+        this.ws = null;
+    }
+
+    async connect() {
+        const url = new URL(this.config.wsUrl);
+        // Add query parameters
+        Object.entries(this.config.params).forEach(([key, value]) => {
+            url.searchParams.set(key, value);
+        });
+
+        this.ws = new WebSocket(url);
+
+        return new Promise((resolve, reject) => {
+            this.ws.onopen = () => {
+                console.log('[DoubaoVoice] Connected');
+                resolve();
+            };
+
+            this.ws.onmessage = (event) => {
+                this._handleMessage(JSON.parse(event.data));
+            };
+
+            this.ws.onerror = reject;
+        });
+    }
+
+    _handleMessage(message) {
+        switch (message.type) {
+            case 'status':
+                this._handleStatus(message.payload);
+                break;
+            case 'result':
+                this.onResult?.(message.payload);
+                break;
+            case 'error':
+                console.error('[DoubaoVoice] Error:', message.payload);
+                break;
+        }
+    }
+}
+
+// Usage example
+const client = new DoubaoVoiceClient({
+    wsUrl: 'ws://localhost:5000/ws',
+    params: {
+        appId: 'your-app-id',
+        accessToken: 'your-access-token',
+        sampleRate: 16000,
+        bitsPerSample: 16,
+        channels: 1
+    }
+});
+```
+
+### Ljudinspelning och överföring
+
+Använder `AudioWorkletNode` för ljudbehandling ger bättre prestanda:
+
+```javascript
+// audio-worklet.js
+class AudioProcessorWorklet extends AudioWorkletProcessor {
+    process(inputs, outputs, parameters) {
+        const input = inputs[0]?.[0];
+        if (!input) return true;
+
+        // Convert to 16-bit PCM
+        const pcm = new Int16Array(input.length);
+        for (let i = 0; i < input.length; i++) {
+            pcm[i] = Math.max(-32768, Math.min(32767, input[i] * 32767));
+        }
+
+        this.port.postMessage({
+            type: 'audioData',
+            data: pcm.buffer
+        }, [pcm.buffer]);
+
+        return true;
+    }
+}
+
+registerProcessor('audio-processor', AudioProcessorWorklet);
+
+// Main thread code
+async function startAudioRecording() {
+    const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+            sampleRate: 48000
+        }
+    });
+
+    const audioContext = new AudioContext();
+    const audioSource = audioContext.createMediaStreamSource(stream);
+
+    await audioContext.audioWorklet.addModule('/audio-worklet.js');
+    const audioWorkletNode = new AudioWorkletNode(audioContext, 'audio-processor');
+
+    audioWorkletNode.port.onmessage = (event) => {
+        if (event.data.type === 'audioData' && ws?.readyState === WebSocket.OPEN) {
+            ws.send(event.data.data); // Send binary data directly
+        }
+    };
+
+    audioSource.connect(audioWorkletNode);
+}
+```
+
+`AudioWorklet` presterar mycket bättre än `ScriptProcessorNode` och undviker ljudstamproblem som äldre bearbetningsvägar ofta introducerar.
+
+## Backend-konfiguration
+
+### `appsettings.json` exempel
+
+```json
+{
+  "Serilog": {
+    "MinimumLevel": {
+      "Default": "Information",
+      "Override": {
+        "Microsoft": "Warning",
+        "System": "Warning"
+      }
+    },
+    "WriteTo": [
+      { "Name": "Console" },
+      {
+        "Name": "File",
+        "Args": { "path": "logs/log-.txt", "rollingInterval": "Day" }
+      }
+    ]
+  },
+  "Kestrel": {
+    "Urls": "http://0.0.0.0:5000"
+  }
+}
+```
+
+Loggningskonfigurationen är viktig eftersom det gör problem mycket lättare att spåra. Serilogs filsänka kan rulla loggar dagligen, vilket håller enskilda loggfiler i en hanterbar storlek.
+
+## Anteckningar och bästa praxis
+
+### 1. Anslutningsövervakning
+
+- Logga regelbundet sessionstillstånd för att spåra hela anslutningens livscykel
+- Övervaka antalet och varaktigheten av ljudsegment för att upptäcka onormala anslutningar
+- Registrera anslutningsstatus och återanslutningsbeteende för Doubao-tjänsten
+
+Detta är grundläggande operativa metoder, men de gör en verklig skillnad i produktionen.
+
+### 2. Felhantering
+
+- Fånga och logga alla WebSocket-undantag
+- Använd `IAsyncDisposable` för att säkerställa att resurserna saneras
+- Implementera graciös anslutningsavstängning och timeouthantering
+
+Kort sagt, gynna robusthet.
+
+### 3. Krav på ljudformat
+
+- Samplingsfrekvens: 16000 Hz (rekommenderas) eller 8000 Hz
+- Bitdjup: 16-bitars
+- Kanaler: mono
+- Kodning: PCM (rå)
+
+Om formatet är fel kan identifieringen misslyckas eller kvaliteten försämras avsevärt. Dessa krav har betydelse.
+
+### 4. Säkerhetsaspekter
+
+- Behåll känsliga referenser endast i backend-konfiguration
+- Genomför anslutningsgränser för att förhindra resursutmattning
+- Använd HTTPS/WSS i produktionen
+
+Säkerhet är aldrig ett mindre bekymmer.
+
+### 5. Prestandaoptimering
+
+- Använd asynkrona operationer för att undvika blockering
+- Justera buffertstorlekar efter behov (standard: 4096 byte)
+- Överväg anslutningspooling och återanvändningsstrategier
+
+Tillämpa dessa optimeringar där de är meningsfulla för din arbetsbelastning.
+
+## Implementeringsrekommendationer
+
+1. **Dockningsinstallation**: Paketera proxytjänsten som en behållare för enklare skalning och hantering
+2. **Lastbalansering**: Använd Nginx eller Envoy som en omvänd proxy för WebSocket-trafik
+3. **Hälsokontroller**: Genomför hjärtslagsbaserade kontroller för att övervaka tjänstens tillgänglighet
+4. **Loggaggregation**: Skicka loggar till ett centraliserat loggningssystem som ELK eller Loki
+
+Implementeringen kan vara enkel eller komplex beroende på team och miljö, så justera därefter.
+
+## Sammanfattning
+
+WebSockets proxymönster löser kärnproblemet att webbläsarens WebSocket API inte stöder anpassade rubriker. I HagiCode-projektet visade sig detta mönster både genomförbart och stabilt när det gick från lekplatsvalidering till produktionsinstallation.
+
+Viktiga takeaways:
+- En backend-proxy kan skicka autentiseringsinformation säkert
+- Native WebSocket är lätt och effektiv för enkla scenarier
+- Modellen "en anslutning, en session" förenklar både implementering och felsökning
+- Frontend-backend-protokollet bör separera styrsignaler från ljuddata
+
+Om du bygger en funktion som också beror på WebSocket-autentisering, hoppas jag att det här mönstret ger dig en användbar utgångspunkt.
+
+Om du har frågor, diskutera dem gärna med oss. Tekniska framsteg sker snabbare när människor jämför anteckningar.
+
+## Referenser
+
+- [HagiCode Project Repository](https://github.com/HagiCode-org/site)
+- [MDN Web API - WebSocket](https://developer.mozilla.org/en-US/docs/Web/API/WebSocket)
+- [Doubao taligenkänningsdokumentation](https://www.volcengine.com/docs/6561/81958)
+
+---
+
+Tack för att du läser. Om du tyckte att den här artikeln var användbar, klicka på gilla-knappen nedan 👍 så att fler kan upptäcka den.
+
+Det här innehållet skapades med AI-assisterat samarbete, granskades av mig och speglar mina egna åsikter och ståndpunkter.
+
+- Författare: [newbe36524](https://www.newbe.pro)
+- Artikellänk: [https://docs.hagicode.com/blog/2026-03-05-websocket-proxy-for-doubao-speech-recognition/](https://docs.hagicode.com/blog/2026-03-05-websocket-proxy-for-doubao-speech-recognition/)
+- Upphovsrättsmeddelande: Om inget annat anges är alla artiklar i den här bloggen licensierade under BY-NC-SA. Vänligen ange källan vid nytryckning.

@@ -1,0 +1,353 @@
+---
+title: "Panduan Praktis untuk Mengoptimalkan Kinerja Vite Build dengan Worker Threads"
+date: 2026-01-28
+truncate: true
+tags: [Vite, Worker Threads, Build Performance, Node.js, Frontend Engineering]
+description: "Saat bekerja dengan proyek frontend besar, pembangunan produksi bisa terasa sangat lambat. Artikel ini membagikan bagaimana kami menggunakan Node.js Worker Threads untuk mengurangi"
+---
+
+## Dari 120 Detik hingga 45 Detik: Panduan Praktis untuk Mengoptimalkan Kinerja Vite Build dengan Worker Threads
+
+> Saat bekerja dengan proyek frontend besar, pembangunan produksi bisa terasa sangat lambat. Artikel ini membagikan bagaimana kami menggunakan Node.js Worker Threads untuk mengurangi tahap kebingungan dalam build Vite dari 120 detik menjadi 45 detik, bersama dengan detail implementasi dan pembelajaran dalam proyek HagiCode.
+
+## Latar Belakang
+
+Dalam praktik rekayasa frontend kami, masalah efisiensi pembangunan menjadi semakin menonjol seiring dengan berkembangnya proyek. Khususnya, selama proses pembuatan produksi, kami biasanya memperkenalkan alat kebingungan JavaScript seperti `javascript-obfuscator` untuk melindungi logika kode sumber. Langkah ini perlu, namun juga mahal secara komputasi dan sangat terikat dengan CPU.
+
+Selama tahap awal pengembangan **HagiCode**, kami mengalami hambatan kinerja yang sangat rumit: waktu pembuatan produksi menurun dengan cepat seiring dengan berkembangnya basis kode.
+
+**Masalah spesifiknya adalah**:
+- Tugas-tugas yang membingungkan dijalankan secara serial pada satu thread, memaksimalkan satu inti CPU sementara yang lainnya tidak digunakan
+- Waktu pembuatan melonjak dari semula 30 detik menjadi 110-120 detik
+- Putaran verifikasi build pasca-perubahan menjadi sangat panjang, sehingga sangat memperlambat iterasi pengembangan
+- Dalam pipeline CI/CD, tahap pembangunan menjadi bagian yang paling memakan waktu
+
+**Mengapa HagiCode memerlukan ini?**
+HagiCode adalah asisten kode berbasis AI yang arsitektur frontendnya mencakup logika bisnis kompleks dan modul interaksi AI. Untuk memastikan keamanan kode inti kami, kami menerapkan kebingungan intensitas tinggi dalam rilis produksi. Dihadapkan dengan waktu tunggu pembangunan yang mendekati dua menit, kami memutuskan untuk melakukan optimalisasi kinerja mendalam pada sistem pembangunan.
+
+## Tentang HagiCode
+
+> Karena kami telah menyebutkan proyek ini, izinkan saya menjelaskan lebih banyak tentangnya.
+
+Jika Anda mengalami frustrasi seperti ini selama pengembangan:
+- Banyak proyek dan banyak tumpukan teknologi, dengan biaya pemeliharaan tinggi untuk skrip pembangunan
+- Konfigurasi pipeline CI/CD yang rumit, memaksa Anda memeriksa dokumen setiap kali Anda melakukan perubahan
+- Masalah kompatibilitas lintas platform yang tidak ada habisnya
+- Menginginkan AI untuk membantu menulis kode, tetapi menemukan alat yang ada tidaklah cukup pintar
+
+Maka **HagiCode**, yang sedang kami buat, mungkin menarik bagi Anda.
+
+**Apa itu HagiCode?**
+- Asisten kode berbasis AI
+- Mendukung pembuatan dan pengoptimalan kode lintas platform multi-bahasa
+- Dilengkapi dengan gamifikasi bawaan sehingga pengkodean tidak terasa membosankan
+
+**Mengapa disebutkan di sini?**
+**Solusi kebingungan JavaScript paralel** yang dibagikan dalam artikel ini persis seperti yang kami sempurnakan saat membuat HagiCode. Jika menurut Anda pendekatan teknik ini berharga, itu menunjukkan bahwa selera teknis kami mungkin cukup bagus, dan HagiCode sendiri mungkin juga layak untuk dicoba.
+
+**Ingin mempelajari lebih lanjut?**
+- GitHub: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site) (tolong beri kami Bintang)
+- Situs web resmi: [hagicode.com](https://hagicode.com)
+- Demo video: [www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/) (Demo langsung selama 30 menit)
+- Panduan instalasi: [hagicode.com/installation/docker-compose](https://hagicode.com/installation/docker-compose)
+- Beta publik sekarang terbuka: instal sekarang untuk bergabung dengan beta
+
+---
+
+## Analisis: Menemukan Titik Terobosan dalam Hambatan Kinerja
+
+Sebelum menyelesaikan masalah kinerja, pertama-tama kami perlu memperjelas pemikiran kami dan mengidentifikasi solusi teknis terbaik.
+
+### Keputusan Inti: Mengapa Memilih Thread Pekerja?
+
+Ada tiga cara utama untuk mencapai komputasi paralel di Node.js:
+1. **child_process**: membuat proses anak independen
+2. **Pekerja Web**: terutama digunakan di sisi browser
+3. **worker_threads**: dukungan multithreading asli di Node.js
+
+Setelah membandingkan opsi, HagiCode akhirnya memilih **Worker Threads** karena alasan berikut:
+- **Tidak ada overhead serialisasi**: Thread Pekerja dijalankan dalam proses yang sama dan dapat berbagi memori `SharedArrayBuffer` atau mentransfer kepemilikan, menghindari biaya serialisasi yang besar dalam komunikasi antar-proses.
+- **Dukungan asli**: dibangun di Node.js 12+ tanpa memerlukan dependensi kelas berat tambahan.
+- **Konteks terpadu**: proses debug dan logging lebih mudah dibandingkan dengan proses turunan.
+
+### Perincian Tugas: Bagaimana Seharusnya Tugas yang Membingungkan Dibagi?
+
+Sulit untuk memparalelkan kebingungan satu file bundel JS yang besar karena kodenya memiliki ketergantungan, tetapi keluaran build Vite terdiri dari beberapa **potongan**. Itu memberi kita batas paralel alami:
+
+- **Kemandirian**: setelah pengemasan Vite, ketergantungan antar bagian yang berbeda sudah dipisahkan, sehingga dapat diproses secara paralel dengan aman.
+- **Perincian yang sesuai**: proyek biasanya memiliki 10-30 bagian, yang merupakan skala yang sangat baik untuk penjadwalan paralel.
+- **Integrasi yang mudah**: the `generateBundle` plugin hook in Vite memungkinkan kita mencegat dan memproses potongan ini sebelum file dikirim.
+
+### Desain Arsitektur
+
+Kami merancang sistem pemrosesan paralel dengan empat komponen inti:
+
+1. **Pemisah Tugas**: mengulangi objek bundel Vite, memfilter file yang tidak memerlukan kebingungan seperti potongan vendor, dan menghasilkan antrean tugas.
+2. **Worker Pool Manager**: mengelola siklus hidup Pekerja dan menangani distribusi tugas, daur ulang, dan percobaan ulang jika terjadi kegagalan.
+3. **Reporter Kemajuan**: keluaran membangun kemajuan secara real-time untuk mengurangi kecemasan menunggu.
+4. **ObfuscationWorker**: thread Pekerja yang benar-benar menjalankan logika kebingungan.
+
+## Solusi: Implementasi Langsung
+
+Berdasarkan analisis di atas, kami mulai menerapkan sistem kebingungan paralel ini.
+
+### 1. Konfigurasikan Plugin Vite
+
+Pertama, kami mengintegrasikan plugin obfuscation paralel ke dalamnya `vite.config.ts`. Konfigurasinya mudah. Anda hanya perlu menentukan jumlah Pekerja dan aturan kebingungannya.
+
+```typescript
+import { defineConfig } from 'vite'
+import { parallelJavascriptObfuscator } from './buildTools/plugin'
+
+export default defineConfig(({ mode }) => {
+  const isProduction = mode === 'production'
+  
+  return {
+    build: {
+      rollupOptions: {
+        ...(isProduction
+          ? {
+              plugins: [
+                parallelJavascriptObfuscator({
+                  enabled: true,
+                  // Automatically adjust based on CPU core count; leave one core for the main thread
+                  workerCount: 4, 
+                  retryAttempts: 3,
+                  fallbackToMainThread: true, // Automatically degrade to single-thread mode on failure
+                  // Filter out vendor chunks; third-party libraries usually do not need obfuscation
+                  isVendorChunk: (fileName: string) => fileName.includes('vendor-'),
+                  obfuscationConfig: {
+                    compact: true,
+                    controlFlowFlattening: true,
+                    deadCodeInjection: true,
+                    disableConsoleOutput: true,
+                    // ... more obfuscation options
+                  },
+                }),
+              ],
+            }
+          : {}),
+      },
+    },
+  }
+})
+```
+
+### 2. Menerapkan Logika Pekerja
+
+Pekerja adalah unit yang melaksanakan tugas. Kita perlu mendefinisikan struktur data masukan dan keluaran dengan jelas.
+
+**Catatan**: meskipun kode di sini sederhana, ada beberapa kendala yang harus diperhatikan, seperti memeriksa apakah `parentPort` adalah null dan menangani kesalahan dengan benar. Dalam implementasi HagiCode, kami menemukan bahwa pola sintaksis ES6 khusus tertentu dapat menyebabkan obfuscator mogok, jadi kami menambahkan `try-catch` perlindungan.
+
+```typescript
+import { parentPort } from 'worker_threads'
+import javascriptObfuscator from 'javascript-obfuscator'
+
+export interface ObfuscationTask {
+  chunkId: string
+  code: string
+  config: any
+}
+
+export interface ObfuscationResult {
+  chunkId: string
+  obfuscatedCode: string
+  error?: string
+}
+
+// Listen for tasks sent from the main thread
+if (parentPort) {
+  parentPort.on('message', async (task: ObfuscationTask) => {
+    try {
+      // Perform obfuscation
+      const obfuscated = javascriptObfuscator.obfuscate(task.code, task.config)
+      const result: ObfuscationResult = {
+        chunkId: task.chunkId,
+        obfuscatedCode: obfuscated.getObfuscatedCode(),
+      }
+      // Send the result back to the main thread
+      parentPort?.postMessage(result)
+    } catch (error) {
+      // Handle exceptions so one Worker crash does not block the whole build
+      const result: ObfuscationResult = {
+        chunkId: task.chunkId,
+        obfuscatedCode: '',
+        error: error instanceof Error ? error.message : 'Unknown error',
+      }
+      parentPort?.postMessage(result)
+    }
+  })
+}
+```
+
+### 3. Manajer Kelompok Pekerja
+
+Ini adalah inti dari keseluruhan solusi. Kita perlu mempertahankan kumpulan Pekerja dengan ukuran tetap dan menjadwalkan tugas menggunakan strategi **FIFO (masuk pertama, keluar pertama)**.
+
+```typescript
+import { Worker } from 'worker_threads'
+import os from 'os'
+
+export class WorkerPool {
+  private workers: Worker[] = []
+  private taskQueue: Array<{
+    task: ObfuscationTask
+    resolve: (result: ObfuscationResult) => void
+    reject: (error: Error) => void
+  }> = []
+  
+  constructor(options: WorkerPoolOptions = {}) {
+    // Default to core count - 1 so the main thread still has some breathing room
+    const workerCount = options.workerCount ?? Math.max(1, (os.cpus().length || 4) - 1)
+    
+    for (let i = 0; i < workerCount; i++) {
+      this.createWorker()
+    }
+  }
+
+  private createWorker() {
+    const worker = new Worker('./worker.ts')
+    
+    worker.on('message', (result) => {
+      // After one task finishes, take the next task from the queue
+      const nextTask = this.taskQueue.shift()
+      if (nextTask) {
+        this.dispatchTask(worker, nextTask)
+      } else {
+        // If there are no pending tasks, mark the Worker as idle
+        this.activeWorkers.delete(worker)
+      }
+    })
+    
+    this.workers.push(worker)
+  }
+
+  // Submit a task to the pool
+  public runTask(task: ObfuscationTask): Promise<ObfuscationResult> {
+    return new Promise((resolve, reject) => {
+      const job = { task, resolve, reject }
+      const idleWorker = this.workers.find(w => !this.activeWorkers.has(w))
+      
+      if (idleWorker) {
+        this.dispatchTask(idleWorker, job)
+      } else {
+        this.taskQueue.push(job)
+      }
+    })
+  }
+
+  private dispatchTask(worker: Worker, job: any) {
+    this.activeWorkers.set(worker, job.task)
+    worker.postMessage(job.task)
+  }
+}
+```
+
+### 4. Pelaporan Kemajuan
+
+Menunggu itu menyakitkan, apalagi jika Anda tidak tahu berapa lama waktu yang dibutuhkan. Jadi kami menambahkan pelapor kemajuan sederhana untuk memberikan masukan waktu nyata mengenai status saat ini.
+
+```typescript
+export class ProgressReporter {
+  private completed = 0
+  private readonly total: number
+  private readonly startTime: number
+
+  constructor(total: number) {
+    this.total = total
+    this.startTime = Date.now()
+  }
+
+  increment(): void {
+    this.completed++
+    this.report()
+  }
+
+  private report(): void {
+    const now = Date.now()
+    const elapsed = now - this.startTime
+    const percentage = (this.completed / this.total) * 100
+    
+    // Simple ETA estimate
+    const avgTimePerChunk = elapsed / this.completed
+    const remaining = (this.total - this.completed) * avgTimePerChunk
+
+    console.log(
+      `[Parallel Obfuscation] ${this.completed}/${this.total} chunks completed (${percentage.toFixed(1)}%) | ETA: ${(remaining / 1000).toFixed(1)}s`
+    )
+  }
+}
+```
+
+## Latihan: Hasil dan Pembelajaran
+
+Setelah menerapkan solusi ini, kinerja pembangunan proyek HagiCode segera meningkat.
+
+### Data Tolok Ukur Kinerja
+
+Kami menguji di lingkungan berikut:
+- CPU: Intel Core i7-12700K (12 core / 20 thread)
+- RAM: 32GB DDR4
+- Node.js: v18.17.0
+- OS: Ubuntu 22.04
+
+**Perbandingan hasil**:
+- **Single-thread (sebelum pengoptimalan)**: 118 detik
+- **4 Pekerja**: 55 detik (peningkatan **53%**)
+- **8 Pekerja**: 48 detik (peningkatan **60%**)
+- **12 Pekerja**: 45 detik (peningkatan **62%**)
+
+Seperti yang Anda lihat, perolehannya tidak linier. Ketika jumlah Pekerja melebihi 8, peningkatannya menjadi lebih kecil. Hal ini terutama dibatasi oleh distribusi tugas yang merata dan hambatan bandwidth memori.
+
+### Masalah Umum dan Solusinya
+
+Dalam penggunaan HagiCode di dunia nyata, kami juga menemui beberapa kendala, jadi inilah referensinya:
+
+**Q1: Waktu pembuatan tidak berkurang banyak dan bahkan menjadi lebih lambat?**
+- **Alasan**: membuat Pekerja memiliki overhead tersendiri, atau terlalu banyak Pekerja yang dikonfigurasi, sehingga menyebabkan seringnya peralihan konteks.
+- **Solusi**: sebaiknya atur jumlah Pekerja ke `CPU core count - 1`. Periksa juga apakah ada bongkahan yang berukuran sangat besar, misalnya `> 5MB`. File "monster" semacam itu akan menjadi penghambat, jadi Anda mungkin perlu mengoptimalkan strategi pemisahan kode Anda.
+
+**Q2: Pekerja terkadang mogok dan menyebabkan kegagalan pembangunan?**
+- **Alasan**: beberapa pola sintaksis kode khusus dapat menyebabkan kesalahan internal di dalam obfuscator.
+- **Solusi**: kami menerapkan **mekanisme degradasi otomatis**. Ketika Pekerja mencapai ambang kegagalan, plugin secara otomatis kembali ke mode single-thread untuk memastikan pembangunan tidak berhenti. Pada saat yang sama, ia mencatat nama file yang menyebabkan kesalahan sehingga dapat diperbaiki nanti.
+
+**Q3: Penggunaan memori terlalu tinggi (OOM)?**
+- **Alasan**: setiap Pekerja memerlukan ruang memorinya sendiri untuk memuat obfuscator dan mengurai AST.
+- **Solusi**:
+  - Mengurangi jumlah Pekerja.
+  - Tingkatkan batas memori Node.js: `NODE_OPTIONS="--max-old-space-size=4096" npm run build`.
+  - Pastikan Pekerja tidak menyimpan referensi yang tidak perlu pada objek berukuran besar.
+
+## Kesimpulan
+
+Dengan memperkenalkan Node.js Worker Threads, kami berhasil mengurangi waktu pembuatan produksi proyek HagiCode dari 120 detik menjadi sekitar 45 detik, sehingga sangat meningkatkan pengalaman pengembangan dan efisiensi CI/CD.
+
+Inti dari solusi ini adalah:
+1. **Pisahkan tugas dengan benar**: gunakan potongan Vite sebagai unit paralel.
+2. **Kontrol sumber daya**: gunakan kumpulan Pekerja untuk menghindari kehabisan sumber daya.
+3. **Desain untuk toleransi kesalahan**: mekanisme degradasi otomatis memastikan stabilitas bangunan.
+
+Jika Anda juga kesulitan dengan efisiensi pembangunan frontend, atau proyek Anda juga melakukan pemrosesan kode yang berat, solusi ini patut untuk dicoba. Tentu saja, kami menyarankan untuk melihat langsung HagiCode, yang detail tekniknya sudah terintegrasi.
+
+Jika artikel ini membantu Anda, silakan beri kami Bintang di GitHub atau bergabunglah dengan beta publik dan cobalah.
+
+## Referensi
+
+- Dokumentasi resmi Node.js Worker Threads: [nodejs.org/api/worker_threads.html](https://nodejs.org/api/worker_threads.html)
+- dokumentasi javascript-obfuscator: [github.com/javascript-obfuscator/javascript-obfuscator](https://github.com/javascript-obfuscator/javascript-obfuscator)
+- Panduan pengembangan plugin Vite: [vitejs.dev/guide/api-plugin.html](https://vitejs.dev/guide/api-plugin.html)
+- **HagiCode GitHub**: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- **Situs web resmi HagiCode**: [hagicode.com](https://hagicode.com)
+- **Panduan instalasi**: [hagicode.com/installation/docker-compose](https://hagicode.com/installation/docker-compose)
+
+
+
+---
+
+Terima kasih telah membaca. Jika Anda merasa artikel ini bermanfaat, silakan klik tombol suka di bawah agar lebih banyak orang dapat menemukannya.
+
+Konten ini dibuat dengan kolaborasi yang dibantu AI, ditinjau oleh saya, dan mencerminkan pandangan dan posisi saya sendiri.
+
+- **Penulis:** [baru36524](https://www.newbe.pro)
+- **Tautan artikel:** [https://hagicode.com/blog/2026/01/27/optimizing-vite-build-with-worker-threads](https://hagicode.com/blog/2026/01/27/optimizing-vite-build-with-worker-threads)
+- **Pemberitahuan Hak Cipta:** Kecuali dinyatakan lain, semua artikel di blog ini dilisensikan di bawah BY-NC-SA. Harap sebutkan sumbernya saat memposting ulang.

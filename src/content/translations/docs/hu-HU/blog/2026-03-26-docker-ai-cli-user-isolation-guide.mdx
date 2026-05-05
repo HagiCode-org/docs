@@ -1,0 +1,258 @@
+---
+title: "AI CLI-eszközök futtatása Docker-tárolókban: Gyakorlati útmutató a felhasználók elkülönítéséhez és az állandó kötetekhez"
+date: 2026-03-26
+tags: [Docker, AI CLI, HagiCode, user isolation, persistent volumes, containerized deployment, Claude Code, Codex]
+description: "Az AI kódoló eszközök, például a Claude Code, a Codex és az OpenCode konténeres környezetekbe való integrálása egyszerűnek hangzik, de mindenhol vannak rejtett bonyolultságok."
+---
+
+## AI CLI-eszközök futtatása Docker-tárolókban: Gyakorlati útmutató a felhasználók elkülönítéséhez és az állandó kötetekhez
+
+> Az AI kódoló eszközök, például a Claude Code, a Codex és az OpenCode konténeres környezetekbe való integrálása egyszerűnek hangzik, de mindenhol vannak rejtett bonyolultságok. Ez a cikk részletesen bemutatja, hogy a HagiCode projekt hogyan oldja meg a Docker-telepítések alapvető kihívásait, beleértve a felhasználói engedélyeket, a konfiguráció megmaradását és a verziókezelést, így elkerülheti a gyakori buktatókat.
+
+## Háttér
+
+Amikor úgy döntöttünk, hogy az AI-kódoló CLI-eszközöket Docker-tárolókon belül futtatjuk, a legintuitívabb gondolat valószínűleg az volt: "A konténerek nem csak root-ok? Miért ne telepíthetnénk mindent közvetlenül, és hívhatnánk késznek?" A valóságban ez a látszólag egyszerű ötlet számos alapvető problémát rejt, amelyeket meg kell oldani.
+
+Először is, **a biztonsági korlátozások jelentik az első akadályt**. Vegyük például a Claude CLI-t: kifejezetten tiltja a root felhasználóként való futtatást. Ez egy kötelező biztonsági ellenőrzés, és ha rootot észlel, akkor nem hajlandó elindulni. Azt gondolhatja, nem válthatok felhasználót a `USER` direktíva? Ez nem ilyen egyszerű. Továbbra is van leképezési probléma a tárolóban lévő nem root felhasználó és a gazdagépen lévő felhasználói engedélyek között.
+
+Másodszor, **az állapot fennmaradása a második csapda**. A Claude Code bejelentkezést igényel, a Codexnek saját konfigurációja van, és az OpenCode-nak is van cache könyvtára. Ha mindent újra kell konfigurálnia minden alkalommal, amikor a tároló újraindul, az "automatizálás" gondolata elveszti értelmét. Szükségünk van ezekre a konfigurációkra, hogy a tároló életciklusán túl is fennmaradjanak.
+
+A harmadik probléma az **engedélyek konzisztenciája**. A tárolón belüli folyamatok hozzáférhetnek a gazdagép felhasználó által létrehozott konfigurációs fájlokhoz? Az UID/GID eltérések gyakran okoznak fájlengedélyezési hibákat, és ez rendkívül gyakori a valós telepítéseknél.
+
+Ezek a problémák függetlennek tűnhetnek, de a gyakorlatban szorosan összefüggenek. A HagiCode fejlesztése során fokozatosan dolgoztunk ki egy praktikus megoldást. Ezután megosztom a technikai részleteket és az ezekből a buktatókból levont tanulságokat.
+
+## A HagiCode-ról
+
+A cikkben megosztott megoldás a gyakorlati tapasztalatainkból származik [HagiCode](https://hagicode.com) projekt. A HagiCode egy nyílt forráskódú mesterséges intelligencia által támogatott programozási platform, amely több fős AI kódoló asszisztenst integrál, beleértve a Claude Code-ot, a Codex-et és az OpenCode-ot. A HagiCode-nak többplatformos és magas rendelkezésre állású telepítést igénylő projektként meg kell oldania a konténeres telepítéssel kapcsolatos kihívások teljes skáláját.
+
+Ha értékesnek találja a cikkben található műszaki megoldást, az azt jelzi, hogy a HagiCode-nak van valami valós kínálata a mérnöki gyakorlatban. Ebben az esetben a [HagiCode hivatalos weboldala](https://hagicode.com) és [GitHub adattár](https://github.com/HagiCode-org/site) mindkettőt érdemes követni.
+
+## Miért nem használhatjuk a root-ot?
+
+Itt van egy gyakori félreértés: a Docker-tárolók alapértelmezés szerint rootként futnak, tehát miért nem telepíti az eszközöket rootként? Ha így gondolja, Claude CLI gyorsan megtanítja az ellenkezőjére.
+
+```bash
+# Run Claude CLI directly as root? No.
+docker run --rm -it --user root myimage claude
+# Output: Error: This command cannot be run as root user
+```
+
+Ez szigorú biztonsági korlátozás a Claude CLI-ben. Az ok egyszerű: ezek a CLI-eszközök érzékeny felhasználói konfigurációkat olvasnak és írnak, beleértve az API tokeneket, a helyi gyorsítótárakat és még a felhasználó által írt szkripteket is. A root jogosultságokkal való futtatás túl sok kockázatot jelent.
+
+Felmerül tehát a kérdés: hogyan tudunk megfelelni a CLI biztonsági követelményeinek, miközben rugalmasan kezeljük a konténerkezelést? Módosítanunk kell a hozzáállásunkat: **ahelyett, hogy futás közben váltanánk a felhasználókat, hozzunk létre egy dedikált felhasználót a képalkotási szakaszban**.
+
+## Dedikált felhasználó létrehozása: több, mint egy név megváltoztatása
+
+Azt gondolhatja, hogy egy szingli hozzáadása `USER` sor a Dockerfile-hoz elég. Ez valóban a legegyszerűbb megközelítés, de nem elég robusztus.
+
+### Statikus létrehozás kontra dinamikus leképezés
+
+A HagiCode megközelítése az, hogy a `hagicode` 1000-es UID-vel rendelkező felhasználó, amely általában megegyezik az alapértelmezett felhasználóval a legtöbb gazdagépen:
+
+```dockerfile
+RUN groupadd -o -g 1000 hagicode && \
+    useradd -o -u 1000 -g 1000 -s /bin/bash -m hagicode && \
+    mkdir -p /home/hagicode/.claude && \
+    chown -R hagicode:hagicode /home/hagicode
+```
+
+De ez csak a képen belüli beépített felhasználót oldja meg. Mi van, ha a gazdagép felhasználója UID 1001? A tároló indításakor továbbra is támogatnia kell a dinamikus hozzárendelést.
+
+A docker-entrypoint.sh tartalmazza a kulcslogikát:
+
+```bash
+if [ -n "$PUID" ] && [ -n "$PGID" ]; then
+    if ! id hagicode >/dev/null 2>&1; then
+        groupadd -g "$PGID" hagicode
+        useradd -u "$PUID" -g "$PGID" -s /bin/bash -m hagicode
+    fi
+fi
+```
+
+Ennek a kialakításnak az előnye egyértelmű: ** használja az alapértelmezett UID 1000-et a kép készítésekor, majd dinamikusan állítsa be futás közben a `PUID` és `PGID` környezeti változók**. Nem számít, milyen UID-vel rendelkezik a gazdagép felhasználó, a konfigurációs fájlok tulajdonjoga továbbra is megfelelő.
+
+## A tartós kötetek tervezési filozófiája
+
+Minden AI CLI-eszköznek megvan a saját preferált konfigurációs könyvtára, ezért ezeket egyenként kell leképezni:
+
+| CLI eszköz | Útvonal a tárolóban | Kötet néven |
+|---------|-----------|--------|
+| Claude | `/home/hagicode/.claude` | `claude-data` |
+| Codex | `/home/hagicode/.codex` | `codex-data` |
+| OpenCode | `/home/hagicode/.config/opencode` | `opencode-config-data` |
+
+Miért használjunk elnevezett köteteket a kötési csatolások helyett? Három ok:
+
+1. **Egyszerűbb kezelés**: A megnevezett köteteket a Docker automatikusan kezeli, így nem kell manuálisan létrehozni a gazdagép-könyvtárakat.
+2. **Engedélyek elkülönítése**: A kötetek kezdeti tartalmát a felhasználó hozza létre a tárolóban, elkerülve az engedélyek ütközését a gazdagéppel.
+3. **Független migráció**: A kötetek a tárolóktól függetlenül létezhetnek, így az adatok nem vesznek el a képek frissítésekor.
+
+A docker-compose-builder-web automatikusan létrehozza a megfelelő kötetkonfigurációt:
+
+```yaml
+volumes:
+  claude-data:
+  codex-data:
+  opencode-config-data:
+
+services:
+  hagicode:
+    volumes:
+      - claude-data:/home/hagicode/.claude
+      - codex-data:/home/hagicode/.codex
+      - opencode-config-data:/home/hagicode/.config/opencode
+    user: "${PUID:-1000}:${PGID:-1000}"
+```
+
+Ügyeljen a `user` mező itt: `PUID` és `PGID` környezeti változókon keresztül vannak beinjektálva, hogy biztosítsák, hogy a tárolón belüli folyamatok a gazdagép felhasználóval megegyező identitás mellett fussanak. Ez a részlet azért fontos, mert az engedélyekkel kapcsolatos problémákat fájdalmas a hibakeresés, ha megjelennek.
+
+## Verziókezelés: beépített verziók futásidejű felülírással
+
+A Docker képverziók rögzítése elengedhetetlen a reprodukálhatósághoz. De a valódi fejlesztés során gyakran újabb verziót kell tesztelnünk, vagy sürgősen ki kell javítanunk egy hibát. Ha minden alkalommal újra kellene építenünk a képet, a munkafolyamat túlságosan nem lenne hatékony.
+
+A HagiCode stratégiája a **alapértelmezés szerint a rögzített verziók, a futásidejű felülírások pedig kiterjesztési mechanizmusként**. Ez egy pragmatikus mérnöki kompromisszum a stabilitás és a rugalmasság között.
+
+A Dockerfile.template pin-verziók itt találhatók:
+
+```dockerfile
+USER hagicode
+WORKDIR /home/hagicode
+
+# Configure the global npm install path
+RUN mkdir -p /home/hagicode/.npm-global && \
+    npm config set prefix '/home/hagicode/.npm-global'
+
+# Install CLI tools using pinned versions
+RUN npm install -g @anthropic-ai/claude-code@2.1.71 && \
+    npm install -g @openai/codex@0.112.0 && \
+    npm install -g opencode-ai@1.2.25 && \
+    npm cache clean --force
+```
+
+A docker-entrypoint.sh támogatja a futásidejű felülírásokat:
+
+```bash
+install_cli_override_if_needed() {
+    local package_name="$2"
+    local override_version="$5"
+
+    if [ -n "$override_version" ]; then
+        gosu hagicode npm install -g "${package_name}@${override_version}"
+    fi
+}
+
+# Example usage
+install_cli_override_if_needed "" "@anthropic-ai/claude-code" "" "" "${CLAUDE_CODE_CLI_VERSION}"
+```
+
+Ez lehetővé teszi egy új verzió tesztelését egy környezeti változón keresztül a kép újraépítése nélkül:
+
+```bash
+docker run -e CLAUDE_CODE_CLI_VERSION=2.2.0 myimage
+```
+
+Ez a kialakítás praktikus, mert senki sem akar újjáépíteni egy képet minden alkalommal, amikor új funkciót tesztel.
+
+## Automatikus konfigurációs befecskendezés
+
+A CLI-eszközök kézi konfigurálása mellett egyes forgatókönyvek automatikus konfigurációs befecskendezést igényelnek. A legjellemzőbb példa az API token.
+
+```bash
+if [ -n "$ANTHROPIC_AUTH_TOKEN" ]; then
+    mkdir -p /home/hagicode/.claude
+    cat > /home/hagicode/.claude/settings.json <<EOF
+{
+  "env": {
+    "ANTHROPIC_AUTH_TOKEN": "${ANTHROPIC_AUTH_TOKEN}"
+  }
+}
+EOF
+    chown -R hagicode:hagicode /home/hagicode/.claude
+fi
+```
+
+Két dolog számít itt: **az érzékeny információkat környezeti változókon keresztül adja át, ahelyett, hogy keményen kódolná őket a képbe**, és győződjön meg arról, hogy a konfigurációs fájlok tulajdonjoga helyesen van beállítva, különben a CLI-eszközök nem fogják tudni beolvasni azokat.
+
+## A legjobb gyakorlatok és a buktatók ellenőrző listája
+
+### Engedélyhibák
+
+Ez a legkönnyebb csapdába esni. A gazdagép felhasználó UID 1001, míg a tároló 1000, így az egyik oldalon létrehozott fájlok nem érhetők el a másik oldalon.
+
+```bash
+# Correct approach: make the container match the host user
+docker run \
+    -e PUID=$(id -u) \
+    -e PGID=$(id -g) \
+    myimage
+```
+
+Ez a probléma nagyon gyakori, és frusztráló lehet, amikor először találkozik vele.
+
+### A konfiguráció a tároló újraindítása után eltűnik
+
+Ha minden újraindítás után újra bejelentkezik, ellenőrizze, hogy nem felejtett el állandó kötetet csatlakoztatni:
+
+```yaml
+volumes:
+  - claude-data:/home/hagicode/.claude
+```
+
+Semmi sem frusztrálóbb, mint gondosan beállítani a konfigurációt, és látni fogja, hogy az eltűnik.
+
+### A verziók frissítésének helyes módja
+
+Ne fuss `npm install -g` közvetlenül egy futó konténerben. A helyes megközelítések a következők:
+
+1. Állítson be egy környezeti változót a felülbíráló telepítés elindításához.
+2. Vagy építsd újra a képet.
+
+```bash
+# Option 1: runtime override
+docker run -e CLAUDE_CODE_CLI_VERSION=2.2.0 myimage
+
+# Option 2: rebuild the image
+docker build -t myimage:v2 .
+```
+
+Rómába több út vezet, de egyes utak simábbak, mint mások.
+
+### Biztonsági szigorítási ellenőrzőlista
+
+- Adja át az API-tokeneket a környezeti változókon keresztül, ahelyett, hogy beírná őket a képbe.
+- Állítsa be a konfigurációs fájl engedélyeit a következőre: `600`.
+- Mindig futtassa az alkalmazást nem root felhasználóként.
+- Rendszeresen frissítse a CLI-verziókat a biztonsági rések javítása érdekében.
+
+A biztonság mindig fontos, de az igazi kihívást annak következetes gyakorlati érvényesítése jelenti.
+
+## Az új CLI-eszközök támogatásának kiterjesztése
+
+Ha a jövőben egy új CLI-eszközt szeretne támogatni, mindössze három lépésből áll:
+
+1. **Dockerfile.template**: a telepítési lépés hozzáadása.
+2. **docker-entrypoint.sh**: a verziófelülírási logika hozzáadása.
+3. **docker-compose-builder-web**: az állandó kötetleképezés hozzáadása.
+
+Ez a sablon alapú kialakítás egyszerűvé teszi a bővítést anélkül, hogy megváltoztatná az alapvető logikát.
+
+## Következtetés
+
+Az AI CLI-eszközök Docker-tárolókban való futtatása három alapvető kihívást jelent: **felhasználói engedélyek, konfigurációs perzisztencia és verziókezelés**. A dedikált felhasználók, a névre szóló kötetelválasztás és a környezeti változó alapú felülírások kombinálásával a HagiCode projekt biztonságos és rugalmas telepítési architektúrát épített fel.
+
+Főbb tervezési pontok:
+
+- **Felhasználói elkülönítés**: Hozzon létre egy dedikált felhasználót a képalkotási szakaszban a dinamikus futásidejű támogatással `PUID`/`PGID` feltérképezése.
+- **Perzisztencia-stratégia**: Minden CLI-eszköz saját elnevezett kötetet kap, így az újraindítások nem befolyásolják a konfigurációt.
+- **Verziós rugalmasság**: A rögzített alapértelmezések biztosítják a reprodukálhatóságot, míg a futásidejű felülírások teret adnak a tesztelésnek.
+- **Automatikus konfiguráció**: Az érzékeny konfiguráció automatikusan beadható a környezeti változókon keresztül.
+
+Ez a megoldás egy ideje stabilan fut a HagiCode projektben, és remélem hasznos hivatkozási pontokat kínál a hasonló igényű fejlesztőknek.
+
+## Szerzői jogi megjegyzés
+
+Köszönöm, hogy elolvastad. Ha hasznosnak találta ezt a cikket, lájkolja, jelölje meg könyvjelzővel és ossza meg.
+Ez a tartalom mesterséges intelligencia által támogatott együttműködéssel készült, és a végső tartalmat a szerző felülvizsgálta és megerősítette.
+- Szerző: [newbe36524](https://www.newbe.pro)
+- Eredeti cikk: [https://docs.hagicode.com/blog/2026-03-26-docker-ai-cli-user-isolation-guide/](https://docs.hagicode.com/blog/2026-03-26-docker-ai-cli-user-isolation-guide/)
+- Szerzői jog: Ha nincs másképp jelezve, a blog minden cikke a BY-NC-SA licenc alá tartozik. Az újraküldésnél kérjük feltüntetni a forrást.

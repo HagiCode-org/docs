@@ -1,0 +1,435 @@
+---
+title: Jak vybudovat distribuční stanici pro rychlé stahování s nízkonákladovými cloudovými servery
+date: 2026-04-15
+tags: [cloud server, Nginx, cache, file distribution, cost optimization]
+description: "Jak vybudovat distribuční stanici pro rychlé stahování s nízkonákladovými cloudovými servery: Šířka pásma cloudového úložiště je absurdně drahá, přeshraniční přístup bolestivě"
+---
+
+## Jak vybudovat distribuční stanici pro rychlé stahování s nízkonákladovými cloudovými servery
+
+> Šířka pásma cloudového úložiště je absurdně drahá, přeshraniční přístup je bolestně pomalý a ceny CDN stačí na to, aby kohokoli vyděsily... Pokud řešíte distribuci souborů, pravděpodobně tyto problémy dobře znáte. V tomto příspěvku se chci podělit o nízkonákladový přístup, který jsme vyvinuli při stavbě [HagiCode](https://hagicode.com): cloudový server plus vrstva mezipaměti Nginx. Náklady klesly asi o polovinu, zatímco rychlost stahování se docela zlepšila, což bylo alespoň trochu uklidňující.
+
+## Pozadí
+
+Pokud jde o internet, rychlost stahování a stabilita jsou skutečně součástí uživatelské zkušenosti. Ať už provozujete open-source projekt nebo komerční produkt, stále musíte uživatelům poskytnout spolehlivý způsob stahování souborů.
+
+Stahování souborů přímo z cloudového úložiště, jako je Azure Blob Storage nebo AWS S3, vypadá jednoduše, ale přináší to několik praktických problémů:
+
+**Latence sítě**: Přeshraniční a meziregionální přístup může být natolik pomalý, že budete chtít rozbít klávesnici. Pokud budou uživatelé muset čekat věčně, zážitek to samozřejmě nebude skvělý.
+
+**Náklady na šířku pásma**: Výstupní provoz z cloudového úložiště je bolestivě drahý. Přístup k Azure Blob Storage z pevninské Číny stojí asi 0,5 CNY za GB, což znamená, že 1 TB za měsíc dává dohromady zhruba 500 CNY. Pro malý tým to není zanedbatelná částka. Koneckonců, peníze nikoho nepocházejí z větru.
+
+**Omezení přístupu**: V některých regionech je přístup k zámořským cloudovým službám nestabilní a někdy je prostě nedostupný. Uživatelé chtějí soubory stáhnout, ale nemohou, což je pro všechny frustrující.
+
+**Cena CDN**: Komerční CDN mohou tyto problémy vyřešit, ale cena je stejně reálná. Většina malých týmů to prostě nemůže ospravedlnit.
+
+Existuje tedy řešení, které je zároveň cenově dostupné a praktické? Ano. Použijte cloudový server, reverzní proxy a vrstvu mezipaměti. Je to přímý přístup, ale funguje. Náklady klesnou asi o polovinu a rychlost se také zlepší, což je slušný kompromis.
+
+## O HagiCode
+
+Tuto architekturu jsme nevymysleli ze vzduchu. Vyšlo to z našich reálných zkušeností, na kterých jsme pracovali [HagiCode](https://hagicode.com).
+
+HagiCode je asistent kódování umělé inteligence a my potřebujeme zajistit stahování pro distribuce na straně serveru i na straně počítače. Vzhledem k tomu, že se jedná o nástroj pro vývojáře, je důležité, aby si jej uživatelé po celém světě mohli stáhnout rychle a spolehlivě. To je přesně důvod, proč jsme v první řadě museli vymyslet nízkonákladovou distribuční strategii.
+
+Pokud si myslíte, že toto řešení vypadá užitečně, pak je možná naše konstrukce alespoň dostatečně slušná... a pokud je to tak, HagiCode samotný by také mohl stát za kontrolu.
+
+## Architektura Design
+
+### Celková architektura
+
+Začněme s úplnou architekturou:
+
+```
+User request
+    ↓
+DNS resolution
+    ↓
+┌─────────────────────────────────────┐
+│   Reverse proxy layer (Traefik/Bunker Web) │ ← SSL termination, routing, security protection
+├─────────────────────────────────────┤
+│   Ports: 80/443                     │
+│   Features: Automatic Let's Encrypt certificates │
+│             Host routing            │
+└─────────────────────────────────────┘
+    ↓
+┌─────────────────────────────────────┐
+│   Cache layer (Nginx)               │ ← File caching, Gzip compression
+├─────────────────────────────────────┤
+│   Ports: 8080(server) / 8081(desktop) │
+│   Cache strategy:                   │
+│   - index.json: 1 hour              │
+│   - other files: 7 days             │
+│   Cache size: 1GB                   │
+└─────────────────────────────────────┘
+    ↓
+┌─────────────────────────────────────┐
+│   Origin (Azure Blob Storage)       │ ← File storage
+└─────────────────────────────────────┘
+```
+
+Základní myšlenka této architektury je jednoduchá: **umístění mezipaměti mezi uživatele a cloudové úložiště**.
+
+Požadavky uživatelů nejprve dorazí na vrstvu reverzního proxy na cloudovém serveru a poté převezme mezipaměť Nginx. Pokud je požadovaný soubor již uložen v mezipaměti, je okamžitě vrácen. Pokud ne, Nginx jej načte z cloudového úložiště a zároveň uloží místní kopii. Až si příště někdo vyžádá stejný soubor, cloudové úložiště už nemusí být znovu zapojeno.
+
+### Proč zvolit tuto architekturu?
+
+**Výhody cloudových serverů**:
+- Předvídatelné náklady: poskytovatelé jako Alibaba Cloud nabízejí levné cloudové servery s 1–2 instancemi vCPU a 2 GB RAM za cenu kolem 50–100 CNY za měsíc
+- Flexibilní nasazení: můžete volně konfigurovat pravidla reverzního proxy a zásady ukládání do mezipaměti
+- Flexibilní geografie: můžete si vybrat regiony serveru blíže vašim uživatelům
+- Dobrá škálovatelnost: S rostoucí návštěvností můžete upgradovat specifikaci serveru
+
+**Reverzní proxy + architektura mezipaměti**:
+- Snižte tlak na původ: ukládejte horké soubory do mezipaměti, abyste omezili přímý přístup ke cloudovému úložišti
+- Nižší náklady: provoz cloudového serveru je mnohem levnější než výstup z cloudového úložiště
+- Zlepšete rychlost: Blízký přístup a šířka pásma serveru jsou obvykle lepší než přímé poskytování cloudového úložiště
+
+**Proč zvolit Nginx jako vrstvu mezipaměti?**
+
+Nebyla to náhodná volba. Nginx zde má několik skutečných výhod:
+
+1. Vysoký výkon: Nginx je široce uznáván pro vynikající výkon reverzního proxy
+2. Starší ukládání do mezipaměti: vestavěné `proxy_cache` funkce je stabilní a spolehlivá
+3. Nízké využití zdrojů: může běžet pouze s 256 MB paměti
+4. Flexibilní konfigurace: na různé typy souborů můžete použít různé zásady mezipaměti
+
+## Reverzní proxy vrstva: Traefik vs Bunker Web
+
+Řešení nasazení HagiCode podporuje dvě možnosti reverzního proxy a každá z nich má své vlastní silné stránky:
+
+| Možnost | Charakteristika | Vhodné scénáře |
+|------|------|----------|
+| **Traefik** | Lehký, automatický SSL, jednoduchá konfigurace | Základní nasazení, scénáře s nízkým provozem |
+| **Bunker Web** | Vestavěný WAF, ochrana DDoS, ochrana proti botům | Scénáře s vysokým zabezpečením a vysokým provozem |
+
+### Traefik: Lehká první volba
+
+Traefik je moderní HTTP reverzní proxy a load balancer. Jeho největší výhodou je jednoduchá konfigurace a certifikát Let's Encrypt dokáže získat automaticky.
+
+Pro počáteční nasazení nebo scénáře s nízkým provozem je Traefik často velmi dobrou volbou:
+- Využívá relativně málo zdrojů; 1,5 CPU a 512 MB paměti stačí
+- SSL certifikáty se konfigurují automaticky, takže je nemusíte spravovat sami
+- Směrování se konfiguruje pomocí štítků Docker, což je dostatečně pohodlné
+
+### Bunker Web: Pro scénáře s vysokým zabezpečením
+
+Bunker Web je firewall webových aplikací založený na Nginx s komplexnější ochranou zabezpečení.
+
+Kdy byste měli zvážit přechod na Bunker Web? Obvykle v těchto případech:
+- Jste pod útokem DDoS
+- Potřebujete ochranu ModSecurity
+- Chcete ochranu proti botům
+- Máte přísnější bezpečnostní požadavky
+
+HagiCode poskytuje `switch-deployment.sh` skript, takže můžete rychle přepínat mezi dvěma možnostmi:
+
+```bash
+# Switch to Bunker Web
+./switch-deployment.sh bunkerweb
+
+# Switch back to Traefik
+./switch-deployment.sh traefik
+
+# Check current status
+./switch-deployment.sh status
+```
+
+Skript provádí předběžné kontroly, kontroly stavu a automatické vrácení zpět, takže proces přepínání je poměrně bezpečný a spolehlivý.
+
+## Konfigurace vrstvy mezipaměti Nginx
+
+Vrstva mezipaměti je jádrem celé architektury, takže konfigurace Nginx dělá obrovský rozdíl ve výkonu mezipaměti.
+
+### Konfigurace cesty mezipaměti
+
+```nginx
+# Cache path configuration
+proxy_cache_path /var/cache/nginx levels=1:2 keys_zone=azure_cache:10m
+                   max_size=1g inactive=7d use_temp_path=off;
+```
+
+Podrobnosti parametru:
+- `levels=1:2`: hierarchie adresářů mezipaměti se dvěma úrovněmi pro zlepšení efektivity přístupu k souborům
+- `keys_zone=azure_cache:10m`: zóna úložiště klíčů mezipaměti; Na velké množství klíčů stačí 10 MB
+- `max_size=1g`: maximální velikost mezipaměti je 1 GB
+- `inactive=7d`: odstranit soubory uložené v mezipaměti, pokud k nim nebylo 7 dní přistupováno
+- `use_temp_path=off`: zapisovat přímo do adresáře mezipaměti pro lepší výkon
+
+### Strategie vrstvené mezipaměti
+
+Různé typy souborů vyžadují různé strategie mezipaměti:
+
+```nginx
+# Server download service
+server {
+    listen 8080;
+
+    # Short-term cache for index.json (to allow timely updates)
+    location /index.json {
+        proxy_cache azure_cache;
+        proxy_cache_valid 200 1h;
+        proxy_cache_key "$scheme$server_port$request_uri";
+        add_header X-Cache-Status $upstream_cache_status;
+        add_header Cache-Control "public, max-age=3600";
+
+        # Reverse proxy to Azure OSS
+        proxy_pass https://${SERVER_DL_HOST}/${SERVER_DL_CONTAINER}$uri?${SERVER_DL_SAS_TOKEN};
+        proxy_ssl_server_name on;
+        proxy_ssl_protocols TLSv1.2 TLSv1.3;
+    }
+
+    # Long-term cache for static files such as installation packages
+    location / {
+        proxy_cache azure_cache;
+        proxy_cache_valid 200 7d;
+        proxy_cache_key "$scheme$server_port$request_uri";
+        add_header X-Cache-Status $upstream_cache_status;
+        add_header Cache-Control "public, max-age=604800";
+
+        proxy_pass https://${SERVER_DL_HOST}/${SERVER_DL_CONTAINER}$uri?${SERVER_DL_SAS_TOKEN};
+        proxy_ssl_server_name on;
+        proxy_ssl_protocols TLSv1.2 TLSv1.3;
+    }
+}
+```
+
+**Proč je to takto navrženo?**
+
+`index.json` je soubor kontroly verze, takže je třeba jej neprodleně aktualizovat. S 1-hodinovým oknem mezipaměti mohou uživatelé zjistit nové vydání maximálně do jedné hodiny po zveřejnění.
+
+Statické soubory, jako jsou instalační balíčky, se mění zřídka, takže jejich ukládání do mezipaměti po dobu 7 dnů výrazně snižuje přístup k původnímu zdroji. Když je potřeba aktualizace, stačí vymazat mezipaměť ručně.
+
+**`X-Cache-Status` hlavička odpovědi**:
+
+Toto záhlaví vám pomůže zkontrolovat chování přístupu k mezipaměti:
+- `HIT`: zásah do mezipaměti
+- `MISS`: cache miss, vyzvednuto z puvodu
+- `EXPIRED`: mezipaměť vypršela, znovu načteno z původního místa
+- `BYPASS`: vynechaná mezipaměť
+
+Jak to zkontrolovat:
+```bash
+curl -I https://server.dl.hagicode.com/app.zip
+```
+
+## Analýza nákladů
+
+Předpokládejme 1 TB stahování za měsíc. Pojďme si to spočítat:
+
+| Možnost | Náklady na provoz | Náklady na server | Celkem |
+|------|----------|------------|------|
+| Přímé Azure OSS | Asi 500 CNY | 0 CNY | 500 CNY |
+| Cloudový server + OSS (poměr zásahů mezipaměti 80 %) | 100 CNY + 80 CNY | 60 CNY | 240 CNY |
+| Komerční CDN | 300–500 CNY | 0 CNY | 300–500 CNY |
+
+**Závěr**: přidání vrstvy mezipaměti může snížit náklady na distribuci zhruba o 50 %.
+
+Tento odhad předpokládá 80% poměr přístupů do mezipaměti. V praxi, pokud se soubory často nemění, může být poměr zásahů ještě vyšší.
+
+## Praxe nasazení
+
+### Příprava prostředí
+
+Nejprve nakonfigurujte proměnné prostředí:
+
+```bash
+cd /path/to/hagicode_aliyun_deployment/docker
+cp .env.example .env
+vi .env  # Fill in the Azure OSS SAS URL and Lark Webhook URL
+```
+
+**Důležité**: `.env` obsahuje citlivé informace, jako je token SAS a URL webhooku. Nikdy jej nezavazujte k řízení verzí.
+
+### Konfigurace DNS
+
+Přidejte následující záznamy DNS A:
+- `server.dl.hagicode.com` → IP serveru
+- `desktop.dl.hagicode.com` → IP serveru
+
+### Inicializujte server
+
+Použijte Ansible k automatické inicializaci serveru:
+
+```bash
+cd /path/to/hagicode_aliyun_deployment
+ansible-playbook -i ./ansible/inventory/hosts.yml ./ansible/playbooks/init.yml
+```
+
+Tato příručka automaticky zpracovává následující úkoly:
+- Vytvořte uživatele nasazení
+- Nainstalujte Docker a Docker Compose
+- Nakonfigurujte klíče SSH
+- Nastavte pravidla brány firewall
+
+To je hlavní nastavovací práce a automatizace ušetří spoustu času.
+
+### Nasadit Služby
+
+```bash
+./deploy.sh
+```
+
+Skript nasazení vám pomůže provést následující:
+- Zkontrolujte konfiguraci prostředí
+- Vytáhněte nejnovější kód
+- Spusťte kontejnery Docker
+- Spusťte zdravotní kontroly
+- Odeslat oznámení o nasazení (Lark)
+
+Stačí jeden příkaz, který udržuje proces pohodlný.
+
+### Ověřte rozmístění
+
+```bash
+# Check container status
+docker ps
+
+# Test the download domains
+curl -I https://server.dl.hagicode.com/index.json
+curl -I https://desktop.dl.hagicode.com/index.json
+```
+
+## Provozní tipy
+
+### Správa mezipaměti
+
+Mezipaměti také potřebují čas od času údržbu:
+
+**Zkontrolujte využití mezipaměti disku**:
+```bash
+docker volume inspect docker_nginx-cache
+du -sh /var/lib/docker/volumes/docker_nginx-cache/_data
+```
+
+**Vymažte mezipaměť ručně**:
+```bash
+./clear-cache.sh
+```
+
+Nebo v případě potřeby spusťte přímo ruční příkazy:
+```bash
+docker exec nginx sh -c "rm -rf /var/cache/nginx/*"
+docker restart nginx
+```
+
+### Limity zdrojů
+
+Na 1jádrovém serveru s kapacitou 2 GB vypadá konfigurace limitu prostředků takto:
+
+```yaml
+services:
+  traefik:
+    deploy:
+      resources:
+        limits:
+          cpus: '1.50'
+          memory: 512M
+
+  nginx:
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 256M
+```
+
+Chcete-li sledovat využití zdrojů, můžete občas spustit:
+```bash
+docker stats
+```
+
+### Postupy zabezpečení tokenů SAS
+
+Token SAS je pověření používané pro přístup k Azure Blob Storage, takže jeho únik by byl vážný:
+
+- Nespáchat `.env` soubor do správy verzí; už je to uvnitř `.gitignore`
+- Nastavte vhodnou dobu vypršení platnosti tokenu SAS, doporučuje se 1 rok
+- Omezte oprávnění tokenu SAS pouze pro čtení
+- Tokeny SAS pravidelně střídejte
+
+### Monitorování a upozornění
+
+HagiCode integruje upozornění Lark/Feishu Webhook, která mohou odesílat upozornění na následující události:
+- Úspěch nebo neúspěch nasazení
+- Stav vymazání mezipaměti
+- Servisní výjimky
+
+Oznámení zahrnují informace o serveru, časová razítka a podrobnosti o chybách, takže řešení problémů je mnohem rychlejší.
+
+### Rozšíření s vysokou dostupností
+
+Když jeden server již nestačí, můžete zvážit následující:
+
+1. **Horizontální škálování**: nasaďte více uzlů a rozdělte provoz pomocí kruhové obsluhy DNS nebo nástroje pro vyrovnávání zatížení
+2. **CDN vpředu**: Umístěte CDN před cloudové servery pro ještě rychlejší přístup
+3. **Zahřívání mezipaměti**: použijte skripty k předběžnému načtení horkých souborů do mezipaměti
+
+## Poznámky
+
+Je třeba mít na paměti několik věcí:
+
+1. **Certifikáty SSL**: Let's Encrypt má rychlostní limity, takže nepřepínejte nasazení příliš často, jinak může selhat vydání certifikátu
+2. **Vymazání mezipaměti**: po aktualizaci důležitých souborů nezapomeňte vymazat mezipaměť, jinak si uživatelé mohou stále stáhnout starou verzi
+3. **Správa protokolů**: pravidelně čistěte protokoly Docker, jinak se disk může zaplnit
+4. **Strategie zálohování**: zálohujte soubory jako např `Traefik acme.json` a konfigurace Bunker Web
+5. **Monitorování a výstrahy**: nakonfigurujte oznámení Feishu, abyste mohli sledovat stav nasazení a rychle reagovat na problémy
+
+## Závěr
+
+Stačí cloudový server a mezipaměť Nginx. HagiCode používá toto řešení s poměrně nízkými měsíčními náklady, kolem 60-100 CNY za server, a výsledky byly velmi solidní. Hlavní výhody jsou:
+
+- **Předvídatelné náklady**: zhruba o 50 % levnější než přímé používání cloudového úložiště nebo placení za komerční CDN
+- **Flexibilní nasazení**: vyberte si Traefik nebo Bunker Web v závislosti na vašich potřebách
+- **Silná škálovatelnost**: v případě potřeby můžete škálovat horizontálně nebo přidat CDN později
+- **Jednoduché operace**: Shell skripty a Ansible usnadňují automatizované nasazení
+
+Pro malé týmy a nezávislé vývojáře, kteří potřebují distribuci souborů, je to rozhodně praktická možnost, kterou stojí za to vyzkoušet.
+
+HagiCode tuto architekturu již nějakou dobu stabilně provozuje ve výrobě a stahování globálních uživatelů zůstalo spolehlivé. Pokud hledáte podobné řešení, stojí za to ho vyzkoušet.
+
+## Rekapitulace balíčku technologií
+
+Na závěr uvádíme souhrn použitých technologií:
+
+| Komponenta | Výběr | Účel |
+|------|------|------|
+| Cloudový server | Alibaba Cloud ECS | Základní běhové prostředí |
+| Reverzní proxy | Traefik / Bunker Web | Ukončení SSL, směrování, ochrana zabezpečení |
+| Vrstva mezipaměti | Nginx | Reverzní ukládání do mezipaměti proxy, komprese Gzip |
+| Ukládání souborů | Azure Blob Storage | Původ souboru |
+| Kontejnerizace | Docker Compose | Orchestrování služeb |
+| automatizace | Ansible | Správa konfigurace serveru |
+| Oznámení | Webhook Lark/Feishu | Oznámení o stavu nasazení |
+
+## Reference
+
+Zde jsou referenční materiály uvedené v tomto příspěvku:
+
+- Projekt HagiCode: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Web HagiCode: [hagicode.com](https://hagicode.com)
+- 30minutová praktická ukázka: [www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)
+- Instalace Docker Compose jedním kliknutím: [docs.hagicode.com/installation/docker-compose](https://docs.hagicode.com/installation/docker-compose)
+- Rychlá instalace na plochu: [hagicode.com/desktop/](https://hagicode.com/desktop/)
+
+---
+
+Pokud vám tento příspěvek pomohl, už to stojí za to:
+- Dejte like, ať to najde více lidí
+- Spusťte projekt na GitHubu: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Pro více informací navštivte oficiální stránky: [hagicode.com](https://hagicode.com)
+- Podívejte se na 30minutové praktické demo: [www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)
+- Vyzkoušejte instalaci jedním kliknutím: [docs.hagicode.com/installation/docker-compose](https://docs.hagicode.com/installation/docker-compose)
+- Rychle nainstalujte desktopovou aplikaci: [hagicode.com/desktop/](https://hagicode.com/desktop/)
+- Veřejná beta byla spuštěna a můžete si ji vyzkoušet
+
+---
+
+To je k tomuto příspěvku vše. Doufám, že vám toto řešení pomůže. Pokud máte lepší nápady, klidně se o ně podělte. Technologie se vždy snáze zdokonalují, když se lidé učí jeden od druhého.
+
+## Upozornění na autorská práva
+
+Děkuji za přečtení. Pokud se vám tento článek zdál užitečný, můžete jej lajkovat, přidat do záložek a sdílet.
+Tento obsah byl vytvořen ve spolupráci s umělou inteligencí a konečná verze byla zkontrolována a schválena autorem.
+- autor: [newbe36524](https://www.newbe.pro)
+- Původní odkaz: [https://docs.hagicode.com/blog/2026-04-15-low-cost-cloud-server-download-distribution-station/](https://docs.hagicode.com/blog/2026-04-15-low-cost-cloud-server-download-distribution-station/)
+- Upozornění na autorská práva: Pokud není uvedeno jinak, všechny články na tomto blogu jsou licencovány podle BY-NC-SA. Při opětovném odeslání uveďte zdroj.

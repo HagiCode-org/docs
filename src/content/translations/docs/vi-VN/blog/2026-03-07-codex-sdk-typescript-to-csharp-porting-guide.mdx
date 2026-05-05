@@ -1,0 +1,296 @@
+---
+title: "Từ TypeScript đến C#: Thực hành chuyển đổi ngôn ngữ chéo cho Codex SDK"
+date: 2026-03-07
+tags: ["C#", TypeScript, SDK, Codex, "cross-language", porting]
+description: "Nói một cách đơn giản, bài viết này cũng là một phần của chúng tôi: nó ghi lại toàn bộ quá trình chuyển SDK TypeScript Codex chính thức sang C#. Gọi nó là 'cổng'"
+---
+
+## Từ TypeScript đến C#: Thực hành chuyển đổi ngôn ngữ chéo cho Codex SDK
+
+> Nói một cách đơn giản, bài viết này cũng là một phần của chúng tôi: nó ghi lại toàn bộ quá trình chuyển SDK TypeScript Codex chính thức sang C#. Gọi nó là "cảng" nghe có vẻ quá dễ dàng - nó giống một cuộc phiêu lưu dài hơn, bởi vì hai ngôn ngữ này có những tính cách rất khác nhau, và chúng tôi phải tìm cách khiến chúng hợp tác với nhau.
+
+## Nền
+
+Codex là công cụ AI Agent CLI do OpenAI phát hành và nó thực sự mạnh mẽ. Nhóm chính thức cung cấp SDK TypeScript trong `@openai/codex` gói. Nó tương tác với Codex CLI bằng cách gọi `codex exec --experimental-json` lệnh và phân tích luồng sự kiện JSONL.
+
+Vấn đề là trong dự án HagiCode, chúng ta cần sử dụng nó trong môi trường .NET thuần túy - cụ thể là trong các dịch vụ phụ trợ C# và ứng dụng máy tính để bàn. Chúng tôi không thể đưa thời gian chạy Node.js vào một dự án .NET một cách hợp lý chỉ để gọi một công cụ CLI. Điều đó sẽ quá cồng kềnh.
+
+Vì vậy, chúng tôi chỉ có hai lựa chọn: duy trì lớp cầu nối Node.js phức tạp hoặc tự xây dựng SDK C# gốc.
+
+Chúng tôi đã chọn cái sau.
+
+## Giới thiệu về HagiCode
+
+Bài viết này cũng xuất phát trực tiếp từ kinh nghiệm thực tế của chúng tôi trong [Mã Hagi](https://hagicode.com) dự án. HagiCode là một dự án trợ lý mã hóa AI mã nguồn mở. Nói một cách dễ hiểu, điều đó có nghĩa là duy trì nhiều thành phần cùng một lúc: tiện ích mở rộng VSCode ở giao diện người dùng, dịch vụ AI ở phần phụ trợ và máy khách để bàn đa nền tảng. Sự phức tạp đa ngôn ngữ, đa nền tảng đó chính xác là lý do tại sao chúng tôi cần SDK C# gốc - chúng tôi thực sự không muốn chạy Node.js trong dự án .NET.
+
+Nếu bạn thấy bài viết này hữu ích, vui lòng cho chúng tôi một ngôi sao trên GitHub: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site). Bạn cũng có thể truy cập trang web chính thức để tìm hiểu thêm: [hagicode.com](https://hagicode.com). Thật đáng khích lệ khi một dự án nguồn mở nhận được sự hỗ trợ.
+
+## Nội dung cốt lõi
+
+### So sánh thiết kế kiến trúc
+
+Trước khi dịch mã từng cái một, trước tiên chúng tôi phải hiểu thiết kế kiến trúc của cả hai SDK. Bạn phải hiểu cả hai mặt trước khi có thể chuyển chúng tốt.
+
+Kiến trúc cốt lõi của TypeScript SDK trông như thế này:
+
+```
+Codex (entry class)
+  └── CodexExec (executor, manages child processes)
+      └── Thread (conversation thread)
+          ├── run() / runStreamed() (synchronous/asynchronous execution)
+          └── event stream parsing
+```
+
+SDK C# giữ nguyên phân lớp kiến trúc nhưng điều chỉnh các chi tiết triển khai. Ý tưởng tổng thể rất đơn giản: duy trì tính nhất quán của API trong khi tận dụng tối đa các tính năng của ngôn ngữ C# trong quá trình triển khai.
+
+### Loại chuyển đổi hệ thống
+
+Đây là phần cơ bản nhất và cũng là phần quan trọng nhất của công việc. Nếu nền tảng yếu thì mọi việc sau đó sẽ trở nên khó khăn hơn.
+
+Hệ thống kiểu của TypeScript linh hoạt hơn C# và đó đơn giản là sự thật. Chúng tôi cần tìm một chiến lược lập bản đồ phù hợp:
+
+| Bản đánh máy | C# | Ghi chú |
+|------------|-----|------|
+| `interface` / `type` | `record` | Sử dụng C# `record` cho cấu trúc dữ liệu bất biến |
+| `chuỗi \| vô giá trị` | `string?` | Loại tham chiếu có thể rỗng |
+| `boolean \| không xác định` | `bool?` | Boolean rỗng |
+| `AsyncGenerator` | `IAsyncEnumerable` | Trình lặp không đồng bộ |
+
+**Hệ thống loại sự kiện** là một ví dụ điển hình. TypeScript sử dụng các kiểu kết hợp để xác định các sự kiện:
+
+```typescript
+export type ThreadEvent =
+  | ThreadStartedEvent
+  | TurnStartedEvent
+  | TurnCompletedEvent
+  | ...
+```
+
+Trong C#, chúng tôi sử dụng hệ thống phân cấp kế thừa và khớp mẫu để đạt được hiệu ứng tương tự:
+
+```csharp
+public abstract record ThreadEvent(string Type);
+
+public sealed record ThreadStartedEvent(string ThreadId) : ThreadEvent("thread.started");
+public sealed record TurnStartedEvent() : ThreadEvent("turn.started");
+public sealed record TurnCompletedEvent(Usage Usage) : ThreadEvent("turn.completed");
+// ...
+```
+
+Chúng tôi đã chọn `record` thay vì `class` bởi vì các đối tượng sự kiện phải bất biến, điều này phù hợp với mục đích đằng sau việc sử dụng các đối tượng đơn giản trong TypeScript. các `sealed` từ khóa cũng ngăn chặn sự kế thừa bổ sung và cung cấp không gian cho trình biên dịch để tối ưu hóa.
+
+### Điểm chuyển chính
+
+#### 1. Trình phân tích sự kiện
+
+Phân tích sự kiện là cốt lõi của toàn bộ SDK vì nó xác định liệu chúng ta có thể hiểu chính xác mọi thông báo được Codex CLI trả về hay không. Nếu phân tích cú pháp sai, mọi thứ sau đó đều lãng phí công sức.
+
+Phiên bản TypeScript sử dụng `JSON.parse()` để phân tích từng dòng JSON:
+
+```typescript
+export function parseEvent(line: string): ThreadEvent {
+  const data = JSON.parse(line);
+  // Handle different event types...
+}
+```
+
+Phiên bản C# sử dụng `System.Text.Json.JsonDocument` thay vào đó:
+
+```csharp
+public static ThreadEvent Parse(string line)
+{
+    using var document = JsonDocument.Parse(line);
+    var root = document.RootElement;
+    var type = GetRequiredString(root, "type", "event.type");
+
+    return type switch
+    {
+        "thread.started" => new ThreadStartedEvent(GetRequiredString(root, "thread_id", ...)),
+        "turn.started" => new TurnStartedEvent(),
+        "turn.completed" => new TurnCompletedEvent(ParseUsage(...)),
+        // ...
+        _ => new UnknownThreadEvent(type, root.Clone()),
+    };
+}
+```
+
+Có một mẹo nhỏ nhưng quan trọng ở đây: `root.Clone()` là bắt buộc, bởi vì các phần tử từ `JsonDocument` trở nên không hợp lệ sau khi tài liệu được xử lý. Chúng tôi cần giữ lại một bản sao cho các loại sự kiện không xác định. Đó đơn giản là một trong những điểm khác biệt giữa việc xử lý JSON của C# và JavaScript.
+
+#### 2. Sự khác biệt trong quản lý quy trình
+
+Đây là điểm khác biệt nhất của hai SDK. Node.js và .NET có các quy ước thời gian chạy khác nhau, do đó việc triển khai phải thích ứng.
+
+TypeScript sử dụng Node.js `spawn()` chức năng:
+
+```typescript
+const child = spawn(this.executablePath, commandArgs, { env, signal });
+```
+
+C# sử dụng .NET `System.Diagnostics.Process`:
+
+```csharp
+using var process = new Process { StartInfo = startInfo };
+process.Start();
+
+// stdin/stdout/stderr must be managed manually
+```
+
+Cụ thể hơn, phiên bản C# cần định cấu hình quy trình như thế này:
+
+```csharp
+var startInfo = new ProcessStartInfo
+{
+    FileName = _executablePath,
+    RedirectStandardInput = true,
+    RedirectStandardOutput = true,
+    RedirectStandardError = true,
+    UseShellExecute = false,
+    CreateNoWindow = true,
+};
+```
+
+Sự khác biệt lớn nhất là cơ chế hủy bỏ. Sử dụng TypeScript `AbortSignal`, là một phần của API Web và rất thuận tiện để làm việc với:
+
+```typescript
+const child = spawn(cmd, args, { signal: cancellationSignal });
+```
+
+Sử dụng C# `CancellationToken` thay vào đó:
+
+```csharp
+public async IAsyncEnumerable<string> RunAsync(
+    CodexExecArgs args,
+    [EnumeratorCancellation] CancellationToken cancellationToken = default)
+{
+    // Check cancellation status inside the loop
+    while (!cancellationToken.IsCancellationRequested)
+    {
+        // Process output...
+    }
+
+    // Terminate the process when cancellation is requested
+    if (cancellationToken.IsCancellationRequested)
+    {
+        try { process.Kill(entireProcessTree: true); } catch { }
+    }
+}
+```
+
+Ở cấp độ cao, đây chỉ là một ví dụ khác về sự khác biệt giữa hệ sinh thái API Web và hệ sinh thái .NET.
+
+#### 3. Duy trì tuần tự hóa cấu hình
+
+Cả hai SDK đều triển khai logic chuyển đổi cấu hình JSON thành cấu hình TOML vì Codex CLI chấp nhận ghi đè cấu hình ở định dạng TOML. Phần này phải hoàn toàn nhất quán, nếu không, cùng một cấu hình sẽ hoạt động khác nhau trong hai SDK.
+
+Đó là loại chi tiết bạn không thể thỏa hiệp. Thành công hay thất bại thường phụ thuộc vào những chi tiết như thế này.
+
+### Chi tiết triển khai
+
+#### Cấu trúc dự án
+
+Chúng tôi đã tạo cấu trúc dự án sau:
+
+```
+CodexSdk/
+├── CodexSdk.csproj
+├── Codex.cs           # Entry class
+├── CodexThread.cs     # Conversation thread
+├── CodexExec.cs       # Executor
+├── Events.cs          # Event type definitions
+├── Items.cs           # Item type definitions
+├── EventParser.cs     # Event parser
+├── OutputSchemaTempFile.cs  # Temporary file management
+└── ...
+```
+
+Đó là một cấu trúc khá sạch sẽ và điều đó đã giúp ích rất nhiều trong quá trình cập cảng.
+
+#### Ví dụ sử dụng
+
+Cách sử dụng cơ bản vẫn nhất quán với TypeScript SDK:
+
+```csharp
+using CodexSdk;
+
+// Create a Codex instance
+var codex = new Codex();
+var thread = codex.StartThread();
+
+// Execute a query
+var result = await thread.RunAsync("Summarize this repository.");
+Console.WriteLine(result.FinalResponse);
+```
+
+Xử lý sự kiện phát trực tuyến tận dụng khả năng khớp mẫu C#:
+
+```csharp
+await foreach (var @event in thread.RunStreamedAsync("Analyze the code."))
+{
+    switch (@event)
+    {
+        case ItemCompletedEvent itemCompleted
+            when itemCompleted.Item is AgentMessageItem msg:
+            Console.WriteLine($"Assistant: {msg.Text}");
+            break;
+        case TurnCompletedEvent completed:
+            Console.WriteLine($"Tokens: in={completed.Usage.InputTokens}");
+            break;
+        case CommandExecutionItem command:
+            Console.WriteLine($"Command: {command.Command}");
+            break;
+    }
+}
+```
+
+### Ghi chú
+
+Trong quá trình thực hiện, chúng tôi đã thu thập được một số bài học thực tế:
+
+1. **Quản lý quy trình**: Phiên bản C# phải quản lý toàn bộ vòng đời của quy trình theo cách thủ công, bao gồm cả việc chấm dứt quy trình trong khi hủy. sử dụng `Kill(entireProcessTree: true)` để đảm bảo các tiến trình con cũng được dọn sạch.
+
+2. **Xử lý lỗi**: Chúng tôi sử dụng `InvalidOperationException` để đưa ra các lỗi phân tích cú pháp, giữ nguyên kiểu xử lý lỗi tương tự như TypeScript SDK.
+
+3. **Dọn dẹp tài nguyên**: `OutputSchemaTempFile` dụng cụ `IAsyncDisposable` để đảm bảo các tập tin tạm thời được dọn sạch một cách chính xác.
+
+4. **Biến môi trường**: Phiên bản C# hỗ trợ ghi đè hoàn toàn các biến môi trường của quy trình thông qua `CodexOptions.Env`. Đây là một tính năng nhỏ nhưng rất thiết thực.
+
+5. **Sự khác biệt về nền tảng**: Phiên bản C# không bao gồm logic của phiên bản TypeScript để tự động định vị các tệp nhị phân bên trong các gói npm. Vì các dự án .NET thường không phụ thuộc vào npm nên đường dẫn đến `codex` thực thi phải được chỉ định thông qua `CODEX_EXECUTABLE` biến môi trường hoặc `CodexPathOverride`.
+
+## Kết luận
+
+Việc chuyển SDK TypeScript hoàn thiện sang C# không chỉ là vấn đề chuyển đổi cú pháp - nó còn đòi hỏi phải hiểu triết lý thiết kế của cả hai ngôn ngữ. Tính linh hoạt của TypeScript và các tính năng của hệ sinh thái JavaScript như `AbortSignal` cần các bản sao thích hợp trong C#.
+
+Điểm mấu chốt là: **duy trì tính nhất quán của API quan trọng hơn việc duy trì tính nhất quán ở cấp độ triển khai**. Người dùng quan tâm đến việc giao diện có dễ sử dụng hay không chứ không phải việc triển khai bên trong có giống nhau hay không. Điều đó nghe có vẻ đơn giản, nhưng việc thực hiện những đánh đổi đó cần có sự phán xét.
+
+Nếu bạn đang làm việc trên một cổng đa ngôn ngữ tương tự, kinh nghiệm của chúng tôi là trước tiên bạn phải hiểu đầy đủ kiến trúc SDK gốc, sau đó dịch từng mô-đun và cuối cùng sử dụng bộ thử nghiệm hoàn chỉnh để đảm bảo tính nhất quán về hành vi. Loại công việc này không thể vội vàng được.
+
+Mọi thứ cuối cùng sẽ thành công.
+
+---
+
+## Tài liệu tham khảo
+
+- SDK TypeScript chính thức: [github.com/openai/codex](https://github.com/openai/codex)
+- Mã nguồn SDK C #: [github.com/HagiCode-org/site/tree/main/repos/playground/CodexDotnet](https://github.com/HagiCode-org/site/tree/main/repos/playground/CodexDotnet)
+- Tài liệu Codex chính thức: [codex.docs.anysphere.co](https://codex.docs.anysphere.co)
+
+---
+
+**Nếu bài viết này giúp ích cho bạn**:
+
+- Hãy cho chúng tôi một ngôi sao trên GitHub: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Truy cập trang web chính thức để tìm hiểu thêm: [hagicode.com](https://hagicode.com)
+- Xem bản demo trực tiếp 30 phút: [www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)
+- Hãy thử cài đặt bằng một cú nhấp chuột: [docs.hagicode.com/installation/docker-compose](https://docs.hagicode.com/installation/docker-compose)
+- Cài đặt nhanh cho máy khách Desktop: [hagicode.com/desktop/](https://hagicode.com/desktop/)
+- Phiên bản beta công khai đã bắt đầu và bạn có thể dùng thử
+
+---
+
+Cảm ơn bạn đã đọc. Nếu bạn thấy bài viết này hữu ích, vui lòng nhấp vào nút thích bên dưới để nhiều người có thể khám phá nó.
+
+Nội dung này được tạo ra với sự cộng tác có sự hỗ trợ của AI, được tác giả xem xét và phản ánh quan điểm cũng như quan điểm của chính tác giả.
+
+- tác giả: [newbe36524](https://www.newbe.pro)
+- Liên kết bài viết: [https://docs.hagicode.com/blog/2026-03-07-codex-sdk-typescript-to-csharp-porting-guide/](https://docs.hagicode.com/blog/2026-03-07-codex-sdk-typescript-to-csharp-porting-guide/)
+- Thông báo bản quyền: Trừ khi có quy định khác, tất cả các bài viết trên blog này đều được cấp phép theo BY-NC-SA. Vui lòng ghi rõ nguồn khi đăng lại.

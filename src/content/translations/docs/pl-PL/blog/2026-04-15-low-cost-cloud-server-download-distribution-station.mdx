@@ -1,0 +1,435 @@
+---
+title: Jak zbudować stację dystrybucyjną szybkiego pobierania za pomocą tanich serwerów w chmurze
+date: 2026-04-15
+tags: [cloud server, Nginx, cache, file distribution, cost optimization]
+description: "Jak zbudować stację dystrybucji szybkiego pobierania za pomocą tanich serwerów w chmurze: przepustowość pamięci w chmurze jest absurdalnie droga, dostęp transgraniczny bolesny"
+---
+
+## Jak zbudować stację dystrybucyjną szybkiego pobierania za pomocą tanich serwerów w chmurze
+
+> Przepustowość przechowywania w chmurze jest absurdalnie droga, dostęp transgraniczny boleśnie powolny, a ceny CDN wystarczą, aby każdego odstraszyć... Jeśli zajmujesz się dystrybucją plików, prawdopodobnie dobrze znasz te problemy. W tym poście chcę podzielić się niskokosztowym podejściem, które wypracowaliśmy podczas budowy [Kod Hagi](https://hagicode.com): serwer w chmurze plus warstwa buforowania Nginx. Koszt spadł o około połowę, a prędkość pobierania znacznie wzrosła, co było przynajmniej trochę pocieszające.
+
+## Tło
+
+Jeśli chodzi o Internet, prędkość pobierania i stabilność są naprawdę częścią doświadczenia użytkownika. Niezależnie od tego, czy prowadzisz projekt open source, czy produkt komercyjny, nadal musisz zapewnić użytkownikom niezawodny sposób pobierania plików.
+
+Pobieranie plików bezpośrednio z magazynu w chmurze, takiego jak Azure Blob Storage lub AWS S3, wygląda prosto, ale wiąże się z kilkoma praktycznymi problemami:
+
+**Opóźnienie sieci**: Dostęp transgraniczny i międzyregionalny może być na tyle powolny, że masz ochotę rozwalić klawiaturę. Jeśli użytkownicy będą musieli czekać wiecznie, doświadczenie z pewnością nie będzie wspaniałe.
+
+**Koszt przepustowości**: Ruch wychodzący z magazynu w chmurze jest boleśnie kosztowny. Dostęp do usługi Azure Blob Storage z Chin kontynentalnych kosztuje około 0,5 CNY za GB, co oznacza, że ​​1 TB miesięcznie to około 500 CNY. Dla małego zespołu nie jest to niewielka kwota. W końcu nikt nie bierze pieniędzy z wiatru.
+
+**Ograniczenia dostępu**: W niektórych regionach dostęp do zagranicznych usług w chmurze jest niestabilny, a czasami po prostu niedostępny. Użytkownicy chcą pobrać pliki, ale nie mogą, co jest frustrujące dla wszystkich.
+
+**Koszt CDN**: Komercyjne sieci CDN mogą rozwiązać te problemy, ale cena jest równie realna. Większość małych zespołów po prostu nie jest w stanie tego uzasadnić.
+
+Czy istnieje zatem rozwiązanie, które jest jednocześnie niedrogie i praktyczne? Tak. Użyj serwera w chmurze, odwrotnego proxy i warstwy buforowania. Jest to proste podejście, ale działa. Koszt spada o około połowę, a prędkość również się poprawia, co jest przyzwoitym kompromisem.
+
+## O HagiCodzie
+
+Nie wymyśliliśmy tej architektury z powietrza. Wynika to z naszych rzeczywistych doświadczeń, nad którymi pracowaliśmy [Kod Hagi](https://hagicode.com).
+
+HagiCode to asystent kodowania AI i musimy zapewnić pliki do pobrania zarówno dla dystrybucji po stronie serwera, jak i komputerów stacjonarnych. Ponieważ jest to narzędzie dla programistów, ważne jest, aby użytkownicy na całym świecie mogli je pobrać szybko i niezawodnie. Właśnie dlatego musieliśmy w pierwszej kolejności opracować strategię taniej dystrybucji.
+
+Jeśli uważasz, że to rozwiązanie wygląda na przydatne, to może nasza inżynieria jest przynajmniej przyzwoita... a jeśli tak jest, warto sprawdzić także sam HagiCode.
+
+## Projekt Architektury
+
+### Ogólna architektura
+
+Zacznijmy od pełnej architektury:
+
+```
+User request
+    ↓
+DNS resolution
+    ↓
+┌─────────────────────────────────────┐
+│   Reverse proxy layer (Traefik/Bunker Web) │ ← SSL termination, routing, security protection
+├─────────────────────────────────────┤
+│   Ports: 80/443                     │
+│   Features: Automatic Let's Encrypt certificates │
+│             Host routing            │
+└─────────────────────────────────────┘
+    ↓
+┌─────────────────────────────────────┐
+│   Cache layer (Nginx)               │ ← File caching, Gzip compression
+├─────────────────────────────────────┤
+│   Ports: 8080(server) / 8081(desktop) │
+│   Cache strategy:                   │
+│   - index.json: 1 hour              │
+│   - other files: 7 days             │
+│   Cache size: 1GB                   │
+└─────────────────────────────────────┘
+    ↓
+┌─────────────────────────────────────┐
+│   Origin (Azure Blob Storage)       │ ← File storage
+└─────────────────────────────────────┘
+```
+
+Podstawowa idea tej architektury jest prosta: **umieść pamięć podręczną między użytkownikami a pamięcią w chmurze**.
+
+Żądania użytkowników najpierw docierają do warstwy odwrotnego proxy na serwerze w chmurze, a następnie przejmuje warstwę pamięci podręcznej Nginx. Jeżeli żądany plik znajduje się już w pamięci podręcznej, jest on natychmiast zwracany. Jeśli nie, Nginx pobiera go z magazynu w chmurze i jednocześnie przechowuje kopię lokalną. Następnym razem, gdy ktoś poprosi o ten sam plik, przechowywanie w chmurze nie będzie musiało być ponownie wykorzystywane.
+
+### Dlaczego warto wybrać tę architekturę?
+
+**Zalety serwerów w chmurze**:
+- Przewidywalny koszt: dostawcy tacy jak Alibaba Cloud oferują niedrogie serwery w chmurze z 1-2 instancjami vCPU i 2 GB RAM w cenie około 50-100 CNY miesięcznie
+- Elastyczne wdrażanie: możesz dowolnie konfigurować reguły odwrotnego proxy i zasady buforowania
+- Elastyczna lokalizacja geograficzna: możesz wybierać regiony serwerów bliżej swoich użytkowników
+- Dobra skalowalność: możesz aktualizować specyfikację serwera w miarę wzrostu ruchu
+
+**Odwrotny serwer proxy + architektura pamięci podręcznej**:
+- Zmniejsz presję pochodzenia: buforuj gorące pliki, aby ograniczyć bezpośredni dostęp do pamięci w chmurze
+- Niższy koszt: ruch na serwerze w chmurze jest znacznie tańszy niż ruch wychodzący z magazynu w chmurze
+- Popraw prędkość: dostęp w pobliżu i przepustowość serwera są zwykle lepsze niż bezpośrednie dostarczanie pamięci masowej w chmurze
+
+**Dlaczego warto wybrać Nginx jako warstwę pamięci podręcznej?**
+
+To nie był przypadkowy wybór. Nginx ma tutaj kilka realnych zalet:
+
+1. Wysoka wydajność: Nginx jest powszechnie uznawany za doskonałą wydajność odwrotnego proxy
+2. Dojrzałe buforowanie: wbudowane `proxy_cache` funkcja jest stabilna i niezawodna
+3. Niskie zużycie zasobów: może działać z zaledwie 256 MB pamięci
+4. Elastyczna konfiguracja: możesz zastosować różne zasady pamięci podręcznej do różnych typów plików
+
+## Odwrotna warstwa proxy: Traefik kontra Bunker Web
+
+Rozwiązanie wdrożeniowe HagiCode obsługuje dwie opcje odwrotnego proxy, a każda z nich ma swoje mocne strony:
+
+| Opcja | Charakterystyka | Odpowiednie scenariusze |
+|------|------|----------|
+| **Traefik** | Lekki, automatyczny SSL, prosta konfiguracja | Podstawowe wdrożenie, scenariusze o małym natężeniu ruchu |
+| **Sieć bunkra** | Wbudowana ochrona WAF, DDoS, ochrona przed botami | Scenariusze o wysokim poziomie bezpieczeństwa i dużym natężeniu ruchu |
+
+### Traefik: lekki pierwszy wybór
+
+Traefik to nowoczesny odwrotny serwer proxy HTTP i moduł równoważenia obciążenia. Jego największą zaletą jest to, że konfiguracja jest prosta i może automatycznie uzyskiwać certyfikaty Let's Encrypt.
+
+W przypadku początkowych wdrożeń lub scenariuszy o małym natężeniu ruchu Traefik jest często bardzo dobrym wyborem:
+- Zużywa stosunkowo niewiele zasobów; Wystarczy 1,5 procesora i 512 MB pamięci
+- Certyfikaty SSL konfigurowane są automatycznie, więc nie musisz samodzielnie nimi zarządzać
+- Routing jest konfigurowany za pomocą etykiet Dockera, co jest wystarczająco wygodne
+
+### Sieć bunkrów: dla scenariuszy o wysokim poziomie bezpieczeństwa
+
+Bunker Web to zapora sieciowa oparta na Nginx z bardziej kompleksową ochroną bezpieczeństwa.
+
+Kiedy warto rozważyć przejście na Bunker Web? Zwykle w takich przypadkach:
+- Jesteś ofiarą ataku DDoS
+- Potrzebujesz ochrony ModSecurity
+- Chcesz ochrony przed botami
+- Masz bardziej rygorystyczne wymagania dotyczące bezpieczeństwa
+
+HagiCode zapewnia `switch-deployment.sh` skrypt, dzięki czemu możesz szybko przełączać się między dwiema opcjami:
+
+```bash
+# Switch to Bunker Web
+./switch-deployment.sh bunkerweb
+
+# Switch back to Traefik
+./switch-deployment.sh traefik
+
+# Check current status
+./switch-deployment.sh status
+```
+
+Skrypt przeprowadza kontrole wstępne, sprawdzanie stanu i automatyczne wycofywanie zmian, dzięki czemu proces przełączania jest dość bezpieczny i niezawodny.
+
+## Konfiguracja warstwy pamięci podręcznej Nginx
+
+Warstwa pamięci podręcznej jest rdzeniem całej architektury, więc konfiguracja Nginx ma ogromny wpływ na wydajność pamięci podręcznej.
+
+### Konfiguracja ścieżki pamięci podręcznej
+
+```nginx
+# Cache path configuration
+proxy_cache_path /var/cache/nginx levels=1:2 keys_zone=azure_cache:10m
+                   max_size=1g inactive=7d use_temp_path=off;
+```
+
+Szczegóły parametrów:
+- `levels=1:2`: hierarchia katalogów pamięci podręcznej z dwoma poziomami w celu poprawy wydajności dostępu do plików
+- `keys_zone=azure_cache:10m`: strefa przechowywania kluczy pamięci podręcznej; 10 MB wystarczy na dużą liczbę kluczy
+- `max_size=1g`: maksymalny rozmiar pamięci podręcznej wynosi 1 GB
+- `inactive=7d`: usuń pliki z pamięci podręcznej, jeśli nie korzystano z nich przez 7 dni
+- `use_temp_path=off`: zapisz bezpośrednio w katalogu pamięci podręcznej, aby uzyskać lepszą wydajność
+
+### Strategia wielopoziomowej pamięci podręcznej
+
+Różne typy plików wymagają różnych strategii pamięci podręcznej:
+
+```nginx
+# Server download service
+server {
+    listen 8080;
+
+    # Short-term cache for index.json (to allow timely updates)
+    location /index.json {
+        proxy_cache azure_cache;
+        proxy_cache_valid 200 1h;
+        proxy_cache_key "$scheme$server_port$request_uri";
+        add_header X-Cache-Status $upstream_cache_status;
+        add_header Cache-Control "public, max-age=3600";
+
+        # Reverse proxy to Azure OSS
+        proxy_pass https://${SERVER_DL_HOST}/${SERVER_DL_CONTAINER}$uri?${SERVER_DL_SAS_TOKEN};
+        proxy_ssl_server_name on;
+        proxy_ssl_protocols TLSv1.2 TLSv1.3;
+    }
+
+    # Long-term cache for static files such as installation packages
+    location / {
+        proxy_cache azure_cache;
+        proxy_cache_valid 200 7d;
+        proxy_cache_key "$scheme$server_port$request_uri";
+        add_header X-Cache-Status $upstream_cache_status;
+        add_header Cache-Control "public, max-age=604800";
+
+        proxy_pass https://${SERVER_DL_HOST}/${SERVER_DL_CONTAINER}$uri?${SERVER_DL_SAS_TOKEN};
+        proxy_ssl_server_name on;
+        proxy_ssl_protocols TLSv1.2 TLSv1.3;
+    }
+}
+```
+
+**Dlaczego zostało to zaprojektowane w ten sposób?**
+
+`index.json` to plik sprawdzania wersji, dlatego należy go niezwłocznie zaktualizować. Dzięki 1-godzinnemu oknu pamięci podręcznej użytkownicy mogą wykryć nową wersję w ciągu maksymalnie godziny po publikacji.
+
+Pliki statyczne, takie jak pakiety instalacyjne, zmieniają się rzadko, więc buforowanie ich przez 7 dni znacznie ogranicza dostęp do Origin. Gdy konieczna jest aktualizacja, możesz po prostu ręcznie wyczyścić pamięć podręczną.
+
+**`X-Cache-Status` nagłówek odpowiedzi**:
+
+Ten nagłówek pomaga sprawdzić zachowanie trafień w pamięci podręcznej:
+- `HIT`: trafienie w pamięć podręczną
+- `MISS`: brak pamięci podręcznej, pobrany z źródła
+- `EXPIRED`: pamięć podręczna wygasła, ponownie pobrano z Origin
+- `BYPASS`: pamięć podręczna pominięta
+
+Jak to sprawdzić:
+```bash
+curl -I https://server.dl.hagicode.com/app.zip
+```
+
+## Analiza kosztów
+
+Załóżmy, że ruch związany z pobieraniem wynosi 1 TB miesięcznie. Zróbmy matematykę:
+
+| Opcja | Koszt ruchu | Koszt serwera | Razem |
+|------|----------|------------|------|
+| Bezpośredni system operacyjny Azure | Około 500 CNY | CNY 0 | 500 CNY |
+| Serwer w chmurze + OSS (współczynnik trafień w pamięci podręcznej 80%) | 100 CNY + 80 CNY | 60 CNY | 240 CNY |
+| Komercyjny CDN | 300-500 juanów | CNY 0 | 300-500 juanów |
+
+**Wniosek**: dodanie warstwy pamięci podręcznej może obniżyć koszty dystrybucji o około 50%.
+
+Szacunki te zakładają, że współczynnik trafień w pamięci podręcznej wynosi 80%. W praktyce, jeśli pliki nie zmieniają się często, współczynnik trafień może być jeszcze wyższy.
+
+## Praktyka wdrożeniowa
+
+### Przygotowanie środowiska
+
+Najpierw skonfiguruj zmienne środowiskowe:
+
+```bash
+cd /path/to/hagicode_aliyun_deployment/docker
+cp .env.example .env
+vi .env  # Fill in the Azure OSS SAS URL and Lark Webhook URL
+```
+
+**Ważne**: `.env` plik zawiera poufne informacje, takie jak token SAS-owy i adres URL webhooka. Nigdy nie przekazuj tego do kontroli wersji.
+
+### Konfiguracja DNS
+
+Dodaj następujące rekordy DNS A:
+- `server.dl.hagicode.com` → IP serwera
+- `desktop.dl.hagicode.com` → IP serwera
+
+### Zainicjuj serwer
+
+Użyj Ansible, aby automatycznie zainicjować serwer:
+
+```bash
+cd /path/to/hagicode_aliyun_deployment
+ansible-playbook -i ./ansible/inventory/hosts.yml ./ansible/playbooks/init.yml
+```
+
+Ten podręcznik automatycznie obsługuje następujące zadania:
+- Utwórz użytkownika wdrożenia
+- Zainstaluj Docker i Docker Compose
+- Skonfiguruj klucze SSH
+- Ustaw reguły zapory sieciowej
+
+Jest to główna praca konfiguracyjna, a automatyzacja pozwala zaoszczędzić dużo czasu.
+
+### Wdróż usługi
+
+```bash
+./deploy.sh
+```
+
+Skrypt wdrażania pomaga wykonać następujące czynności:
+- Sprawdź konfigurację środowiska
+- Pobierz najnowszy kod
+- Uruchom kontenery Docker
+- Uruchom kontrolę stanu
+- Wysyłaj powiadomienia o wdrożeniu (Lark)
+
+Wystarczy jedno polecenie, co zapewnia wygodę procesu.
+
+### Sprawdź wdrożenie
+
+```bash
+# Check container status
+docker ps
+
+# Test the download domains
+curl -I https://server.dl.hagicode.com/index.json
+curl -I https://desktop.dl.hagicode.com/index.json
+```
+
+## Wskazówki operacyjne
+
+### Zarządzanie pamięcią podręczną
+
+Pamięci podręczne również wymagają konserwacji od czasu do czasu:
+
+**Sprawdź użycie dysku pamięci podręcznej**:
+```bash
+docker volume inspect docker_nginx-cache
+du -sh /var/lib/docker/volumes/docker_nginx-cache/_data
+```
+
+**Wyczyść pamięć podręczną ręcznie**:
+```bash
+./clear-cache.sh
+```
+
+Lub w razie potrzeby uruchom bezpośrednio polecenia ręczne:
+```bash
+docker exec nginx sh -c "rm -rf /var/cache/nginx/*"
+docker restart nginx
+```
+
+### Limity zasobów
+
+Na serwerze 1-rdzeniowym o pojemności 2 GB konfiguracja limitu zasobów wygląda następująco:
+
+```yaml
+services:
+  traefik:
+    deploy:
+      resources:
+        limits:
+          cpus: '1.50'
+          memory: 512M
+
+  nginx:
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 256M
+```
+
+Aby monitorować wykorzystanie zasobów, możesz od czasu do czasu uruchomić:
+```bash
+docker stats
+```
+
+### Praktyki dotyczące bezpieczeństwa tokenu SAS
+
+Token SAS to poświadczenie używane do uzyskiwania dostępu do usługi Azure Blob Storage, więc jego wyciek byłby poważny:
+
+- Nie popełniaj `.env` plik do kontroli wersji; już jest `.gitignore`
+- Ustaw odpowiedni czas wygaśnięcia tokenu SAS, zalecany 1 rok
+- Ogranicz uprawnienia tokenu SAS do tylko do odczytu
+- Regularnie obracaj tokenami SAS
+
+### Monitorowanie i alerty
+
+HagiCode integruje powiadomienia Lark/Feishu Webhook, które mogą wysyłać powiadomienia o następujących zdarzeniach:
+- Sukces lub porażka wdrożenia
+- Stan czyszczenia pamięci podręcznej
+- Wyjątki serwisowe
+
+Powiadomienia obejmują informacje o serwerze, znaczniki czasu i szczegóły błędów, dzięki czemu rozwiązywanie problemów jest znacznie szybsze.
+
+### Rozszerzenia o wysokiej dostępności
+
+Gdy jeden serwer już nie wystarczy, możesz rozważyć następujące kwestie:
+
+1. **Skalowanie poziome**: wdrażaj wiele węzłów i dystrybuuj ruch za pomocą działania okrężnego DNS lub modułu równoważenia obciążenia
+2. **CDN z przodu**: umieść CDN przed serwerami w chmurze, aby uzyskać jeszcze szybszy dostęp
+3. **Podgrzewanie pamięci podręcznej**: użyj skryptów, aby wstępnie załadować gorące pliki do pamięci podręcznej
+
+## Notatki
+
+Jest kilka rzeczy, o których warto pamiętać:
+
+1. **Certyfikaty SSL**: Let's Encrypt ma ograniczenia szybkości, dlatego nie zmieniaj wdrożeń zbyt często, gdyż w przeciwnym razie wydanie certyfikatu może się nie powieść
+2. **Czyszczenie pamięci podręcznej**: po aktualizacji ważnych plików pamiętaj o wyczyszczeniu pamięci podręcznej, w przeciwnym razie użytkownicy nadal będą mogli pobrać starą wersję
+3. **Zarządzanie logami**: regularnie czyść logi Dockera, w przeciwnym razie dysk może się zapełnić
+4. **Strategia tworzenia kopii zapasowych**: wykonaj kopię zapasową plików takich jak `Traefik acme.json` i konfiguracja Bunker Web
+5. **Monitorowanie i alerty**: skonfiguruj powiadomienia Feishu, aby móc śledzić status wdrożenia i szybko reagować na problemy
+
+## Wniosek
+
+Wystarczy serwer w chmurze i warstwa buforowania Nginx. HagiCode korzysta z tego rozwiązania przy dość niskim koszcie miesięcznym, około 60-100 CNY za serwer, a wyniki są bardzo solidne. Główne zalety to:
+
+- **Przewidywalny koszt**: około 50% tańszy niż bezpośrednie korzystanie z magazynu w chmurze lub płacenie za komercyjną sieć CDN
+- **Elastyczne wdrożenie**: wybierz Traefik lub Bunker Web w zależności od potrzeb
+- **Silna skalowalność**: możesz skalować w poziomie lub w razie potrzeby dodać CDN później
+- **Proste operacje**: Skrypty powłoki i Ansible sprawiają, że automatyczne wdrażanie jest proste
+
+Dla małych zespołów i niezależnych programistów potrzebujących dystrybucji plików jest to zdecydowanie praktyczna opcja, którą warto wypróbować.
+
+HagiCode od jakiegoś czasu stabilnie uruchamia tę architekturę w środowisku produkcyjnym, a pliki pobierane przez użytkowników na całym świecie pozostają niezawodne. Jeśli szukasz podobnego rozwiązania, warto spróbować.
+
+## Podsumowanie stosu technologii
+
+Na zakończenie oto podsumowanie zastosowanych technologii:
+
+| Komponent | Wybór | Cel |
+|------|------|------|
+| Serwer w chmurze | Alibaba Chmura ECS | Podstawowe środowisko uruchomieniowe |
+| Odwrotne proxy | Traefik / Bunkier Web | Zakończenie SSL, routing, ochrona bezpieczeństwa |
+| Warstwa pamięci podręcznej | Nginx | Odwrotne buforowanie proxy, kompresja Gzip |
+| Przechowywanie plików | Magazyn obiektów Blob platformy Azure | Pochodzenie pliku |
+| Konteneryzacja | Tworzenie Dockera | Orkiestracja usług |
+| Automatyzacja | Ansible | Zarządzanie konfiguracją serwera |
+| Powiadomienia | Haczyk internetowy Lark/Feishu | Powiadomienia o stanie wdrożenia |
+
+## Referencje
+
+Oto materiały referencyjne wspomniane w tym poście:
+
+- Projekt HagiCode: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Strona internetowa HagiCode: [hagicode.com](https://hagicode.com)
+- 30-minutowe praktyczne demo: [www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)
+- Instalacja Docker Compose jednym kliknięciem: [https://docs.hagicode.com/installation/docker-compose](https://docs.hagicode.com/installation/docker-compose)
+- Szybka instalacja na komputerze stacjonarnym: [hagicode.com/desktop/](https://hagicode.com/desktop/)
+
+---
+
+Jeśli ten post Ci pomógł, oznacza to, że warto:
+- Polub go, aby więcej osób mogło go znaleźć
+- Oznacz projekt na GitHubie: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Odwiedź oficjalną stronę internetową, aby uzyskać więcej informacji: [hagicode.com](https://hagicode.com)
+- Obejrzyj 30-minutową praktyczną demonstrację: [www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)
+- Wypróbuj instalację jednym kliknięciem: [https://docs.hagicode.com/installation/docker-compose](https://docs.hagicode.com/installation/docker-compose)
+- Zainstaluj szybko aplikację komputerową: [hagicode.com/desktop/](https://hagicode.com/desktop/)
+- Rozpoczęła się publiczna wersja beta i możesz ją wypróbować
+
+---
+
+To tyle w tym poście. Mam nadzieję, że to rozwiązanie Ci pomoże. Jeśli masz lepsze pomysły, możesz się nimi podzielić. Technologia jest zawsze łatwiejsza do udoskonalenia, gdy ludzie uczą się od siebie nawzajem.
+
+## Informacja o prawach autorskich
+
+Dziękuję za przeczytanie. Jeśli ten artykuł był dla Ciebie przydatny, możesz go polubić, dodać do zakładek i udostępnić.
+Ta treść została utworzona we współpracy ze sztuczną inteligencją, a ostateczna wersja została sprawdzona i zatwierdzona przez autora.
+- Autor: [nowość36524](https://www.newbe.pro)
+- Oryginalny link: [https://docs.hagicode.com/blog/2026-04-15-low-cost-cloud-server-download-distribution-station/](https://docs.hagicode.com/blog/2026-04-15-low-cost-cloud-server-download-distribution-station/)
+- Informacja o prawach autorskich: O ile nie zaznaczono inaczej, wszystkie artykuły na tym blogu są objęte licencją BY-NC-SA. Przy ponownym zamieszczaniu prosimy o podanie źródła.

@@ -1,0 +1,300 @@
+---
+title: Cum să implementați reîncercarea automată pentru CLI-uri Agent precum Claude Code și Codex
+date: 2026-04-18
+tags: [Agent CLI, Claude Code, Codex, Reîncercare Automată, HagiCode]
+description: "Expresia reîncercare automată arată ca un mic comutator, dar odată ce o puneți într-un mediu de inginerie real, nu este deloc așa. Bună tuturor, eu"
+---
+
+## Cum să implementați reîncercarea automată pentru CLI-uri Agent precum Claude Code și Codex
+
+> Expresia reîncercare automată arată ca un mic comutator, dar odată ce o puneți într-un mediu de inginerie real, nu este deloc așa. Bună tuturor, sunt Yu Kun, creatorul HagiCode. Astăzi, nu vreau să vorbesc în van. Vreau să discut despre cum ar trebui făcută efectiv reîncercarea automată pentru CLI-uri Agent precum Claude Code și Codex, astfel încât să se poată recupera de la excepții și să evite în același timp tragerea sistemului într-o execuție repetată nesfârșită.
+
+## Context
+
+Dacă ați lucrat și la programare AI recent, probabil că ați întâmpinat deja acest tip de problemă: sarcina nu eșuează imediat, ci se strică la mijlocul execuției.
+
+Într-o cerere HTTP obișnuită, asta înseamnă adesea doar trimiterea ei din nou, poate cu un backoff exponențial. Dar CLI-urile Agent sunt diferite. Instrumente precum Claude Code și Codex execută de obicei într-un mod de streaming, împingând ieșirea bucăță cu bucăță. În timpul acelui proces, se pot de asemenea lega la un thread, sesiune sau token de reluare. Cu alte cuvinte, întrebarea nu este simplu, „A eșuat această cerere sau nu?" Devine:
+
+- Conținutul deja emis contează încă?
+- Contextul curent poate continua să ruleze?
+- Această eroare ar trebui recuperată automat?
+- Dacă ar trebui recuperată, cât timp ar trebui să așteptăm înainte de reîncercare, ce ar trebui să trimitem în timpul reîncercării, și ar trebui să refolosim contextul original?
+
+Prima dată când multe echipe construiesc această parte, scriu instinctiv cea mai naivă versiune: dacă apare o eroare, încearcă o dată din nou. Această idee este perfect naturală, dar odată ce ajunge într-un proiect real, o problemă după alta începe să apară.
+
+- Unele erori sunt clar eșecuri temporare, dar sunt tratate ca eșecuri finale
+- Unele erori nu merită reîncercate deloc, dar sistemul le repedează iar și iar
+- Cererile cu un thread și cererile fără thread sunt tratate exact la fel
+- Strategia de backoff nu are limită, iar cererile din fundal se supraîncarcă
+
+În timpul integrării mai multor CLI-uri Agent, HagiCode a pășit și în aceste capcane. În special pe partea Codex, prima problemă pe care am expus-o a fost că un anumit tip de mesaj de reconectare nu era recunoscut ca o stare terminală reîncercabilă, deci mecanismul de recuperare pe care îl aveam deja nu a avut niciodată ocazia să intre în acțiune. Pentru a spune pe scurt, nu că sistemul lipsea reîncercarea automată. Sistemul pur și simplu nu a recunoscut că acel eșec particular merita reîncercat.
+
+Deci punctul de bază al acestui articol este foarte clar: **reîncercarea automată nu este un buton, ci un design stratificat.**
+
+## Despre HagiCode
+
+Abordarea partajată în acest articol provine din practica reală în proiectul nostru [HagiCode](https://hagicode.com). Ceea ce încearcă să facă HagiCode nu este doar să conecteze un model și gata. Este despre unificarea mesajelor de streaming, apelurilor de instrumente, recuperării de eșecuri și contextului de sesiune al mai multor CLI-uri Agent într-un singur model de execuție care poate fi menținut pe termen lung.
+
+Unul dintre lucrurile care îmi pasă cel mai mult este cum să fac programarea AI să aterizeze cu adevărat în lucrul de inginerie real. Scrierea unui demo nu este grea. Partea grea este transformarea acelui demo în ceva ce o echipă este cu adevărat dispusă să folosească pentru mult timp. HagiCode ia reîncercarea automată în serios nu pentru că funcționalitatea arată sofisticată, ci pentru că dacă execuția CLI de lungă durată, streaming, reluabilă nu este stabilă, ceea ce văd utilizatorii nu este un asistent inteligent, ci un wrapper de comenzi care pierde conexiunea la mijlocul execuției la fiecare a doua rulare.
+
+Dacă doriți să vedeți mai întâi punctele de intrare ale proiectului, iată două:
+
+- GitHub: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Site oficial: [hagicode.com](https://hagicode.com)
+
+Mergând un pas mai departe, HagiCode este acum și pe Steam. Dacă folosiți Steam, nu ezitați să îl adăugați mai întâi la lista de dorințe:
+
+- [Pagina magazin Steam (adăugați la lista de dorințe / vedeți detalii)](https://store.steampowered.com/app/4625540/Hagicode/)
+
+## De ce reîncercarea automată pentru CLI-uri Agent este mai grea decât reîncercarea obișnuită
+
+Aceasta este o întrebare foarte practică, deci să trecem direct la concluzie: dificultatea reîncercării automate pentru CLI-uri Agent nu este „încearcă din nou după câteva secunde," ci „mai poate continua în contextul original?"
+
+Puteți să o gândiți ca o conversație lungă. Reîncercarea API obișnuită este mai degrabă ca formarea numărului când linia este ocupată. Reîncercarea CLI Agent este mai degrabă ca pierderea semnalului în timp ce cealaltă parte este la mijlocul unei fraze, iar apoi trebuie să decideți dacă să sunați înapoi, dacă să reîncepeți de la capăt când o faceți, și dacă cealaltă parte își amintește încă unde s-a oprit conversația. Acestea nu sunt același tip de problemă de inginerie.
+
+Mai concret, există patru dificultăți deosebit de tipice.
+
+### 1. Este streaming
+
+Odată ce ieșirea a fost deja trimisă utilizatorului, nu mai puteți gestiona eșecul așa cum ați face cu o cerere obișnuită, unde îl înghițiți silențios și încercați din nou în liniște. Asta pentru că conținutul anterior a fost deja văzut. Dacă strategia de reluare este greșită, frontend-ul poate arăta ușor text duplicat și stare inconsistentă, iar ciclul de viață al apelurilor de instrumente poate deveni de asemenea încurcat. Acest lucru nu este metafizică. Este inginerie.
+
+### 2. Se leagă de obicei la contextul de sesiune
+
+Provideri precum Codex se leagă la un thread, iar implementări precum Claude Code au de asemenea o țintă de continuare sau un context reluabil echivalent. Prerechizita reală pentru reîncercarea automată nu este doar că eroarea arată ca un eșec temporar, ci și că există încă un suport care permite acestei execuții să continue.
+
+### 3. Nu fiecare eroare merită reîncercată
+
+Jitter de rețea, timeout inactiv SSE și eșecuri temporare upstream merită de obicei o altă încercare. Dar dacă ceea ce vă confruntați este un eșec de autentificare, un context pierdut, sau un provider care nu are deloc capacitate de reluare, atunci reîncercarea nu este de obicei recuperare. Este generare de zgomot.
+
+### 4. Are nevoie de limite
+
+Reîncercarea automată nelimitată este aproape întotdeauna greșită. Trendurile tehnologice pot fi zgomotoase pentru o vreme, dar legile ingineriei rămân adesea stabile pentru mulți ani. Una dintre ele este că recuperarea de eșecuri trebuie să aibă limite. Sistemul trebuie să știe de câte ori poate reîncerca maxim, cât ar trebui să aștepte de fiecare dată, și când ar trebui să se oprească și să admită că aceasta chiar nu se va recupera.
+
+Datorită acestor caracteristici, HagiCode în cele din urmă nu a implementat reîncercarea automată ca câteva linii de `try/catch` în interiorul unui provider specific. În schimb, am extras-o într-un strat de capabilitate partajat. În cele din urmă, problemele de inginerie trebuie rezolvate cu metode de inginerie.
+
+## Abordarea HagiCode: Extragerea reîncercării din provider
+
+Implementarea reală curentă a HagiCode poate fi comprimată într-o singură propoziție:
+
+**Stratul partajat gestionează fluxul de reîncercare uniform, iar fiecare provider concret este responsabil doar pentru a răspunde la două întrebări: merită această stare terminală reîncercată, și contextul curent mai poate continua?**
+
+Acest lucru nu este complicat, dar este critic. Odată ce responsabilitățile sunt separate în acest fel, Claude Code, Codex și chiar alte CLI-uri Agent pot refolosi toate același schelet. Modelele se vor schimba, instrumentele vor evolua, fluxurile de lucru vor fi actualizate, dar fundația de inginerie rămâne acolo.
+
+### Stratul 1: Utilizarea unui coordonator unificat pentru a gestiona bucla de reîncercare
+
+Fragmentul de implementare de bază în proiect arată cam așa:
+
+```csharp
+internal static class ProviderErrorAutoRetryCoordinator
+{
+    public static async IAsyncEnumerable<CliMessage> ExecuteAsync(
+        string prompt,
+        ProviderErrorAutoRetrySettings? settings,
+        Func<string, IAsyncEnumerable<CliMessage>> executeAttemptAsync,
+        Func<bool> canRetryInSameContext,
+        Func<TimeSpan, CancellationToken, Task> delayAsync,
+        Func<CliMessage, bool> isRetryableTerminalMessage,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        var normalizedSettings = ProviderErrorAutoRetrySettings.Normalize(settings);
+        var retrySchedule = normalizedSettings.Enabled
+            ? normalizedSettings.GetRetrySchedule()
+            : [];
+
+        for (var attempt = 0; ; attempt++)
+        {
+            var attemptPrompt = attempt == 0
+                ? prompt
+                : ProviderErrorAutoRetrySettings.ContinuationPrompt;
+
+            CliMessage? terminalFailure = null;
+
+            await foreach (var message in executeAttemptAsync(attemptPrompt)
+                               .WithCancellation(cancellationToken))
+            {
+                if (isRetryableTerminalMessage(message))
+                {
+                    terminalFailure = message;
+                    break;
+                }
+
+                yield return message;
+            }
+
+            if (terminalFailure is null)
+            {
+                yield break;
+            }
+
+            if (attempt >= retrySchedule.Count || !canRetryInSameContext())
+            {
+                yield return terminalFailure;
+                yield break;
+            }
+
+            await delayAsync(retrySchedule[attempt], cancellationToken);
+        }
+    }
+}
+```
+
+Ce face acest cod este de fapt foarte simplu, dar de asemenea foarte eficient.
+
+- Nu transmite eșecurile intermediare direct la început; coordonatorul decide dacă recuperarea este încă posibilă
+- Doar când bugetul de reîncercare este epuizat, eșecul final returnează efectiv la stratul superior
+- Începând cu a doua încercare, prompt-ul original nu mai este trimis; un prompt de continuare este trimis uniform în schimb
+
+De aceea am subliniat continuu mai devreme că reîncercarea automată nu este simplu „trimite cererea din nou." Nu este doar patch-uirea unei ramuri de excepție. Este managementul ciclului de viață al unei execuții. Asta poate suna ca limbaj de product-manager, dar în termeni de inginerie, exact asta este.
+
+### Stratul 2: Un instantaneu al politicii de reîncercare
+
+O altă problemă foarte ușor de trecut cu vederea este aceasta: cine decide dacă reîncercarea automată este activată pentru această cerere?
+
+Răspunsul HagiCode nu este să depindă de o „configurație globală curentă," ci să transforme politica într-un instantaneu și să o lase să călătorească împreună cu această cerere. Astfel, coada de sesiuni, persistența mesajelor, redirecționarea execuției și adaptarea providerului nu vor pierde politica pe drum. O rulare reușită nu este un sistem. Succesul susținut este un sistem.
+
+Structura de bază poate fi simplificată la aceasta:
+
+```csharp
+public sealed record ProviderErrorAutoRetrySnapshot
+{
+    public const string DefaultStrategy = "default";
+
+    public bool Enabled { get; init; }
+
+    public string Strategy { get; init; } = DefaultStrategy;
+
+    public static ProviderErrorAutoRetrySnapshot Normalize(bool? enabled, string? strategy)
+    {
+        return new ProviderErrorAutoRetrySnapshot
+        {
+            Enabled = enabled ?? true,
+            Strategy = string.IsNullOrWhiteSpace(strategy)
+                ? DefaultStrategy
+                : strategy.Trim()
+        };
+    }
+}
+```
+
+Apoi pe partea de execuție, este mapat în obiectul de setări consumat efectiv de provider. Valoarea acestei abordări este foarte directă:
+
+- Stratul de business decide dacă reîncercarea ar trebui permisă
+- Runtime-ul decide cum reîncercarea ar trebui efectuată
+
+Fiecare parte își gestionează propria preocupare fără a se ciocni cu cealaltă. Multe probleme nu sunt imposibil de rezolvat. Costul lor pur și simplu nu a fost făcut explicit. Transformarea politicii într-un instantaneu este esențial o modalitate de a contabiliza acel cost în avans.
+
+### Stratul 3: Providerii decid doar starea terminală și viabilitatea contextului
+
+Odată ce ajungem la providerul concret Claude Code sau Codex, responsabilitatea aici devine de fapt foarte subțire. O puteți gândi ca o îmbunătățire, nu o înlocuire.
+
+Luând Codex ca exemplu, când se conectează la coordonatorul partajat, chiar are nevoie să furnizeze doar trei lucruri:
+
+```csharp
+await foreach (var message in ProviderErrorAutoRetryCoordinator.ExecuteAsync(
+                   prompt,
+                   options.ProviderErrorAutoRetry,
+                   retryPrompt => ExecuteCodexAttemptAsync(...),
+                   () => !string.IsNullOrWhiteSpace(resolvedThreadId),
+                   DelayAsync,
+                   IsRetryableTerminalFailure,
+                   cancellationToken))
+{
+    yield return message;
+}
+```
+
+Veți observa că deciziile specifice providerului sunt cu adevărat doar acestea două:
+
+- `IsRetryableTerminalFailure`
+- `canRetryInSameContext`
+
+Codex verifică dacă thread-ul mai poate continua, în timp ce Claude Code verifică dacă ținta de continuare există încă. Politica de backoff, numărul de reîncercări și prompt-urile de continuare nu ar trebui reinventate de fiecare provider separat.
+
+Odată ce acest strat este separat, costul integrării mai multor CLI-uri în HagiCode scade mult. Nu trebuie să duplicați o întreagă mașină de stări de reîncercare. Trebuie doar să conectați condițiile de limită ale acelui provider. A scrie rapid nu este același lucru cu a scrie robust. A putea conecta ceva nu este același lucru cu a conecta bine. A face să ruleze nu este de asemenea același lucru cu a face să fie mentenabil în timp.
+
+## O greșeală ușor de făcut: Nu tratați fiecare eroare ca reîncercabilă
+
+În această analiză, punctul pe care vreau să îl scot cel mai mult în evidență nu este „cum să implementați reîncercarea," ci „cum să evitați reîncercările greșite."
+
+Punctul de intrare original în problemă a fost că Codex nu a recunoscut un mesaj de reconectare. Prin intuiție, mulți oameni ar alege cea mai mică remediere posibilă: adăugarea unui alt prefix de string la lista albă. Această idee nu este exact greșită, dar se simte mai degrabă ca o soluție de stadiu demo decât una mentenabilă pe termen lung.
+
+Din implementarea curentă HagiCode, sistemul a făcut deja un pas într-o direcție mai robustă. Nu se mai uită doar la un string literal. În schimb, predă stările terminale recuperabile coordonatorului partajat uniform. Beneficiile sunt evidente:
+
+- Este mai puțin probabil să eșueze complet din cauza unei mici schimbări de formulare într-un mesaj
+- Acoperirea testelor poate fi construită în jurul envelopei de stare terminală mai degrabă decât o singură linie de text hardcodată
+- Logica de reîncercare devine mai consistentă în interiorul aceluiași provider
+
+Desigur, trebuie să existe o limită fermă aici: a fi mai general nu înseamnă a fi mai permisiv. **Dacă contextul curent nu poate continua, atunci chiar dacă eroarea arată ca un eșec temporar, nu ar trebui reluată orbește.**
+
+Acest punct este critic. Ceea ce face cu adevărat oamenii să aibă încredere într-un sistem nu este că funcționează ocazional, ci că este fiabil în majoritatea timpului. Dacă un flux poate fi menținut doar de experți, atunci este încă departe de adopția reală.
+
+## Cele mai valoroase trei lecții de păstrat în practică
+
+La acest punct, are sens să începem să aducem discuția înapoi la practica de implementare. Dacă planificați să construiți o capabilitate similară în propriul proiect, acestea sunt cele trei reguli pe care le recomand cel mai puternic să le protejați mai întâi.
+
+### 1. Bugetul de reîncercare trebuie să aibă limite
+
+Ritmul de backoff implicit curent al HagiCode este:
+
+- 10 secunde
+- 20 secunde
+- 60 secunde
+
+Acest ritm poate să nu se potrivească fiecărui sistem, dar existența limitelor trebuie să rămână. Altfel, reîncercarea automată devine rapid nu un mecanism de recuperare ci un amplificator de incidente. Nu vă grăbiți să îi dați un nume impresionant. Mai întâi asigurați-vă că lucrul poate supraviețui două iterații în interiorul unei echipe reale.
+
+### 2. Prompt-ul de continuare ar trebui unificat
+
+Proiectul folosește un prompt de continuare fix astfel încât încercările ulterioare urmează clar calea continuării contextului curent mai degrabă decât pornirea unei cereri complete noi. Această capabilitate nu este spectaculoasă, dar când construiți un proiect real, nu o puteți face fără. Multe lucruri care par magie, odată descompuse, sunt doar un proces de inginerie lustruit.
+
+### 3. Atât biblioteca partajată cât și stratul adaptor au nevoie de teste oglindite
+
+Vreau în special să mai spun câteva lucruri despre acest punct. Multe echipe vor scrie un strat de teste în runtime-ul partajat și vor considera că probabil este suficient. Nu este.
+
+Motivul pentru care mă simt relativ încrezător în implementarea HagiCode este că ambele straturi au acoperire de teste:
+
+- Providerul partajat testează dacă continuarea automată chiar a avut loc
+- Stratul adaptor testează dacă erorile finale și mesajele de streaming au fost păstrate corect
+
+De data aceasta am rulat din nou două grupuri de teste conexe, și toate cele 31 de cazuri de teste au trecut în ambele. Acel rezultat singur nu dovedește că designul este perfect, dar dovedește cel puțin un lucru: reîncercarea automată curentă nu este un design pe hârtie. Este o capabilitate constrânsă atât de cod cât și de teste. Talk is cheap. Show me the code. Se potrivește perfect aici.
+
+## Rezumat
+
+Dacă întregul articol trebuia comprimat într-o singură propoziție, ar fi aceasta:
+
+**Pentru CLI-uri Agent precum Claude Code și Codex, reîncercarea automată nu ar trebui implementată ca un truc local ascuns în interiorul unui provider. Ar trebui construită ca o combinație a unui coordonator partajat, un instantaneu de politică, verificări de viabilitate a contextului și teste oglindite.**
+
+Beneficiile de a face asta în acest mod sunt foarte practice:
+
+- Logica este scrisă o dată și refolosită pe mai mulți provideri
+- Dacă o cerere este permisă să reîncerce poate călători stabil cu lanțul de execuție
+- Continuă să ruleze când contextul există, și se oprește la timp când nu există
+- Ceea ce vede în final frontend-ul este o stare completată stabilă sau o stare eșuată, nu o grămadă de zgomot intermediar abandonat
+
+Această soluție a fost lustruită puțin câte puțin în timp ce HagiCode integra mai multe CLI-uri Agent în scenarii reale. Cine spune că programarea asistată de AI nu este noua eră de programare în pereche? Modelele vă ajută să începeți, să completați cod și să ramificați, dar ceea ce determină adesea limita superioară a experienței este încă contextul, procesul și constrângerile.
+
+Dacă acest articol v-a fost util, sunteți de asemenea binevenit să priviți la punctele de intrare publice ale HagiCode:
+
+- GitHub: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Site oficial: [hagicode.com](https://hagicode.com)
+- Demo practică de 30 de minute: [www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)
+- Intrare instalare desktop: [hagicode.com/desktop/](https://hagicode.com/desktop/)
+- Steam: [Pagina magazin Steam (adăugați la lista de dorințe / vedeți detalii)](https://store.steampowered.com/app/4625540/Hagicode/)
+
+HagiCode este deja pe Steam acum. Acesta nu este vaporware, și am pus link-ul chiar aici. Dacă folosiți Steam, mergeți și adăugați-l la lista de dorințe. Dând clic pentru a privi singur este mai direct decât auzindu-mă spunând încă zece rânduri despre asta aici.
+
+Destul pe acest subiect pentru acum. Ne vom mai întâlni în interiorul proiectelor reale.
+
+## Referințe
+
+- Pagina principală a proiectului HagiCode: [https://hagicode.com](https://hagicode.com)
+- Depozitul GitHub HagiCode: [https://github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Video demo oficial: [https://www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)
+- Instrucțiuni de instalare desktop: [https://hagicode.com/desktop/](https://hagicode.com/desktop/)
+
+## Notă privind drepturile de autor
+
+Vă mulțumim pentru lectură. Dacă ați considerat acest articol util, sunteți binevenit să apreciați, să salvați și să distribuiți.
+Acest conținut a fost creat cu colaborare asistată de AI, iar conținutul final a fost revizuit și confirmat de autor.
+- Autor: [newbe36524](https://www.newbe.pro)
+- Articol original: [https://docs.hagicode.com/blog/2026-02-11-agent-cli-automatic-retry/](https://docs.hagicode.com/blog/2026-02-11-agent-cli-automatic-retry/)
+- Notă privind drepturile de autor: Cu excepția cazului în care se specifică altfel, toate articolele de pe acest blog sunt licențiate sub BY-NC-SA. Vă rugăm să indicați sursa la republicare.

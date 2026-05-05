@@ -1,0 +1,412 @@
+---
+title: "Redigera DESIGN.md direkt i webbgränssnittet: Från idé till implementering"
+date: 2026-04-09
+tags: [DESIGN.md, Online Editing, HagiCode, Frontend-Backend Separation, Version Conflict Detection, MonoSpecs, Design Template Import]
+description: "I MonoSpecs projektledningssystem bär DESIGN.md den arkitektoniska designen och tekniska besluten för ett projekt. Men den traditionella redigeringen"
+---
+
+## Redigera DESIGN.md direkt i webbgränssnittet: Från idé till implementering
+
+> I MonoSpecs projektledningssystem, `DESIGN.md` bär den arkitektoniska utformningen och tekniska beslut av ett projekt. Men det traditionella redigeringsarbetsflödet tvingar användare att hoppa ut till en extern redigerare. Den splittrade upplevelsen är som att bli avbruten mitt under att läsa en dikt: inspirationen är borta, och stämningen likaså. Den här artikeln delar lösningen som vi tillämpade i HagiCode-projektet: redigering `DESIGN.md` direkt i webbgränssnittet, med stöd för import av mallar från en designwebbplats online. När allt kommer omkring, vem njuter inte av känslan av att slutföra allt i ett flöde?
+
+## Bakgrund
+
+Som kärnbärare av projektdesigndokument, `DESIGN.md` innehåller nyckelinformation såsom arkitekturdesign, tekniska beslut och implementeringsvägledning. Den traditionella redigeringsmetoden kräver dock att användare byter till en extern redigerare som VS Code, manuellt lokaliserar den fysiska sökvägen och sedan redigerar filen. Det är inte speciellt komplicerat, men efter att ha upprepat processen några gånger blir det tröttsamt.
+
+Problemen visar sig huvudsakligen på följande sätt:
+
+- **Fragmenterat arbetsflöde**: användare måste ständigt växla mellan webbhanteringsgränssnittet och en lokal redigerare, vilket bryter kontinuiteten i deras arbetsflöde, ungefär som att låta musiken klippas ut mitt i en låt.
+- **Svårt att återanvända**: designwebbplatsen publicerar redan ett rikt bibliotek med designmallar, men de kan inte integreras direkt i projektredigeringsarbetsflödet. Det goda finns, men du kan fortfarande inte använda det där du behöver det.
+- **Erfarenhetsslinga saknas**: det finns ingen sluten slinga för "förhandsgranska-välj-import", så användare måste kopiera och klistra in manuellt, vilket ökar risken för misstag.
+- **Samarbete friktion**: att hålla designdokument och kodimplementering synkroniserade blir en högfriktionsprocess, vilket skadar teamets effektivitet.
+
+För att lösa dessa smärtpunkter bestämde vi oss för att lägga till direktredigeringsstöd för `DESIGN.md` i webbgränssnittet och tillåt import av mallar med ett klick från en designwebbplats online. Det var inget omvälvande beslut. Vi ville helt enkelt göra utvecklingsupplevelsen smidigare.
+
+## Om HagiCode
+
+Lösningen som delas i den här artikeln kommer från vår praktiska erfarenhet av [HagiCode](https://hagicode.com) projekt. HagiCode är ett AI-drivet kodningsassistentprojekt och under utveckling behöver vi ofta underhålla projektdesigndokument. För att hjälpa teamet att samarbeta mer effektivt har vi utforskat och implementerat denna onlineredigerings- och importlösning. Det finns inget mystiskt med det. Vi stötte på ett problem och hittade ett sätt att lösa det.
+
+## Teknisk lösning
+
+### Övergripande arkitektur
+
+Denna lösning använder en frontend-backend-separerad arkitektur med en proxy med samma ursprung, huvudsakligen sammansatt av följande lager. I praktiken kan designen sammanfattas som att "varje del gör sitt eget jobb":
+
+**1. Frontend editor lager**
+```typescript
+// Core component: DesignMdManagementDrawer
+// Location: repos/web/src/components/project/DesignMdManagementDrawer.tsx
+// Responsibility: handle editing, saving, version conflict detection, and import flow
+```
+
+**2. Backend servicelager**
+```csharp
+// Core service: ProjectAppService.DesignMd
+// Location: repos/hagicode-core/src/PCode.Application/ProjectAppService.DesignMd.cs
+// Responsibility: path resolution, file read/write, and version management
+```
+
+**3. Proxylager med samma ursprung**
+```csharp
+// Proxy service: ProjectAppService.DesignMdSiteIndex
+// Location: repos/hagicode-core/src/PCode.Application/ProjectAppService.DesignMdSiteIndex.cs
+// Responsibility: proxy design site resources, preview image caching, and security validation
+```
+
+### Viktiga tekniska beslut
+
+#### Beslut 1: Globalt lådmönster
+
+Vi använder en enda global låda istället för lokala popup-lager, med staten hanterad genom `layoutSlice`, vilket ger användarna en konsekvent upplevelse över olika vyer (`classic` och `kanban`). Oavsett vilken vy användaren öppnar editorn från får de samma interaktionsmodell. En konsekvent upplevelse får människor att känna sig mer tillfreds i stället för att bli desorienterade när de byter åsikt.
+
+#### Beslut 2: Project-Scoped API
+
+Vi monterade `DESIGN.md`-relaterade slutpunkter under `ProjectController`, återanvända den befintliga projektbehörighetsgränsen och undvika komplexiteten med att lägga till en separat styrenhet. Detta gör behörighetshanteringen tydligare och stämmer även överens med RESTful resursorganisation. Ibland är återanvändning mer meningsfullt än att skapa något nytt från grunden.
+
+#### Beslut 3: Upptäcka versionskonflikt
+
+Vi härleder en ogenomskinlig version från filsystemets `LastWriteTimeUtc`, vilket ger oss lätt optimistisk samtidighetskontroll. När flera användare redigerar samma fil samtidigt kan systemet upptäcka konflikter och uppmana användaren att uppdatera. Denna design blockerar inte redigering, samtidigt som datakonsistensen skyddas.
+
+#### Beslut 4: Proxymönster med samma ursprung
+
+Vi använder `IHttpClientFactory` till proxy för externa designwebbplatser, och undviker både korsoriginella problem och SSRF-risker. Detta håller systemet säkert samtidigt som det förenklar frontend-samtal. Du kan knappast vara för försiktig med säkerheten.
+
+## Kärnimplementering
+
+### 1. Redigera DESIGN.md direkt
+
+#### Backend-implementering
+
+Backend är huvudsakligen ansvarig för sökvägsupplösning, läs/skriv av filer och versionshantering. Dessa uppgifter är grundläggande, men oumbärliga, som grunden för ett hus:
+
+```csharp
+// Path resolution and security validation
+private Task<string> ResolveDesignDocumentDirectoryAsync(string projectPath, string? repositoryPath)
+{
+    if (string.IsNullOrWhiteSpace(repositoryPath))
+    {
+        return Task.FromResult(Path.GetFullPath(projectPath));
+    }
+    return ValidateSubPathAsync(projectPath, repositoryPath);
+}
+
+// Version generation (based on file system timestamp and size)
+private static string BuildDesignDocumentVersion(string path)
+{
+    var fileInfo = new FileInfo(path);
+    fileInfo.Refresh();
+    return string.Create(
+        CultureInfo.InvariantCulture,
+        $"{fileInfo.LastWriteTimeUtc.Ticks:x}-{fileInfo.Length:x}");
+}
+```
+
+Versionsdesignen är intressant i sin enkelhet: vi använder filens senast ändrade tid och storlek för att generera en unik versionsidentifierare. Den är lätt och pålitlig, utan extra versionsdatabas att underhålla. Enkla lösningar är ofta de mest effektiva.
+
+#### Frontend-implementering
+
+På frontend implementerar vi dirty-state-detektion och sparar logik. Den här designen hjälper användare att förstå om deras ändringar har sparats och minskar oron för "tänk om jag tappar bort det?":
+
+```typescript
+// Dirty-state detection and save logic
+const [draft, setDraft] = useState('');
+const [savedDraft, setSavedDraft] = useState('');
+const isDirty = draft !== savedDraft;
+
+const handleSave = useCallback(async () => {
+    const result = await saveProjectDesignMdDocument({
+        ...activeTarget,
+        content: draft,
+        expectedVersion: document.version, // optimistic concurrency control
+    });
+    setSavedDraft(draft); // update saved state
+}, [activeTarget, document, draft]);
+```
+
+I den här implementeringen upprätthåller vi två delar av staten: `draft` är innehållet som för närvarande redigeras, medan `savedDraft` är det sparade innehållet. Att jämföra dem talar om för oss om det finns osparade ändringar. Designen är enkel, men den ger människor sinnesro. Ingen vill att det de arbetat hårt med ska försvinna.
+
+### 2. Importera designfiler från en onlinekälla
+
+#### Katalogstruktur
+
+```
+repos/index/
+└── src/data/public/design.json    # Design template index
+
+repos/awesome-design-md-site/
+├── vendor/awesome-design-md/       # Upstream design templates
+│   └── design-md/
+│       ├── clickhouse/
+│       │   └── DESIGN.md
+│       ├── linear/
+│       │   └── DESIGN.md
+│       └── ...
+└── src/lib/content/
+    └── awesomeDesignCatalog.ts     # Content pipeline
+```
+
+#### Indexdataformat
+
+Indexfilen på designwebbplatsen definierar alla tillgängliga mallar. Med detta index kan användare välja den mall de vill ha lika enkelt som att beställa från en meny:
+
+```json
+{
+  "entries": [
+    {
+      "slug": "linear.app",
+      "title": "Linear Inspired Design System",
+      "summary": "AI Product / Dark Feel",
+      "detailUrl": "/designs/linear.app/",
+      "designDownloadUrl": "/designs/linear.app/DESIGN.md",
+      "previewLightImageUrl": "...",
+      "previewDarkImageUrl": "..."
+    }
+  ]
+}
+```
+
+Varje post innehåller mallens grundläggande information och nedladdningslänkar. Backend läser listan över tillgängliga mallar från detta index och presenterar dem för användaren att välja mellan. Det gör urvalet intuitivt istället för att tvinga människor att känna sig framme i mörkret.
+
+#### Proxyimplementering med samma ursprung
+
+För att hålla saker och ting säkra utför backend strikt validering av åtkomst till designwebbplatsen. Du kan inte vara för försiktig med säkerheten:
+
+```csharp
+// Safe slug validation
+private static readonly Regex SafeDesignSiteSlugRegex =
+    new("^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,127})$", RegexOptions.Compiled);
+
+private static string NormalizeDesignSiteSlug(string slug)
+{
+    var normalizedSlug = slug?.Trim() ?? string.Empty;
+    if (!IsSafeDesignSiteSlug(normalizedSlug))
+    {
+        throw new BusinessException(
+            ProjectDesignSiteIndexErrorCodes.InvalidSlug,
+            "Design site slug must be a single safe path segment.");
+    }
+    return normalizedSlug;
+}
+
+// Preview image caching (OS temp directory)
+private static string ComputePreviewCacheKey(string slug, string theme, string previewUrl)
+{
+    var raw = $"{slug}|{theme}|{previewUrl}";
+    var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(raw));
+    return Convert.ToHexString(bytes).ToLowerInvariant();
+}
+```
+
+Vi gör två saker här: för det första validerar vi slugformatet strikt med ett reguljärt uttryck för att förhindra attacker från vägövergång; för det andra cachelagrar vi förhandsgranskningsbilder för att minska trycket på den externa webbplatsen. Det förra är skydd, det senare är optimering, och båda är viktiga.
+
+### 3. Fullständigt importflöde
+
+```typescript
+// 1. Open the import drawer
+const handleRequestImportDrawer = useCallback(() => {
+    setIsImportDrawerOpen(true);
+}, []);
+
+// 2. Select and import
+const handleImportRequest = useCallback((entry) => {
+    if (isDirty) {
+        setPendingImportEntry(entry);
+        setConfirmMode('import'); // overwrite confirmation
+        return;
+    }
+    void executeImport(entry);
+}, [isDirty]);
+
+// 3. Execute import
+const executeImport = useCallback(async (entry) => {
+    const result = await getProjectDesignMdSiteImportDocument(
+        activeTarget.projectId,
+        entry.slug
+    );
+    setDraft(result.content); // replace editor text only, do not save automatically
+    setIsImportDrawerOpen(false);
+}, [activeTarget?.projectId]);
+```
+
+Importflödet följer en "användarbekräftelse"-princip: efter importen uppdateras endast editorns innehåll och ingenting sparas automatiskt. Användare kan inspektera det importerade innehållet och spara det manuellt först efter att ha bekräftat att det ser rätt ut. Det slutliga beslutet bör ligga i händerna på användaren.
+
+## Praktiska exempel
+
+### Scenario 1: Skapa DESIGN.md i projektroten
+
+När `DESIGN.md` inte existerar, returnerar backend ett virtuellt dokumenttillstånd. Detta låter gränssnittet undvika speciell hantering för fallet "filen existerar inte", och ett enhetligt API förenklar kodlogiken:
+
+```csharp
+return new ProjectDesignDocumentDto
+{
+    Path = targetPath,
+    Exists = false,  // virtual document state
+    Content = string.Empty,
+    Version = null
+};
+
+// Automatically create the file on first save
+public async Task<SaveProjectDesignDocumentResultDto> SaveDesignDocumentAsync(...)
+{
+    Directory.CreateDirectory(targetDirectory);
+    await File.WriteAllTextAsync(targetPath, input.Content);
+    return new SaveProjectDesignDocumentResultDto { Created = !exists };
+}
+```
+
+Fördelen med denna design är att frontend inte behöver specialfallslogik för saknade filer. Genom att dölja den komplexiteten i backend kan frontend lättare fokusera på användarupplevelsen.
+
+### Scenario 2: Importera en mall från designwebbplatsen
+
+Efter att användaren valt designmallen "Linjär" i importlådan hämtar systemet `DESIGN.md` innehåll via backend-proxyn. Hela processen är transparent för användaren: de väljer bara en mall och systemet hanterar nätverksförfrågningar och datatransformation automatiskt.
+
+```typescript
+// 1. The system fetches DESIGN.md content through the backend proxy
+GET /api/project/{id}/design-md/site-index/linear.app
+
+// 2. The backend validates the slug and fetches content from upstream
+var entry = FindDesignSiteEntry(catalog, "linear.app");
+using var upstreamResponse = await httpClient.SendAsync(request);
+var content = await upstreamResponse.Content.ReadAsStringAsync();
+
+// 3. The frontend replaces the editor text
+setDraft(result.content);
+// The user reviews it and then saves it manually to disk
+```
+
+Hela flödet förblir transparent för användaren. De väljer bara en mall och systemet hanterar nätverket och transformationen bakom kulisserna. Det är den upplevelsen vi vill ha: enkel, men kraftfull.
+
+### Scenario 3: Hantera versionskonflikter
+
+När flera användare redigerar samma `DESIGN.md` samtidigt upptäcker systemet versionskonflikter. Denna optimistiska mekanism för samtidighetskontroll bevarar datakonsistens utan att blockera användarens redigeringar:
+
+```csharp
+if (!string.Equals(currentVersion, expectedVersion, StringComparison.Ordinal))
+{
+    throw new BusinessException(
+        ProjectDesignDocumentErrorCodes.VersionConflict,
+        $"DESIGN.md at '{targetPath}' changed on disk.");
+}
+```
+
+Frontend fångar detta fel och uppmanar användaren:
+
+```typescript
+// Frontend prompts the user to refresh and retry
+<Alert>
+    <AlertTitle>Version conflict</AlertTitle>
+    <AlertDescription>
+        The file was modified by another process. Please refresh to get the latest version and try again.
+    </AlertDescription>
+</Alert>
+```
+
+Denna optimistiska mekanism för samtidighetskontroll håller data konsekvent utan att blockera användare medan de arbetar. Konflikter är oundvikliga, men åtminstone användare bör veta vad som hände istället för att tyst förlora sina ändringar.
+
+## Anteckningar och bästa praxis
+
+### 1. Vägsäkerhet
+
+Verifiera alltid `repositoryPath` för att förhindra attacker som går över vägar. Du kan aldrig göra för mycket när det kommer till säkerhet:
+
+```csharp
+// Always validate repositoryPath to prevent path traversal attacks
+return ValidateSubPathAsync(projectPath, repositoryPath);
+// Reject dangerous inputs such as "../" and absolute paths
+```
+
+### 2. Cachestrategi
+
+Cache förhandsgranskningsbilder i 24 timmar, med maximalt 160 filer. Måttlig cachelagring förbättrar prestandan, men balansen spelar fortfarande roll:
+
+```csharp
+// Cache preview images for 24 hours, with a maximum of 160 files
+private static readonly TimeSpan PreviewCacheTtl = TimeSpan.FromHours(24);
+private const int PreviewCacheMaxFiles = 160;
+// Periodically clean up expired cache
+```
+
+### 3. Felhantering
+
+Försämra graciöst när uppströmsplatsen inte är tillgänglig. Denna design säkerställer att även om ett externt beroende misslyckas, fungerar kärnredigeringsfunktionen fortfarande normalt:
+
+```typescript
+// Gracefully degrade when the upstream site is unavailable
+try {
+    const catalog = await getProjectDesignMdSiteImportCatalog(projectId);
+} catch (error) {
+    toast.error(t('project.designMd.siteImport.feedback.catalogLoadFailed'));
+    // The main editing drawer remains available
+}
+```
+
+Denna graciösa försämring säkerställer att även när externa beroenden inte är tillgängliga, fortsätter redigeringsfunktionen att fungera. Ett system ska vara motståndskraftigt istället för att kollapsa i samma ögonblick som något går fel.
+
+### 4. Optimering av användarupplevelse
+
+Bekräfta överskrivningar före import, och spara inte automatiskt efter import. Användare bör behålla kontrollen över sina egna handlingar:
+
+```typescript
+// Confirm overwrite before import
+if (isDirty) {
+    setConfirmMode('import');
+    return;
+}
+
+// Do not save automatically after import; let the user confirm
+setDraft(result.content); // update draft only
+// The content is written to disk only after the user reviews it and clicks Save
+```
+
+### 5. Prestandaöverväganden
+
+Använd en HTTP-klientfabrik för att undvika att skapa för många anslutningar. Resurshantering kan verka liten, men att göra det bra kan göra stor skillnad:
+
+```csharp
+// Use an HTTP client factory to avoid creating too many connections
+private const string DesignSiteProxyClientName = "ProjectDesignSiteProxy";
+private static readonly TimeSpan DesignSiteProxyTimeout = TimeSpan.FromSeconds(8);
+```
+
+## Föreslagna tillägg
+
+1. **Markdown-förbättring**: vi använder för närvarande en grundläggande `Textarea`, men vi skulle kunna uppgradera till CodeMirror för syntaxmarkering och kortkommandon. När redaktören mår bättre känns det också bättre att skriva dokumentation.
+2. **Förhandsgranskningsläge**: lägg till Markdown-förhandsvisning i realtid för att förbättra redigeringsupplevelsen. Det-du-ser-är-vad-du-får ger alltid människor mer självförtroende.
+3. **Diff merge**: implementera en intelligent sammanfogningsalgoritm istället för enkel fulltextersättning. Konflikter är oundvikliga, men konfliktlösningsprocessen behöver inte vara smärtsam.
+4. **Lokal cache**: cache `design.json` i databasen för att minska beroendet av den externa platsen. Ju färre beroenden ett system har, desto mer stabilt tenderar det att vara.
+
+## Sammanfattning
+
+I HagiCode-projektet implementerade vi en komplett onlineredigerings- och importlösning för `DESIGN.md` genom frontend-backend-samarbete. Kärnvärdet av denna lösning ligger i följande punkter:
+
+- **Högre effektivitet**: inget behov av att byta verktyg; redigering och import av designdokument kan ske i ett enhetligt webbgränssnitt.
+- **Lägre inträdesbarriär**: import av designmall med ett klick hjälper nya projekt att komma igång snabbt.
+- **Säker och pålitlig**: sökvägsvalidering, upptäckt av versionskonflikt och graciösa försämringsmekanismer håller systemet stabilt.
+- **Bättre användarupplevelse**: den globala lådan, detektering av smutsigt tillstånd och bekräftelsedialoger förfinar den övergripande interaktionsupplevelsen.
+
+Denna lösning körs redan i HagiCode-projektet och har löst teamets problem kring designdokumenthantering. Om du har liknande problem hoppas jag att den här artikeln ger dig några användbara idéer. Det finns ingen särskilt djupgående teori här, bara det praktiska arbetet med att stöta på ett problem och hitta ett sätt att lösa det.
+
+## Referenser
+
+- HagiCode projektförråd: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- HagiCodes officiella hemsida: [hagicode.com](https://hagicode.com)
+- MonoSpecs projektledningssystem: [docs.hagicode.com](https://docs.hagicode.com)
+- 30 minuters praktisk demo: [www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)
+- Installationsguide för Docker Compose: [docs.hagicode.com/installation/docker-compose](https://docs.hagicode.com/installation/docker-compose)
+- Desktopinstallation: [hagicode.com/desktop/](https://hagicode.com/desktop/)
+
+Om den här artikeln hjälpte dig får du gärna ge projektet en stjärna på GitHub. Den offentliga betan har redan startat, och du kan gå med i upplevelsen direkt efter att du har installerat den. Projekt med öppen källkod behöver alltid mer feedback och uppmuntran, och om du tyckte det var användbart är det värt att hjälpa fler att upptäcka det.
+
+---
+
+*"Vackra saker eller människor behöver inte tillhöra dig. Så länge de förblir vackra räcker det att i tysthet uppskatta den skönheten."*
+
+*Detsamma gäller för en `DESIGN.md` redaktör. Det behöver inte vara alltför komplicerat. Om det hjälper dig att arbeta effektivt räcker det redan.*
+
+## Upphovsrättsmeddelande
+
+Tack för att du läser. Om du tyckte att den här artikeln var användbar, överväg att gilla, skapa bokmärken och dela den.
+Det här innehållet skapades med AI-assisterat samarbete, och den slutliga versionen granskades och godkändes av författaren.
+- Författare: [newbe36524](https://www.newbe.pro)
+- Originalartikel: [https://docs.hagicode.com/blog/2026-04-09-design-md-web-editor-implementation/](https://docs.hagicode.com/blog/2026-04-09-design-md-web-editor-implementation/)
+- Upphovsrättsförklaring: Om inget annat anges är alla artiklar på den här bloggen licensierade under BY-NC-SA. Vänligen inkludera attribution när du gör om inlägg!

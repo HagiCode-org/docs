@@ -1,0 +1,541 @@
+---
+title: "Пояснення гібридної архітектури розподілу HagiCode Desktop: як P2P прискорює завантаження великих файлів"
+date: 2026-03-27
+tags: [HagiCode, Desktop, P2P, BitTorrent, WebSeed, Hybrid Distribution, Technical Architecture]
+description: "Пояснення архітектури гібридного розповсюдження HagiCode Desktop: як P2P прискорює завантаження великих файлів: Я довго тримав цю статтю, перш ніж нарешті"
+---
+
+## Пояснення гібридної архітектури розподілу HagiCode Desktop: як P2P прискорює завантаження великих файлів
+
+> Я довго тримав цю статтю, перш ніж нарешті її написати, і досі не впевнений, чи добре вона читається. Технічний текст досить легко створити, але важко зробити по-справжньому привабливим. Знову ж таки, я не великий майстер літератури, тому я міг би просто надати це просте пояснення.
+
+## Фон
+
+Команди, які розробляють настільні програми, рано чи пізно зіткнуться з однаковим головним болем: як поширювати великі файли?
+
+Це неприємна проблема. Традиційні прямі завантаження HTTP/HTTPS все ще можуть працювати, якщо файли невеликі, а кількість користувачів обмежена. Але час рідко буває добрим. Оскільки проект продовжує рости, інсталяційні пакети ростуть разом із ним: пакети ZIP для робочого столу, портативні пакети, архіви веб-розгортання тощо. Потім починають виникати проблеми:
+
+- **Швидкість завантаження обмежена вихідною смугою пропускання**: незалежно від того, яку пропускну здатність має окремий сервер, він все одно має проблеми, коли всі завантажують одночасно.
+- **Підтримка відновлення майже відсутня**: якщо завантаження HTTP перервано, вам часто доводиться починати спочатку. Це втрачає як час, так і пропускну здатність.
+- **Початковий сервер приймає весь тиск**: весь трафік повертається на центральний сервер, витрати на смугу пропускання постійно зростають, а масштабованість стає справжньою проблемою.
+
+Проект HagiCode Desktop не став винятком. Коли ми розробляли систему розподілу, ми постійно запитували себе: чи можемо ми запровадити гібридний підхід до розподілу, не змінюючи існуючий `index.json` контрольний літак? Іншими словами, чи можемо ми використати розподілену природу мереж P2P для прискорення завантажень, зберігаючи резервне джерело HTTP, щоб система залишалася придатною для використання в обмежених середовищах, таких як корпоративні мережі?
+
+Вплив цього рішення виявився більшим, ніж можна було очікувати. Давайте пройдемося по ньому крок за кроком.
+
+## Про HagiCode
+
+Підхід, опублікований у цій статті, базується на нашому реальному досвіді в [HagiCode](https://hagicode.com) проект. HagiCode — це проект помічника в кодуванні штучного інтелекту з відкритим кодом, який спрямований на допомогу командам розробників у підвищенні ефективності розробки. Проект охоплює кілька підсистем, включаючи інтерфейс, бекенд, засіб запуску робочого столу, документацію, конвеєр збірки та розгортання сервера.
+
+Архітектура гібридного розподілу настільних комп’ютерів — це саме те рішення, яке HagiCode удосконалило завдяки реальному досвіду роботи та неодноразовій оптимізації. Якщо цей дизайн виявиться корисним, то, можливо, він також показує, що сам HagiCode вартий уваги.
+
+Репозиторій GitHub проекту [HagiCode-org/сайт](https://github.com/HagiCode-org/site). Якщо це вас зацікавило, не соромтеся поставити йому зірку та зберегти на потім.
+
+## Основна філософія дизайну: спочатку P2P, резервний HTTP
+
+По суті, гібридну модель розподілу можна підсумувати одним реченням: **спочатку P2P, резервний HTTP**.
+
+Ключ криється в слові «гібрид». Мова йде не про те, щоб просто додати BitTorrent і припинити його роботу. Суть полягає в тому, щоб два методи доставки працювали разом і доповнювали один одного:
+
+- **Мережа P2P** забезпечує розподілене прискорення. Чим більше людей завантажує, тим більше однолітків приєднується, і тим швидшим стає передача.
+- **Резервний WebSeed/HTTP** гарантує доступність, тому завантаження все ще можуть працювати в брандмауерах підприємства та внутрішніх мережевих середовищах.
+- **Площина керування залишається простою**. Ми не змінюємо основну логіку `index.json`; ми лише додаємо кілька додаткових полів метаданих.
+
+Справжня перевага проста: користувачі відчувають, що «завантаження відбуваються швидше», а команді інженерів не потрібно брати на себе надто багато складності. Зрештою, протокол BT вже зрілий, і немає причин винаходити колесо.
+
+## Архітектурний дизайн
+
+### Огляд багаторівневої архітектури
+
+Почнемо з діаграми загальної архітектури, щоб побудувати розумову модель високого рівня:
+
+```
+┌─────────────────────────────────────┐
+│     Renderer (UI layer)             │
+├─────────────────────────────────────┤
+│     IPC/Preload (bridge layer)      │
+├─────────────────────────────────────┤
+│   VersionManager (version manager)  │
+├─────────────────────────────────────┤
+│ HybridDownloadCoordinator (coord.)  │
+│  ├── DistributionPolicyEvaluator    │
+│  ├── DownloadEngineAdapter          │
+│  ├── CacheRetentionManager          │
+│  └── SHA256 Verifier                │
+├─────────────────────────────────────┤
+│   WebTorrent (download engine)      │
+└─────────────────────────────────────┘
+```
+
+Як показано на схемі, система використовує багатошарову конструкцію. Причина чіткого розподілу обов’язків проста: **тестування та можливість заміни**.
+
+- **Рівень інтерфейсу користувача** відповідає за відображення прогресу завантаження та перемикач прискорення обміну. Це поверхня.
+- **Рівень координації** є ядром. Він містить оцінку політики, адаптацію механізму, керування кеш-пам’яттю та перевірку цілісності.
+- **Рівень механізму** інкапсулює конкретну реалізацію завантаження. На даний момент він використовує WebTorrent.
+
+Рівень двигуна абстрагований позаду `DownloadEngineAdapter` інтерфейс. Якщо ми коли-небудь пізніше захочемо замінити інший движок BT або перенести реалізацію в процес побічної коляски, це стане набагато простіше.
+
+### Розділення площини керування та площини даних
+
+HagiCode Desktop зберігає `index.json` як єдину площину керування, і ця конструкція має вирішальне значення. Площина керування відповідає за виявлення версій, вибір каналу та централізовану політику, а площина даних — це місце, де фактично відбувається передача файлів.
+
+Додано нові поля `index.json` необов'язкові:
+
+```json
+{
+  "asset": {
+    "torrentUrl": "https://cdn.example.com/app.torrent",
+    "infoHash": "abc123...",
+    "webSeeds": [
+      "https://cdn.example.com/app.zip",
+      "https://backup.example.com/app.zip"
+    ],
+    "sha256": "def456...",
+    "directUrl": "https://cdn.example.com/app.zip"
+  }
+}
+```
+
+Усі ці поля є необов’язковими. Якщо вони відсутні, клієнт повертається до традиційного режиму завантаження HTTP. Перевагою цього дизайну є **зворотна сумісність**: старі клієнти абсолютно не впливають.
+
+### Рішення, керовані політикою
+
+Не кожен файл варто розповсюджувати через P2P.
+
+`DistributionPolicyEvaluator` несе відповідальність за оцінку політики. Лише файли, які відповідають усім наведеним нижче умовам, використовуватимуть гібридне завантаження:
+
+1. **Тип джерела має бути індексом HTTP**: прямі завантаження GitHub або джерела локальних папок не використовують цей шлях.
+2. **Розмір файлу має бути принаймні 100 МБ**: для менших файлів накладні витрати P2P переважують переваги.
+3. **Повинні бути присутні повні гібридні метадані**: `torrentUrl`, `webSeeds`, і `sha256` всі необхідні.
+4. **Лише найновіший пакет для настільного комп’ютера та веб-пакет для розгортання придатні**: історичні версії продовжують використовувати традиційний шлях розповсюдження.
+
+```typescript
+class DistributionPolicyEvaluator {
+  evaluate(version: Version, settings: SharingAccelerationSettings): HybridDownloadPolicy {
+    // Check source type
+    if (version.sourceType !== 'http-index') {
+      return { useHybrid: false, reason: 'not-http-index' };
+    }
+
+    // Check metadata completeness
+    if (!version.hybrid) {
+      return { useHybrid: false, reason: 'not-eligible' };
+    }
+
+    // Check whether the feature is enabled
+    if (!settings.enabled) {
+      return { useHybrid: false, reason: 'shared-disabled' };
+    }
+
+    // Check asset type (latest desktop/web packages only)
+    if (!version.hybrid.isLatestDesktopAsset && !version.hybrid.isLatestWebAsset) {
+      return { useHybrid: false, reason: 'latest-only' };
+    }
+
+    return { useHybrid: true, reason: 'shared-enabled' };
+  }
+}
+```
+
+Це надає системі **передбачувану поведінку**. І розробники, і користувачі можуть чітко зрозуміти, які файли будуть використовувати P2P, а які ні.
+
+## Основна реалізація
+
+### Система визначення типу
+
+Почнемо з визначень типів, оскільки вони складають основу всієї системи.
+
+```typescript
+// Hybrid distribution metadata
+interface HybridDistributionMetadata {
+  torrentUrl?: string;      // Torrent file URL
+  infoHash?: string;        // InfoHash
+  webSeeds: string[];       // WebSeed list
+  sha256?: string;          // File hash
+  directUrl?: string;       // HTTP direct link (for origin fallback)
+  eligible: boolean;        // Whether hybrid distribution is applicable
+  thresholdBytes: number;   // Threshold in bytes
+  assetKind: VersionAssetKind;
+  isLatestDesktopAsset: boolean;
+  isLatestWebAsset: boolean;
+}
+
+// Sharing acceleration settings
+interface SharingAccelerationSettings {
+  enabled: boolean;           // Master switch
+  uploadLimitMbps: number;    // Upload bandwidth limit
+  cacheLimitGb: number;       // Cache limit
+  retentionDays: number;      // Retention period
+  hybridThresholdMb: number;  // Hybrid distribution threshold
+  onboardingChoiceRecorded: boolean;
+}
+
+// Download progress
+interface VersionDownloadProgress {
+  current: number;
+  total: number;
+  percentage: number;
+  stage: VersionInstallStage;  // queued, downloading, backfilling, verifying, extracting, completed, error
+  mode: VersionDownloadMode;   // http-direct, shared-acceleration, source-fallback
+  peers?: number;              // Number of connected peers
+  p2pBytes?: number;           // Bytes received from P2P
+  fallbackBytes?: number;      // Bytes received from fallback
+  verified?: boolean;          // Whether verification has completed
+}
+```
+
+Після того, як система типів зрозуміла, решта реалізації слідує природним чином.
+
+### Основний координатор
+
+`HybridDownloadCoordinator` організовує весь робочий процес завантаження. Він координує оцінку політики, виконання механізму, перевірку SHA256 і керування кешем.
+
+```typescript
+class HybridDownloadCoordinator {
+  async download(
+    version: Version,
+    cachePath: string,
+    packageSource: PackageSource,
+    onProgress?: DownloadProgressCallback,
+  ): Promise<HybridDownloadResult> {
+    // 1. Evaluate the policy: should hybrid download be used?
+    const policy = this.policyEvaluator.evaluate(version, settings);
+
+    // 2. Execute the download
+    if (policy.useHybrid) {
+      await this.engine.download(version, cachePath, settings, onProgress);
+    } else {
+      await packageSource.downloadPackage(version, cachePath, onProgress);
+    }
+
+    // 3. SHA256 verification (hard gate)
+    const verified = await this.verify(version, cachePath, onProgress);
+    if (!verified) {
+      await this.cacheRetentionManager.discard(version.id, cachePath);
+      throw new Error(`sha256 verification failed for ${version.id}`);
+    }
+
+    // 4. Mark as trusted cache and begin controlled seeding
+    await this.cacheRetentionManager.markTrusted({
+      versionId: version.id,
+      cachePath,
+      cacheSize,
+    }, settings);
+
+    return { cachePath, policy, verified };
+  }
+}
+```
+
+Тут є один особливо важливий момент: **перевірка SHA256 є жорстким шлюзом**. Завантажений файл має пройти перевірку, перш ніж його можна буде включити в процес встановлення. Якщо перевірка не вдається, кеш-пам’ять видаляється, щоб переконатися, що неправильний файл ніколи не спричинить проблеми зі встановленням.
+
+### Завантажте абстракцію двигуна
+
+`DownloadEngineAdapter` це абстрактний інтерфейс, який визначає методи, які має реалізувати кожна система:
+
+```typescript
+interface DownloadEngineAdapter {
+  download(
+    version: Version,
+    destinationPath: string,
+    settings: SharingAccelerationSettings,
+    onProgress?: (progress: VersionDownloadProgress) => void,
+  ): Promise<void>;
+
+  stopAll(): Promise<void>;
+}
+```
+
+Реалізація V1 заснована на WebTorrent і загорнута в нього `InProcessTorrentEngineAdapter`:
+
+```typescript
+class InProcessTorrentEngineAdapter implements DownloadEngineAdapter {
+  async download(...) {
+    const client = this.getClient(settings);  // Apply upload rate limiting
+    const torrent = client.add(torrentId, {
+      path: path.dirname(destinationPath),
+      destroyStoreOnDestroy: false,
+      maxWebConns: 8,
+    });
+
+    // Add WebSeed sources
+    torrent.on('ready', () => {
+      for (const seed of hybrid.webSeeds) {
+        torrent.addWebSeed(seed);
+      }
+      if (hybrid.directUrl) {
+        torrent.addWebSeed(hybrid.directUrl);
+      }
+    });
+
+    // Progress reporting - distinguish P2P from origin fallback
+    torrent.on('download', () => {
+      const hasP2PPeer = torrent.wires.some(w => w.type !== 'webSeed');
+      const mode = hasP2PPeer ? 'shared-acceleration' : 'source-fallback';
+      // ... report progress
+    });
+  }
+}
+```
+
+Конструкція двигуна, що підключається, значно полегшує майбутню оптимізацію. Наприклад, V2 може запускати механізм у допоміжному процесі, щоб уникнути зупинки основного процесу в разі збою двигуна.
+
+### Розрізнення режимів звітування про прогрес
+
+На рівні користувальницького інтерфейсу користувачі найбільше цікавляться простим: «я зараз завантажую через P2P чи через резервний HTTP?» `InProcessTorrentEngineAdapter` визначає це, перевіряючи типи всередині `torrent.wires`:
+
+```typescript
+const hasP2PPeer = torrent.wires.some((wire) => wire.type !== 'webSeed');
+const hasFallbackWire = torrent.wires.some((wire) => wire.type === 'webSeed');
+
+const mode = hasP2PPeer ? 'shared-acceleration'
+         : hasFallbackWire ? 'source-fallback'
+         : 'shared-acceleration';
+
+const stage = hasP2PPeer ? 'downloading'
+           : hasFallbackWire ? 'backfilling'
+           : 'downloading';
+```
+
+Логіка виглядає простою, але вона є ключовою частиною взаємодії з користувачем. Користувачі можуть чітко бачити, чи є поточний стан «прискорення спільного доступу» чи «заповнення джерела», що полегшує розуміння поведінки.
+
+### Перевірка потокової передачі SHA256
+
+Перевірка цілісності використовує Node.js `crypto` модуль для обчислення хешу потоковим способом, що дозволяє уникнути завантаження всього файлу в пам’ять:
+
+```typescript
+private async computeSha256(filePath: string): Promise<string> {
+  const hash = createHash('sha256');
+  await new Promise<void>((resolve, reject) => {
+    const stream = fs.createReadStream(filePath);
+    stream.on('data', (chunk) => hash.update(chunk));
+    stream.on('error', reject);
+    stream.on('end', resolve);
+  });
+  return hash.digest('hex').toLowerCase();
+}
+```
+
+Ця реалізація особливо зручна для великих файлів. Уявіть собі, що ви завантажуєте інсталяційний пакет об’ємом 2 ГБ, а потім намагаєтеся завантажити все в пам’ять, щоб перевірити його. Потокове передавання чітко вирішує це.
+
+## Потік даних
+
+Повний потік даних виглядає так:
+
+```
+┌────────────────────────────────────────────────────────────────────┐
+│             User clicks install on a large-file version            │
+└────────────────────────────────────────────────────────────────────┘
+                                 │
+                                 ▼
+┌────────────────────────────────────────────────────────────────────┐
+│              VersionManager invokes the coordinator                │
+│              HybridDownloadCoordinator.download()                  │
+└────────────────────────────────────────────────────────────────────┘
+                                 │
+                                 ▼
+┌────────────────────────────────────────────────────────────────────┐
+│           DistributionPolicyEvaluator.evaluate()                   │
+│       Checks: source, metadata, switch, and asset type            │
+└────────────────────────────────────────────────────────────────────┘
+                                 │
+                    ┌───────────┴───────────┐
+                    │ useHybrid?            │
+                    └───────────┬───────────┘
+                        yes │         │ no
+                           ▼         ▼
+              ┌──────────────────┐  ┌─────────────────────┐
+              │ P2P + WebSeed    │  │ HTTP direct download│
+              │ Hybrid download  │  │ (compatibility path)│
+              └──────────────────┘  └─────────────────────┘
+                        │
+                        ▼
+              ┌──────────────────┐
+              │ SHA256 verify    │
+              │ (hard gate)      │
+              └────────┬─────────┘
+                       │
+              ┌────────┴─────────┐
+              │ Passed?          │
+              └────────┬─────────┘
+                   yes │    │ no
+                     ▼    ▼
+          ┌────────────┐ ┌────────────────┐
+          │ Extract +  │ │ Drop cache +   │
+          │ install +  │ │ return error   │
+          │ seed safely│ └────────────────┘
+          └────────────┘
+```
+
+Потік дуже чіткий від кінця до кінця, і кожен крок має чітко визначену відповідальність. Коли щось йде не так, набагато легше визначити стадію збою.
+
+## Виробництво
+
+Навіть найкращий технічний дизайн зазнає невдачі, якщо користувацький досвід буде поганим. HagiCode Desktop доклав чимало зусиль для створення цієї можливості.
+
+### Приховати термінологію BT
+
+Більшість користувачів не знають, що означає BitTorrent або InfoHash. Тож на рівні продукту ми представляємо функцію, використовуючи фразу «прискорення спільного доступу»:
+
+- Ця функція називається «прискорення обміну», а не завантаження P2P.
+- Налаштування називається «ліміт завантаження», а не заповнення.
+- На мітці прогресу зазначено «заповнення вихідного коду», а не резервний варіант WebSeed.
+
+Це зменшує когнітивне навантаження на термінологію та полегшує сприйняття функції.
+
+### Увімкнено за замовчуванням у майстрі першого запуску
+
+Коли нові користувачі запускають настільну програму вперше, вони бачать сторінку майстра, яка представляє прискорення спільного доступу:
+
+> Щоб підвищити швидкість завантаження, ми ділимося з іншими користувачами тими частинами, які ви вже завантажили, поки триває ваше власне завантаження. Це абсолютно необов’язково, і ви можете будь-коли вимкнути це в налаштуваннях.
+
+Він увімкнено за замовчуванням, але користувачі мають чіткий спосіб відмовитися. Якщо корпоративні користувачі цього не хочуть, вони можуть просто вимкнути його під час реєстрації.
+
+### Параметри, керовані користувачем
+
+На сторінці налаштувань доступні три настроювані параметри:
+
+| Параметр | За замовчуванням | опис |
+|------|--------|------|
+| Ліміт завантаження | 2 МБ/с | Запобігає надмірному використанню вихідної смуги пропускання |
+| Обмеження кешу | 10 ГБ | Контролює використання дискового простору |
+| Дні утримання | 7 днів | Автоматично очищає старий кеш після закінчення цього періоду |
+
+Усі ці параметри мають розумні значення за замовчуванням. Більшості користувачів ніколи не потрібно їх змінювати, тоді як досвідчені користувачі можуть налаштувати їх відповідно до свого мережевого середовища.
+
+## Ключові дизайнерські рішення
+
+Озираючись на загальне рішення, варто відзначити кілька дизайнерських рішень.
+
+### Двигун працює в основному процесі (V1)
+
+Чому б не почати відразу з коляски або допоміжного процесу? Причина проста: **доставляйте швидко**. Проект у процесі розробки має коротший цикл розробки, і його легше налагодити. Першочерговим завданням є запуск функції, а потім підвищення стабільності.
+
+Звичайно, це рішення пов’язане з витратами: якщо двигун виходить з ладу, це може вплинути на основний процес. Ми зменшуємо цей ризик за допомогою обмежень адаптера та контролю тайм-ауту, а також залишаємо відкритим шлях міграції, щоб V2 міг легше перейти до окремого процесу.
+
+### SHA256 як перевірка цілісності
+
+Ми використовуємо SHA256 замість MD5 або CRC32, оскільки SHA256 більш безпечний. Вартість зіткнення для MD5 і CRC32 занадто низька. Якщо хтось зловмисно створив підроблений інсталяційний пакет, наслідки можуть бути серйозними. Обчислення SHA256 коштують дорожче, але підвищення безпеки того варте.
+
+### Увімкнено лише для джерел індексу HTTP
+
+Такі сценарії, як завантаження GitHub і локальні джерела папок, не використовують гібридне розповсюдження. Це не технічне обмеження; йдеться про **уникнення непотрібної складності**. Протоколи BT додають обмежену цінність у сценаріях приватної мережі та лише збільшують складність коду.
+
+## Практичні замітки
+
+### Нормалізація параметрів
+
+Всередині `SharingAccelerationSettingsStore`кожне числове значення має пройти перевірку меж і нормалізацію:
+
+```typescript
+private normalize(settings: SharingAccelerationSettings): SharingAccelerationSettings {
+  return {
+    enabled: Boolean(settings.enabled),
+    uploadLimitMbps: this.clampNumber(settings.uploadLimitMbps, 1, 200, DEFAULT_SETTINGS.uploadLimitMbps),
+    cacheLimitGb: this.clampNumber(settings.cacheLimitGb, 1, 500, DEFAULT_SETTINGS.cacheLimitGb),
+    retentionDays: this.clampNumber(settings.retentionDays, 1, 90, DEFAULT_SETTINGS.retentionDays),
+    hybridThresholdMb: DEFAULT_SETTINGS.hybridThresholdMb,  // Fixed value, not user-configurable
+    onboardingChoiceRecorded: Boolean(settings.onboardingChoiceRecorded),
+  };
+}
+
+private clampNumber(value: number, min: number, max: number, fallback: number): number {
+  if (!Number.isFinite(value)) {
+    return fallback;
+  }
+  return Math.min(max, Math.max(min, Math.round(value)));
+}
+```
+
+Це запобігає користувачам від редагування файлу конфігурації вручну на недійсні значення.
+
+### Очищення кешу LRU
+
+`CacheRetentionManager.prune()` відповідає за очищення прострочених або великих записів кешу. Стратегія очищення використовує LRU (останнє використання):
+
+```typescript
+const records = [...this.listRecords()]
+  .sort((left, right) =>
+    new Date(left.lastUsedAt).getTime() - new Date(right.lastUsedAt).getTime()
+  );
+
+// When over the limit, evict the least recently used entries first
+while (totalBytes > maxBytes && retainedEntries.length > 0) {
+  const evicted = records.find((record) => retainedEntries.includes(record.versionId));
+  retainedEntries.splice(retainedEntries.indexOf(evicted.versionId), 1);
+  removedEntries.push(evicted.versionId);
+  totalBytes -= evicted.cacheSize;
+  await fs.rm(evicted.cachePath, { force: true });
+}
+```
+
+Ця логіка забезпечує ефективне використання дискового простору, зберігаючи історичні версії, які ще можуть знадобитися користувачеві.
+
+### Негайне припинення посіву
+
+Коли користувач вимикає прискорення спільного доступу, програма має негайно припинити заповнення та знищити торрент-клієнт:
+
+```typescript
+async disableSharingAcceleration(): Promise<void> {
+  this.settingsStore.updateSettings({ enabled: false });
+  await this.cacheRetentionManager.stopAllSeeding();  // Stop seeding
+  await this.engine.stopAll();  // Destroy the torrent client
+}
+```
+
+Якщо користувач вимикає цю функцію, продукт більше не повинен споживати ресурси P2P. Це основний товарний етикет.
+
+## Ризики та компроміси
+
+Ідеального рішення не існує, і гібридна дистрибуція не є винятком. Ось основні компроміси:
+
+**Ізоляція від аварії слабша, ніж у коляски**: V1 використовує внутрішній двигун, тому збій двигуна може вплинути на основний процес. Межі адаптера та елементи керування тайм-аутом зменшують ризик, але вони не є фундаментальним виправленням. V2 включає запланований шлях міграції до допоміжного процесу.
+
+**Використання ресурсів за замовчуванням увімкнено**: параметри за замовчуванням 2 МБ/с завантаження, 10 ГБ кешу та 7-денне збереження споживають деякі ресурси машини. Очікування користувачів керуються за допомогою адаптаційної копії та прозорих налаштувань.
+
+**Сумісність із мережею підприємства**: автоматичний резерв WebSeed/HTTPS зберігає зручність використання в корпоративних мережах, але може зменшити прискорення від P2P. Це навмисний компроміс, який надає пріоритет доступності.
+
+**Зворотно сумісні метадані**: усі нові поля необов’язкові. Якщо вони відсутні, система повертається до режиму HTTP. Старі клієнти абсолютно не впливають, що робить оновлення плавними.
+
+## Висновок
+
+У цій статті описано гібридну архітектуру розподілу, яка використовується в проекті HagiCode Desktop. Основні висновки:
+
+1. **Рівнева архітектура**: площина керування та площина даних розділені, а механізм абстрагований за підключається інтерфейсом для легшого тестування та розширення.
+
+2. **Поведінка, керована політикою**: не кожен файл використовує P2P. Гібридне розповсюдження можливе лише для великих файлів, які відповідають необхідним умовам.
+
+3. **Перевірка цілісності**: SHA256 служить жорстким шлюзом, а перевірка потокової передачі дозволяє уникнути тиску на пам’ять.
+
+4. **Продукційна презентація**: термінологія BT прихована за фразою «прискорення обміну», і ця функція ввімкнена за умовчанням під час реєстрації.
+
+5. **Контроль користувача**: ліміти завантаження, ліміти кеш-пам’яті, дні зберігання й інші параметри залишаються налаштованими користувачем.
+
+Ця архітектура вже реалізована в проекті HagiCode Desktop. Якщо ви спробуєте його, ми будемо раді почути ваші відгуки після встановлення та використання в реальному світі.
+
+## Список літератури
+
+- HagiCode Desktop GitHub: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Офіційний сайт HagiCode: [hagicode.com](https://hagicode.com)
+- Офіційна документація WebTorrent: [webtorrent.io](https://webtorrent.io)
+- Специфікація протоколу BitTorrent: [bittorrent.org](https://www.bittorrent.org/beps/bep_0019.html)
+- Специфікація розширення WebSeed: [bittorrent.org/beps/bep_0017.html](https://www.bittorrent.org/beps/bep_0017.html)
+
+---
+
+Якщо ця стаття допомогла вам:
+
+- Поставте проекту зірку на GitHub: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Відвідайте веб-сайт, щоб дізнатися більше: [hagicode.com](https://hagicode.com)
+- Швидке встановлення для HagiCode Desktop: [hagicode.com/desktop/](https://hagicode.com/desktop/)
+- Публічна бета-версія вже відкрита, і ви можете встановити та спробувати її
+
+Можливо, ми всі просто звичайні люди, які пробують свій шлях у світі технологій, але це добре. Звичайні люди все ще можуть бути наполегливими, і ця наполегливість має значення.
+
+## Повідомлення про авторські права
+
+Дякую, що прочитали. Якщо ця стаття була для вас корисною, поставте лайк, збережіть і поділіться нею.
+Цей вміст було створено за допомогою штучного інтелекту, а остаточну версію перевірив і схвалив автор.
+- Автор: [newbe36524](https://www.newbe.pro)
+- Оригінальна стаття: [https://docs.hagicode.com/blog/2026-03-27-hagicode-desktop-p2p-acceleration-architecture/](https://docs.hagicode.com/blog/2026-03-27-hagicode-desktop-p2p-acceleration-architecture/)
+- Повідомлення про ліцензію: якщо не зазначено інше, усі публікації в блозі на цьому сайті мають ліцензію BY-NC-SA. Будь ласка, вказуйте авторство під час репосту.

@@ -1,0 +1,296 @@
+---
+title: "Od TypeScript k C#: Praxe portování mezi jazyky pro Codex SDK"
+date: 2026-03-07
+tags: ["C#", TypeScript, SDK, Codex, "cross-language", porting]
+description: "Jednoduše řečeno, tento článek je také tak trochu naše dítě: zaznamenává celý proces portování oficiální sady TypeScript Codex SDK do C#. Říká se tomu 'port'"
+---
+
+## Od TypeScript k C#: Praxe portování mezi jazyky pro Codex SDK
+
+> Jednoduše řečeno, tento článek je také tak trochu naše dítě: zaznamenává celý proces portování oficiální sady TypeScript Codex SDK do C#. Když tomu říkáme „přístav“, zní to skoro až příliš jednoduše – bylo to spíše jako dlouhé dobrodružství, protože tyto dva jazyky mají velmi odlišné povahy a my jsme museli najít způsob, jak je přimět spolupracovat.
+
+## Pozadí
+
+Codex je nástroj AI Agent CLI vydaný OpenAI a je skutečně výkonný. Oficiální tým poskytuje TypeScript SDK v `@openai/codex` balíček. Interaguje s Codex CLI voláním `codex exec --experimental-json` příkaz a analýzu streamu událostí JSONL.
+
+Problém je v tom, že v projektu HagiCode jej potřebujeme používat v čistém .NET prostředí – konkrétně v C# backendových službách a desktopových aplikacích. Nemohli jsme rozumně zavést runtime Node.js do projektu .NET jen proto, abychom zavolali nástroj CLI. To by bylo příliš těžkopádné.
+
+Zbyly nám tedy dvě možnosti: udržovat komplexní vrstvu mostu Node.js nebo si sami vytvořit nativní C# SDK.
+
+Vybrali jsme to druhé.
+
+## O HagiCode
+
+Tento článek také pochází přímo z našich praktických zkušeností v [HagiCode](https://hagicode.com) projekt. HagiCode je projekt asistenta kódování AI s otevřeným zdrojovým kódem. Jednoduše řečeno to znamená údržbu více komponent najednou: rozšíření VSCode na frontendu, služby AI na backendu a multiplatformního desktopového klienta. Tato vícejazyčná a multiplatformní složitost je přesně důvodem, proč jsme potřebovali nativní C# SDK – opravdu jsme nechtěli provozovat Node.js v rámci projektu .NET.
+
+Pokud považujete tento článek za užitečný, neváhejte nám dát hvězdičku na GitHubu: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site). Můžete také navštívit oficiální webovou stránku, kde se dozvíte více: [hagicode.com](https://hagicode.com). Je vždy povzbudivé, když projekt s otevřeným zdrojovým kódem získá podporu.
+
+## Základní obsah
+
+### Srovnání architektonických návrhů
+
+Před převodem kódu jedna ku jedné jsme museli nejprve porozumět architektonickému návrhu obou SDK. Musíte porozumět oběma stranám, než je můžete dobře přenést.
+
+Základní architektura sady TypeScript SDK vypadá takto:
+
+```
+Codex (entry class)
+  └── CodexExec (executor, manages child processes)
+      └── Thread (conversation thread)
+          ├── run() / runStreamed() (synchronous/asynchronous execution)
+          └── event stream parsing
+```
+
+C# SDK zachovává stejné architektonické vrstvení, ale přizpůsobuje detaily implementace. Celková myšlenka je přímočará: zachovat konzistenci API při plném využití funkcí jazyka C# při implementaci.
+
+### Zadejte Převod systému
+
+To je nejzásadnější a také nejdůležitější část práce. Pokud je základ slabý, vše, co následuje, se stává těžším.
+
+Typový systém TypeScriptu je flexibilnější než systém C#, a to je prostě fakt. Potřebovali jsme najít vhodnou strategii mapování:
+
+| TypeScript | C# | Poznámky |
+|------------|-----|------|
+| `interface` / `type` | `record` | Používá C# `record` pro neměnné datové struktury |
+| `řetězec \| null' | `string?` | Typ reference s možností null |
+| `booleovský \| nedefinováno' | `bool?` | Boolean s možností null |
+| `AsyncGenerator` | `IAsyncEnumerable` | Asynchronní iterátor |
+
+Typickým příkladem je **systém typu události**. TypeScript používá k definování událostí sjednocovací typy:
+
+```typescript
+export type ThreadEvent =
+  | ThreadStartedEvent
+  | TurnStartedEvent
+  | TurnCompletedEvent
+  | ...
+```
+
+V C# používáme hierarchii dědičnosti a párování vzorů, abychom dosáhli podobného efektu:
+
+```csharp
+public abstract record ThreadEvent(string Type);
+
+public sealed record ThreadStartedEvent(string ThreadId) : ThreadEvent("thread.started");
+public sealed record TurnStartedEvent() : ThreadEvent("turn.started");
+public sealed record TurnCompletedEvent(Usage Usage) : ThreadEvent("turn.completed");
+// ...
+```
+
+Vybrali jsme `record` místo toho `class` protože objekty událostí by měly být neměnné, což odpovídá záměru použití prostých objektů v TypeScriptu. The `sealed` klíčové slovo také zabraňuje dodatečnému dědění a poskytuje kompilátoru prostor pro optimalizaci.
+
+### Klíčové body portování
+
+#### 1. Parser událostí
+
+Analýza událostí je jádrem celého SDK, protože určuje, zda dokážeme správně porozumět každé zprávě vrácené Codex CLI. Pokud je analýza nesprávná, vše po tom je zbytečné úsilí.
+
+Verze TypeScript používá `JSON.parse()` analyzovat každý řádek JSON:
+
+```typescript
+export function parseEvent(line: string): ThreadEvent {
+  const data = JSON.parse(line);
+  // Handle different event types...
+}
+```
+
+Verze C# používá `System.Text.Json.JsonDocument` místo toho:
+
+```csharp
+public static ThreadEvent Parse(string line)
+{
+    using var document = JsonDocument.Parse(line);
+    var root = document.RootElement;
+    var type = GetRequiredString(root, "type", "event.type");
+
+    return type switch
+    {
+        "thread.started" => new ThreadStartedEvent(GetRequiredString(root, "thread_id", ...)),
+        "turn.started" => new TurnStartedEvent(),
+        "turn.completed" => new TurnCompletedEvent(ParseUsage(...)),
+        // ...
+        _ => new UnknownThreadEvent(type, root.Clone()),
+    };
+}
+```
+
+Je zde jeden malý, ale důležitý trik: `root.Clone()` je vyžadováno, protože prvky z `JsonDocument` po likvidaci dokumentu pozbývají platnosti. Musíme si ponechat kopii pro neznámé typy událostí. To je prostě jeden z rozdílů mezi zpracováním C# JSON a JavaScriptem.
+
+#### 2. Rozdíly v řízení procesů
+
+Zde se obě sady SDK liší nejvíce. Node.js a .NET mají odlišné běhové konvence, takže se implementace musí přizpůsobit.
+
+TypeScript používá Node.js `spawn()` funkce:
+
+```typescript
+const child = spawn(this.executablePath, commandArgs, { env, signal });
+```
+
+C# používá .NET `System.Diagnostics.Process`:
+
+```csharp
+using var process = new Process { StartInfo = startInfo };
+process.Start();
+
+// stdin/stdout/stderr must be managed manually
+```
+
+Přesněji řečeno, verze C# potřebuje nakonfigurovat proces takto:
+
+```csharp
+var startInfo = new ProcessStartInfo
+{
+    FileName = _executablePath,
+    RedirectStandardInput = true,
+    RedirectStandardOutput = true,
+    RedirectStandardError = true,
+    UseShellExecute = false,
+    CreateNoWindow = true,
+};
+```
+
+Největší rozdíl je v mechanismu zrušení. Používá TypeScript `AbortSignal`, který je součástí webového rozhraní API a velmi pohodlně se s ním pracuje:
+
+```typescript
+const child = spawn(cmd, args, { signal: cancellationSignal });
+```
+
+Používá C# `CancellationToken` místo toho:
+
+```csharp
+public async IAsyncEnumerable<string> RunAsync(
+    CodexExecArgs args,
+    [EnumeratorCancellation] CancellationToken cancellationToken = default)
+{
+    // Check cancellation status inside the loop
+    while (!cancellationToken.IsCancellationRequested)
+    {
+        // Process output...
+    }
+
+    // Terminate the process when cancellation is requested
+    if (cancellationToken.IsCancellationRequested)
+    {
+        try { process.Kill(entireProcessTree: true); } catch { }
+    }
+}
+```
+
+Na vysoké úrovni je to jen další příklad rozdílu mezi ekosystémem webového rozhraní API a ekosystémem .NET.
+
+#### 3. Zachování serializace konfigurace
+
+Obě sady SDK implementují logiku, která převádí konfiguraci JSON na konfiguraci TOML, protože rozhraní Codex CLI přijímá přepsání konfigurace ve formátu TOML. Tato část musí zůstat zcela konzistentní, jinak se stejná konfigurace bude v obou sadách SDK chovat odlišně.
+
+To je druh detailu, u kterého nemůžete dělat kompromisy. Úspěch nebo neúspěch často spočívá v detailech, jako je tento.
+
+### Podrobnosti o implementaci
+
+#### Struktura projektu
+
+Vytvořili jsme následující strukturu projektu:
+
+```
+CodexSdk/
+├── CodexSdk.csproj
+├── Codex.cs           # Entry class
+├── CodexThread.cs     # Conversation thread
+├── CodexExec.cs       # Executor
+├── Events.cs          # Event type definitions
+├── Items.cs           # Item type definitions
+├── EventParser.cs     # Event parser
+├── OutputSchemaTempFile.cs  # Temporary file management
+└── ...
+```
+
+Je to docela čistá struktura a to během přístavu hodně pomohlo.
+
+#### Příklad použití
+
+Základní použití zůstává konzistentní s TypeScript SDK:
+
+```csharp
+using CodexSdk;
+
+// Create a Codex instance
+var codex = new Codex();
+var thread = codex.StartThread();
+
+// Execute a query
+var result = await thread.RunAsync("Summarize this repository.");
+Console.WriteLine(result.FinalResponse);
+```
+
+Zpracování událostí streamování využívá porovnávání vzorů C#:
+
+```csharp
+await foreach (var @event in thread.RunStreamedAsync("Analyze the code."))
+{
+    switch (@event)
+    {
+        case ItemCompletedEvent itemCompleted
+            when itemCompleted.Item is AgentMessageItem msg:
+            Console.WriteLine($"Assistant: {msg.Text}");
+            break;
+        case TurnCompletedEvent completed:
+            Console.WriteLine($"Tokens: in={completed.Usage.InputTokens}");
+            break;
+        case CommandExecutionItem command:
+            Console.WriteLine($"Command: {command.Command}");
+            break;
+    }
+}
+```
+
+### Poznámky
+
+Během implementace jsme shromáždili několik praktických lekcí:
+
+1. **Správa procesů**: Verze C# musí řídit celý životní cyklus procesu ručně, včetně ukončení procesu při zrušení. Použijte `Kill(entireProcessTree: true)` abyste zajistili, že budou vyčištěny i podřízené procesy.
+
+2. **Ošetření chyb**: Používáme `InvalidOperationException` k vyvolání chyb analýzy, přičemž styl zpracování chyb bude podobný jako u TypeScript SDK.
+
+3. **Čištění zdrojů**: `OutputSchemaTempFile` nářadí `IAsyncDisposable` abyste zajistili správné vyčištění dočasných souborů.
+
+4. **Proměnné prostředí**: Verze C# podporuje plně přepisující proměnné prostředí procesu `CodexOptions.Env`. Je to malá funkce, ale velmi praktická.
+
+5. **Rozdíly mezi platformami**: Verze C# nezahrnuje logiku verze TypeScript pro automatické vyhledání binárních souborů v balíčcích npm. Protože projekty .NET obvykle nezávisí na npm, cesta k `codex` spustitelný soubor musí být specifikován prostřednictvím `CODEX_EXECUTABLE` proměnné prostředí popř `CodexPathOverride`.
+
+## Závěr
+
+Portování vyspělého TypeScript SDK do C# není jen otázkou převodu syntaxe – vyžaduje také pochopení filozofie designu obou jazyků. Flexibilita TypeScriptu a funkce ekosystému JavaScriptu, jako je např `AbortSignal` potřebují vhodné protějšky v C#.
+
+Klíčové je toto: **zachování konzistence API je důležitější než zachování konzistence na úrovni implementace**. Uživatelům záleží na tom, zda se rozhraní snadno používá, nikoli na tom, zda je vnitřní implementace identická. Zní to jednoduše, ale dělat tyto kompromisy vyžaduje úsudek.
+
+Pokud pracujete na podobném mezijazykovém portu, naše zkušenost je taková, že nejprve plně porozumíme původní architektuře SDK, poté ji přeložíme modul po modulu a nakonec použijeme kompletní testovací sadu k zajištění konzistence chování. Taková práce se nedá uspěchat.
+
+Vše se nakonec vyřeší.
+
+---
+
+## Reference
+
+- Oficiální TypeScript SDK: [github.com/openai/codex](https://github.com/openai/codex)
+- Zdrojový kód C# SDK: [github.com/HagiCode-org/site/tree/main/repos/playground/CodexDotnet](https://github.com/HagiCode-org/site/tree/main/repos/playground/CodexDotnet)
+- Oficiální dokumentace Codexu: [codex.docs.anysphere.co](https://codex.docs.anysphere.co)
+
+---
+
+**Pokud vám tento článek pomohl**:
+
+- Dejte nám hvězdu na GitHubu: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Navštivte oficiální webovou stránku, kde se dozvíte více: [hagicode.com](https://hagicode.com)
+- Podívejte se na 30minutovou živou ukázku: [www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)
+- Zkuste instalaci jedním kliknutím: [docs.hagicode.com/installation/docker-compose](https://docs.hagicode.com/installation/docker-compose)
+- Rychlá instalace pro desktopového klienta: [hagicode.com/desktop/](https://hagicode.com/desktop/)
+- Veřejná beta byla spuštěna a můžete si ji vyzkoušet
+
+---
+
+Děkuji za přečtení. Pokud se vám tento článek zdál užitečný, klikněte níže na tlačítko Líbí se mi, aby jej objevilo více lidí.
+
+Tento obsah byl vytvořen ve spolupráci s umělou inteligencí, zkontrolován autorem a odráží jeho vlastní názory a postoj.
+
+- autor: [newbe36524](https://www.newbe.pro)
+- Odkaz na článek: [https://docs.hagicode.com/blog/2026-03-07-codex-sdk-typescript-to-csharp-porting-guide/](https://docs.hagicode.com/blog/2026-03-07-codex-sdk-typescript-to-csharp-porting-guide/)
+- Upozornění na autorská práva: Pokud není uvedeno jinak, všechny články na tomto blogu jsou licencovány podle BY-NC-SA. Při opětovném odeslání uveďte zdroj.

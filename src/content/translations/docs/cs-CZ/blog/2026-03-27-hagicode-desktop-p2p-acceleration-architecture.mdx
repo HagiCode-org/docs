@@ -1,0 +1,541 @@
+---
+title: "Vysvětlení architektury hybridní distribuce pro stolní počítače HagiCode: Jak P2P urychluje stahování velkých souborů"
+date: 2026-03-27
+tags: [HagiCode, Desktop, P2P, BitTorrent, WebSeed, Hybrid Distribution, Technical Architecture]
+description: "Vysvětlení architektury hybridní distribuce HagiCode Desktop: Jak P2P urychluje stahování velkých souborů: Tento článek jsem dlouho zadržoval, než jsem konečně"
+---
+
+## Vysvětlení architektury hybridní distribuce pro stolní počítače HagiCode: Jak P2P urychluje stahování velkých souborů
+
+> Dlouho jsem tento článek zdržoval, než jsem ho konečně napsal, a stále si nejsem jistý, zda se čte dobře. Technické psaní je snadné vytvořit, ale je těžké udělat skutečně poutavé. Pak znovu, nejsem žádný velký literární mistr, takže bych mohl uvést toto prosté vysvětlení.
+
+## Pozadí
+
+Týmy vytvářející desktopové aplikace se dříve nebo později setkají se stejnou bolestí hlavy: jak distribuujete velké soubory?
+
+Je to nepříjemný problém. Tradiční přímé stahování HTTP/HTTPS může stále vydržet, když jsou soubory malé a počet uživatelů je omezený. Ale čas je málokdy laskavý. Jak projekt neustále roste, rostou s ním i instalační balíčky: Desktopové ZIP balíčky, přenosné balíčky, webové archivy nasazení a další. Pak se začnou objevovat problémy:
+
+- **Rychlost stahování je omezena původní šířkou pásma**: bez ohledu na to, jak velkou šířku pásma má jeden server, stále má problémy, když všichni stahují najednou.
+- **Podpora obnovení téměř neexistuje**: pokud je stahování HTTP přerušeno, často musíte začít znovu od začátku. To plýtvá časem i šířkou pásma.
+- **Původní server přebírá veškerý tlak**: veškerý provoz se vrací na centrální server, náklady na šířku pásma stále rostou a škálovatelnost se stává skutečným problémem.
+
+Projekt HagiCode Desktop nebyl výjimkou. Když jsme navrhovali distribuční systém, stále jsme se sami sebe ptali: můžeme zavést hybridní distribuční přístup, aniž bychom změnili stávající? `index.json` řídící letadlo? Jinými slovy, můžeme použít distribuovanou povahu P2P sítí k urychlení stahování a zároveň zachovat záložní zdroj HTTP, takže systém zůstane použitelný v omezených prostředích, jako jsou podnikové sítě?
+
+Dopad tohoto rozhodnutí se ukázal být větší, než byste čekali. Pojďme si to projít krok za krokem.
+
+## O HagiCode
+
+Přístup sdílený v tomto článku vychází z našich zkušeností v reálném světě [HagiCode](https://hagicode.com) projekt. HagiCode je projekt asistenta kódování umělé inteligence s otevřeným zdrojovým kódem zaměřený na pomoc vývojovým týmům zlepšit efektivitu inženýrství. Projekt zahrnuje několik subsystémů, včetně frontendu, backendu, desktop launcheru, dokumentace, sestavení kanálu a nasazení serveru.
+
+Architektura hybridní distribuce pro stolní počítače je přesně tím druhem řešení, které HagiCode zdokonaluje skutečnými provozními zkušenostmi a opakovanou optimalizací. Pokud se tento design osvědčí, pak možná také ukazuje, že samotný HagiCode stojí za pozornost.
+
+Úložiště GitHub projektu je [HagiCode-org/site](https://github.com/HagiCode-org/site). Pokud vás to zajímá, klidně tomu dejte hvězdičku a uschovejte si to na později.
+
+## Základní filozofie návrhu: P2P za prvé, HTTP Fallback
+
+V jádru lze hybridní distribuční model shrnout do jediné věty: **P2P nejprve, HTTP záložní**.
+
+Klíč spočívá ve slově „hybrid“. Nejedná se o pouhé přidání BitTorrentu a volání za den. Jde o to, aby tyto dva způsoby doručení spolupracovaly a doplňovaly se:
+
+- **P2P síť** poskytuje distribuovanou akceleraci. Čím více lidí si stáhne, tím více kolegů se připojí a přenos bude rychlejší.
+- **Záloha WebSeed/HTTP** zaručuje dostupnost, takže stahování může stále fungovat v podnikových firewallech a v interních síťových prostředích.
+- **Ovládací rovina zůstává jednoduchá**. Neměníme základní logiku `index.json`; přidáváme pouze několik volitelných polí metadat.
+
+Skutečná výhoda je přímočará: uživatelé mají pocit, že „stahování je rychlejší“, zatímco technický tým nemusí nést příliš mnoho složitosti navíc. Koneckonců, protokol BT je již vyzrálý a není mnoho důvodů znovu vynalézat kolo.
+
+## Architektura Design
+
+### Přehled vrstvené architektury
+
+Začněme s celkovým diagramem architektury, abychom vytvořili mentální model na vysoké úrovni:
+
+```
+┌─────────────────────────────────────┐
+│     Renderer (UI layer)             │
+├─────────────────────────────────────┤
+│     IPC/Preload (bridge layer)      │
+├─────────────────────────────────────┤
+│   VersionManager (version manager)  │
+├─────────────────────────────────────┤
+│ HybridDownloadCoordinator (coord.)  │
+│  ├── DistributionPolicyEvaluator    │
+│  ├── DownloadEngineAdapter          │
+│  ├── CacheRetentionManager          │
+│  └── SHA256 Verifier                │
+├─────────────────────────────────────┤
+│   WebTorrent (download engine)      │
+└─────────────────────────────────────┘
+```
+
+Jak ukazuje diagram, systém používá vrstvený design. Důvod pro jasné oddělení odpovědností je jednoduchý: **testovatelnost a nahraditelnost**.
+
+- **Vrstva uživatelského rozhraní** je zodpovědná za zobrazení průběhu stahování a přepínač akcelerace sdílení. Je to povrch.
+- **Koordinační vrstva** je jádrem. Obsahuje vyhodnocení zásad, přizpůsobení motoru, správu mezipaměti a ověření integrity.
+- **Vrstva enginu** zapouzdřuje konkrétní implementaci stahování. V současné době používá WebTorrent.
+
+Vrstva motoru je abstrahována za `DownloadEngineAdapter` rozhraní. Pokud budeme chtít později vyměnit za jiný motor BT nebo přesunout implementaci do procesu postranního vozíku, bude to mnohem jednodušší.
+
+### Oddělení řídicí roviny a datové roviny
+
+HagiCode Desktop uchovává `index.json` jako jediná řídicí rovina a tento design je kritický. Řídicí rovina je zodpovědná za zjišťování verzí, výběr kanálů a centralizovanou politiku, zatímco datová rovina je místem, kde probíhá skutečný přenos souborů.
+
+Nová pole přidána do `index.json` jsou volitelné:
+
+```json
+{
+  "asset": {
+    "torrentUrl": "https://cdn.example.com/app.torrent",
+    "infoHash": "abc123...",
+    "webSeeds": [
+      "https://cdn.example.com/app.zip",
+      "https://backup.example.com/app.zip"
+    ],
+    "sha256": "def456...",
+    "directUrl": "https://cdn.example.com/app.zip"
+  }
+}
+```
+
+Všechna tato pole jsou volitelná. Pokud chybí, klient přejde zpět do tradičního režimu stahování HTTP. Výhodou tohoto designu je **zpětná kompatibilita**: starší klienti jsou zcela nedotčeni.
+
+### Politická rozhodnutí
+
+Ne každý soubor se vyplatí distribuovat prostřednictvím P2P.
+
+`DistributionPolicyEvaluator` je zodpovědný za hodnocení politiky. Hybridní stahování budou používat pouze soubory, které splňují všechny následující podmínky:
+
+1. **Typ zdroje musí být index HTTP**: přímá stahování GitHub nebo místní zdroje složek tuto cestu nepoužívají.
+2. **Velikost souboru musí být alespoň 100 MB**: u menších souborů převažuje režie P2P nad výhodou.
+3. **Musí být přítomna úplná hybridní metadata**: `torrentUrl`, `webSeeds`a `sha256` jsou všechny povinné.
+4. **Pouze nejnovější balíček pro stolní počítače a balíček pro nasazení na webu jsou způsobilé**: historické verze nadále používají tradiční distribuční cestu.
+
+```typescript
+class DistributionPolicyEvaluator {
+  evaluate(version: Version, settings: SharingAccelerationSettings): HybridDownloadPolicy {
+    // Check source type
+    if (version.sourceType !== 'http-index') {
+      return { useHybrid: false, reason: 'not-http-index' };
+    }
+
+    // Check metadata completeness
+    if (!version.hybrid) {
+      return { useHybrid: false, reason: 'not-eligible' };
+    }
+
+    // Check whether the feature is enabled
+    if (!settings.enabled) {
+      return { useHybrid: false, reason: 'shared-disabled' };
+    }
+
+    // Check asset type (latest desktop/web packages only)
+    if (!version.hybrid.isLatestDesktopAsset && !version.hybrid.isLatestWebAsset) {
+      return { useHybrid: false, reason: 'latest-only' };
+    }
+
+    return { useHybrid: true, reason: 'shared-enabled' };
+  }
+}
+```
+
+To dává systému **předvídatelné chování**. Vývojáři i uživatelé mohou jasně pochopit, které soubory budou používat P2P a které ne.
+
+## Implementace jádra
+
+### Systém definice typu
+
+Začněme definicemi typů, protože ty tvoří základ celého systému.
+
+```typescript
+// Hybrid distribution metadata
+interface HybridDistributionMetadata {
+  torrentUrl?: string;      // Torrent file URL
+  infoHash?: string;        // InfoHash
+  webSeeds: string[];       // WebSeed list
+  sha256?: string;          // File hash
+  directUrl?: string;       // HTTP direct link (for origin fallback)
+  eligible: boolean;        // Whether hybrid distribution is applicable
+  thresholdBytes: number;   // Threshold in bytes
+  assetKind: VersionAssetKind;
+  isLatestDesktopAsset: boolean;
+  isLatestWebAsset: boolean;
+}
+
+// Sharing acceleration settings
+interface SharingAccelerationSettings {
+  enabled: boolean;           // Master switch
+  uploadLimitMbps: number;    // Upload bandwidth limit
+  cacheLimitGb: number;       // Cache limit
+  retentionDays: number;      // Retention period
+  hybridThresholdMb: number;  // Hybrid distribution threshold
+  onboardingChoiceRecorded: boolean;
+}
+
+// Download progress
+interface VersionDownloadProgress {
+  current: number;
+  total: number;
+  percentage: number;
+  stage: VersionInstallStage;  // queued, downloading, backfilling, verifying, extracting, completed, error
+  mode: VersionDownloadMode;   // http-direct, shared-acceleration, source-fallback
+  peers?: number;              // Number of connected peers
+  p2pBytes?: number;           // Bytes received from P2P
+  fallbackBytes?: number;      // Bytes received from fallback
+  verified?: boolean;          // Whether verification has completed
+}
+```
+
+Jakmile je typový systém jasný, následuje přirozeně zbytek implementace.
+
+### Hlavní koordinátor
+
+`HybridDownloadCoordinator` řídí celý pracovní postup stahování. Koordinuje vyhodnocování zásad, provádění motoru, ověřování SHA256 a správu mezipaměti.
+
+```typescript
+class HybridDownloadCoordinator {
+  async download(
+    version: Version,
+    cachePath: string,
+    packageSource: PackageSource,
+    onProgress?: DownloadProgressCallback,
+  ): Promise<HybridDownloadResult> {
+    // 1. Evaluate the policy: should hybrid download be used?
+    const policy = this.policyEvaluator.evaluate(version, settings);
+
+    // 2. Execute the download
+    if (policy.useHybrid) {
+      await this.engine.download(version, cachePath, settings, onProgress);
+    } else {
+      await packageSource.downloadPackage(version, cachePath, onProgress);
+    }
+
+    // 3. SHA256 verification (hard gate)
+    const verified = await this.verify(version, cachePath, onProgress);
+    if (!verified) {
+      await this.cacheRetentionManager.discard(version.id, cachePath);
+      throw new Error(`sha256 verification failed for ${version.id}`);
+    }
+
+    // 4. Mark as trusted cache and begin controlled seeding
+    await this.cacheRetentionManager.markTrusted({
+      versionId: version.id,
+      cachePath,
+      cacheSize,
+    }, settings);
+
+    return { cachePath, policy, verified };
+  }
+}
+```
+
+Je zde jeden obzvláště důležitý bod: **Ověření SHA256 je tvrdá brána**. Stažený soubor musí projít ověřením, než bude moci vstoupit do instalačního procesu. Pokud se ověření nezdaří, mezipaměť se zahodí, aby se zajistilo, že nesprávný soubor nikdy nezpůsobí problémy s instalací.
+
+### Stáhněte si fotografii abstrakce motoru
+
+`DownloadEngineAdapter` je abstraktní rozhraní, které definuje metody, které musí každý engine implementovat:
+
+```typescript
+interface DownloadEngineAdapter {
+  download(
+    version: Version,
+    destinationPath: string,
+    settings: SharingAccelerationSettings,
+    onProgress?: (progress: VersionDownloadProgress) => void,
+  ): Promise<void>;
+
+  stopAll(): Promise<void>;
+}
+```
+
+Implementace V1 je založena na WebTorrent a je zabalena `InProcessTorrentEngineAdapter`:
+
+```typescript
+class InProcessTorrentEngineAdapter implements DownloadEngineAdapter {
+  async download(...) {
+    const client = this.getClient(settings);  // Apply upload rate limiting
+    const torrent = client.add(torrentId, {
+      path: path.dirname(destinationPath),
+      destroyStoreOnDestroy: false,
+      maxWebConns: 8,
+    });
+
+    // Add WebSeed sources
+    torrent.on('ready', () => {
+      for (const seed of hybrid.webSeeds) {
+        torrent.addWebSeed(seed);
+      }
+      if (hybrid.directUrl) {
+        torrent.addWebSeed(hybrid.directUrl);
+      }
+    });
+
+    // Progress reporting - distinguish P2P from origin fallback
+    torrent.on('download', () => {
+      const hasP2PPeer = torrent.wires.some(w => w.type !== 'webSeed');
+      const mode = hasP2PPeer ? 'shared-acceleration' : 'source-fallback';
+      // ... report progress
+    });
+  }
+}
+```
+
+Zásuvná konstrukce motoru výrazně usnadňuje budoucí optimalizaci. Například V2 by mohl spustit motor v pomocném procesu, aby se zabránilo svržení hlavního procesu, pokud motor selže.
+
+### Rozlišení režimů hlášení o pokroku
+
+Na vrstvě uživatelského rozhraní je věc, která uživatele zajímá nejvíce, jednoduchá: „Stahuji aktuálně přes P2P nebo přes záložní HTTP?“ `InProcessTorrentEngineAdapter` určuje to kontrolou typů uvnitř `torrent.wires`:
+
+```typescript
+const hasP2PPeer = torrent.wires.some((wire) => wire.type !== 'webSeed');
+const hasFallbackWire = torrent.wires.some((wire) => wire.type === 'webSeed');
+
+const mode = hasP2PPeer ? 'shared-acceleration'
+         : hasFallbackWire ? 'source-fallback'
+         : 'shared-acceleration';
+
+const stage = hasP2PPeer ? 'downloading'
+           : hasFallbackWire ? 'backfilling'
+           : 'downloading';
+```
+
+Logika vypadá jednoduše, ale je klíčovou součástí uživatelské zkušenosti. Uživatelé mohou jasně vidět, zda je aktuální stav „zrychlení sdílení“ nebo „zálohování původu“, což usnadňuje pochopení chování.
+
+### Ověření streamování SHA256
+
+Ověření integrity používá Node.js `crypto` modul pro výpočet hash streamovacím způsobem, který zabrání načtení celého souboru do paměti:
+
+```typescript
+private async computeSha256(filePath: string): Promise<string> {
+  const hash = createHash('sha256');
+  await new Promise<void>((resolve, reject) => {
+    const stream = fs.createReadStream(filePath);
+    stream.on('data', (chunk) => hash.update(chunk));
+    stream.on('error', reject);
+    stream.on('end', resolve);
+  });
+  return hash.digest('hex').toLowerCase();
+}
+```
+
+Tato implementace je vhodná zejména pro velké soubory. Představte si, že si stáhnete instalační balíček o velikosti 2 GB a pak se pokusíte celou věc nahrát do paměti, jen abyste to ověřili. Streamování to řeší čistě.
+
+## Datový tok
+
+Úplný datový tok vypadá takto:
+
+```
+┌────────────────────────────────────────────────────────────────────┐
+│             User clicks install on a large-file version            │
+└────────────────────────────────────────────────────────────────────┘
+                                 │
+                                 ▼
+┌────────────────────────────────────────────────────────────────────┐
+│              VersionManager invokes the coordinator                │
+│              HybridDownloadCoordinator.download()                  │
+└────────────────────────────────────────────────────────────────────┘
+                                 │
+                                 ▼
+┌────────────────────────────────────────────────────────────────────┐
+│           DistributionPolicyEvaluator.evaluate()                   │
+│       Checks: source, metadata, switch, and asset type            │
+└────────────────────────────────────────────────────────────────────┘
+                                 │
+                    ┌───────────┴───────────┐
+                    │ useHybrid?            │
+                    └───────────┬───────────┘
+                        yes │         │ no
+                           ▼         ▼
+              ┌──────────────────┐  ┌─────────────────────┐
+              │ P2P + WebSeed    │  │ HTTP direct download│
+              │ Hybrid download  │  │ (compatibility path)│
+              └──────────────────┘  └─────────────────────┘
+                        │
+                        ▼
+              ┌──────────────────┐
+              │ SHA256 verify    │
+              │ (hard gate)      │
+              └────────┬─────────┘
+                       │
+              ┌────────┴─────────┐
+              │ Passed?          │
+              └────────┬─────────┘
+                   yes │    │ no
+                     ▼    ▼
+          ┌────────────┐ ┌────────────────┐
+          │ Extract +  │ │ Drop cache +   │
+          │ install +  │ │ return error   │
+          │ seed safely│ └────────────────┘
+          └────────────┘
+```
+
+Tok je velmi jasný od konce ke konci a každý krok má dobře definovanou odpovědnost. Když se něco pokazí, je mnohem snazší určit fázi selhání.
+
+## Výroba
+
+I ten nejlepší technický design selže, pokud je uživatelská zkušenost špatná. HagiCode Desktop investoval značné úsilí do výroby této schopnosti.
+
+### Skrýt terminologii BT
+
+Většina uživatelů neví, co znamená BitTorrent nebo InfoHash. Na úrovni produktu tedy funkci představujeme pomocí fráze „zrychlení sdílení“:
+
+- Tato funkce se nazývá „zrychlení sdílení“, nikoli stahování P2P.
+- Nastavení se nazývá „limit nahrávání“, nikoli seeding.
+- Štítek průběhu říká „origin backfilling“, nikoli záložní web WebSeed.
+
+To snižuje kognitivní zátěž terminologie a usnadňuje přijetí funkce.
+
+### Ve výchozím nastavení povoleno v Průvodci prvním spuštěním
+
+Když noví uživatelé poprvé spustí aplikaci pro stolní počítače, zobrazí se jim stránka průvodce, která představuje zrychlení sdílení:
+
+> Abychom zvýšili rychlost stahování, sdílíme části, které jste již stáhli, s ostatními uživateli, zatímco vaše vlastní stahování probíhá. Toto je zcela volitelné a můžete jej kdykoli vypnout v Nastavení.
+
+Ve výchozím nastavení je povoleno, ale uživatelé mají jasný způsob, jak se odhlásit. Pokud to podnikoví uživatelé nechtějí, mohou to jednoduše deaktivovat během onboardingu.
+
+### Uživatelem řízené parametry
+
+Stránka nastavení odhaluje tři laditelné parametry:
+
+| Parametr | Výchozí | Popis |
+|------|--------|------|
+| Limit nahrávání | 2 MB/s | Zabraňuje nadměrnému využití šířky pásma proti proudu |
+| Limit mezipaměti | 10 GB | Řídí spotřebu místa na disku |
+| Retenční dny | 7 dní | Po uplynutí této doby automaticky vyčistí starou mezipaměť |
+
+Všechny tyto parametry mají rozumné výchozí hodnoty. Většina uživatelů je nemusí nikdy měnit, zatímco pokročilí uživatelé je mohou upravit na základě vlastního síťového prostředí.
+
+## Klíčová rozhodnutí o designu
+
+Při zpětném pohledu na celkové řešení stojí za zmínku několik návrhů.
+
+### Motor běží v hlavním procesu (V1)
+
+Proč nezačít hned s postranním vozíkem nebo pomocným procesem? Důvod je jednoduchý: **rychle odeslání**. Průběžný návrh má kratší vývojový cyklus a snáze se ladí. První prioritou je spustit funkci a poté zlepšit stabilitu.
+
+Toto rozhodnutí samozřejmě něco stojí: pokud motor havaruje, může to ovlivnit hlavní proces. Toto riziko snižujeme prostřednictvím hranic adaptéru a řízení časového limitu a také udržujeme cestu migrace otevřenou, aby se V2 mohla snadněji přesunout do samostatného procesu.
+
+### SHA256 jako kontrola integrity
+
+Místo MD5 nebo CRC32 používáme SHA256, protože SHA256 je bezpečnější. Náklady na kolize pro MD5 a CRC32 jsou příliš nízké. Pokud někdo se zlými úmysly vytvořil falešný instalační balíček, následky mohou být vážné. SHA256 je dražší na výpočet, ale zisk zabezpečení za to stojí.
+
+### Povoleno pouze pro zdroje indexu HTTP
+
+Scénáře, jako je stahování GitHub a místní zdroje složek, nepoužívají hybridní distribuci. Nejedná se o technické omezení; jde o **vyhnutí se zbytečným složitostem**. Protokoly BT přidávají omezenou hodnotu v rámci scénářů privátních sítí a pouze by zvýšily složitost kódu.
+
+## Praktické poznámky
+
+### Normalizace nastavení
+
+Uvnitř `SharingAccelerationSettingsStore`, každá číselná hodnota musí projít kontrolou mezí a normalizací:
+
+```typescript
+private normalize(settings: SharingAccelerationSettings): SharingAccelerationSettings {
+  return {
+    enabled: Boolean(settings.enabled),
+    uploadLimitMbps: this.clampNumber(settings.uploadLimitMbps, 1, 200, DEFAULT_SETTINGS.uploadLimitMbps),
+    cacheLimitGb: this.clampNumber(settings.cacheLimitGb, 1, 500, DEFAULT_SETTINGS.cacheLimitGb),
+    retentionDays: this.clampNumber(settings.retentionDays, 1, 90, DEFAULT_SETTINGS.retentionDays),
+    hybridThresholdMb: DEFAULT_SETTINGS.hybridThresholdMb,  // Fixed value, not user-configurable
+    onboardingChoiceRecorded: Boolean(settings.onboardingChoiceRecorded),
+  };
+}
+
+private clampNumber(value: number, min: number, max: number, fallback: number): number {
+  if (!Number.isFinite(value)) {
+    return fallback;
+  }
+  return Math.min(max, Math.max(min, Math.round(value)));
+}
+```
+
+To zabrání uživatelům v ruční úpravě konfiguračního souboru na neplatné hodnoty.
+
+### Vyčištění mezipaměti LRU
+
+`CacheRetentionManager.prune()` je odpovědný za čištění položek mezipaměti, jejichž platnost vypršela nebo jsou příliš velké. Strategie čištění používá LRU (nejméně používané):
+
+```typescript
+const records = [...this.listRecords()]
+  .sort((left, right) =>
+    new Date(left.lastUsedAt).getTime() - new Date(right.lastUsedAt).getTime()
+  );
+
+// When over the limit, evict the least recently used entries first
+while (totalBytes > maxBytes && retainedEntries.length > 0) {
+  const evicted = records.find((record) => retainedEntries.includes(record.versionId));
+  retainedEntries.splice(retainedEntries.indexOf(evicted.versionId), 1);
+  removedEntries.push(evicted.versionId);
+  totalBytes -= evicted.cacheSize;
+  await fs.rm(evicted.cachePath, { force: true });
+}
+```
+
+Tato logika zajišťuje efektivní využití místa na disku při zachování historických verzí, které může uživatel stále potřebovat.
+
+### Okamžité zastavení výsevu
+
+Když uživatel vypne akceleraci sdílení, aplikace musí okamžitě zastavit seedování a zničit torrent klienta:
+
+```typescript
+async disableSharingAcceleration(): Promise<void> {
+  this.settingsStore.updateSettings({ enabled: false });
+  await this.cacheRetentionManager.stopAllSeeding();  // Stop seeding
+  await this.engine.stopAll();  // Destroy the torrent client
+}
+```
+
+Pokud uživatel tuto funkci zakáže, produkt by již neměl spotřebovávat žádné prostředky P2P. To je základní produktová etiketa.
+
+## Rizika a kompromisy
+
+Dokonalé řešení neexistuje a hybridní distribuce není výjimkou. Toto jsou hlavní kompromisy:
+
+**Crash izolace je slabší než sidecar**: V1 používá motor v procesu, takže havárie motoru může ovlivnit hlavní proces. Hranice adaptéru a kontroly časového limitu snižují riziko, ale nejsou zásadním řešením. V2 zahrnuje plánovanou cestu migrace do pomocného procesu.
+
+**Povoleno-výchozí využití zdrojů**: výchozí nastavení 2 MB/s odesílání, 10 GB mezipaměti a 7denní uchovávání spotřebovávají určité prostředky počítače. Očekávání uživatelů jsou spravována prostřednictvím vstupní kopie a transparentního nastavení.
+
+**Kompatibilita s podnikovou sítí**: automatická záloha WebSeed/HTTPS zachovává použitelnost v podnikových sítích, ale může snížit zisky z akcelerace z P2P. Jedná se o záměrný kompromis, který upřednostňuje dostupnost.
+
+**Zpětně kompatibilní metadata**: všechna nová pole jsou volitelná. Pokud chybí, systém přejde zpět do režimu HTTP. Starší klienti jsou zcela nedotčeni, takže upgrady jsou hladké.
+
+## Závěr
+
+Tento článek prošel hybridní distribuční architekturou používanou v projektu HagiCode Desktop. Klíčové věci jsou:
+
+1. **Vrstvená architektura**: řídicí rovina a datová rovina jsou odděleny a motor je abstrahován za zásuvné rozhraní pro snadnější testování a rozšíření.
+
+2. **Chování řízené zásadami**: ne každý soubor používá P2P. Hybridní distribuce je povolena pouze pro velké soubory, které splňují požadované podmínky.
+
+3. **Ověření integrity**: SHA256 slouží jako pevná brána a ověřování streamováním zabraňuje tlaku na paměť.
+
+4. **Produkovaná prezentace**: Terminologie BT se skrývá za frází „zrychlení sdílení“ a tato funkce je ve výchozím nastavení povolena během registrace.
+
+5. **Kontrola uživatele**: limity pro nahrávání, limity mezipaměti, dny uchování a další parametry mohou být uživatelsky nastavitelné.
+
+Tato architektura již byla implementována v projektu HagiCode Desktop. Pokud to vyzkoušíte, rádi bychom slyšeli vaši zpětnou vazbu po instalaci a použití v reálném světě.
+
+## Reference
+
+- HagiCode Desktop GitHub: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Oficiální stránky HagiCode: [hagicode.com](https://hagicode.com)
+- Oficiální dokumentace WebTorrent: [webtorrent.io](https://webtorrent.io)
+- Specifikace protokolu BitTorrent: [bittorrent.org](https://www.bittorrent.org/beps/bep_0019.html)
+- Specifikace rozšíření WebSeed: [bittorrent.org/beps/bep_0017.html](https://www.bittorrent.org/beps/bep_0017.html)
+
+---
+
+Pokud vám tento článek pomohl:
+
+- Dejte projektu hvězdičku na GitHubu: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Navštivte webové stránky a dozvíte se více: [hagicode.com](https://hagicode.com)
+- Rychlá instalace pro HagiCode Desktop: [hagicode.com/desktop/](https://hagicode.com/desktop/)
+- Veřejná beta je nyní otevřena a můžete si ji nainstalovat a vyzkoušet
+
+Možná jsme všichni jen obyčejní lidé, kteří si procházejí cestu světem technologií, ale to je v pořádku. Obyčejní lidé mohou být stále vytrvalí a na vytrvalosti záleží.
+
+## Upozornění na autorská práva
+
+Děkuji za přečtení. Pokud vám tento článek přišel užitečný, dejte mu like, uložte ho a sdílejte.
+Tento obsah byl vytvořen ve spolupráci s umělou inteligencí, přičemž konečná verze byla zkontrolována a schválena autorem.
+- autor: [newbe36524](https://www.newbe.pro)
+- Původní článek: [https://docs.hagicode.com/blog/2026-03-27-hagicode-desktop-p2p-acceleration-architecture/](https://docs.hagicode.com/blog/2026-03-27-hagicode-desktop-p2p-acceleration-architecture/)
+- Licenční upozornění: Pokud není uvedeno jinak, všechny blogové příspěvky na tomto webu jsou licencovány podle BY-NC-SA. Při opětovném zveřejnění uveďte uvedení zdroje.

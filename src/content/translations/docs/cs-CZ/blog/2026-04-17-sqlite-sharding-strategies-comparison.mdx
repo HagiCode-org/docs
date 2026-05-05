@@ -1,0 +1,375 @@
+---
+title: "SQLite Sharding v praxi: Hloubkové srovnání tří strategií Sharding"
+date: 2026-04-17
+tags: [SQLite, Sharding, Performance Optimization, Architecture Design, HagiCode]
+description: "Když jednosouborová databáze SQLite narazí na úzká hrdla souběžnosti, jak prolomíme? Tento článek sdílí tři přístupy shardingu SQLite z HagiCode"
+---
+
+## SQLite Sharding v praxi: Hloubkové srovnání tří strategií Sharding
+
+> Když jednosouborová databáze SQLite narazí na úzká hrdla souběžnosti, jak prolomíme? Tento článek sdílí tři přístupy shardingu SQLite z projektu HagiCode napříč různými scénáři, což vám pomůže pochopit, jak zvolit správnou strategii shardingu.
+
+Ahoj všichni, jsem Yu Kun, tvůrce HagiCode.
+
+## Pozadí
+
+Při vytváření vysoce výkonných aplikací narážejí jednosouborové databáze SQLite na velmi praktické problémy. Jakmile počet uživatelů a objem dat rostou, začnou se tyto problémy řadit jeden za druhým:
+
+- Operace zápisu se začnou řadit do fronty a doba odezvy se viditelně prodlouží
+- Výkon dotazů klesá s rostoucím objemem dat
+- Časté `database is locked` chyby se objevují pod vícevláknovým přístupem
+
+Mnoho lidí se instinktivně ptá: měli bychom migrovat přímo na PostgreSQL nebo MySQL? To může problém vyřešit, ale složitost nasazení prudce stoupá. Existuje varianta s lehčí hmotností?
+
+Odpověď je sharding. Nakonec by měly být inženýrské problémy stále řešeny inženýrskými metodami. Distribucí dat přes více souborů SQLite můžeme výrazně zlepšit souběžnost a výkon dotazů při zachování odlehčených charakteristik SQLite.
+
+## O HagiCode
+
+Přístupy sdílené v tomto článku vycházejí z našich praktických zkušeností v oblasti [HagiCode](https://hagicode.com) projekt. Jako projekt asistenta kódování AI potřebuje HagiCode zpracovat velké množství konverzačních zpráv, trvání stavu a záznamy historie událostí. Právě prostřednictvím řešení těchto skutečných problémů jsme shrnuli tři přístupy shardingu pro různé scénáře.
+
+Dobré nástroje jsou důležité, ale to, jak je používáte, závisí na práci, kterou skutečně potřebujete udělat.
+
+Naše úložiště kódu je na adrese [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site). V případě zájmu se neváhejte podívat hlouběji.
+
+## Přehled tří Shardingových přístupů
+
+Po analýze kódové základny HagiCode jsme identifikovali tři přístupy shardingu SQLite pro různé obchodní scénáře:
+
+1. **Sdílené úložiště zpráv relace**: úložiště pro konverzační zprávy AI, které se vyznačuje vysokofrekvenčním zápisem a izolovanými dotazy na základě relací
+2. **Orleans Grain sharded storage**: stálost stavu pro distribuovaný rámec, charakterizovaný přístupem napříč uzly a potřebou deterministického směrování
+3. **Sdílené úložiště Hero History**: historické záznamy událostí pro gamifikovaný systém, vyznačující se získáváním zdrojů událostí a potřebou kompatibility migrace
+
+Přestože se jejich obchodní scénáře liší, všechny tři se řídí stejnými základními principy návrhu:
+
+- **Deterministické směrování**: vypočítejte fragment přímo z obchodního ID, bez tabulky metadat
+- **Transparentní přístup**: horní vrstvy používají jednotné rozhraní a neznají úlomky pod nimi
+- **Nezávislé úložiště**: každý fragment je plně nezávislý soubor SQLite
+- **Optimalizace souběžnosti**: Režim WAL plus `busy_timeout` snižuje hádku o zámek
+
+Mnoho lidí se ptá: proč nevybudovat jedno obecné řešení pro sdílení? To je velmi praktická otázka a závěr je jasný: ve strojírenství neexistuje žádné univerzální řešení, pouze takové, které nejlépe odpovídá aktuálnímu obchodnímu scénáři. Dále do hloubky porovnáme konkrétní implementace těchto tří přístupů.
+
+## Srovnání Sharding strategií
+
+### Počítání střípků a pravidla pojmenování
+
+| Aspekt | Zpráva o relaci | Orleánské obilí | Historie hrdinů |
+|------|----------------|---------------|--------------|
+| **Počet střepů** | 256 (16²) | 100 | 10 |
+| **Pravidlo pojmenování** | Hexadecimální (00-ff) | Desetinné (00-99) | Desetinné (0-9) |
+| **Adresář úložiště** | `DataDir/messages/` | `DataDir/orleans/grains/` | `DataDir/hero-history/` |
+| **Vzor názvu souboru** | `{shard}.db` | `grains-{shard}.db` | `{shard}.db` |
+
+Proč je tak velký rozdíl v počtech střepů? Záleží na obchodních charakteristikách. Jinými slovy, modely se budou měnit, nástroje se budou vyvíjet a pracovní postupy upgradovány, ale inženýrské základy zůstávají stejné: nejprve pochopte problém, který se vlastně snažíte vyřešit.
+
+- **Zpráva relace** používá 256 útržků, protože konverzační zprávy mají nejvyšší četnost zápisu a potřebují více útržků k rozložení zátěže
+- **Orleans Grain** využívá 100 úlomků, čímž vyvažuje souběžný výkon a provozní složitost
+- **Historie hrdinů** používá pouze 10 útržků, protože zápisy historických událostí jsou méně časté a je třeba vzít v úvahu náklady na migraci
+
+### Rozdíly ve směrovacích algoritmech
+
+Směrovací algoritmus je jádrem schématu sdílení. Určuje, jak jsou data distribuována mezi fragmenty. Tyto tři přístupy používají různé strategie směrování:
+
+```csharp
+// Session Message: last two hexadecimal characters of the GUID
+var normalized = Guid.Parse(sessionId.Value).ToString("N").ToLowerInvariant();
+return normalized[^2..];  // Take the last two hexadecimal characters
+
+// Orleans Grain: extract digits, then use the last two digits modulo shard count
+var digits = ExtractDigits(grainId);  // Extract all digits
+var lastTwoDigits = (digits[^2] * 10) + digits[^1];
+return lastTwoDigits % shardCount;
+
+// Hero History: modulo 10 using the ASCII value of the last character
+return heroId[^1] % 10;
+```
+
+**Analýza designu**:
+
+- **Zprávy relace** ID jsou GUID. Po převodu do šestnáctkové soustavy získáte poslední dva znaky rovnoměrné rozložení na 256 útržcích
+- **Orleans Grain** ID nemají konzistentní formát a mohou obsahovat písmena i číslice, takže všechny číslice jsou extrahovány před převzetím modulu
+- **Historie hrdinů** ID jsou řetězce, takže hodnota ASCII posledního znaku se používá přímo s modulem. Je to jednoduché, ale distribuce může být méně rovnoměrná
+
+**Klíčový bod**: bez ohledu na to, který algoritmus používáte, stejné ID se musí vždy mapovat na stejný fragment. To je jeden z nejzákladnějších požadavků v distribuovaných systémech. Jinak je nekonzistence dat nevyhnutelná. Pokud je směrování nestabilní, každé další úsilí se zhroutí na nulu.
+
+### Rozdíly ve strategiích inicializace
+
+| Aspekt | Zpráva o relaci | Orleánské obilí | Historie hrdinů |
+|------|----------------|---------------|--------------|
+| **Časování inicializace** | Líně nabité na vyžádání | Plná paralelní inicializace při spuštění | Líně nabité na vyžádání |
+| **Kontrola souběžnosti** | `Lazy<Task>` zabraňuje duplicitní inicializaci | `Parallel.ForEachAsync` | `Lazy<Task>` zabraňuje duplicitní inicializaci |
+
+**Proč Orleans Grain volí úplnou inicializaci při spuštění?**
+
+Protože Orleans je distribuovaný rámec, Grain může být naplánován na jakýkoli uzel. Pokud se zjistí, že soubor fragmentu chybí až za běhu, požadavky mohou selhat. Úplná inicializace při spuštění prodlužuje dobu spuštění, ale zaručuje stabilitu běhu. Uvedení do provozu je pouze začátek; udržovat jej udržovatelný je skutečná dovednost.
+
+**Výhody líného načítání**:
+
+U zpráv relace a historie hrdinů zkracuje pomalé načítání dobu spouštění. Soubory a schémata se vytvářejí pouze tehdy, když je skutečně potřeba fragment. Použití `Lazy<Task>` také zabraňuje závodům během souběžné inicializace. Design vypadá jednoduše, ale v reálných projektech ušetří spoustu zbytečných problémů.
+
+### Charakteristiky návrhu schématu
+
+Návrhy schémat tří přístupů odrážejí jejich příslušné obchodní charakteristiky:
+
+**Zpráva z relace**:
+- Podporuje model zdroje událostí (tabulka událostí plus tabulka snímků)
+- Zahrnuje podřízenou tabulku pro bloky obsahu zpráv (`MessageContentBlocks`)
+- Má pole komprese a příznaku komprese pro podporu budoucích optimalizací
+
+**Orleans Grain**:
+- Minimalistický design: jeden `GrainState` stůl
+- Stav obchodů jako serializovaný JSON
+- Používá optimistické řízení souběžnosti založené na ETag
+
+**Historie hrdinů**:
+- Indexy optimalizace dotazů na časové ose
+- Jedinečný `DedupeKey` omezení zabraňuje duplicitě
+- Podporuje více typů událostí a stavů
+
+Tyto návrhy ukazují, že návrh schémat by měl zůstat pevně v souladu s obchodními požadavky, spíše než se honit genericitou. Orleans Grain je jednoduchý právě proto, že potřebuje pouze ukládat serializovaný stav a nevyžaduje složité možnosti dotazování. To není mystika. Je to strojírenství. Nespěchejte, abyste něčemu dali velké jméno, než si ověříte, zda to může přežít dvě iterace uvnitř skutečného týmu.
+
+### Porovnání konfigurace souběžnosti
+
+Všechny tři přístupy používají stejné nastavení optimalizace souběžnosti SQLite:
+
+```sql
+PRAGMA journal_mode=WAL;      -- Write-ahead logging mode
+PRAGMA synchronous=NORMAL;     -- Reduce persistence overhead
+PRAGMA busy_timeout=5000;      -- 5-second busy wait
+PRAGMA foreign_keys=ON;        -- Foreign key constraints
+```
+
+**Výhody režimu WAL**:
+
+Tradiční režim vrácení zpětného žurnálu způsobuje spory o zámek během zápisu, zatímco režim WAL umožňuje, aby čtení a zápis probíhaly souběžně. Ve scénářích s velkými daty to může výrazně zlepšit výkon. Mnoho vývojářů toto nastavení přehlíží, ale záleží na něm mnohem víc, než si myslí.
+
+**Výměna `synchronous=NORMAL`**:
+
+Nastavení na `FULL` poskytuje maximální bezpečnost, ale výrazně snižuje výkon. `NORMAL` vytváří rovnováhu mezi bezpečností a výkonem, takže je tou správnou volbou pro většinu aplikací. O tomhle není třeba příliš přemýšlet. `NORMAL` je dost.
+
+## Jak zvolit strategii Sharding
+
+Na základě analýzy tří přístupů HagiCode můžeme shrnout následující rozhodovací matici:
+
+```
+High-throughput scenarios -> more shards (for example, Message uses 256)
+Simple maintainability   -> fewer shards (for example, Hero History uses 10)
+Mostly numeric IDs       -> modulo algorithm (Orleans Grain)
+Mostly GUIDs             -> hexadecimal suffix (Session Message)
+String IDs               -> ASCII modulo (Hero History)
+```
+
+**Pravidla pro výběr počtu úlomků**:
+
+- Příliš málo (`< 10`): omezené zlepšení souběžnosti, díky čemuž je sharding méně smysluplný
+- Příliš mnoho (`> 1000`): správa souborů se stává složitou a režie fondu připojení se zvyšuje
+- Základní pravidlo: 10 až 100 útržků odpovídá většině scénářů
+- Scénáře extrémně vysoké souběžnosti: lze uvažovat o 256 útržcích
+
+Pokud se podíváte pouze na ukázky, je snadné se nechat unést. Jakmile však vstoupíte do výroby, je třeba pečlivě spočítat všechny náklady. Mnoho věcí není nemožné, jen nejsou poctivě naceněny.
+
+## Praktický průvodce
+
+### Implementujte standardizovaný Shard Resolver
+
+```csharp
+public interface IShardResolver<TId>
+{
+    string ResolveShardKey(TId id);
+}
+
+// Hexadecimal sharding (for GUIDs)
+public class HexSuffixShardResolver : IShardResolver<string>
+{
+    private readonly int _suffixLength;
+
+    public HexSuffixShardResolver(int suffixLength = 2)
+    {
+        _suffixLength = suffixLength;
+    }
+
+    public string ResolveShardKey(string id)
+    {
+        var normalized = id.Replace("-", "").ToLowerInvariant();
+        return normalized[^_suffixLength..];
+    }
+}
+
+// Numeric modulo sharding (for purely numeric IDs)
+public class NumericModuloShardResolver : IShardResolver<long>
+{
+    private readonly int _shardCount;
+
+    public NumericModuloShardResolver(int shardCount)
+    {
+        _shardCount = shardCount;
+    }
+
+    public string ResolveShardKey(long id)
+    {
+        return (id % _shardCount).ToString("D2");
+    }
+}
+```
+
+### Tovární vzor jednotného připojení
+
+```csharp
+public class ShardedConnectionFactory<TOptions>
+{
+    private readonly ConcurrentDictionary<string, Lazy<Task>> _initializationTasks = new();
+    private readonly TOptions _options;
+    private readonly IShardSchemaInitializer _initializer;
+
+    public ShardedConnectionFactory(
+        TOptions options,
+        IShardSchemaInitializer initializer)
+    {
+        _options = options;
+        _initializer = initializer;
+    }
+
+    public async Task<TDbContext> CreateAsync(string shardKey, CancellationToken ct)
+    {
+        var connectionString = BuildConnectionString(shardKey);
+
+        // Use Lazy<Task> to prevent concurrent initialization
+        var initTask = _initializationTasks.GetOrAdd(
+            connectionString,
+            _ => new Lazy<Task>(() => InitializeShardAsync(connectionString, ct))
+        );
+
+        await initTask.Value;
+        return CreateDbContext(connectionString);
+    }
+
+    private async Task InitializeShardAsync(string connectionString, CancellationToken ct)
+    {
+        await _initializer.InitializeAsync(connectionString, ct);
+    }
+
+    private string BuildConnectionString(string shardKey)
+    {
+        var shardPath = Path.Combine(_options.BaseDirectory, $"{shardKey}.db");
+        return $"Data Source={shardPath}";
+    }
+
+    private TDbContext CreateDbContext(string connectionString)
+    {
+        // Create the DbContext according to the specific ORM
+        return Activator.CreateInstance(typeof(TDbContext), connectionString) as TDbContext;
+    }
+}
+```
+
+### Nejlepší postupy pro inicializaci schématu
+
+```csharp
+public class SqliteShardInitializer : IShardSchemaInitializer
+{
+    public async Task InitializeAsync(string connectionString, CancellationToken ct)
+    {
+        await using var connection = new SqliteConnection(connectionString);
+        await connection.OpenAsync(ct);
+
+        // Concurrency optimization settings
+        await connection.ExecuteAsync("""
+            PRAGMA journal_mode=WAL;
+            PRAGMA synchronous=NORMAL;
+            PRAGMA busy_timeout=5000;
+            PRAGMA foreign_keys=ON;
+        """);
+
+        // Create table schema
+        await connection.ExecuteAsync("""
+            CREATE TABLE IF NOT EXISTS Entities (
+                Id TEXT PRIMARY KEY,
+                CreatedAt TEXT NOT NULL,
+                UpdatedAt TEXT NOT NULL,
+                Data TEXT NOT NULL,
+                ETag TEXT
+            );
+        """);
+
+        // Create indexes
+        await connection.ExecuteAsync("""
+            CREATE INDEX IF NOT EXISTS IX_Entities_CreatedAt
+            ON Entities(CreatedAt DESC);
+
+            CREATE INDEX IF NOT EXISTS IX_Entities_UpdatedAt
+            ON Entities(UpdatedAt DESC);
+        """);
+    }
+}
+```
+
+### Klíčové úvahy
+
+**1. Stabilita trasy**
+
+Směrovací algoritmus musí zaručit, že stejné ID se vždy mapuje na stejný fragment. Vyhněte se náhodným nebo časově závislým výpočtům a nezavádějte do algoritmu proměnné parametry.
+
+**2. Výběr počtu střepů**
+
+Počet střepů by se měl rozhodnout ve fázi návrhu. Jeho pozdější změna je nesmírně obtížná. Zvažte:
+- Současný a budoucí objem souběžnosti
+- Náklady na správu každého úlomku
+- Složitost migrace dat
+
+**3. Plánování migrace**
+
+Přístup Hero History ukazuje kompletní cestu migrace:
+
+1. Vybudujte novou infrastrukturu sdíleného úložiště
+2. Implementujte službu migrace pro kopírování dat z primární databáze do datových fragmentů
+3. Po migraci ověřte kompatibilitu dotazu
+4. Přepněte cesty čtení a zápisu na fragmenty
+5. Vyčistěte starší tabulky v primární databázi
+
+Při navrhování schématu shardingu je třeba vzít v úvahu budoucí požadavky na migraci. Diskuse je levná. Ukaž mi kód. Samotný kód ale nestačí. Potřebujete také úplnou migrační cestu. Jednorázový úspěch není systém; trvalý úspěch je.
+
+**4. Monitorování a provoz**
+
+- Sledujte distribuci velikosti mezi fragmenty, abyste včas odhalili zkreslení dat
+- Nastavte si upozornění na horká místa úlomků, abyste zabránili tomu, aby se jediný úlomek stal úzkým hrdlem
+- Pravidelně kontrolujte velikosti souborů WAL, abyste předešli nadměrnému využití disku
+- Vytvořte mechanismy kontroly stavu fragmentů
+
+**5. Testovací pokrytí**
+
+- Otestujte okrajové podmínky, jako jsou prázdná ID, speciální znaky a příliš dlouhá ID
+- Ověřte směrovací determinismus, abyste zajistili, že se stejné ID vždy mapuje na stejný fragment
+- Spusťte souběžné zátěžové testy zápisu, abyste potvrdili, že spory o zámek jsou účinně omezeny
+- Spusťte testy migrace, abyste zajistili integritu a konzistenci dat
+
+## Shrnutí
+
+Porovnáním tří přístupů shardingu SQLite v projektu HagiCode můžeme vidět, že:
+
+1. **Neexistuje žádné univerzální řešení**: různé obchodní scénáře vyžadují různé strategie sdílení
+2. **Základní principy jsou sdíleny**: deterministické směrování, transparentní přístup, nezávislé úložiště a optimalizace souběžnosti
+3. **Design by měl čelit budoucnosti**: zvažte migrační cesty a provozní náklady
+
+Pokud váš projekt používá SQLite a začal narážet na úzká hrdla souběžnosti, doufám, že vám tento článek poskytne užitečné nápady. Není třeba spěchat s migrací na těžkou databázi. Někdy k vyřešení problému stačí správná strategie shardingu.
+
+Sharding samozřejmě není žádná stříbrná kulka. Před výběrem strategie shardingu se nejprve ujistěte, že:
+- Výkon dotazů s jednou tabulkou jste již optimalizovali
+- Již jste přidali příslušné indexy
+- Režim WAL jste již povolili
+
+Zavedení shardingu byste měli zvážit až poté, co budou provedeny tyto optimalizace a stále přetrvává problémové místo výkonu. Dělat dobře jednoduché věci je schopnost sama o sobě.
+
+Někdy vykonání práce jednou řekne víc než desetkrát vysvětlování. Odsud nechejte inženýrské výsledky mluvit samy za sebe.
+
+## Reference
+
+- Úložiště projektu HagiCode: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Dokumentace režimu SQLite WAL: [sqlite.org/wal.html](https://www.sqlite.org/wal.html)
+- Distribuovaný rámec Orleans: [dotnet.github.io/orleans](https://dotnet.github.io/orleans/)
+
+## Upozornění na autorská práva
+
+Děkuji za přečtení. Pokud se vám tento článek zdál užitečný, dejte mu lajk, přidejte si jej do záložek a sdílejte jej.
+Tento obsah byl vytvořen ve spolupráci s umělou inteligencí a konečný obsah byl zkontrolován a potvrzen autorem.
+- autor: [newbe36524](https://www.newbe.pro)
+- Původní odkaz: [https://docs.hagicode.com/blog/2026-04-17-sqlite-sharding-strategies-comparison/](https://docs.hagicode.com/blog/2026-04-17-sqlite-sharding-strategies-comparison/)
+- Copyright: Pokud není uvedeno jinak, všechny články blogu jsou licencovány pod BY-NC-SA. Při opětovném odeslání prosím uveďte zdroj.

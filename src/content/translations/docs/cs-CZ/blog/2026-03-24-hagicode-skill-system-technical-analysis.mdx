@@ -1,0 +1,423 @@
+---
+title: "Technická analýza systému dovedností HagiCode: Vytvoření škálovatelné platformy pro správu dovedností AI"
+date: 2026-03-24
+tags: [HagiCode, Skill, AI, Orleans, TanStack, Technical Architecture]
+description: "Tento článek se podrobně zabývá architekturou a implementací systému řízení dovedností v projektu HagiCode a zahrnuje technické"
+---
+
+## Technická analýza systému dovedností HagiCode: Vytvoření škálovatelné platformy pro správu dovedností AI
+
+> Tento článek se podrobně zabývá architekturou a implementací systému řízení dovedností v projektu HagiCode a pokrývá technické detaily čtyř hlavních funkcí: místní globální správa, vyhledávání na trhu, inteligentní doporučení a správa důvěryhodných poskytovatelů.
+
+## Pozadí
+
+V oblasti asistentů kódování AI bylo vždy zásadní otázkou, jak rozšířit hranice možností AI. Samotný Claude Code je již silný v pomoci s kódem, ale různé vývojové týmy a různé technologické zásobníky často potřebují specializované schopnosti pro konkrétní scénáře, jako je zpracování nasazení Dockeru, optimalizace databáze nebo generování frontendových komponent. To je přesně to, kde se systém dovedností stává obzvláště důležitým.
+
+Během vývoje projektu HagiCode jsme narazili na podobnou výzvu: jak necháme Clauda Codea, aby se „učil“ novým profesionálním dovednostem jako člověk, a přitom si zachovali solidní uživatelskou zkušenost a dobrou technickou udržovatelnost? Tento problém je svým způsobem těžký a jednoduchý. Na základě této otázky jsme navrhli a implementovali kompletní systém řízení dovedností.
+
+Tento článek podrobně projde technickou architekturou a základní implementací systému. Je určen pro vývojáře, kteří se zajímají o rozšiřitelnost AI a integraci nástrojů příkazového řádku. Mohlo by to být pro vás užitečné, nebo také ne, ale alespoň je to nyní zapsáno.
+
+## O HagiCode
+
+Přístup sdílený v tomto článku vychází z našich praktických zkušeností v [HagiCode](https://hagicode.com) projekt. HagiCode je projekt asistenta kódování umělé inteligence s otevřeným zdrojovým kódem, který má vývojovým týmům pomoci zlepšit efektivitu inženýrství. Zásobník projektu zahrnuje ASP.NET Core, distribuovaný framework Orleans, frontend TanStack Start + React a subsystém pro správu dovedností představený v tomto článku.
+
+Úložiště GitHub je [HagiCode-org/site](https://github.com/HagiCode-org/site). Pokud považujete technický přístup v tomto článku za hodnotný, dejte mu hvězdu. Koneckonců více hvězd zlepšuje náladu.
+
+## Přehled architektury systému
+
+Systém Skill používá architekturu oddělenou frontend-backend. Na tom není nic zvlášť tajemného.
+
+**Frontend** používá TanStack Start + React k vytvoření uživatelského rozhraní se stavem správy Redux Toolkit. Čtyři hlavní funkce mapují přímo na čtyři komponenty karty: Místní dovednosti, Galerie dovedností, Inteligentní doporučení a Důvěryhodní poskytovatelé. Koneckonců, design je především o zlepšení uživatelského zážitku.
+
+**Backend** je založen na ASP.NET Core + ABP Framework a používá Orleans Grain pro distribuovanou správu stavu. Online klient API zabalí `IOnlineApiClient` rozhraní pro komunikaci se službou vzdáleného katalogu dovedností.
+
+Celkovým architektonickým principem je oddělení provádění příkazů od obchodní logiky. Prostřednictvím vzoru adaptéru jsou detaily implementace provádění příkazů npm/npx skryty uvnitř nezávislých modulů. Koneckonců, nikdo ve skutečnosti nechce volání příkazového řádku rozptýlené po celé kódové základně.
+
+## Základní schopnost 1: Místní globální správa
+
+Místní globální správa je nejzákladnějším modulem. Je zodpovědný za výpis nainstalovaných dovedností a podporu operací odinstalace. Není zde nic příliš složitého; jde hlavně o to udělat dobře základy.
+
+### Technický přístup
+
+Realizace žije v `LocalSkillsTab.tsx` a `LocalSkillCommandAdapter.cs`. Základní myšlenkou je zabalit `npx skills` příkaz, analyzovat jeho výstup JSON a převést jej na interní datové struktury. Zní to jednoduše a v praxi to tak většinou je.
+
+```csharp
+public async Task<IReadOnlyList<LocalSkillInventoryResponseDto>> GetLocalSkillsAsync(
+    CancellationToken cancellationToken = default)
+{
+    var result = await _commandAdapter.ListGlobalSkillsAsync(cancellationToken);
+    return result.Skills.Select(skill => new LocalSkillInventoryResponseDto
+    {
+        Name = skill.Name,
+        Version = skill.Version,
+        Source = skill.Source,
+        InstalledPath = skill.InstalledPath,
+        Description = skill.Description
+    }).ToList();
+}
+```
+
+Datový tok je velmi jasný: frontend odešle požadavek -> `SkillGalleryAppService` přijímá -> `LocalSkillCommandAdapter` provede příkaz npx -> je analyzován výsledek JSON -> je vráceno DTO. Každý krok přirozeně navazuje na předchozí.
+
+Odinstalace dovednosti používá `npx skills remove -g <skillName> -y` příkaz a systém automaticky zpracovává závislosti a čištění. Metadata instalace jsou uložena v `managed-install.json` uvnitř adresáře dovedností, zaznamenávání informací, jako je čas instalace a verze zdroje pro pozdější aktualizace a audit. Některé věci prostě stojí za zaznamenání.
+
+### Podrobný postup instalace
+
+Instalace dovedností vyžaduje několik koordinovaných kroků. Ve skutečnosti to není nijak zvlášť složité:
+
+```csharp
+public async Task<SkillInstallResultDto> InstallAsync(
+    SkillInstallRequestDto request,
+    CancellationToken cancellationToken = default)
+{
+    // 1. Normalize the installation reference
+    var normalized = _referenceNormalizer.Normalize(
+        request.SkillId,
+        request.Source,
+        request.SkillSlug,
+        request.Version);
+
+    // 2. Check prerequisites
+    await _prerequisiteChecker.CheckAsync(cancellationToken);
+
+    // 3. Acquire installation lock
+    using var installLock = await _lockProvider.AcquireAsync(normalized.SkillId);
+
+    // 4. Execute installation command
+    var result = await _installCommandRunner.ExecuteAsync(
+        new SkillInstallCommandExecutionRequest
+        {
+            Command = $"npx skills add {normalized.FullReference} -g -y",
+            Timeout = TimeSpan.FromMinutes(4)
+        },
+        cancellationToken);
+
+    // 5. Persist installation metadata
+    await _metadataStore.WriteAsync(normalized.SkillPath, request);
+
+    return new SkillInstallResultDto { Success = result.Success };
+}
+```
+
+Je zde použito několik klíčových návrhových vzorů: **referenční normalizátor** převádí různé vstupní formáty, jako např `tanweai/pua` a `@opencode/docker-skill`, do jednotné vnitřní reprezentace; **mechanismus zámku instalace** zajišťuje, že pro stejnou dovednost může současně běžet pouze jedna instalační operace; a **streamovaný výstup** posouvá postup instalace do frontendu v reálném čase prostřednictvím událostí odeslaných serverem, takže uživatelé mohou sledovat protokoly podobné terminálům, jak k nim dojde.
+
+Všechny tyto vzory jsou zde pro jeden účel: aby byl systém jednodušší na používání a údržbu.
+
+## Základní schopnost 2: Hledání na trhu
+
+Vyhledávání na tržišti umožňuje uživatelům objevovat a instalovat dovednosti z komunity. Schopnost jednoho člověka je vždy omezená; kolektivní poznání jde mnohem dále.
+
+### Technický přístup
+
+Funkce vyhledávání se spoléhá na online API `https://api.hagicode.com/v1/skills/search`. Pro zlepšení rychlosti odezvy systém implementuje ukládání do mezipaměti. Cache je trochu jako paměť: pokud budete mít užitečné věci kolem sebe, nemusíte příště tak tvrdě přemýšlet.
+
+```csharp
+private async Task<IReadOnlyList<SkillGallerySkillDto>> SearchCatalogAsync(
+    string query,
+    CancellationToken cancellationToken,
+    IReadOnlySet<string>? allowedSources = null)
+{
+    var cacheKey = $"skill_search:{query}:{string.Join(",", allowedSources ?? Array.Empty<string>())}";
+
+    if (_memoryCache.TryGetValue(cacheKey, out var cached))
+        return (IReadOnlyList<SkillGallerySkillDto>)cached!;
+
+    var response = await _onlineApiClient.SearchAsync(
+        new SearchSkillsRequest
+        {
+            Query = query,
+            Limit = _options.LimitPerQuery,
+        },
+        cancellationToken);
+
+    var results = response.Skills
+        .Where(skill => allowedSources is null || allowedSources.Contains(skill.Source))
+        .Select(skill => new SkillGallerySkillDto { ... })
+        .ToList();
+
+    _memoryCache.Set(cacheKey, results, TimeSpan.FromMinutes(10));
+    return results;
+}
+```
+
+Výsledky vyhledávání podporují filtrování podle důvěryhodných zdrojů, takže uživatelé vidí pouze zdroje dovedností, kterým důvěřují. Seed dotazy jako např `popular` a `recent` se používají k inicializaci katalogu, což uživatelům umožňuje vidět doporučené oblíbené dovednosti při prvním otevření. Na prvním dojmu stále záleží.
+
+## Základní schopnost 3: Inteligentní doporučení
+
+Inteligentní doporučení jsou nejsložitější částí systému. Mohou automaticky doporučit nejvhodnější dovednosti na základě aktuálního kontextu projektu. I přesto, že je složitý, stále stojí za to ho postavit.
+
+### Tok doporučení
+
+Celý tok doporučení je rozdělen do pěti fází:
+
+```
+1. Build project context
+   ↓
+2. AI generates search queries
+   ↓
+3. Search the online catalog in parallel
+   ↓
+4. AI ranks the candidates
+   ↓
+5. Return the recommendation list
+```
+
+Nejprve systém analyzuje charakteristiky, jako je technologický zásobník projektu, programovací jazyky a doménová struktura, aby vytvořil „profil projektu“. Tento profil je trochu jako životopis, který zaznamenává klíčové rysy projektu.
+
+Poté se AI Grain použije ke generování cílených vyhledávacích dotazů. Tento design je ve skutečnosti docela zajímavý: místo toho, abychom se AI přímo zeptali: „Jaké dovednosti bych měl doporučit?“, nejprve ji požádáme, aby přemýšlela o tom, „Jaké vyhledávací výrazy pravděpodobně najdou relevantní dovednosti?“ Někdy záleží na způsobu, jakým otázku položíte, více než na samotné odpovědi:
+
+```csharp
+var queryGeneration = await aiGrain.GenerateSkillRecommendationQueriesAsync(
+    projectContext,      // Project context
+    locale,              // User language preference
+    maxQueries,           // Maximum number of queries
+    effectiveSearchHero); // AI model selection
+```
+
+Dále se tyto vyhledávací dotazy provádějí paralelně, aby se shromáždil seznam kandidátských dovedností. Paralelní zpracování je na konci dne jen způsob, jak ušetřit čas.
+
+Konečně další AI Grain hodnotí kandidátské dovednosti. Tento krok zvažuje faktory, jako je relevance dovedností pro projekt, stav důvěryhodnosti a uživatelské historické preference:
+
+```csharp
+var ranking = await aiGrain.RankSkillRecommendationsAsync(
+    projectContext,
+    candidates,
+    installedSkillNames,
+    locale,
+    maxRecommendations,
+    effectiveRankingHero);
+
+response.Items = MergeRecommendations(projectContext, candidates, ranking, maxRecommendations);
+```
+
+### Záložní mechanismus
+
+Modely AI mohou reagovat pomalu nebo se dočasně stát nedostupnými. I ty nejlepší systémy někdy klopýtnou. Z tohoto důvodu systém obsahuje deterministický záložní mechanismus: když je služba AI nedostupná, používá heuristický algoritmus založený na pravidlech ke generování doporučení, jako je odvození pravděpodobných požadovaných dovedností ze závislostí v `package.json`.
+
+Jednoduše řečeno, tento nouzový mechanismus je jednoduše plán zálohování systému.
+
+## Základní schopnost 4: Správa důvěryhodného poskytovatele
+
+Správa důvěryhodných poskytovatelů umožňuje uživatelům kontrolovat, které zdroje dovedností jsou považovány za důvěryhodné. Důvěra je stále něco, co by si uživatelé měli být schopni definovat sami.
+
+### Pravidla shody
+
+Důvěryhodní poskytovatelé podporují dvě pravidla shody: **přesná shoda** (`exact`) a **shoda předpon** (`prefix`).
+
+```csharp
+public static TrustedSkillProviderResolutionSnapshot Resolve(
+    TrustedSkillProviderSnapshot snapshot,
+    string source)
+{
+    var normalizedSource = Normalize(source);
+
+    foreach (var entry in snapshot.Entries.OrderBy(e => e.SortOrder))
+    {
+        if (!entry.IsEnabled) continue;
+
+        foreach (var rule in entry.MatchRules)
+        {
+            bool isMatch = rule.MatchType switch
+            {
+                TrustedSkillProviderMatchRuleType.Exact
+                    => string.Equals(normalizedSource, Normalize(rule.Value),
+                        StringComparison.OrdinalIgnoreCase),
+                TrustedSkillProviderMatchRuleType.Prefix
+                    => normalizedSource.StartsWith(Normalize(rule.Value) + "/",
+                        StringComparison.OrdinalIgnoreCase),
+                _ => false
+            };
+
+            if (isMatch)
+                return new TrustedSkillProviderResolutionSnapshot
+                {
+                    IsTrustedSource = true,
+                    ProviderId = entry.ProviderId,
+                    DisplayName = entry.DisplayName
+                };
+        }
+    }
+
+    return new TrustedSkillProviderResolutionSnapshot { IsTrustedSource = false };
+}
+```
+
+Mezi vestavěné důvěryhodné poskytovatele patří známé organizace a projekty, jako je Vercel, Azure, anthropics, Microsoft a používání prohlížeče. Vlastní poskytovatele lze přidat prostřednictvím konfiguračních souborů zadáním ID poskytovatele, zobrazovaného názvu, štítku odznaku, pravidel shody a dalších. Svět je dostatečně velký, že důvěřovat jen několika vestavěným zařízením by nikdy nestačilo.
+
+### Persistence Implementace
+
+Důvěryhodná konfigurace je zachována pomocí Orleans Grain:
+
+```csharp
+public class TrustedSkillProviderGrain : Grain<TrustedSkillProviderState>,
+    ITrustedSkillProviderGrain
+{
+    public async Task UpdateConfigurationAsync(TrustedSkillProviderSnapshot snapshot)
+    {
+        State.Snapshot = snapshot;
+        await WriteStateAsync();
+    }
+
+    public Task<TrustedSkillProviderSnapshot> GetConfigurationAsync()
+    {
+        return Task.FromResult(State.Snapshot);
+    }
+}
+```
+
+Výhodou tohoto přístupu je, že změny konfigurace jsou automaticky synchronizovány napříč všemi uzly, aniž by bylo nutné ručně obnovovat mezipaměti. Automatizace je v konečném důsledku o tom, aby lidé měli o starost méně.
+
+## Klíčový technický design
+
+### Vzor adaptéru pro provádění příkazů
+
+Systém Skill potřebuje provádět různé příkazy npx. Pokud by tato logika byla rozptýlena všude, kód by se rychle stával obtížně udržovatelným. Proto jsme navrhli rozhraní adaptéru. Návrhové vzory nakonec existují, aby se kód snadněji udržoval:
+
+```csharp
+public interface ISkillInstallCommandRunner
+{
+    Task<SkillInstallCommandExecutionResult> ExecuteAsync(
+        SkillInstallCommandExecutionRequest request,
+        CancellationToken cancellationToken = default);
+}
+```
+
+Různé příkazy mají různé implementace spouštěče, ale všechny implementují stejné rozhraní, takže testování a nahrazení je jednoduché.
+
+### Výstup streamování SSE
+
+Průběh instalace je v reálném čase přenášen do frontendu prostřednictvím událostí odeslaných serverem:
+
+```csharp
+public async Task InstallWithProgressAsync(
+    SkillInstallRequestDto request,
+    IServerStreamWriter<SkillInstallProgressEventDto> stream,
+    CancellationToken cancellationToken)
+{
+    var process = new Process
+    {
+        StartInfo = new ProcessStartInfo
+        {
+            FileName = "npx",
+            Arguments = $"skills add {request.FullReference} -g -y",
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false
+        }
+    };
+
+    process.OutputDataReceived += async (sender, e) =>
+    {
+        await stream.WriteAsync(new SkillInstallProgressEventDto
+        {
+            EventType = "output",
+            Data = e.Data ?? string.Empty
+        });
+    };
+
+    process.Start();
+    process.BeginOutputReadLine();
+    await process.WaitForExitAsync(cancellationToken);
+}
+```
+
+Na frontendu mohou uživatelé vidět výstup podobný terminálu v reálném čase, díky čemuž je zážitek velmi intuitivní. Zpětná vazba v reálném čase pomáhá lidem cítit se pohodlně.
+
+## Praktický průvodce
+
+### Instalace komunitní dovednosti
+
+Vezměte instalaci `pua` dovednost jako příklad (je to oblíbená dovednost komunity):
+
+1. Otevřete zásuvku Skills a přepněte se na `Skill Gallery` tab
+2. Vstupte `pua` ve vyhledávacím poli
+3. Kliknutím na výsledek vyhledávání zobrazíte podrobnosti o dovednostech
+4. Klikněte na `Install` tlačítko
+5. Přepněte na `Local Skills` potvrďte úspěšnou instalaci
+
+Instalační příkaz je `npx skills add tanweai/pua -g -y`a systém zpracovává všechny podrobnosti automaticky. Ve skutečnosti není tolik kroků, jakmile je uděláte jeden po druhém.
+
+### Přidání vlastního důvěryhodného zdroje
+
+Pokud má váš tým vlastní úložiště dovedností, můžete jej přidat jako důvěryhodný zdroj:
+
+```yaml
+providerId: "my-team"
+displayName: "My Team Skills"
+badgeLabel: "MyTeam"
+isEnabled: true
+sortOrder: 100
+matchRules:
+  - matchType: "prefix"
+    value: "my-team/"
+  - matchType: "exact"
+    value: "my-team/special-skill"
+```
+
+Tímto způsobem budou všechny dovednosti z vašeho týmu zobrazovat důvěryhodný odznak, díky kterému budou uživatelé pohodlnější při jejich instalaci. Štítky a signály pomáhají lidem cítit se jistější.
+
+### Základy rozvoje dovedností
+
+Vytvoření vlastní dovednosti vyžaduje následující strukturu:
+
+```
+my-skill/
+├── SKILL.md          # Skill metadata (YAML front matter)
+├── index.ts          # Skill entry point
+├── agents/           # Supported agent configuration
+└── references/       # Reference resources
+```
+
+Příklad `SKILL.md` formát:
+
+```yaml
+---
+name: my-skill
+description: A brief description of what this skill does
+---
+
+# My Skill
+
+Detailed documentation...
+```
+
+## Poznámky
+
+1. **Požadavky na síť**: vyhledávání dovedností a instalace vyžadují přístup k `api.hagicode.com` a registr npm
+2. **Verze Node.js**: Doporučuje se Node.js 18 nebo novější
+3. **Požadavky na oprávnění**: jsou vyžadována globální oprávnění k instalaci npm
+4. **Řízení souběžnosti**: pro stejnou dovednost může být současně spuštěna pouze jedna operace instalace nebo odinstalace
+5. **Nastavení časového limitu**: výchozí časový limit pro instalaci jsou 4 minuty, ale složité scénáře mohou vyžadovat úpravu
+
+Tyto poznámky nakonec existují, aby pomohly věci jít hladce.
+
+## Závěr
+
+Tento článek představil kompletní implementaci systému Skill management v projektu HagiCode. Prostřednictvím architektury oddělené front-end-backend, vzoru adaptéru, správy distribuovaného stavu založeného na Orleans a souvisejících technik systém poskytuje:
+
+- **Místní globální správa**: jednotné rozhraní pro správu dovedností vytvořené obalem `npx skills` příkazy
+- **Hledání na trhu**: rychlé objevování dovedností komunity prostřednictvím online rozhraní API a mechanismů ukládání do mezipaměti
+- **Inteligentní doporučení**: Doporučení dovedností založená na umělé inteligenci na základě kontextu projektu
+- **Správa důvěryhodnosti**: flexibilní konfigurační systém, který uživatelům umožňuje kontrolovat hranice důvěryhodnosti
+
+Tento přístup k návrhu nelze použít pouze pro řízení dovedností. Je také užitečný jako reference pro jakýkoli scénář, který potřebuje integrovat nástroje příkazového řádku a zároveň vyvážit místní úložiště a online služby.
+
+Pokud vám tento článek pomohl, neváhejte nám dát hvězdičku na GitHubu: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site). Můžete také navštívit oficiální stránky, kde se dozvíte více: [hagicode.com](https://hagicode.com).
+
+Možná si myslíte, že tento systém je dobře navržený, nebo ne. V každém případě je to v pořádku. Jakmile je kód napsán, někdo jej použije a někdo ne.
+
+## Reference
+
+- Úložiště projektu HagiCode: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Oficiální stránky HagiCode: [hagicode.com](https://hagicode.com)
+- Oficiální dokumentace dovedností Claude Code: [docs.anthropic.com](https://docs.anthropic.com)
+- Rámcová dokumentace Orleans: [dotnet.github.io/orleans](https://dotnet.github.io/orleans)
+- Start TanStack: [tanstack.com/start](https://tanstack.com/start)
+
+## Upozornění na autorská práva
+
+Děkuji za přečtení. Pokud se vám tento článek zdál užitečný, dejte mu lajk, přidejte si jej do záložek a sdílejte jej.
+Tento obsah byl vytvořen ve spolupráci s umělou inteligencí a konečný obsah byl zkontrolován a schválen autorem.
+- autor: [newbe36524](https://www.newbe.pro)
+- Původní odkaz: [https://docs.hagicode.com/blog/2026-03-24-hagicode-skill-system-technical-analysis/](https://docs.hagicode.com/blog/2026-03-24-hagicode-skill-system-technical-analysis/)
+- Upozornění na autorská práva: Pokud není uvedeno jinak, všechny blogové příspěvky na tomto webu jsou licencovány podle BY-NC-SA. Při opětovném odeslání uveďte zdroj.

@@ -1,0 +1,375 @@
+---
+title: "Fragmentação SQLite na prática: uma comparação aprofundada de três estratégias de fragmentação"
+date: 2026-04-17
+tags: [SQLite, Sharding, Performance Optimization, Architecture Design, HagiCode]
+description: "Quando um banco de dados SQLite de arquivo único atinge gargalos de simultaneidade, como podemos superá-los? Este artigo compartilha três abordagens de fragmentação SQLite do HagiCode"
+---
+
+## Fragmentação SQLite na prática: uma comparação aprofundada de três estratégias de fragmentação
+
+> Quando um banco de dados SQLite de arquivo único atinge gargalos de simultaneidade, como podemos superá-los? Este artigo compartilha três abordagens de fragmentação SQLite do projeto HagiCode em diferentes cenários, ajudando você a entender como escolher a estratégia de fragmentação correta.
+
+Olá a todos, sou Yu Kun, o criador do HagiCode.
+
+## Plano de fundo
+
+Ao construir aplicativos de alto desempenho, bancos de dados SQLite de arquivo único enfrentam problemas muito práticos. À medida que a contagem de usuários e o volume de dados aumentam, esses problemas começam a se alinhar um após o outro:
+
+- As operações de gravação começam a ficar na fila e os tempos de resposta aumentam visivelmente
+- O desempenho da consulta cai à medida que o volume de dados aumenta
+- Frequente `database is locked` erros aparecem no acesso multithread
+
+Muitas pessoas perguntam instintivamente: deveríamos migrar diretamente para PostgreSQL ou MySQL? Isso pode resolver o problema, mas a complexidade da implantação aumenta acentuadamente. Existe uma opção mais leve?
+
+A resposta é fragmentação. No final, os problemas de engenharia ainda devem ser resolvidos com métodos de engenharia. Ao distribuir dados em vários arquivos SQLite, podemos melhorar significativamente a simultaneidade e o desempenho da consulta, preservando as características leves do SQLite.
+
+## Sobre HagiCode
+
+As abordagens compartilhadas neste artigo vêm de nossa experiência prática no [HagiCode](https://hagicode.com) projeto. Como um projeto de assistente de codificação de IA, o HagiCode precisa lidar com um grande volume de mensagens de conversação, persistência de estado e registros de histórico de eventos. Foi resolvendo esses problemas reais que resumimos três abordagens de fragmentação para diferentes cenários.
+
+Boas ferramentas são importantes, mas a forma como você as usa depende do trabalho que você realmente precisa fazer.
+
+Nosso repositório de código está em [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site). Sinta-se à vontade para dar uma olhada mais profunda se estiver interessado.
+
+## Visão geral das três abordagens de fragmentação
+
+Depois de analisar a base de código HagiCode, identificamos três abordagens de fragmentação SQLite para diferentes cenários de negócios:
+
+1. **Armazenamento fragmentado de mensagens de sessão**: armazenamento para mensagens de conversação de IA, caracterizado por gravações de alta frequência e consultas isoladas baseadas em sessão
+2. **Armazenamento fragmentado Orleans Grain**: persistência de estado para uma estrutura distribuída, caracterizada por acesso entre nós e a necessidade de roteamento determinístico
+3. **Armazenamento fragmentado do Hero History**: registros históricos de eventos para um sistema gamificado, caracterizado pela origem de eventos e pela necessidade de compatibilidade de migração
+
+Embora seus cenários de negócios sejam diferentes, todos os três seguem os mesmos princípios básicos de design:
+
+- **Roteamento determinístico**: calcule o fragmento diretamente do ID comercial, sem uma tabela de metadados
+- **Acesso transparente**: as camadas superiores usam uma interface unificada e permanecem inconscientes dos fragmentos subjacentes
+- **Armazenamento independente**: cada fragmento é um arquivo SQLite totalmente independente
+- **Otimização de simultaneidade**: modo WAL plus `busy_timeout` reduz a contenção de bloqueio
+
+Muitas pessoas perguntam: por que não construir uma solução genérica de sharding? Essa é uma pergunta muito prática e a conclusão é direta: em engenharia não existe uma solução universal, apenas aquela que melhor se adapta ao cenário empresarial atual. A seguir, compararemos em profundidade as implementações concretas dessas três abordagens.
+
+## Comparação de estratégias de fragmentação
+
+### Contagem de fragmentos e regras de nomenclatura
+
+| Aspecto | Mensagem da sessão | Grão de Orleans | História do herói |
+|------|----------------|---------------|--------------|
+| **Contagem de fragmentos** | 256 (16²) | 100 | 10 |
+| **Regra de nomenclatura** | Hexadecimal (00-ss) | Decimais (00-99) | Decimais (0-9) |
+| **Diretório de armazenamento** | `DataDir/messages/` | `DataDir/orleans/grains/` | `DataDir/hero-history/` |
+| **Padrão de nome de arquivo** | `{shard}.db` | `grains-{shard}.db` | `{shard}.db` |
+
+Por que existe uma diferença tão grande nas contagens de fragmentos? Depende das características do negócio. Dito de outra forma, os modelos mudarão, as ferramentas evoluirão e os fluxos de trabalho serão atualizados, mas os fundamentos da engenharia permanecerão os mesmos: primeiro entenda o problema que você está realmente tentando resolver.
+
+- **Mensagem de sessão** usa 256 fragmentos porque as mensagens de conversa têm a maior frequência de gravação e precisam de mais fragmentos para distribuir a carga
+- **Orleans Grain** usa 100 fragmentos, equilibrando desempenho de simultaneidade e complexidade operacional
+- **Hero History** usa apenas 10 fragmentos porque as gravações de eventos históricos são menos frequentes e o custo de migração deve ser considerado
+
+### Diferenças nos algoritmos de roteamento
+
+O algoritmo de roteamento é o núcleo de um esquema de fragmentação. Ele determina como os dados são distribuídos entre os fragmentos. As três abordagens usam diferentes estratégias de roteamento:
+
+```csharp
+// Session Message: last two hexadecimal characters of the GUID
+var normalized = Guid.Parse(sessionId.Value).ToString("N").ToLowerInvariant();
+return normalized[^2..];  // Take the last two hexadecimal characters
+
+// Orleans Grain: extract digits, then use the last two digits modulo shard count
+var digits = ExtractDigits(grainId);  // Extract all digits
+var lastTwoDigits = (digits[^2] * 10) + digits[^1];
+return lastTwoDigits % shardCount;
+
+// Hero History: modulo 10 using the ASCII value of the last character
+return heroId[^1] % 10;
+```
+
+**Análise de projeto**:
+
+- **Mensagem de sessão** IDs são GUIDs. Depois de converter para hexadecimal, usar os dois últimos caracteres fornece uma distribuição uniforme em 256 fragmentos
+- **Orleans Grain** Os IDs não têm um formato consistente e podem conter letras e dígitos, portanto, todos os dígitos são extraídos antes de obter o módulo
+- **Hero History** IDs são strings, então o valor ASCII do último caractere é usado diretamente com o módulo. É simples, mas a distribuição pode ser menos uniforme
+
+**Ponto principal**: independentemente do algoritmo usado, o mesmo ID deve sempre ser mapeado para o mesmo fragmento. Este é um dos requisitos mais fundamentais em sistemas distribuídos. Caso contrário, a inconsistência de dados será inevitável. Se o roteamento for instável, todos os outros esforços serão reduzidos a zero.
+
+### Diferenças nas estratégias de inicialização
+
+| Aspecto | Mensagem da sessão | Grão de Orleans | História do herói |
+|------|----------------|---------------|--------------|
+| **Tempo de inicialização** | Carregamento lento sob demanda | Inicialização paralela completa na inicialização | Carregamento lento sob demanda |
+| **Controle de simultaneidade** | `Lazy<Task>` evita inicialização duplicada | `Parallel.ForEachAsync` | `Lazy<Task>` evita inicialização duplicada |
+
+**Por que Orleans Grain escolhe a inicialização completa na inicialização?**
+
+Como Orleans é uma estrutura distribuída, um Grain pode ser escalonado para qualquer nó. Se for descoberto que um arquivo de fragmento está ausente apenas no tempo de execução, as solicitações poderão falhar. A inicialização completa na inicialização estende o tempo de inicialização, mas garante a estabilidade do tempo de execução. Colocá-lo em funcionamento é apenas o começo; mantê-lo sustentável é a verdadeira habilidade.
+
+**Vantagens do carregamento lento**:
+
+Para mensagem de sessão e histórico de herói, o carregamento lento reduz o tempo de inicialização. Arquivos e esquemas são criados somente quando um fragmento é realmente necessário. Usando `Lazy<Task>` também evita condições de corrida durante a inicialização simultânea. O design parece simples, mas em projetos reais evita muitos problemas desnecessários.
+
+### Características de design de esquema
+
+Os designs de esquema das três abordagens refletem suas respectivas características de negócios:
+
+**Mensagem da sessão**:
+- Suporta o modelo Event Sourcing (tabela de eventos mais tabela de snapshots)
+- Inclui uma tabela secundária para blocos de conteúdo de mensagens (`MessageContentBlocks`)
+- Possui campos de compactação e sinalizador de compactação para oferecer suporte a otimizações futuras
+
+**Grão de Orleans**:
+- Design minimalista: um único `GrainState` mesa
+- Armazena o estado como JSON serializado
+- Usa controle de simultaneidade otimista baseado em ETag
+
+**História do Herói**:
+- Índices de otimização de consulta de linha do tempo
+- Um único `DedupeKey` restrição evita duplicação
+- Suporta vários tipos e status de eventos
+
+Esses designs mostram que o design do esquema deve permanecer totalmente alinhado aos requisitos de negócios, em vez de buscar a genericidade. Orleans Grain é simples precisamente porque precisa apenas armazenar o estado serializado e não requer recursos de consulta complexos. Isto não é misticismo. É engenharia. Não se apresse em dar um nome grandioso a algo antes de verificar se ele pode sobreviver a duas iterações dentro de uma equipe real.
+
+### Comparação de configuração de simultaneidade
+
+Todas as três abordagens usam as mesmas configurações de otimização de simultaneidade SQLite:
+
+```sql
+PRAGMA journal_mode=WAL;      -- Write-ahead logging mode
+PRAGMA synchronous=NORMAL;     -- Reduce persistence overhead
+PRAGMA busy_timeout=5000;      -- 5-second busy wait
+PRAGMA foreign_keys=ON;        -- Foreign key constraints
+```
+
+**Vantagens do modo WAL**:
+
+O modo de diário de reversão tradicional causa contenção de bloqueio durante as gravações, enquanto o modo WAL permite que leituras e gravações prossigam simultaneamente. Em cenários de grandes volumes de dados, isso pode melhorar significativamente o desempenho. Muitos desenvolvedores ignoram essa configuração, mas ela é muito mais importante do que eles pensam.
+
+**A troca de `synchronous=NORMAL`**:
+
+Configurando-o para `FULL` fornece segurança máxima, mas reduz significativamente o desempenho. `NORMAL` atinge um equilíbrio entre segurança e desempenho, tornando-o a escolha certa para a maioria das aplicações. Não há necessidade de pensar demais nisso. `NORMAL` é o suficiente.
+
+## Como escolher uma estratégia de fragmentação
+
+Com base na análise das três abordagens do HagiCode, podemos resumir a seguinte matriz de decisão:
+
+```
+High-throughput scenarios -> more shards (for example, Message uses 256)
+Simple maintainability   -> fewer shards (for example, Hero History uses 10)
+Mostly numeric IDs       -> modulo algorithm (Orleans Grain)
+Mostly GUIDs             -> hexadecimal suffix (Session Message)
+String IDs               -> ASCII modulo (Hero History)
+```
+
+**Regras básicas para escolher contagens de fragmentos**:
+
+- Muito poucos (`< 10`): melhoria limitada da simultaneidade, tornando a fragmentação menos significativa
+- Muitos (`> 1000`): o gerenciamento de arquivos se torna complexo e a sobrecarga do pool de conexões aumenta
+- Regra prática: 10 a 100 fragmentos cabem na maioria dos cenários
+- Cenários de simultaneidade extremamente altos: 256 fragmentos podem ser considerados
+
+Se você olhar apenas as demonstrações, é fácil se deixar levar. Mas assim que você entra em produção, cada custo deve ser calculado cuidadosamente. Muitas coisas não são impossíveis, apenas não têm preços honestos.
+
+## Guia Prático
+
+### Implementar um resolvedor de fragmentos padronizado
+
+```csharp
+public interface IShardResolver<TId>
+{
+    string ResolveShardKey(TId id);
+}
+
+// Hexadecimal sharding (for GUIDs)
+public class HexSuffixShardResolver : IShardResolver<string>
+{
+    private readonly int _suffixLength;
+
+    public HexSuffixShardResolver(int suffixLength = 2)
+    {
+        _suffixLength = suffixLength;
+    }
+
+    public string ResolveShardKey(string id)
+    {
+        var normalized = id.Replace("-", "").ToLowerInvariant();
+        return normalized[^_suffixLength..];
+    }
+}
+
+// Numeric modulo sharding (for purely numeric IDs)
+public class NumericModuloShardResolver : IShardResolver<long>
+{
+    private readonly int _shardCount;
+
+    public NumericModuloShardResolver(int shardCount)
+    {
+        _shardCount = shardCount;
+    }
+
+    public string ResolveShardKey(long id)
+    {
+        return (id % _shardCount).ToString("D2");
+    }
+}
+```
+
+### Padrão de fábrica de conexão unificada
+
+```csharp
+public class ShardedConnectionFactory<TOptions>
+{
+    private readonly ConcurrentDictionary<string, Lazy<Task>> _initializationTasks = new();
+    private readonly TOptions _options;
+    private readonly IShardSchemaInitializer _initializer;
+
+    public ShardedConnectionFactory(
+        TOptions options,
+        IShardSchemaInitializer initializer)
+    {
+        _options = options;
+        _initializer = initializer;
+    }
+
+    public async Task<TDbContext> CreateAsync(string shardKey, CancellationToken ct)
+    {
+        var connectionString = BuildConnectionString(shardKey);
+
+        // Use Lazy<Task> to prevent concurrent initialization
+        var initTask = _initializationTasks.GetOrAdd(
+            connectionString,
+            _ => new Lazy<Task>(() => InitializeShardAsync(connectionString, ct))
+        );
+
+        await initTask.Value;
+        return CreateDbContext(connectionString);
+    }
+
+    private async Task InitializeShardAsync(string connectionString, CancellationToken ct)
+    {
+        await _initializer.InitializeAsync(connectionString, ct);
+    }
+
+    private string BuildConnectionString(string shardKey)
+    {
+        var shardPath = Path.Combine(_options.BaseDirectory, $"{shardKey}.db");
+        return $"Data Source={shardPath}";
+    }
+
+    private TDbContext CreateDbContext(string connectionString)
+    {
+        // Create the DbContext according to the specific ORM
+        return Activator.CreateInstance(typeof(TDbContext), connectionString) as TDbContext;
+    }
+}
+```
+
+### Melhores práticas para inicialização de esquema
+
+```csharp
+public class SqliteShardInitializer : IShardSchemaInitializer
+{
+    public async Task InitializeAsync(string connectionString, CancellationToken ct)
+    {
+        await using var connection = new SqliteConnection(connectionString);
+        await connection.OpenAsync(ct);
+
+        // Concurrency optimization settings
+        await connection.ExecuteAsync("""
+            PRAGMA journal_mode=WAL;
+            PRAGMA synchronous=NORMAL;
+            PRAGMA busy_timeout=5000;
+            PRAGMA foreign_keys=ON;
+        """);
+
+        // Create table schema
+        await connection.ExecuteAsync("""
+            CREATE TABLE IF NOT EXISTS Entities (
+                Id TEXT PRIMARY KEY,
+                CreatedAt TEXT NOT NULL,
+                UpdatedAt TEXT NOT NULL,
+                Data TEXT NOT NULL,
+                ETag TEXT
+            );
+        """);
+
+        // Create indexes
+        await connection.ExecuteAsync("""
+            CREATE INDEX IF NOT EXISTS IX_Entities_CreatedAt
+            ON Entities(CreatedAt DESC);
+
+            CREATE INDEX IF NOT EXISTS IX_Entities_UpdatedAt
+            ON Entities(UpdatedAt DESC);
+        """);
+    }
+}
+```
+
+### Principais considerações
+
+**1. Estabilidade de roteamento**
+
+O algoritmo de roteamento deve garantir que o mesmo ID sempre seja mapeado para o mesmo fragmento. Evite cálculos aleatórios ou dependentes do tempo e não introduza parâmetros mutáveis ​​no algoritmo.
+
+**2. Escolhendo a contagem de fragmentos**
+
+O número de fragmentos deve ser decidido durante a fase de design. Alterá-lo mais tarde é extremamente difícil. Considere:
+- Volume de simultaneidade atual e futuro
+- O custo de gerenciamento de cada fragmento
+- A complexidade da migração de dados
+
+**3. Planejamento de migração**
+
+A abordagem Hero History demonstra um caminho de migração completo:
+
+1. Construa a nova infraestrutura de armazenamento fragmentado
+2. Implemente um serviço de migração para copiar dados do banco de dados primário para os fragmentos
+3. Verifique a compatibilidade da consulta após a migração
+4. Alternar caminhos de leitura e gravação para os fragmentos
+5. Limpe tabelas legadas no banco de dados primário
+
+Os requisitos de migração futuros precisam ser considerados ao projetar o esquema de fragmentação. Falar é barato. Mostre-me o código. Mas o código por si só não é suficiente. Você também precisa de um caminho de migração completo. Um sucesso único não é um sistema; sucesso sustentado é.
+
+**4. Monitoramento e operações**
+
+- Monitore a distribuição de tamanho entre fragmentos para detectar antecipadamente a distorção de dados
+- Defina alertas para pontos de acesso de fragmentos para evitar que um único fragmento se torne o gargalo
+- Inspecione regularmente os tamanhos dos arquivos WAL para evitar o uso excessivo do disco
+- Estabeleça mecanismos de verificação de integridade do fragmento
+
+**5. Cobertura de teste**
+
+- Teste condições de limite, como IDs vazios, caracteres especiais e IDs excessivamente longos
+- Verifique o determinismo de roteamento para garantir que o mesmo ID sempre seja mapeado para o mesmo fragmento
+- Execute testes de estresse de gravação simultâneos para confirmar que a contenção de bloqueio foi efetivamente reduzida
+- Execute testes de migração para garantir a integridade e consistência dos dados
+
+## Resumo
+
+Ao comparar as três abordagens de fragmentação SQLite no projeto HagiCode, podemos ver que:
+
+1. **Não existe uma solução universal**: diferentes cenários de negócios precisam de diferentes estratégias de fragmentação
+2. **Os princípios básicos são compartilhados**: roteamento determinístico, acesso transparente, armazenamento independente e otimização de simultaneidade
+3. **O design deve estar voltado para o futuro**: considere caminhos de migração e custos operacionais
+
+Se o seu projeto usa SQLite e começou a enfrentar gargalos de simultaneidade, espero que este artigo lhe dê algumas ideias úteis. Não há necessidade de pressa na migração para um banco de dados pesado. Às vezes, a estratégia de fragmentação correta é suficiente para resolver o problema.
+
+É claro que a fragmentação não é uma solução mágica. Antes de escolher uma estratégia de fragmentação, primeiro certifique-se de que:
+- Você já otimizou o desempenho da consulta de tabela única
+- Você já adicionou índices apropriados
+- Você já ativou o modo WAL
+
+Somente depois que essas otimizações forem feitas, e ainda houver um gargalo de desempenho, você deverá considerar a introdução da fragmentação. Fazer bem as coisas simples é uma capacidade em si.
+
+Às vezes, fazer o trabalho uma vez diz mais do que explicá-lo dez vezes. A partir daqui, deixe os resultados da engenharia falarem por si.
+
+## Referências
+
+- Repositório do projeto HagiCode: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Documentação do modo SQLite WAL: [sqlite.org/wal.html](https://www.sqlite.org/wal.html)
+- Estrutura distribuída de Orleans: [dotnet.github.io/orleans](https://dotnet.github.io/orleans/)
+
+## Aviso de direitos autorais
+
+Obrigado por ler. Se você achou este artigo útil, sinta-se à vontade para curtir, marcar e compartilhá-lo.
+Este conteúdo foi criado com colaboração assistida por IA e o conteúdo final foi revisado e confirmado pelo autor.
+- Autor: [novobe36524](https://www.newbe.pro)
+- Links originais: [https://docs.hagicode.com/blog/2026-04-17-sqlite-sharding-strategies-comparison/](https://docs.hagicode.com/blog/2026-04-17-sqlite-sharding-strategies-comparison/)
+- Direitos autorais: Salvo indicação em contrário, todos os artigos do blog são licenciados sob BY-NC-SA. Por favor, cite a fonte ao repostar.

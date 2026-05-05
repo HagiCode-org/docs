@@ -1,0 +1,378 @@
+---
+title: Cách tự động phát hành Steam bằng tác vụ GitHub
+date: 2026-04-16
+tags: [GitHub Actions, Steam, Automated Release, DevOps, CI/CD]
+description: "Bài viết này chia sẻ giải pháp hoàn chỉnh mà chúng tôi đã triển khai cho các bản phát hành Steam tự động trong dự án HagiCode Desktop, bao gồm quy trình tự động hóa từ đầu đến cuối"
+---
+
+## Cách tự động phát hành Steam bằng tác vụ GitHub
+
+> Bài viết này chia sẻ giải pháp hoàn chỉnh mà chúng tôi đã triển khai cho các bản phát hành Steam tự động trong dự án HagiCode Desktop, bao gồm quy trình tự động hóa toàn diện từ Bản phát hành GitHub đến nền tảng Steam, bao gồm các chi tiết kỹ thuật chính như xác thực Steam Guard và tải lên Depot đa nền tảng.
+
+## Nền
+
+Quy trình phát hành trên Steam thực sự khá khác so với phân phối ứng dụng truyền thống. Steam có hệ thống phân phối cập nhật hoàn chỉnh của riêng mình. Các nhà phát triển cần sử dụng SteamCMD để tải các tạo phẩm xây dựng lên mạng CDN của Steam, thay vì chỉ đưa vào liên kết tải xuống như trên các nền tảng khác.
+
+Dự án HagiCode Desktop đang chuẩn bị phát hành trên Steam, đưa ra một số thách thức mới cho quy trình phát hành của chúng tôi:
+
+1. Chúng tôi cần chuyển đổi các tạo phẩm xây dựng hiện có sang định dạng tương thích với Steam.
+2. Chúng tôi phải tải chúng lên Steam thông qua SteamCMD.
+3. Chúng tôi cũng phải xử lý việc xác thực Steam Guard.
+4. Chúng tôi cần hỗ trợ tải lên Depot đa nền tảng cho Linux, Windows và macOS.
+5. Chúng tôi muốn một luồng hoàn toàn tự động từ Bản phát hành GitHub sang Steam.
+
+Dự án đã triển khai "chế độ phiên bản di động", cho phép ứng dụng phát hiện các tải trọng dịch vụ cố định được đóng gói trong `extra` thư mục. Mục tiêu của chúng tôi là tích hợp liền mạch chế độ phiên bản di động đó với bản phân phối Steam.
+
+## Giới thiệu về HagiCode
+
+Giải pháp được chia sẻ trong bài viết này xuất phát từ kinh nghiệm thực tế của chúng tôi trong lĩnh vực [Mã Hagi](https://hagicode.com) dự án. HagiCode là trợ lý mã hóa AI hỗ trợ việc sử dụng máy tính để bàn. Vì chúng tôi đang tích cực làm việc để ra mắt trên Steam nên chúng tôi cần thiết lập quy trình phát hành tự động đáng tin cậy.
+
+## Thiết kế kiến trúc
+
+Cốt lõi của toàn bộ quy trình phát hành Steam là quy trình làm việc của GitHub Actions chia quy trình thành ba giai đoạn chính:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ GitHub Actions Workflow (Steam Release)                    │
+├─────────────────────────────────────────────────────────────┤
+│ 1. Preparation Stage:                                      │
+│    - Check out portable-version code                       │
+│    - Download build artifacts from GitHub Release          │
+│    - Extract and prepare the Steam content directory       │
+│                                                             │
+│ 2. SteamCMD Setup:                                         │
+│    - Install or reuse SteamCMD                             │
+│    - Authenticate with Steam Guard                         │
+│                                                             │
+│ 3. Release Stage:                                          │
+│    - Generate Depot VDF configuration files                │
+│    - Generate App Build VDF configuration files            │
+│    - Invoke SteamCMD to upload to Steam                    │
+└─────────────────────────────────────────────────────────────┘
+```
+
+Thiết kế này cung cấp một số lợi thế:
+- Nó sử dụng lại các tạo phẩm Phát hành GitHub hiện có và tránh việc xây dựng lại các kết quả đầu ra tương tự.
+- Nó sử dụng các trình chạy tự lưu trữ để cách ly an toàn.
+- Nó hỗ trợ chuyển đổi giữa chế độ xem trước và các nhánh phát hành chính thức.
+- Nó bao gồm việc xử lý lỗi và ghi nhật ký hoàn chỉnh, giúp chẩn đoán lỗi dễ dàng hơn.
+
+## Triển khai quy trình công việc
+
+### Thiết kế thông số kích hoạt
+
+Quy trình làm việc của chúng tôi hỗ trợ các tham số chính sau:
+
+```yaml
+inputs:
+  release:           # Portable Version release tag
+    description: 'Version tag to release (for example v1.0.0)'
+    required: true
+  steam_preview:     # Whether to generate a preview build
+    description: 'Whether to use preview mode'
+    required: false
+    default: 'false'
+  steam_branch:      # Steam branch to set live
+    description: 'Target Steam branch'
+    required: false
+    default: 'preview'
+  steam_description: # Build description override
+    description: 'Build description'
+    required: false
+```
+
+### Cấu hình Á hậu tự lưu trữ
+
+Vì lý do bảo mật, chúng tôi sử dụng trình chạy tự lưu trữ với `steam` nhãn:
+
+```yaml
+runs-on:
+  - self-hosted
+  - Linux
+  - X64
+  - steam
+```
+
+Điều này đảm bảo rằng các bản phát hành Steam chạy trên một trình chạy chuyên dụng và giữ các thông tin xác thực nhạy cảm được cách ly một cách an toàn.
+
+### Kiểm soát đồng thời
+
+Để ngăn các bản phát hành của cùng một phiên bản gây nhiễu lẫn nhau, chúng tôi đã định cấu hình kiểm soát đồng thời:
+
+```yaml
+concurrency:
+  group: portable-version-steam-${{ github.event.inputs.release }}
+  cancel-in-progress: false
+```
+
+Chú ý rằng `cancel-in-progress: false` được đặt ở đây vì các bản phát hành Steam có thể mất một thời gian và chúng tôi không muốn một lần chạy mới được kích hoạt sẽ hủy một lần chạy đang tải lên.
+
+## Triển khai tập lệnh cốt lõi
+
+### Chuẩn bị đầu vào phát hành
+
+các `prepare-steam-release-input.mjs` tập lệnh chịu trách nhiệm chuẩn bị các đầu vào cần thiết để phát hành:
+
+```javascript
+// Download the GitHub Release build manifest and artifact inventory
+const buildManifest = await downloadBuildManifest(releaseTag);
+const artifactInventory = await downloadArtifactInventory(releaseTag);
+
+// Download compressed archives for each platform
+for (const platform of ['linux-x64', 'win-x64', 'osx-universal']) {
+  const artifactUrl = getArtifactUrl(artifactInventory, platform);
+  await downloadArtifact(artifactUrl, platform);
+}
+
+// Extract into the Steam content directory structure
+await extractToSteamContent(sources, contentRoot);
+```
+
+### Xác thực Steam Guard
+
+Steam yêu cầu các tài khoản phải được bảo vệ bằng Steam Guard, vì vậy chúng tôi đã triển khai thuật toán tạo mã dựa trên bí mật chung:
+
+```javascript
+function generateSteamGuardCode(sharedSecret, timestamp = Date.now()) {
+  const secret = decodeSharedSecret(sharedSecret);
+  const time = Math.floor(timestamp / 1000 / 30);
+
+  const timeBuffer = Buffer.alloc(8);
+  timeBuffer.writeBigUInt64BE(BigInt(time));
+
+  // Use HMAC-SHA1 to generate a time-based one-time code
+  const hash = crypto.createHmac('sha1', secret)
+    .update(timeBuffer)
+    .digest();
+
+  // Convert it into a 5-character Steam Guard code
+  const code = steamGuardCode(hash);
+  return code;
+}
+```
+
+Việc triển khai này dựa trên cơ chế TOTP (Mật khẩu một lần dựa trên thời gian) của Steam Guard, tạo ra mã xác minh mới cứ sau 30 giây.
+
+### Tạo cấu hình VDF
+
+VDF (Định dạng dữ liệu van) là định dạng cấu hình được Steam sử dụng. Chúng ta cần tạo hai loại tệp VDF:
+
+**Depot VDF** được sử dụng để định cấu hình nội dung cho từng nền tảng:
+
+```javascript
+function buildDepotVdf(depotId, contentRoot) {
+  return [
+    '"DepotBuildConfig"',
+    '{',
+    `  "DepotID" "${escapeVdf(depotId)}"`,
+    `  "ContentRoot" "${escapeVdf(contentRoot)}"`,
+    '  "FileMapping"',
+    '  {',
+    '    "LocalPath" "*"',
+    '    "DepotPath" "."',
+    '    "recursive" "1"',
+    '  }',
+    '}'
+  ].join('\n');
+}
+```
+
+**App Build VDF** được sử dụng để định cấu hình toàn bộ bản dựng ứng dụng:
+
+```javascript
+function buildAppBuildVdf(appId, depotBuilds, description, setLive) {
+  const vdf = [
+    '"appbuild"',
+    '{',
+    `  "appid" "${appId}"`,
+    `  "desc" "${escapeVdf(description)}"`,
+    `  "contentroot" "${escapeVdf(contentRoot)}"`,
+    '  "buildoutput" "build_output"',
+    '  "depots"',
+    '  {'
+  ];
+
+  for (const [depotId, depotVdfPath] of Object.entries(depotBuilds)) {
+    vdf.push(`    "${depotId}" "${depotVdfPath}"`);
+  }
+
+  if (setLive) {
+    vdf.push(`  }`);
+    vdf.push(`  "setlive" "${setLive}"`);
+  }
+
+  vdf.push('}');
+  return vdf.join('\n');
+}
+```
+
+### Lệnh gọi SteamCMD
+
+Cuối cùng, quá trình tải lên được thực hiện bằng cách gọi SteamCMD:
+
+```javascript
+await runCommand(steamcmdPath, [
+  '+login', steamUsername, steamPassword, steamGuardCode,
+  '+run_app_build', appBuildPath,
+  '+quit'
+]);
+```
+
+Đây là bước nhảy cuối cùng trong toàn bộ quy trình làm việc. Một khi nó thành công, việc phát hành được thực hiện.
+
+## Xử lý kho đa nền tảng
+
+Steam sử dụng hệ thống Depot để quản lý nội dung cho các nền tảng khác nhau. Chúng tôi hỗ trợ ba Kho chính:
+
+| Nền tảng | Mã định danh kho | Hỗ trợ kiến trúc |
+|-----|-----------|---------|
+| Linux | `linux-x64` | x64_64 |
+| cửa sổ | `win-x64` | x64_64 |
+| macOS | `osx-universal` | phổ quát, x64_64, arm64 |
+
+Mỗi Depot có thư mục nội dung và file cấu hình VDF riêng. Điều này đảm bảo rằng người dùng trên các nền tảng khác nhau chỉ tải xuống nội dung họ thực sự cần.
+
+## Quy trình phát hành
+
+### Bước 1: Chuẩn bị phát hành GitHub
+
+Đầu tiên, tạo Bản phát hành GitHub trong `portable-version` kho lưu trữ bao gồm:
+- Lưu trữ nén cho mỗi nền tảng
+- Xây dựng bảng kê khai (`{tag}.build-manifest.json`)
+- Kho hiện vật (`{tag}.artifact-inventory.json`)
+
+### Bước 2: Kích hoạt quy trình phát hành Steam
+
+Kích hoạt quy trình làm việc theo cách thủ công thông qua Tác vụ GitHub và điền vào các tham số bắt buộc:
+- `release`: thẻ phiên bản cần xuất bản, chẳng hạn như `v1.0.0`
+- `steam_branch`: nhánh mục tiêu, chẳng hạn như `preview` hoặc `public`
+- `steam_preview`: có nên sử dụng chế độ xem trước hay không
+
+### Bước 3: Tự động thực hiện luồng phát hành
+
+Quy trình làm việc tự động thực hiện các bước sau:
+
+1. Tải xuống và trích xuất các tạo phẩm phát hành GitHub.
+2. Cài đặt hoặc cập nhật SteamCMD.
+3. Tạo tập tin cấu hình Steam VDF.
+4. Xác thực bằng Steam Guard.
+5. Tải nội dung lên Steam CDN.
+6. Đặt chi nhánh được chỉ định trực tiếp.
+
+Khi trình tự này hoàn thành, toàn bộ đường dẫn phát hành sẽ được bao phủ.
+
+## Hướng dẫn cấu hình
+
+### Cấu hình bí mật bắt buộc
+
+Định cấu hình các bí mật sau trong cài đặt kho lưu trữ GitHub:
+
+| Tên bí mật | Mô tả |
+|-----------|------|
+| `STEAM_USERNAME` | Tên người dùng tài khoản Steam |
+| `STEAM_PASSWORD` | Mật khẩu tài khoản Steam |
+| `STEAM_SHARED_SECRET` | Bí mật chia sẻ của Steam Guard (tùy chọn) |
+| `STEAM_GUARD_CODE` | Mã Steam Guard (tùy chọn) |
+| `STEAM_APP_ID` | ID ứng dụng Steam |
+| `STEAM_DEPOT_ID_LINUX` | ID kho Linux |
+| `STEAM_DEPOT_ID_WINDOWS` | ID kho Windows |
+| `STEAM_DEPOT_ID_MACOS` | ID kho macOS |
+
+Không có gì đặc biệt bất thường về các cài đặt này. Bạn chỉ cần có tất cả các giá trị mong đợi.
+
+### Cấu hình biến môi trường
+
+| Tên biến | Mô tả | Giá trị mặc định |
+|---------|------|--------|
+| `PORTABLE_VERSION_STEAMCMD_ROOT` | Thư mục cài đặt SteamCMD | `~/.local/share/portable-version/steamcmd` |
+
+## Thực tiễn tốt nhất
+
+### Quản lý xác thực Steam Guard
+
+Ở lần chạy đầu tiên, bạn cần nhập mã Steam Guard theo cách thủ công. Sau đó, nên định cấu hình bí mật chung để mã có thể được tạo tự động. Điều này tránh sự can thiệp thủ công vào mỗi lần phát hành.
+
+SteamCMD lưu mã thông báo đăng nhập và có thể sử dụng lại nó trong những lần chạy sau. Bạn vẫn cần theo dõi việc hết hạn mã thông báo vì cần phải xác thực lại sau khi mã thông báo hết hạn.
+
+### Cấu trúc thư mục nội dung
+
+Đảm bảo cấu trúc thư mục nội dung Steam là chính xác:
+
+```
+steam-content/
+├── linux-x64/     # Linux platform content
+├── win-x64/       # Windows platform content
+└── osx-universal/ # macOS universal binary content
+```
+
+Mỗi thư mục phải chứa các tệp ứng dụng hoàn chỉnh cho nền tảng tương ứng của nó.
+
+### Sử dụng chế độ xem trước
+
+Chế độ xem trước không thiết lập bất kỳ nhánh nào hoạt động nên phù hợp để thử nghiệm và xác thực:
+
+```yaml
+if [ "$STEAM_PREVIEW_INPUT" = 'true' ]; then
+  cmd+=(--preview)
+fi
+```
+
+Điều này cho phép bạn tải lên Steam trước để xác minh, sau đó chuyển sang nhánh chính thức sau khi mọi thứ đã được kiểm tra.
+
+### Xử lý lỗi và ghi nhật ký
+
+Các tập lệnh bao gồm xử lý lỗi và ghi nhật ký hoàn chỉnh:
+- Xác thực rằng Bản phát hành GitHub tồn tại.
+- Kiểm tra các tập tin siêu dữ liệu cần thiết.
+- Đảm bảo nội dung nền tảng có mặt.
+- Tạo báo cáo tóm tắt Hành động GitHub.
+
+Thông tin này rất có giá trị cho cả việc gỡ lỗi và kiểm tra.
+
+### Quản lý hiện vật
+
+Quy trình làm việc tạo ra hai loại tạo phẩm:
+- `portable-steam-release-preparation-{tag}`: siêu dữ liệu chuẩn bị phát hành
+- `portable-steam-build-metadata-{tag}`: Siêu dữ liệu của bản dựng Steam
+
+Những tạo phẩm này có thể được sử dụng để kiểm tra và gỡ lỗi sau này. Thời hạn lưu giữ là 30 ngày là một mặc định thực tế.
+
+## Cách sử dụng trong thế giới thực
+
+Trong dự án HagiCode, quy trình phát hành tự động này đã chạy thành công trên nhiều phiên bản. Toàn bộ quá trình từ Bản phát hành GitHub đến nền tảng Steam hoàn toàn tự động và không cần can thiệp thủ công.
+
+Điều này cải thiện đáng kể cả hiệu quả phát hành và độ tin cậy. Trước đây, việc xuất bản một phiên bản theo cách thủ công mất hơn 30 phút. Bây giờ toàn bộ quá trình kết thúc chỉ trong vài phút.
+
+Quan trọng hơn, quy trình làm việc tự động giúp giảm nguy cơ xảy ra lỗi do con người. Mọi bản phát hành đều tuân theo cùng một quy trình tiêu chuẩn hóa, giúp cho kết quả dễ dự đoán hơn.
+
+## Tóm tắt
+
+Với cách tiếp cận được mô tả trong bài viết này, chúng tôi đã đạt được:
+1. Tự động hóa hoàn toàn từ bản phát hành GitHub đến nền tảng Steam.
+2. Tải lên Depot đa nền tảng.
+3. Xác thực an toàn dựa trên Steam Guard.
+4. Chuyển đổi linh hoạt giữa chế độ xem trước và phát hành chính thức.
+5. Hoàn thành xử lý lỗi và ghi nhật ký.
+
+Giải pháp này không chỉ phù hợp với dự án HagiCode mà còn có thể dùng làm tài liệu tham khảo cho các dự án khác đang có kế hoạch ra mắt trên Steam. Nếu bạn cũng đang xem xét việc tự động hóa bản phát hành Steam, tôi hy vọng trải nghiệm thực tế này sẽ hữu ích với bạn.
+
+Công nghệ có thể phức tạp hoặc đơn giản tùy thuộc vào con đường bạn chọn. Điều quan trọng là tìm ra một quy trình làm việc phù hợp với nhu cầu của bạn.
+
+Nếu bài viết này giúp ích cho bạn, vui lòng gắn dấu sao vào kho lưu trữ HagiCode GitHub hoặc truy cập trang web chính thức để tìm hiểu thêm.
+
+## Tài liệu tham khảo
+
+- [Tài liệu SteamCMD](https://developer.valvesoftware.com/wiki/SteamCMD)
+- [SDK Steamworks](https://partner.steamgames.com/)
+- [Kho lưu trữ dự án HagiCode](https://github.com/HagiCode-org/site)
+- [Trang web chính thức của HagiCode](https://hagicode.com)
+- [Hướng dẫn cài đặt HagiCode](https://docs.hagicode.com/installation/docker-compose)
+- [Máy tính để bàn HagiCode](https://hagicode.com/desktop/)
+
+## Thông báo bản quyền
+
+Cảm ơn bạn đã đọc. Nếu bạn thấy bài viết này hữu ích, bạn có thể thích, đánh dấu và chia sẻ nó.
+Nội dung này được tạo bằng sự cộng tác có sự hỗ trợ của AI và nội dung cuối cùng đã được tác giả xem xét và xác nhận.
+- tác giả: [newbe36524](https://www.newbe.pro)
+- Bài viết gốc: [https://docs.hagicode.com/blog/2026-04-16-steam-release-automation-github-actions/](https://docs.hagicode.com/blog/2026-04-16-steam-release-automation-github-actions/)
+- Thông báo bản quyền: Trừ khi có quy định khác, tất cả các bài viết trong blog này đều được cấp phép theo BY-NC-SA. Vui lòng trích dẫn nguồn khi đăng lại.

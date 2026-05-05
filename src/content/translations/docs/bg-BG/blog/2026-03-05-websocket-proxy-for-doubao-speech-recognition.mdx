@@ -1,0 +1,502 @@
+---
+title: "Разрешаване на предизвикателствата при удостоверяването на WebSocket на браузъра: Практичен прокси модел за разпознаване на говор на Doubao"
+date: 2026-03-05
+tags: [WebSocket, Proxy, Speech Recognition, Authentication, Backend]
+description: "API на браузъра WebSocket не поддържа персонализирани HTTP заглавки, което създава предизвикателство за услугите за разпознаване на реч, които изискват данни за удостоверяване в"
+---
+
+## Разрешаване на предизвикателствата при удостоверяването на WebSocket на браузъра: Практичен прокси модел за разпознаване на говор на Doubao
+
+> API на WebSocket на браузъра не поддържа персонализирани HTTP заглавки, което създава предизвикателство за услугите за разпознаване на реч, които изискват данни за удостоверяване в заглавките. Тази статия споделя как решихме този проблем в проекта HagiCode с прокси модел на бекенда и как подходът се разви от експерименти на детската площадка до производствена употреба.
+
+
+## Фон
+
+Когато започнахме да изграждаме разпознаване на реч за проекта HagiCode, ние уверено избрахме услугата за разпознаване на реч Doubao на ByteDance. Първоначалният дизайн беше ясен: оставете фронтенда да се свърже директно към услугата WebSocket на Doubao. Колко трудно може да бъде това? Просто отворете връзка и изпратете малко данни, нали?
+
+След това дойде изненадата: API на Doubao изисква информацията за удостоверяване да бъде предадена през HTTP заглавки, включително неща като `accessToken` и `secretKey`. Това веднага стана неудобно, защото API на WebSocket на браузъра просто не поддържа настройка на персонализирани заглавки.
+
+И така, какво правите, когато браузърът не ви позволява да ги изпратите?
+
+По това време преценихме две възможности:
+
+1. Поставете идентификационните данни в параметрите на заявката за URL адрес - просто и откровено
+2. Добавете прокси слой в задната част - повече работа на пръв поглед
+
+Първата опция излага идентификационните данни директно в кода на интерфейса и локалното хранилище. Това наистина ли е безопасно? Не се чувствах комфортно с това. На всичкото отгоре, някои API изискват проверка, базирана на заглавка, така че този подход дори не е жизнеспособен.
+
+В крайна сметка избрахме втората опция: внедряване на WebSocket прокси в бекенда. По стечение на обстоятелствата този модел беше валидиран за първи път в нашата среда на детската площадка и едва след като потвърдихме неговата стабилност, го преместихме в производство. В края на краищата никой не иска производството да се дублира като лабораторен експеримент.
+
+## Относно HagiCode
+
+Подходът, споделен в тази статия, идва от нашия практически опит в [HagiCode](https://github.com/HagiCode-org/site) проект.
+
+HagiCode е проект за асистент за кодиране с изкуствен интелект с поддръжка на гласово взаимодействие. Тъй като трябваше да извикаме услуга за разпознаване на реч от интерфейса, се натъкнахме направо на този проблем с удостоверяването на WebSocket, който ни доведе до решението, описано тук. Понякога тези технически пречки са разочароващи, но също така ви принуждават да научите модели, които се оказват полезни по-късно.
+
+## Анализ на техническите предизвикателства
+
+### Ограничения за WebSocket на браузъра
+
+Стандартният WebSocket API изглежда чудесно прост:
+
+```javascript
+const ws = new WebSocket('wss://example.com/ws');
+```
+
+Но тази простота е точно мястото, където се крие проблемът - той предава само параметри в URL адреса и не може да задава заглавки по начина, по който една HTTP заявка може:
+
+```javascript
+// This is not supported in the WebSocket API
+const ws = new WebSocket('wss://example.com/ws', {
+  headers: {
+    'Authorization': 'Bearer token'
+  }
+});
+```
+
+И това е основният проблем. За услуги като разпознаване на реч Doubao, които зависят от удостоверяване, базирано на заглавка, това ограничение е твърд блокер.
+
+След като приемете това ограничение, архитектурата трябва да се промени.
+
+### Архитектурни дизайнерски решения
+
+При проектирането на решението сравнихме внимателно компромисите.
+
+**Решение 1: Избор на прокси шаблона**
+
+Сравнихме два подхода:
+
+| опция | плюсове | минуси | Решение |
+|------|------|------|------|
+| Роден WebSocket | Лек, прост, директно пренасочване | Управлението на връзката трябва да се извършва ръчно | избрани |
+| SignalR | Автоматично повторно свързване, силно въвеждане | Твърде сложни, допълнителни зависимости | Отхвърлено |
+
+В крайна сметка избрахме родния WebSocket. Честно казано, това беше най-лекият вариант и по-подходящ за просто двупосочно препращане на двоичен поток. Издърпването на SignalR би се почувствало като свръхинженеринг за този случай на употреба и може да добави допълнително забавяне.
+
+**Решение 2: Стратегия за управление на връзката**
+
+Ние възприехме модел „една връзка, една сесия“ – всяка външна връзка WebSocket се преобразува в своя собствена независима обратна връзка на Doubao.
+
+Ползите са ясни:
+- Лесен за изпълнение и съобразен с общия модел на използване
+- По-лесно отстраняване на грешки и отстраняване на неизправности
+- Добра изолация на ресурсите, предотвратяваща смущения между сесиите
+
+Казано просто, директното решение понякога е най-доброто. Сложността не прави дизайна автоматично по-добър.
+
+**Решение 3: Съхраняване на данни за удостоверяване**
+
+Идентификационните данни се съхраняват в конфигурационните файлове на бекенда (`appsettings.yml` или променливи на средата) и заредени чрез инжектиране на зависимости:
+
+- Опростен конфигурационен модел, който отговаря на съществуващите конвенции за бекенда
+- Чувствителните данни никога не достигат до интерфейса
+- Поддържа настройка на множество среди за разработка, тестване и производство
+
+Това ниво на разделяне има значение. Никой не иска идентификационни данни да се носят на места, където не трябва да бъдат.
+
+### Проектиране на поток от данни
+
+Общият поток от данни изглежда така:
+
+```
+Frontend (browser)
+  │
+  │ ws://backend/api/voice/ws
+  │ WebSocket (binary)
+  ▼
+Backend (proxy)
+  │
+  │ wss://openspeech.bytedance.com/
+  │ (with authentication headers)
+  ▼
+Doubao API
+```
+
+Самият поток не е сложен:
+1. Предният интерфейс се свързва с прокси сървъра чрез WebSocket
+2. Бекенд проксито получава аудио данни и се свързва с Doubao API с удостоверени заглавки
+3. Doubao API връща резултати от разпознаване и проксито ги препраща към интерфейса
+4. Целият процес остава напълно асинхронен с двупосочно поточно предаване
+
+След като отговорностите са ясно разделени, дизайнът става съвсем естествен.
+
+## Реализация на основен компонент
+
+### 1. Конфигурация на крайната точка на WebSocket
+
+```csharp
+app.Map("/ws", async context =>
+{
+    if (context.WebSockets.IsWebSocketRequest)
+    {
+        // Read configuration from query parameters
+        var appId = context.Request.Query["appId"];
+        var accessToken = context.Request.Query["accessToken"];
+
+        // Validate required parameters
+        if (string.IsNullOrEmpty(appId) || string.IsNullOrEmpty(accessToken))
+        {
+            context.Response.StatusCode = 400;
+            return;
+        }
+
+        // Accept the WebSocket connection
+        using var webSocket = await context.WebSockets.AcceptWebSocketAsync();
+
+        // Message handling loop
+        var buffer = new byte[4096];
+        while (!webSocket.CloseStatus.HasValue)
+        {
+            var result = await webSocket.ReceiveAsync(buffer, CancellationToken.None);
+
+            if (result.MessageType == WebSocketMessageType.Close)
+            {
+                await webSocket.CloseAsync(
+                    result.CloseStatus.Value,
+                    result.CloseStatusDescription,
+                    CancellationToken.None);
+                break;
+            }
+
+            // Process audio data
+            await HandleAudioDataAsync(buffer, result.Count);
+        }
+    }
+});
+```
+
+### 2. Управление на сесията
+
+```csharp
+public class DoubaoSessionManager : IDoubaoSessionManager
+{
+    private readonly ConcurrentDictionary<string, DoubaoSession> _sessions = new();
+
+    public DoubaoSession CreateSession(string connectionId)
+    {
+        var session = new DoubaoSession(connectionId);
+        _sessions[connectionId] = session;
+        return session;
+    }
+
+    public async Task SendAudioAsync(string connectionId, byte[] audioData)
+    {
+        if (_sessions.TryGetValue(connectionId, out var session))
+        {
+            await session.SendAudioAsync(audioData);
+        }
+    }
+
+    public void RemoveSession(string connectionId)
+    {
+        if (_sessions.TryRemove(connectionId, out var session))
+        {
+            session.Dispose();
+        }
+    }
+}
+```
+
+Използване `ConcurrentDictionary` за управление на сесии означава, че безопасността на нишките до голяма степен се грижи за нас. Всяка входяща връзка получава своя собствена сесия и почистването се извършва автоматично при прекъсване на връзката.
+
+### 3. Валидиране на конфигурацията
+
+```csharp
+public class ClientConfigDto
+{
+    public string AppId { get; set; } = null!;
+    public string Access set; } =Token { get; null!;
+    public string? ServiceUrl { get; set; }
+    public string? ResourceId { get; set; }
+    public int? SampleRate { get; set; }
+    public int? BitsPerSample { get; set; }
+    public int? Channels { get; set; }
+
+    public void Validate()
+    {
+        if (string.IsNullOrWhiteSpace(AppId))
+            throw new ArgumentException("AppId is required");
+        if (string.IsNullOrWhiteSpace(AccessToken))
+            throw new ArgumentException("AccessToken is required");
+    }
+}
+```
+
+Проверката на конфигурацията помага да се появят проблеми по време на стартиране, вместо да ги остави да се провалят по-късно по време на изпълнение. Тази защита си заслужава.
+
+## Проектиране на протокол за съобщения
+
+Предният и бекенд използват JSON текстови съобщения за контрол, докато двоичните съобщения носят аудио данни.
+
+Примерно контролно съобщение:
+
+```json
+{
+    "type": "control",
+    "messageId": "msg_123",
+    "timestamp": "2026-03-03T10:00:00Z",
+    "payload": {
+        "command": "StartRecognition",
+        "parameters": {
+            "hotwordId": "hotword1",
+            "boosting_table_id": "table123"
+        }
+    }
+}
+```
+
+Примерен резултат от разпознаване:
+
+```json
+{
+    "type": "result",
+    "timestamp": "2026-03-03T10:00:03Z",
+    "payload": {
+        "text": "Hello world",
+        "confidence": 0.95,
+        "duration": 1500,
+        "isFinal": true,
+        "utterances": [
+            {
+                "text": "Hello",
+                "startTime": 0,
+                "endTime": 800,
+                "definite": true
+            }
+        ]
+    }
+}
+```
+
+Този дизайн разделя контролните сигнали от аудио полезния товар, което прави системата по-лесна за разсъждение и внедряване. Чистото разпределяне на отговорностите често е правилното решение.
+
+## Frontend интеграция на практика
+
+### WebSocket връзка
+
+```javascript
+class DoubaoVoiceClient {
+    constructor(config) {
+        this.config = config;
+        this.ws = null;
+    }
+
+    async connect() {
+        const url = new URL(this.config.wsUrl);
+        // Add query parameters
+        Object.entries(this.config.params).forEach(([key, value]) => {
+            url.searchParams.set(key, value);
+        });
+
+        this.ws = new WebSocket(url);
+
+        return new Promise((resolve, reject) => {
+            this.ws.onopen = () => {
+                console.log('[DoubaoVoice] Connected');
+                resolve();
+            };
+
+            this.ws.onmessage = (event) => {
+                this._handleMessage(JSON.parse(event.data));
+            };
+
+            this.ws.onerror = reject;
+        });
+    }
+
+    _handleMessage(message) {
+        switch (message.type) {
+            case 'status':
+                this._handleStatus(message.payload);
+                break;
+            case 'result':
+                this.onResult?.(message.payload);
+                break;
+            case 'error':
+                console.error('[DoubaoVoice] Error:', message.payload);
+                break;
+        }
+    }
+}
+
+// Usage example
+const client = new DoubaoVoiceClient({
+    wsUrl: 'ws://localhost:5000/ws',
+    params: {
+        appId: 'your-app-id',
+        accessToken: 'your-access-token',
+        sampleRate: 16000,
+        bitsPerSample: 16,
+        channels: 1
+    }
+});
+```
+
+### Заснемане и предаване на звук
+
+Използване `AudioWorkletNode` за аудио обработка дава по-добра производителност:
+
+```javascript
+// audio-worklet.js
+class AudioProcessorWorklet extends AudioWorkletProcessor {
+    process(inputs, outputs, parameters) {
+        const input = inputs[0]?.[0];
+        if (!input) return true;
+
+        // Convert to 16-bit PCM
+        const pcm = new Int16Array(input.length);
+        for (let i = 0; i < input.length; i++) {
+            pcm[i] = Math.max(-32768, Math.min(32767, input[i] * 32767));
+        }
+
+        this.port.postMessage({
+            type: 'audioData',
+            data: pcm.buffer
+        }, [pcm.buffer]);
+
+        return true;
+    }
+}
+
+registerProcessor('audio-processor', AudioProcessorWorklet);
+
+// Main thread code
+async function startAudioRecording() {
+    const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+            sampleRate: 48000
+        }
+    });
+
+    const audioContext = new AudioContext();
+    const audioSource = audioContext.createMediaStreamSource(stream);
+
+    await audioContext.audioWorklet.addModule('/audio-worklet.js');
+    const audioWorkletNode = new AudioWorkletNode(audioContext, 'audio-processor');
+
+    audioWorkletNode.port.onmessage = (event) => {
+        if (event.data.type === 'audioData' && ws?.readyState === WebSocket.OPEN) {
+            ws.send(event.data.data); // Send binary data directly
+        }
+    };
+
+    audioSource.connect(audioWorkletNode);
+}
+```
+
+`AudioWorklet` се представя много по-добре от `ScriptProcessorNode` и избягва проблемите със заекването на звука, които често въвеждат по-старите пътища за обработка.
+
+## Backend конфигурация
+
+### `appsettings.json` пример
+
+```json
+{
+  "Serilog": {
+    "MinimumLevel": {
+      "Default": "Information",
+      "Override": {
+        "Microsoft": "Warning",
+        "System": "Warning"
+      }
+    },
+    "WriteTo": [
+      { "Name": "Console" },
+      {
+        "Name": "File",
+        "Args": { "path": "logs/log-.txt", "rollingInterval": "Day" }
+      }
+    ]
+  },
+  "Kestrel": {
+    "Urls": "http://0.0.0.0:5000"
+  }
+}
+```
+
+Конфигурацията на регистриране има значение, защото прави проблемите много по-лесни за проследяване. Файловият приемник на Serilog може да преобръща регистрационни файлове ежедневно, което поддържа индивидуалните лог файлове в управляем размер.
+
+## Бележки и най-добри практики
+
+### 1. Мониторинг на връзката
+
+- Редовно регистрирайте състоянието на сесията, за да проследите пълния жизнен цикъл на връзката
+- Наблюдавайте броя и продължителността на аудио сегментите, за да откриете необичайни връзки
+- Запишете състоянието на връзката и поведението при повторно свързване за услугата Doubao
+
+Това са основни оперативни практики, но те правят реална разлика в производството.
+
+### 2. Обработка на грешки
+
+- Уловете и регистрирайте всички WebSocket изключения
+- Използвайте `IAsyncDisposable` за да се гарантира, че ресурсите са почистени
+- Приложете грациозно изключване на връзката и обработка на изчакване
+
+Накратко, предпочитайте здравината.
+
+### 3. Изисквания за аудио формат
+
+- Честота на дискретизация: 16000 Hz (препоръчително) или 8000 Hz
+- Битова дълбочина: 16 бита
+- Канали: моно
+- Кодиране: PCM (суров)
+
+Ако форматът е грешен, разпознаването може да се провали или качеството може да се влоши значително. Тези изисквания са от значение.
+
+### 4. Съображения за сигурност
+
+- Съхранявайте чувствителните идентификационни данни само в конфигурацията на бекенда
+- Приложете ограничения за връзка, за да предотвратите изчерпването на ресурсите
+- Използвайте HTTPS/WSS в производството
+
+Сигурността никога не е маловажна грижа.
+
+### 5. Оптимизиране на производителността
+
+- Използвайте асинхронни операции, за да избегнете блокиране
+- Настройте размерите на буфера според нуждите (по подразбиране: 4096 байта)
+- Обмислете обединяване на връзки и стратегии за повторно използване
+
+Прилагайте тези оптимизации там, където имат смисъл за вашето работно натоварване.
+
+## Препоръки за внедряване
+
+1. **Внедряване на Docker**: Пакетирайте прокси услугата като контейнер за по-лесно мащабиране и управление
+2. **Балансиране на натоварването**: Използвайте Nginx или Envoy като обратен прокси за WebSocket трафик
+3. **Проверки на състоянието**: Внедрете проверки на базата на сърдечен ритъм, за да наблюдавате наличността на услугата
+4. **Агрегиране на регистрационни файлове**: Изпратете регистрационни файлове към централизирана система за регистриране, като ELK или Loki
+
+Внедряването може да бъде просто или сложно в зависимост от екипа и средата, така че коригирайте съответно.
+
+## Резюме
+
+WebSocket прокси моделът решава основния проблем, че API на браузъра WebSocket не поддържа персонализирани заглавки. В проекта HagiCode този модел се оказа едновременно осъществим и стабилен, тъй като премина от валидиране на игрална площадка към внедряване в производствена среда.
+
+Ключови изводи:
+- Бекенд прокси може да предава информация за удостоверяване сигурно
+- Native WebSocket е лек и ефективен за прости сценарии
+- Моделът "една връзка, една сесия" опростява както внедряването, така и отстраняването на грешки
+- Протоколът frontend-backend трябва да отделя контролните сигнали от аудио данните
+
+Ако изграждате функция, която също зависи от удостоверяването на WebSocket, надявам се, че този модел ви дава полезна отправна точка.
+
+Ако имате въпроси, не се колебайте да ги обсъдите с нас. Техническият прогрес се случва по-бързо, когато хората сравняват бележки.
+
+## Референции
+
+- [Хранилище на проекти HagiCode](https://github.com/HagiCode-org/site)
+- [MDN Web API - WebSocket](https://developer.mozilla.org/en-US/docs/Web/API/WebSocket)
+- [Документация за разпознаване на реч Doubao](https://www.volcengine.com/docs/6561/81958)
+
+---
+
+Благодаря ви, че прочетохте. Ако сте намерили тази статия за полезна, моля, щракнете върху бутона за харесване по-долу 👍, за да могат повече хора да я открият.
+
+Това съдържание е създадено с помощта на AI сътрудничество, прегледано от мен и отразява моите собствени възгледи и позиция.
+
+- Автор: [newbe36524](https://www.newbe.pro)
+- Линк към статията: [https://docs.hagicode.com/blog/2026-03-05-websocket-proxy-for-doubao-speech-recognition/](https://docs.hagicode.com/blog/2026-03-05-websocket-proxy-for-doubao-speech-recognition/)
+- Бележка за авторски права: Освен ако не е посочено друго, всички статии в този блог са лицензирани под BY-NC-SA. Моля, включете източника, когато препечатвате.

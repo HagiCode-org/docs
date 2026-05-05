@@ -1,0 +1,435 @@
+---
+title: Gyors letöltési elosztóállomás építése alacsony költségű felhőkiszolgálókkal
+date: 2026-04-15
+tags: [cloud server, Nginx, cache, file distribution, cost optimization]
+description: "Hogyan építsünk fel egy gyors letöltési elosztó állomást alacsony költségű felhőkiszolgálókkal: A felhőalapú tárolás sávszélessége abszurd módon drága, a határokon átnyúló hozzáférés pedig fájdalmas"
+---
+
+## Gyors letöltési elosztóállomás építése alacsony költségű felhőkiszolgálókkal
+
+> A felhőalapú tárolás sávszélessége abszurd drága, a határokon átnyúló hozzáférés fájdalmasan lassú, a CDN-árazás pedig elég ahhoz, hogy bárkit elriasztjon... Ha kezeli a fájlterjesztést, valószínűleg jól ismeri ezeket a problémákat. Ebben a bejegyzésben egy alacsony költségű megközelítést szeretnék megosztani, amelyet az építés során dolgoztunk ki [HagiCode](https://hagicode.com): egy felhőkiszolgáló plusz egy Nginx gyorsítótárazási réteg. A költség körülbelül a felére csökkent, miközben a letöltési sebesség egy kicsit javult, ami legalább egy kicsit megnyugtató volt.
+
+## Háttér
+
+Ami az internetet illeti, a letöltési sebesség és a stabilitás valóban része a felhasználói élménynek. Függetlenül attól, hogy nyílt forráskódú projektet vagy kereskedelmi terméket futtat, továbbra is megbízható módot kell biztosítania a felhasználóknak a fájlok letöltésére.
+
+A fájlok letöltése közvetlenül a felhőtárhelyről, például az Azure Blob Storage-ból vagy az AWS S3-ból, egyszerűnek tűnik, de számos gyakorlati problémával jár:
+
+**Hálózati késleltetés**: A határokon átnyúló és régiók közötti hozzáférés elég lassú lehet ahhoz, hogy összetörje a billentyűzetet. Ha a felhasználóknak örökké várniuk kell, az élmény nyilvánvalóan nem lesz nagyszerű.
+
+**A sávszélesség költsége**: A felhőalapú tárolási kimenő forgalom fájdalmasan drága. Az Azure Blob Storage elérése a szárazföldi Kínából körülbelül 0,5 CNY/GB-ba kerül, ami azt jelenti, hogy havi 1 TB hozzávetőlegesen 500 CNY-t tesz ki. Egy kis csapat számára ez nem elhanyagolható összeg. Hiszen senki pénze nem szélből jön.
+
+**Hozzáférési korlátozások**: Egyes régiókban a tengerentúli felhőszolgáltatásokhoz való hozzáférés instabil, néha pedig egyszerűen nem érhető el. A felhasználók szeretnék letölteni a fájlokat, de nem tudják, ami mindenki számára frusztráló.
+
+**CDN költség**: A kereskedelmi CDN-ek megoldhatják ezeket a problémákat, de az ár ugyanolyan valós. A legtöbb kis csapat egyszerűen nem tudja megindokolni.
+
+Tehát van olyan megoldás, amely megfizethető és praktikus is? Igen. Használjon felhőkiszolgálót, fordított proxyt és gyorsítótárazási réteget. Ez egy egyszerű megközelítés, de működik. A költség körülbelül a felére csökken, és a sebesség is javul, ami tisztességes kompromisszum.
+
+## A HagiCode-ról
+
+Ezt az építészetet nem légből kapott. Valós tapasztalatunkból származott [HagiCode](https://hagicode.com).
+
+A HagiCode egy mesterséges intelligencia kódolási asszisztens, és mind a szerveroldali, mind az asztali oldali disztribúciókhoz letöltéseket kell biztosítanunk. Mivel ez egy fejlesztők számára készült eszköz, fontos, hogy a felhasználók világszerte gyorsan és megbízhatóan letölthessék. Pontosan ezért kellett elsősorban egy alacsony költségű elosztási stratégiát kitalálnunk.
+
+Ha úgy gondolja, hogy ez a megoldás hasznosnak tűnik, akkor talán a tervezésünk legalább elég tisztességes... és ha ez a helyzet, akkor magát a HagiCode-ot is érdemes lehet megnézni.
+
+## Építészeti tervezés
+
+### Általános építészet
+
+Kezdjük a teljes architektúrával:
+
+```
+User request
+    ↓
+DNS resolution
+    ↓
+┌─────────────────────────────────────┐
+│   Reverse proxy layer (Traefik/Bunker Web) │ ← SSL termination, routing, security protection
+├─────────────────────────────────────┤
+│   Ports: 80/443                     │
+│   Features: Automatic Let's Encrypt certificates │
+│             Host routing            │
+└─────────────────────────────────────┘
+    ↓
+┌─────────────────────────────────────┐
+│   Cache layer (Nginx)               │ ← File caching, Gzip compression
+├─────────────────────────────────────┤
+│   Ports: 8080(server) / 8081(desktop) │
+│   Cache strategy:                   │
+│   - index.json: 1 hour              │
+│   - other files: 7 days             │
+│   Cache size: 1GB                   │
+└─────────────────────────────────────┘
+    ↓
+┌─────────────────────────────────────┐
+│   Origin (Azure Blob Storage)       │ ← File storage
+└─────────────────────────────────────┘
+```
+
+Ennek az architektúrának az alapötlete egyszerű: **tegyen gyorsítótárat a felhasználók és a felhőtárhely közé**.
+
+A felhasználói kérések először a felhőkiszolgáló fordított proxy rétegéhez érkeznek, majd az Nginx gyorsítótár-réteg veszi át az irányítást. Ha a kért fájl már gyorsítótárban van, azonnal visszaküldi. Ha nem, az Nginx lekéri a felhőtárhelyről, és egyidejűleg eltárol egy helyi másolatot. Amikor legközelebb valaki ugyanazt a fájlt kéri, a felhőtárhelyet nem kell újra bevonni.
+
+### Miért válassza ezt az építészetet?
+
+**A felhőszerverek előnyei**:
+- Kiszámítható költségek: az olyan szolgáltatók, mint az Alibaba Cloud, alacsony költségű felhőszervereket kínálnak 1-2 vCPU-val és 2 GB RAM-mal, havi 50-100 CNY körüli áron.
+- Rugalmas üzembe helyezés: szabadon konfigurálhatja a fordított proxyszabályokat és a gyorsítótárazási szabályzatokat
+- Rugalmas földrajzi elhelyezkedés: kiválaszthatja a felhasználókhoz közelebb eső szerverrégiókat
+- Jó skálázhatóság: a forgalom növekedésével frissítheti a szerver specifikációit
+
+**Reverse proxy + cache architektúra**:
+- Csökkentse a származási nyomást: gyorsítótárazza a forró fájlokat a felhőalapú tárhelyhez való közvetlen hozzáférés csökkentése érdekében
+- Alacsonyabb költség: a felhőkiszolgáló forgalom sokkal olcsóbb, mint a felhőalapú tárhely kilépés
+- Növelje a sebességet: a közeli hozzáférés és a szerver sávszélessége általában jobb, mint a közvetlen felhőalapú tárolás
+
+**Miért válassza az Nginxet gyorsítótár-rétegként?**
+
+Ez nem véletlenszerű választás volt. Az Nginxnek számos valódi előnye van:
+
+1. Nagy teljesítmény: Az Nginx széles körben elismert kiváló fordított proxy teljesítményéről
+2. Felnőtt gyorsítótárazás: a beépített `proxy_cache` a funkció stabil és megbízható
+3. Alacsony erőforrás-használat: akár 256 MB memóriával is futhat
+4. Rugalmas konfiguráció: különböző gyorsítótár-házirendeket alkalmazhat a különböző fájltípusokra
+
+## Fordított proxyréteg: Traefik vs Bunker Web
+
+A HagiCode telepítési megoldása két fordított proxy opciót támogat, és mindegyiknek megvannak a maga erősségei:
+
+| Opció | Jellemzők | Megfelelő forgatókönyvek |
+|------|------|----------|
+| **Traefik** | Könnyű, automatikus SSL, egyszerű konfiguráció | Alapvető telepítés, alacsony forgalmú forgatókönyvek |
+| **Bunker Web** | Beépített WAF, DDoS védelem, bot elleni védelem | Nagy biztonságú, nagy forgalmú forgatókönyvek |
+
+### Traefik: The Lightweight First Choice
+
+A Traefik egy modern HTTP fordított proxy és terheléselosztó. Legnagyobb előnye, hogy egyszerű a konfigurálása, és automatikusan be tudja szerezni a Let's Encrypt tanúsítványokat.
+
+Kezdeti telepítésekhez vagy alacsony forgalmú forgatókönyvekhez a Traefik gyakran nagyon jó választás:
+- Viszonylag kevés erőforrást használ fel; 1,5 CPU és 512 MB memória elég
+- Az SSL-tanúsítványok beállítása automatikusan történik, így nem kell saját kezűleg kezelnie őket
+- Az útválasztás a Docker-címkéken keresztül konfigurálható, ami elég kényelmes
+
+### Bunker Web: fokozott biztonságú forgatókönyvekhez
+
+A Bunker Web egy Nginx-alapú webalkalmazás-tűzfal átfogóbb biztonsági védelemmel.
+
+Mikor érdemes megfontolni a Bunker Webre váltást? Általában az ilyen esetekben:
+- Ön DDoS támadás alatt áll
+- ModSecurity védelemre van szüksége
+- Bot elleni védelmet szeretne
+- Szigorúbb biztonsági követelmények vannak
+
+A HagiCode biztosítja a `switch-deployment.sh` szkriptet, így gyorsan válthat a két lehetőség között:
+
+```bash
+# Switch to Bunker Web
+./switch-deployment.sh bunkerweb
+
+# Switch back to Traefik
+./switch-deployment.sh traefik
+
+# Check current status
+./switch-deployment.sh status
+```
+
+A szkript előzetes ellenőrzéseket, állapotellenőrzéseket és automatikus visszaállítást végez, így a váltási folyamat meglehetősen biztonságos és megbízható.
+
+## Nginx gyorsítótár-réteg konfigurációja
+
+A gyorsítótár réteg az egész architektúra magja, így az Nginx konfigurációja óriási különbséget jelent a gyorsítótár teljesítményében.
+
+### A gyorsítótár elérési útjának beállítása
+
+```nginx
+# Cache path configuration
+proxy_cache_path /var/cache/nginx levels=1:2 keys_zone=azure_cache:10m
+                   max_size=1g inactive=7d use_temp_path=off;
+```
+
+Paraméter részletei:
+- `levels=1:2`: kétszintű gyorsítótár-hierarchia a fájlhozzáférés hatékonyságának javítása érdekében
+- `keys_zone=azure_cache:10m`: gyorsítótár kulcs tárolási zóna; 10 MB elég sok kulcshoz
+- `max_size=1g`: a gyorsítótár maximális mérete 1 GB
+- `inactive=7d`: törölje a gyorsítótárazott fájlokat, ha 7 napig nem fértek hozzá
+- `use_temp_path=off`: írjon közvetlenül a gyorsítótár könyvtárába a jobb teljesítmény érdekében
+
+### Többszintű gyorsítótár-stratégia
+
+A különböző fájltípusokhoz különböző gyorsítótár-stratégiák szükségesek:
+
+```nginx
+# Server download service
+server {
+    listen 8080;
+
+    # Short-term cache for index.json (to allow timely updates)
+    location /index.json {
+        proxy_cache azure_cache;
+        proxy_cache_valid 200 1h;
+        proxy_cache_key "$scheme$server_port$request_uri";
+        add_header X-Cache-Status $upstream_cache_status;
+        add_header Cache-Control "public, max-age=3600";
+
+        # Reverse proxy to Azure OSS
+        proxy_pass https://${SERVER_DL_HOST}/${SERVER_DL_CONTAINER}$uri?${SERVER_DL_SAS_TOKEN};
+        proxy_ssl_server_name on;
+        proxy_ssl_protocols TLSv1.2 TLSv1.3;
+    }
+
+    # Long-term cache for static files such as installation packages
+    location / {
+        proxy_cache azure_cache;
+        proxy_cache_valid 200 7d;
+        proxy_cache_key "$scheme$server_port$request_uri";
+        add_header X-Cache-Status $upstream_cache_status;
+        add_header Cache-Control "public, max-age=604800";
+
+        proxy_pass https://${SERVER_DL_HOST}/${SERVER_DL_CONTAINER}$uri?${SERVER_DL_SAS_TOKEN};
+        proxy_ssl_server_name on;
+        proxy_ssl_protocols TLSv1.2 TLSv1.3;
+    }
+}
+```
+
+**Miért van megtervezve így?**
+
+`index.json` a verzióellenőrző fájl, ezért azonnal frissíteni kell. Az 1 órás gyorsítótár ablakkal a felhasználók a közzétételt követő legfeljebb egy órán belül észlelhetik az új kiadást.
+
+A statikus fájlok, például a telepítőcsomagok ritkán változnak, így a 7 napig tartó gyorsítótárazásuk nagymértékben csökkenti az eredethez való hozzáférést. Ha frissítésre van szükség, egyszerűen törölheti a gyorsítótárat manuálisan.
+
+**`X-Cache-Status` válaszfejléc**:
+
+Ez a fejléc segít a gyorsítótár találati viselkedésének ellenőrzésében:
+- `HIT`: gyorsítótár találat
+- `MISS`: gyorsítótár hiánya, származási helyről lekérve
+- `EXPIRED`: a gyorsítótár lejárt, újra lekérve az eredetről
+- `BYPASS`: a gyorsítótár megkerülve
+
+Hogyan ellenőrizhető:
+```bash
+curl -I https://server.dl.hagicode.com/app.zip
+```
+
+## Költségelemzés
+
+Tételezzünk fel 1 TB letöltési forgalmat havonta. Számoljuk ki:
+
+| Opció | Forgalmi költség | Szerver költsége | Összesen |
+|------|----------|------------|------|
+| Közvetlen Azure OSS | Körülbelül 500 CNY | 0 CNY | 500 CNY |
+| Felhőszerver + OSS (80%-os gyorsítótár találati arány) | 100 CNY + 80 CNY | 60 CNY | 240 CNY |
+| Kereskedelmi CDN | 300-500 CNY | 0 CNY | 300-500 CNY |
+
+**Következtetés**: gyorsítótár-réteg hozzáadása nagyjából 50%-kal csökkentheti a terjesztési költségeket.
+
+Ez a becslés 80%-os gyorsítótár találati arányt feltételez. A gyakorlatban, ha a fájlok nem változnak gyakran, a találati arány még magasabb is lehet.
+
+## Telepítési gyakorlat
+
+### Környezeti előkészítés
+
+Először állítsa be a környezeti változókat:
+
+```bash
+cd /path/to/hagicode_aliyun_deployment/docker
+cp .env.example .env
+vi .env  # Fill in the Azure OSS SAS URL and Lark Webhook URL
+```
+
+**Fontos**: a `.env` fájl olyan bizalmas információkat tartalmaz, mint a SAS-token és a Webhook URL. Soha ne hagyja a verziókezelés alá.
+
+### DNS konfiguráció
+
+Adja hozzá a következő DNS A rekordokat:
+- `server.dl.hagicode.com` → szerver IP
+- `desktop.dl.hagicode.com` → szerver IP
+
+### Inicializálja a szervert
+
+Használja az Ansible-t a szerver automatikus inicializálásához:
+
+```bash
+cd /path/to/hagicode_aliyun_deployment
+ansible-playbook -i ./ansible/inventory/hosts.yml ./ansible/playbooks/init.yml
+```
+
+Ez a játékkönyv automatikusan kezeli a következő feladatokat:
+- Hozza létre a telepítési felhasználót
+- Telepítse a Dockert és a Docker Compose-t
+- Konfigurálja az SSH kulcsokat
+- Állítson be tűzfalszabályokat
+
+Ez a fő beállítási munka, és az automatizálás sok időt takarít meg.
+
+### Telepítse a szolgáltatásokat
+
+```bash
+./deploy.sh
+```
+
+A telepítési szkript segít a következőkben:
+- Ellenőrizze a környezet konfigurációját
+- Húzza ki a legújabb kódot
+- Indítsa el a Docker-tárolókat
+- Futtasson egészségügyi vizsgálatokat
+- Üzembe helyezési értesítések küldése (Lark)
+
+Elegendő egy parancs, ami kényelmessé teszi a folyamatot.
+
+### Ellenőrizze a telepítést
+
+```bash
+# Check container status
+docker ps
+
+# Test the download domains
+curl -I https://server.dl.hagicode.com/index.json
+curl -I https://desktop.dl.hagicode.com/index.json
+```
+
+## Műveleti tippek
+
+### Gyorsítótár kezelése
+
+A gyorsítótárak időről időre karbantartást is igényelnek:
+
+**Ellenőrizze a gyorsítótár-lemezhasználatot**:
+```bash
+docker volume inspect docker_nginx-cache
+du -sh /var/lib/docker/volumes/docker_nginx-cache/_data
+```
+
+**A gyorsítótár kézi törlése**:
+```bash
+./clear-cache.sh
+```
+
+Vagy futtassa közvetlenül a kézi parancsokat, ha szükséges:
+```bash
+docker exec nginx sh -c "rm -rf /var/cache/nginx/*"
+docker restart nginx
+```
+
+### Erőforrás korlátok
+
+Egy 1 magos, 2 GB-os szerveren az erőforrás-korlátozás konfigurációja így néz ki:
+
+```yaml
+services:
+  traefik:
+    deploy:
+      resources:
+        limits:
+          cpus: '1.50'
+          memory: 512M
+
+  nginx:
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 256M
+```
+
+Az erőforrás-használat figyeléséhez időnként futtathatja a következőket:
+```bash
+docker stats
+```
+
+### SAS Token biztonsági gyakorlatok
+
+A SAS-token az Azure Blob Storage eléréséhez használt hitelesítő adat, így annak kiszivárogtatása súlyos lenne:
+
+- Ne kövesd el a `.env` fájl-verzióvezérlés; már benne van `.gitignore`
+- Állítsa be a megfelelő SAS-token lejárati idejét, 1 év javasolt
+- Korlátozza a SAS-token engedélyeit írásvédettre
+- Rendszeresen forgassa a SAS tokeneket
+
+### Monitoring és riasztások
+
+A HagiCode integrálja a Lark/Feishu Webhook értesítéseket, amelyek riasztásokat küldhetnek a következő eseményekről:
+- A telepítés sikere vagy kudarca
+- A gyorsítótár törlésének állapota
+- Szolgáltatási kivételek
+
+Az értesítések szerverinformációkat, időbélyegzőket és hibarészleteket tartalmaznak, így a hibaelhárítás sokkal gyorsabb.
+
+### Magas rendelkezésre állású bővítmények
+
+Ha egy szerver már nem elég, mérlegelheti a következőket:
+
+1. **Vízszintes méretezés**: telepítsen több csomópontot, és ossza el a forgalmat DNS-körülbelül vagy terheléselosztóval
+2. **CDN elöl**: helyezzen CDN-t a felhőszerverek elé a még gyorsabb hozzáférés érdekében
+3. **Gyorsítótár felmelegedése**: szkriptek segítségével töltse be a forró fájlokat a gyorsítótárba
+
+## Megjegyzések
+
+Néhány dolgot érdemes szem előtt tartani:
+
+1. **SSL-tanúsítványok**: A Let's Encrypt sebességkorlátokkal rendelkezik, ezért ne váltson túl gyakran a központi telepítések között, különben a tanúsítvány kiadása meghiúsulhat
+2. **Gyorsítótár törlése**: a fontos fájlok frissítése után ne felejtse el törölni a gyorsítótárat, különben a felhasználók továbbra is letölthetik a régi verziót
+3. **Naplókezelés**: rendszeresen tisztítsa meg a Docker-naplókat, különben a lemez megtelik
+4. **Biztonsági mentési stratégia**: készítsen biztonsági másolatot olyan fájlokról, mint pl `Traefik acme.json` és Bunker Web konfiguráció
+5. **Monitoring és riasztások**: konfigurálja a Feishu-értesítéseket, így nyomon követheti a telepítés állapotát és gyorsan reagálhat a problémákra
+
+## Következtetés
+
+Egy felhőkiszolgáló és egy Nginx gyorsítótárazási réteg elég. A HagiCode ezt a megoldást meglehetősen alacsony havi költséggel, 60-100 CNY körül használja a szerverért, és az eredmények nagyon szilárdak. A fő előnyök a következők:
+
+- **Kiszámítható költség**: nagyjából 50%-kal olcsóbb, mint a felhőalapú tárolás közvetlen használata vagy a kereskedelmi CDN-ért történő fizetés
+- **Rugalmas telepítés**: válassza a Traefik vagy a Bunker Web lehetőséget az igényeinek megfelelően
+- **Erős skálázhatóság**: szükség esetén vízszintesen méretezhet, vagy később CDN-t is hozzáadhat
+- **Egyszerű műveletek**: A Shell-szkriptek és az Ansible egyszerűvé teszik az automatikus telepítést
+
+Kis csapatok és független fejlesztők számára, akiknek fájlterjesztésre van szükségük, ez egy praktikus lehetőség, amelyet érdemes kipróbálni.
+
+A HagiCode ezt az architektúrát egy ideje stabilan éles állapotban futtatja, és a globális felhasználói letöltések megbízhatóak maradtak. Ha hasonló megoldást keresel, érdemes egy próbát tenni.
+
+## Technology Stack összefoglaló
+
+Végezetül itt található az érintett technológiák összefoglalása:
+
+| Összetevő | Választás | Cél |
+|------|------|------|
+| Felhő szerver | Alibaba Cloud ECS | Alap futási környezet |
+| Fordított proxy | Traefik / Bunker Web | SSL-lezárás, útválasztás, biztonsági védelem |
+| Gyorsítótár réteg | Nginx | Fordított proxy gyorsítótár, Gzip tömörítés |
+| Fájltárolás | Azure Blob Storage | A fájl eredete |
+| Konténerezés | Docker Compose | Szolgálati hangszerelés |
+| Automatizálás | Lehetséges | Szerver konfiguráció kezelése |
+| Értesítések | Lark/Feishu Webhook | Üzembe helyezési állapotértesítések |
+
+## Hivatkozások
+
+Íme a bejegyzésben említett referenciaanyagok:
+
+- HagiCode projekt: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- HagiCode weboldala: [hagicode.com](https://hagicode.com)
+- 30 perces gyakorlati bemutató: [www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)
+- A Docker Compose telepítése egy kattintással: [docs.hagicode.com/installation/docker-compose](https://docs.hagicode.com/installation/docker-compose)
+- Gyors telepítés asztalra: [hagicode.com/desktop/](https://hagicode.com/desktop/)
+
+---
+
+Ha ez a bejegyzés segített, akkor már az is megéri:
+- Nyomj rá egy lájkot, hogy minél többen megtalálják
+- Csillagozza meg a projektet a GitHubon: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- További információkért látogasson el a hivatalos weboldalra: [hagicode.com](https://hagicode.com)
+- Nézze meg a 30 perces gyakorlati bemutatót: [www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)
+- Próbálja ki az egykattintásos telepítést: [docs.hagicode.com/installation/docker-compose](https://docs.hagicode.com/installation/docker-compose)
+- Telepítse gyorsan az asztali alkalmazást: [hagicode.com/desktop/](https://hagicode.com/desktop/)
+- Elindult a nyilvános béta, és nyugodtan próbáld ki
+
+---
+
+Ennyit erről a bejegyzésről. Remélem, ez a megoldás segít Önnek. Ha van jobb ötletetek, nyugodtan osszátok meg. A technológia mindig könnyebben fejleszthető, ha az emberek tanulnak egymástól.
+
+## Szerzői jogi megjegyzés
+
+Köszönöm, hogy elolvastad. Ha hasznosnak találta ezt a cikket, lájkolja, jelölje meg könyvjelzővel és ossza meg.
+Ez a tartalom mesterséges intelligencia által támogatott együttműködéssel készült, a végső verziót pedig a szerző felülvizsgálta és jóváhagyta.
+- Szerző: [newbe36524](https://www.newbe.pro)
+- Eredeti link: [https://docs.hagicode.com/blog/2026-04-15-low-cost-cloud-server-download-distribution-station/](https://docs.hagicode.com/blog/2026-04-15-low-cost-cloud-server-download-distribution-station/)
+- Szerzői jogi megjegyzés: Eltérő rendelkezés hiányában a blogon található összes cikk a BY-NC-SA licence alá tartozik. Az újraküldésnél kérjük feltüntetni a forrást.

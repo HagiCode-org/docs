@@ -1,0 +1,423 @@
+---
+title: "Analiza techniczna systemu umiejętności HagiCode: Budowa skalowalnej platformy zarządzania umiejętnościami AI"
+date: 2026-03-24
+tags: [HagiCode, Skill, AI, Orleans, TanStack, Technical Architecture]
+description: "W tym artykule szczegółowo omówiono architekturę i implementację systemu zarządzania umiejętnościami w projekcie HagiCode, uwzględniając kwestie techniczne"
+---
+
+## Analiza techniczna systemu umiejętności HagiCode: Budowa skalowalnej platformy zarządzania umiejętnościami AI
+
+> W tym artykule szczegółowo omówiono architekturę i implementację systemu zarządzania umiejętnościami w projekcie HagiCode, omawiając szczegóły techniczne czterech podstawowych funkcji: lokalne zarządzanie globalne, wyszukiwanie na rynku, inteligentne rekomendacje i zarządzanie zaufanymi dostawcami.
+
+## Tło
+
+W dziedzinie asystentów kodowania AI głównym pytaniem zawsze było poszerzanie granic możliwości AI. Sam Claude Code jest już dobry we wsparciu kodu, ale różne zespoły programistów i różne stosy technologii często potrzebują wyspecjalizowanych możliwości dla określonych scenariuszy, takich jak obsługa wdrożeń Dockera, optymalizacja baz danych lub generowanie komponentów frontendu. Właśnie w tym miejscu system umiejętności staje się szczególnie ważny.
+
+Podczas opracowywania projektu HagiCode stanęliśmy przed podobnym wyzwaniem: w jaki sposób pozwolić Claude Code „nauczyć się” nowych umiejętności zawodowych tak, jak zrobiłby to człowiek, zachowując jednocześnie solidne doświadczenie użytkownika i dobrą łatwość konserwacji inżynieryjnej? Problem ten jest na swój sposób zarówno trudny, jak i prosty. Wokół tego pytania zaprojektowaliśmy i wdrożyliśmy kompletny system zarządzania umiejętnościami.
+
+W tym artykule szczegółowo omówiono architekturę techniczną i podstawową implementację systemu. Jest przeznaczony dla programistów zainteresowanych rozszerzalnością sztucznej inteligencji i integracją narzędzi wiersza poleceń. Może ci się to przydać, a może nie, ale przynajmniej zostało to teraz zapisane.
+
+## O HagiCodzie
+
+Podejście przedstawione w tym artykule wynika z naszych praktycznych doświadczeń w zakresie [Kod Hagi](https://hagicode.com) projekt. HagiCode to projekt asystenta kodowania AI typu open source, zaprojektowany, aby pomóc zespołom programistów poprawić wydajność inżynieryjną. Stos projektu obejmuje ASP.NET Core, rozproszoną platformę Orleans, frontend TanStack Start + React oraz podsystem zarządzania umiejętnościami przedstawiony w tym artykule.
+
+Repozytorium GitHub to [HagiCode-org/site](https://github.com/HagiCode-org/site). Jeśli uważasz, że podejście techniczne opisane w tym artykule jest wartościowe, możesz dać mu gwiazdkę. W końcu więcej gwiazd poprawia nastrój.
+
+## Przegląd architektury systemu
+
+System Skill wykorzystuje architekturę oddzieloną od frontendu i backendu. Nie ma w tym nic szczególnie tajemniczego.
+
+**Frontend** wykorzystuje TanStack Start + React do zbudowania interfejsu użytkownika ze stanem zarządzającym Redux Toolkit. Cztery główne możliwości są bezpośrednio powiązane z czterema komponentami zakładek: Umiejętności lokalne, Galeria umiejętności, Inteligentne rekomendacje i Zaufani dostawcy. Ostatecznie projekt ma przede wszystkim na celu poprawę komfortu użytkownika.
+
+**Backend** jest oparty na ASP.NET Core + ABP Framework i wykorzystuje Orleans Grain do zarządzania stanem rozproszonym. Klient API online otacza plik `IOnlineApiClient` interfejs do komunikacji ze zdalną usługą katalogu umiejętności.
+
+Ogólna zasada architektury polega na oddzieleniu wykonywania poleceń od logiki biznesowej. Dzięki wzorcowi adaptera szczegóły implementacji wykonania polecenia npm/npx są ukryte w niezależnych modułach. W końcu nikt tak naprawdę nie chce, aby wywołania wiersza poleceń były rozproszone po całym kodzie.
+
+## Podstawowa zdolność 1: Lokalne zarządzanie globalne
+
+Najbardziej podstawowym modułem jest lokalne zarządzanie globalne. Jest odpowiedzialny za wyświetlanie zainstalowanych umiejętności i wspieranie operacji dezinstalacji. Nie ma tu nic zbyt skomplikowanego; chodzi głównie o dobre wykonanie podstaw.
+
+### Podejście techniczne
+
+Implementacja żyje `LocalSkillsTab.tsx` i `LocalSkillCommandAdapter.cs`. Podstawową ideą jest owinięcie `npx skills` polecenie, przeanalizuj jego dane wyjściowe JSON i przekonwertuj je na wewnętrzne struktury danych. Brzmi prosto i w praktyce przeważnie tak jest.
+
+```csharp
+public async Task<IReadOnlyList<LocalSkillInventoryResponseDto>> GetLocalSkillsAsync(
+    CancellationToken cancellationToken = default)
+{
+    var result = await _commandAdapter.ListGlobalSkillsAsync(cancellationToken);
+    return result.Skills.Select(skill => new LocalSkillInventoryResponseDto
+    {
+        Name = skill.Name,
+        Version = skill.Version,
+        Source = skill.Source,
+        InstalledPath = skill.InstalledPath,
+        Description = skill.Description
+    }).ToList();
+}
+```
+
+Przepływ danych jest bardzo przejrzysty: frontend wysyła żądanie -> `SkillGalleryAppService` otrzymuje -> `LocalSkillCommandAdapter` wykonuje polecenie npx -> wynik JSON jest analizowany -> zwracane jest DTO. Każdy krok wynika naturalnie z poprzedniego.
+
+Dezinstalacja umiejętności wykorzystuje plik `npx skills remove -g <skillName> -y` polecenie, a system automatycznie obsługuje zależności i czyszczenie. Metadane instalacji są przechowywane w `managed-install.json` w katalogu umiejętności, zapisując informacje, takie jak czas instalacji i wersja źródłowa, do późniejszych aktualizacji i audytów. Niektóre rzeczy po prostu warto nagrać.
+
+### Szczegółowy przebieg instalacji
+
+Instalacja umiejętności wymaga kilku skoordynowanych kroków. Prawdę mówiąc, nie jest to szczególnie skomplikowane:
+
+```csharp
+public async Task<SkillInstallResultDto> InstallAsync(
+    SkillInstallRequestDto request,
+    CancellationToken cancellationToken = default)
+{
+    // 1. Normalize the installation reference
+    var normalized = _referenceNormalizer.Normalize(
+        request.SkillId,
+        request.Source,
+        request.SkillSlug,
+        request.Version);
+
+    // 2. Check prerequisites
+    await _prerequisiteChecker.CheckAsync(cancellationToken);
+
+    // 3. Acquire installation lock
+    using var installLock = await _lockProvider.AcquireAsync(normalized.SkillId);
+
+    // 4. Execute installation command
+    var result = await _installCommandRunner.ExecuteAsync(
+        new SkillInstallCommandExecutionRequest
+        {
+            Command = $"npx skills add {normalized.FullReference} -g -y",
+            Timeout = TimeSpan.FromMinutes(4)
+        },
+        cancellationToken);
+
+    // 5. Persist installation metadata
+    await _metadataStore.WriteAsync(normalized.SkillPath, request);
+
+    return new SkillInstallResultDto { Success = result.Success };
+}
+```
+
+Zastosowano tutaj kilka kluczowych wzorców projektowych: **normalizator odniesienia** konwertuje różne formaty wejściowe, takie jak `tanweai/pua` i `@opencode/docker-skill`w ujednoliconą reprezentację wewnętrzną; **mechanizm blokady instalacji** zapewnia, że ​​w tym samym czasie można wykonać tylko jedną operację instalacji dla tej samej umiejętności; oraz **wyjście strumieniowe** przesyła postęp instalacji do interfejsu użytkownika w czasie rzeczywistym za pośrednictwem zdarzeń wysyłanych przez serwer, dzięki czemu użytkownicy mogą na bieżąco przeglądać logi przypominające terminal.
+
+Ostatecznie wszystkie te wzorce służą jednemu celowi: ułatwieniu obsługi i konserwacji systemu.
+
+## Podstawowa umiejętność 2: Wyszukiwanie na rynku
+
+Wyszukiwanie w Marketplace umożliwia użytkownikom odkrywanie i instalowanie umiejętności społeczności. Możliwości jednej osoby są zawsze ograniczone; wiedza zbiorowa sięga znacznie dalej.
+
+### Podejście techniczne
+
+Funkcja wyszukiwania opiera się na internetowym interfejsie API `https://api.hagicode.com/v1/skills/search`. Aby poprawić szybkość reakcji, system implementuje buforowanie. Pamięć podręczna jest trochę jak pamięć: jeśli przechowujesz przydatne rzeczy pod ręką, następnym razem nie będziesz musiał tak dużo myśleć.
+
+```csharp
+private async Task<IReadOnlyList<SkillGallerySkillDto>> SearchCatalogAsync(
+    string query,
+    CancellationToken cancellationToken,
+    IReadOnlySet<string>? allowedSources = null)
+{
+    var cacheKey = $"skill_search:{query}:{string.Join(",", allowedSources ?? Array.Empty<string>())}";
+
+    if (_memoryCache.TryGetValue(cacheKey, out var cached))
+        return (IReadOnlyList<SkillGallerySkillDto>)cached!;
+
+    var response = await _onlineApiClient.SearchAsync(
+        new SearchSkillsRequest
+        {
+            Query = query,
+            Limit = _options.LimitPerQuery,
+        },
+        cancellationToken);
+
+    var results = response.Skills
+        .Where(skill => allowedSources is null || allowedSources.Contains(skill.Source))
+        .Select(skill => new SkillGallerySkillDto { ... })
+        .ToList();
+
+    _memoryCache.Set(cacheKey, results, TimeSpan.FromMinutes(10));
+    return results;
+}
+```
+
+Wyniki wyszukiwania obsługują filtrowanie według zaufanych źródeł, dzięki czemu użytkownicy widzą tylko źródła umiejętności, którym ufają. Zapytania o nasiona, takie jak `popular` i `recent` służą do inicjowania katalogu, dzięki czemu użytkownicy mogą zobaczyć zalecane popularne umiejętności już przy pierwszym otwarciu. Pierwsze wrażenie nadal ma znaczenie.
+
+## Podstawowa zdolność 3: Inteligentne rekomendacje
+
+Inteligentne rekomendacje są najbardziej złożoną częścią systemu. Mogą automatycznie polecić najbardziej odpowiednie umiejętności w oparciu o bieżący kontekst projektu. Choć jest skomplikowany, warto go zbudować.
+
+### Przepływ rekomendacji
+
+Pełny przepływ rekomendacji podzielony jest na pięć etapów:
+
+```
+1. Build project context
+   ↓
+2. AI generates search queries
+   ↓
+3. Search the online catalog in parallel
+   ↓
+4. AI ranks the candidates
+   ↓
+5. Return the recommendation list
+```
+
+Najpierw system analizuje takie cechy, jak stos technologii projektu, języki programowania i struktura domeny, aby zbudować „profil projektu”. Ten profil jest trochę jak CV, w którym zapisuje kluczowe cechy projektu.
+
+Następnie ziarno AI jest wykorzystywane do generowania ukierunkowanych zapytań. Ten projekt jest w rzeczywistości dość interesujący: zamiast bezpośrednio pytać sztuczną inteligencję: „Jakie umiejętności powinienem polecić?”, najpierw prosimy ją, aby zastanowiła się: „Jakie wyszukiwane hasła prawdopodobnie pozwolą znaleźć odpowiednie umiejętności?” Czasami sposób, w jaki zadajesz pytanie, ma większe znaczenie niż sama odpowiedź:
+
+```csharp
+var queryGeneration = await aiGrain.GenerateSkillRecommendationQueriesAsync(
+    projectContext,      // Project context
+    locale,              // User language preference
+    maxQueries,           // Maximum number of queries
+    effectiveSearchHero); // AI model selection
+```
+
+Następnie te zapytania są wykonywane równolegle w celu zebrania listy umiejętności kandydatów. Przetwarzanie równoległe to w ostatecznym rozrachunku tylko sposób na zaoszczędzenie czasu.
+
+Wreszcie kolejne ziarno sztucznej inteligencji ocenia umiejętności kandydatów. Na tym etapie uwzględniane są takie czynniki, jak znaczenie umiejętności dla projektu, status zaufania i historyczne preferencje użytkownika:
+
+```csharp
+var ranking = await aiGrain.RankSkillRecommendationsAsync(
+    projectContext,
+    candidates,
+    installedSkillNames,
+    locale,
+    maxRecommendations,
+    effectiveRankingHero);
+
+response.Items = MergeRecommendations(projectContext, candidates, ranking, maxRecommendations);
+```
+
+### Mechanizm awaryjny
+
+Modele AI mogą reagować powoli lub stać się tymczasowo niedostępne. Nawet najlepsze systemy czasami się zawieszają. Z tego powodu system zawiera deterministyczny mechanizm awaryjny: gdy usługa AI jest niedostępna, wykorzystuje oparty na regułach algorytm heurystyczny do generowania rekomendacji, takich jak wnioskowanie o prawdopodobnie wymaganych umiejętnościach na podstawie zależności w `package.json`.
+
+Mówiąc wprost, ten mechanizm awaryjny jest po prostu planem tworzenia kopii zapasowych systemu.
+
+## Podstawowa umiejętność 4: Zarządzanie zaufanymi dostawcami
+
+Zarządzanie zaufanymi dostawcami pozwala użytkownikom kontrolować, które źródła umiejętności są uważane za godne zaufania. Zaufanie jest nadal czymś, co użytkownicy powinni móc sami zdefiniować.
+
+### Zasady dopasowania
+
+Zaufani dostawcy obsługują dwie reguły dopasowywania: **dopasowanie ścisłe** (`exact`) i **dopasowanie prefiksu** (`prefix`).
+
+```csharp
+public static TrustedSkillProviderResolutionSnapshot Resolve(
+    TrustedSkillProviderSnapshot snapshot,
+    string source)
+{
+    var normalizedSource = Normalize(source);
+
+    foreach (var entry in snapshot.Entries.OrderBy(e => e.SortOrder))
+    {
+        if (!entry.IsEnabled) continue;
+
+        foreach (var rule in entry.MatchRules)
+        {
+            bool isMatch = rule.MatchType switch
+            {
+                TrustedSkillProviderMatchRuleType.Exact
+                    => string.Equals(normalizedSource, Normalize(rule.Value),
+                        StringComparison.OrdinalIgnoreCase),
+                TrustedSkillProviderMatchRuleType.Prefix
+                    => normalizedSource.StartsWith(Normalize(rule.Value) + "/",
+                        StringComparison.OrdinalIgnoreCase),
+                _ => false
+            };
+
+            if (isMatch)
+                return new TrustedSkillProviderResolutionSnapshot
+                {
+                    IsTrustedSource = true,
+                    ProviderId = entry.ProviderId,
+                    DisplayName = entry.DisplayName
+                };
+        }
+    }
+
+    return new TrustedSkillProviderResolutionSnapshot { IsTrustedSource = false };
+}
+```
+
+Wbudowani zaufani dostawcy obejmują dobrze znane organizacje i projekty, takie jak Vercel, Azure, anthropics, Microsoft i korzystanie z przeglądarki. Dostawców niestandardowych można dodawać za pomocą plików konfiguracyjnych, określając identyfikator dostawcy, nazwę wyświetlaną, etykietę plakietki, reguły dopasowywania i inne. Świat jest na tyle duży, że zaufanie tylko kilku wbudowanym elementom nigdy nie wystarczy.
+
+### Implementacja trwałości
+
+Zaufana konfiguracja jest utrwalana przy użyciu ziarna Orleans:
+
+```csharp
+public class TrustedSkillProviderGrain : Grain<TrustedSkillProviderState>,
+    ITrustedSkillProviderGrain
+{
+    public async Task UpdateConfigurationAsync(TrustedSkillProviderSnapshot snapshot)
+    {
+        State.Snapshot = snapshot;
+        await WriteStateAsync();
+    }
+
+    public Task<TrustedSkillProviderSnapshot> GetConfigurationAsync()
+    {
+        return Task.FromResult(State.Snapshot);
+    }
+}
+```
+
+Zaletą tego podejścia jest to, że zmiany konfiguracji są automatycznie synchronizowane we wszystkich węzłach, bez konieczności ręcznego odświeżania pamięci podręcznej. Automatyzacja ostatecznie polega na tym, aby ludzie mniej się martwili.
+
+## Kluczowy projekt techniczny
+
+### Wzorzec adaptera wykonywania poleceń
+
+System umiejętności musi wykonywać różne polecenia npx. Gdyby ta logika była rozproszona wszędzie, kod szybko stałby się trudny do utrzymania. Dlatego zaprojektowaliśmy interfejs adaptera. W końcu istnieją wzorce projektowe, które ułatwiają utrzymanie kodu:
+
+```csharp
+public interface ISkillInstallCommandRunner
+{
+    Task<SkillInstallCommandExecutionResult> ExecuteAsync(
+        SkillInstallCommandExecutionRequest request,
+        CancellationToken cancellationToken = default);
+}
+```
+
+Różne polecenia mają różne implementacje modułów wykonawczych, ale wszystkie implementują ten sam interfejs, dzięki czemu testowanie i wymiana są proste.
+
+### Wyjście strumieniowe SSE
+
+Postęp instalacji jest przekazywany do interfejsu użytkownika w czasie rzeczywistym poprzez zdarzenia wysłane przez serwer:
+
+```csharp
+public async Task InstallWithProgressAsync(
+    SkillInstallRequestDto request,
+    IServerStreamWriter<SkillInstallProgressEventDto> stream,
+    CancellationToken cancellationToken)
+{
+    var process = new Process
+    {
+        StartInfo = new ProcessStartInfo
+        {
+            FileName = "npx",
+            Arguments = $"skills add {request.FullReference} -g -y",
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false
+        }
+    };
+
+    process.OutputDataReceived += async (sender, e) =>
+    {
+        await stream.WriteAsync(new SkillInstallProgressEventDto
+        {
+            EventType = "output",
+            Data = e.Data ?? string.Empty
+        });
+    };
+
+    process.Start();
+    process.BeginOutputReadLine();
+    await process.WaitForExitAsync(cancellationToken);
+}
+```
+
+Na interfejsie użytkownicy mogą oglądać w czasie rzeczywistym dane wyjściowe przypominające terminal, co sprawia, że obsługa jest bardzo intuicyjna. Informacje zwrotne w czasie rzeczywistym pomagają ludziom czuć się komfortowo.
+
+## Praktyczny przewodnik
+
+### Instalowanie umiejętności społeczności
+
+Weź udział w instalacji `pua` przykładowa umiejętność (jest to popularna umiejętność społeczności):
+
+1. Otwórz szufladę Umiejętności i przejdź do `Skill Gallery` zakładka
+2. Wejdź `pua` w polu wyszukiwania
+3. Kliknij wynik wyszukiwania, aby wyświetlić szczegóły umiejętności
+4. Kliknij `Install` przycisk
+5. Przełącz na `Local Skills` aby potwierdzić, że instalacja się powiodła
+
+Polecenie instalacji to `npx skills add tanweai/pua -g -y`, a system automatycznie zajmie się wszystkimi szczegółami. Nie ma tak wielu kroków, jeśli wykonasz je jeden po drugim.
+
+### Dodawanie niestandardowego zaufanego źródła
+
+Jeśli Twój zespół posiada własne repozytorium umiejętności, możesz dodać je jako zaufane źródło:
+
+```yaml
+providerId: "my-team"
+displayName: "My Team Skills"
+badgeLabel: "MyTeam"
+isEnabled: true
+sortOrder: 100
+matchRules:
+  - matchType: "prefix"
+    value: "my-team/"
+  - matchType: "exact"
+    value: "my-team/special-skill"
+```
+
+W ten sposób wszystkie umiejętności Twojego zespołu będą oznaczone odznaką zaufanych, dzięki czemu użytkownicy będą mogli łatwiej je zainstalować. Etykiety i sygnały rzeczywiście pomagają ludziom poczuć się pewniej.
+
+### Podstawy rozwoju umiejętności
+
+Tworzenie niestandardowej umiejętności wymaga następującej struktury:
+
+```
+my-skill/
+├── SKILL.md          # Skill metadata (YAML front matter)
+├── index.ts          # Skill entry point
+├── agents/           # Supported agent configuration
+└── references/       # Reference resources
+```
+
+Przykład `SKILL.md` format:
+
+```yaml
+---
+name: my-skill
+description: A brief description of what this skill does
+---
+
+# My Skill
+
+Detailed documentation...
+```
+
+## Notatki
+
+1. **Wymagania sieciowe**: wyszukiwanie umiejętności i instalacja wymagają dostępu `api.hagicode.com` i rejestr npm
+2. **Wersja Node.js**: Zalecana jest wersja Node.js 18 lub nowsza
+3. **Wymagania dotyczące uprawnień**: wymagane są globalne uprawnienia do instalacji npm
+4. **Kontrola współbieżności**: w danym momencie można wykonać tylko jedną operację instalacji lub dezinstalacji dla tej samej umiejętności
+5. **Ustawienia limitu czasu**: domyślny limit czasu instalacji wynosi 4 minuty, ale złożone scenariusze mogą wymagać dostosowania
+
+Te notatki istnieją ostatecznie po to, aby wszystko przebiegało sprawnie.
+
+## Wniosek
+
+W artykule przedstawiono pełną implementację systemu zarządzania umiejętnościami w projekcie HagiCode. Dzięki oddzielnej architekturze frontend-backend, wzorcowi adaptera, zarządzaniu stanem rozproszonym w oparciu o Orlean i powiązanym technikom, system zapewnia:
+
+- **Lokalne zarządzanie globalne**: ujednolicony interfejs zarządzania umiejętnościami zbudowany przez opakowanie `npx skills` polecenia
+- **Wyszukiwanie na rynku**: szybkie odkrywanie umiejętności społeczności poprzez interfejs API online i mechanizmy buforowania
+- **Inteligentne rekomendacje**: rekomendacje umiejętności oparte na sztucznej inteligencji na podstawie kontekstu projektu
+- **Zarządzanie zaufaniem**: elastyczny system konfiguracji, który pozwala użytkownikom kontrolować granice zaufania
+
+To podejście do projektowania ma zastosowanie nie tylko do zarządzania umiejętnościami. Jest również przydatny jako odniesienie w każdym scenariuszu, który wymaga integracji narzędzi wiersza poleceń, jednocześnie równoważąc lokalną pamięć masową i usługi online.
+
+Jeśli ten artykuł Ci pomógł, nie wahaj się dać nam gwiazdki na GitHubie: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site). Możesz także odwiedzić oficjalną stronę, aby dowiedzieć się więcej: [hagicode.com](https://hagicode.com).
+
+Możesz myśleć, że ten system jest dobrze zaprojektowany, ale może nie. Tak czy inaczej, to jest w porządku. Gdy kod zostanie napisany, ktoś go użyje, a ktoś nie.
+
+## Referencje
+
+- Repozytorium projektu HagiCode: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Oficjalna strona HagiCode: [hagicode.com](https://hagicode.com)
+- Oficjalna dokumentacja umiejętności Claude Code: [docs.anthropic.com](https://docs.anthropic.com)
+- Dokumentacja frameworka Orleans: [dotnet.github.io/orleans](https://dotnet.github.io/orleans)
+- Początek TanStacka: [tanstack.com/start](https://tanstack.com/start)
+
+## Informacja o prawach autorskich
+
+Dziękuję za przeczytanie. Jeśli uważasz ten artykuł za przydatny, możesz go polubić, dodać do zakładek i udostępnić.
+Ta treść została stworzona we współpracy ze sztuczną inteligencją, a ostateczna treść została sprawdzona i zatwierdzona przez autora.
+- Autor: [nowość36524](https://www.newbe.pro)
+- Oryginalny link: [https://docs.hagicode.com/blog/2026-03-24-hagicode-skill-system-technical-analytics/](https://docs.hagicode.com/blog/2026-03-24-hagicode-skill-system-technical-analysis/)
+- Informacja o prawach autorskich: O ile nie zaznaczono inaczej, wszystkie wpisy na blogu w tej witrynie objęte są licencją BY-NC-SA. Przy ponownym zamieszczaniu prosimy o podanie źródła.

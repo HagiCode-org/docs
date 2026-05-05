@@ -1,0 +1,541 @@
+---
+title: "Arhitectura de distribuție hibridă HagiCode Desktop explicată: Cum accelerează P2P descărcarea fișierelor mari"
+date: 2026-03-27
+tags: [HagiCode, Desktop, P2P, BitTorrent, WebSeed, Distribuție Hibridă, Arhitectură Tehnică]
+description: "Arhitectura de distribuție hibridă HagiCode Desktop explicată: Cum accelerează P2P descărcarea fișierelor mari: Am ținut acest articol mult timp înainte de a-l scrie în cele din urmă, și încă nu sunt sigur dacă se citește bine."
+---
+
+## Arhitectura de distribuție hibridă HagiCode Desktop explicată: Cum accelerează P2P descărcarea fișierelor mari
+
+> Am ținut acest articol mult timp înainte de a-l scrie în cele din urmă, și încă nu sunt sigur dacă se citește bine. Scrierea tehnică este destul de ușor de produs, dar greu de făcut cu adevărat captivantă. Apoi din nou, nu sunt nici un mare maestru literar, așa că la fel de bine pot pune jos această explicație simplă.
+
+## Context
+
+Echipele care construiesc aplicații desktop se vor confrunta toate cu aceeași durere de cap mai devreme sau mai târziu: cum distribuiți fișiere mari?
+
+Este o problemă incomodă. Descărcările directe HTTP/HTTPS tradiționale pot rezista încă când fișierele sunt mici și numărul de utilizatori este limitat. Dar timpul este rarecum bland. Pe măsură ce un proiect continuă să crească, pachetele de instalare cresc odată cu el: pachete ZIP Desktop, pachete portabile, arhive de implementare web și multe altele. Apoi problemele încep să apară:
+
+- **Viteza de descărcare este limitată de lățimea de bandă a originii**: indiferent cât de multă lățime de bandă are un singur server, încă se luptă când toată lumea descarcă simultan.
+- **Suportul pentru reluare este aproape inexistent**: dacă o descărcare HTTP este întreruptă, adesea trebuie să reîncepeți de la capăt. Acest lucru irosește atât timp cât și lățime de bandă.
+- **Serverul de origine preia toată presiunea**: tot traficul curge înapoi către un server central, costurile de lățime de bandă continuă să crească, iar scalabilitatea devine o problemă reală.
+
+Proiectul HagiCode Desktop nu a făcut excepție. Când am proiectat sistemul de distribuție, ne-am întrebat continuu: putem introduce o abordare de distribuție hibridă fără a schimba planul de control `index.json` existent? Cu alte cuvinte, putem folosi natura distribuită a rețelelor P2P pentru a accelera descărcările menținând în același timp fallback-ul la originea HTTP astfel încât sistemul rămâne utilizabil în medii constrânse precum rețelele de întreprindere?
+
+Impactul acelei decizii s-a dovedit a fi mai mare decât v-ați putea aștepta. Să parcurgem pas cu pas.
+
+## Despre HagiCode
+
+Abordarea prezentată în acest articol provine din experiența noastră reală în proiectul [HagiCode](https://hagicode.com). HagiCode este un proiect open-source de asistent de codare AI axat pe ajutarea echipelor de dezvoltare să îmbunătățească eficiența de inginerie. Proiectul acoperă multiple subsisteme, inclusiv frontend, backend, lansator desktop, documentație, pipeline de build și implementare pe server.
+
+Arhitectura de distribuție hibridă Desktop este exact genul de soluție pe care HagiCode a rafinat-o prin experiență operațională reală și optimizări repetate. Dacă acest design se dovedește util, atunci poate arată de asemenea că HagiCode în sine merită atenție.
+
+Depozitul GitHub al proiectului este [HagiCode-org/site](https://github.com/HagiCode-org/site). Dacă vă interesează, nu ezitați să îi dați un Star și să îl salvați pentru mai târziu.
+
+## Filosofia de design de bază: P2P mai întâi, fallback HTTP
+
+În esență, modelul de distribuție hibridă poate fi rezumat într-o singură propoziție: **P2P mai întâi, fallback HTTP**.
+
+Cheia stă în cuvântul „hibrid". Nu este vorba doar de a adăuga BitTorrent și a o numi ziua. Ideea este să faceți cele două metode de livrare să lucreze împreună și să se completeze reciproc:
+
+- **Rețeaua P2P** oferă accelerare distribuită. Cu cât descarcă mai mulți oameni, cu atât mai mulți peers se alătură, iar transferul devine mai rapid.
+- **WebSeed/HTTP fallback** garantează disponibilitatea, astfel încât descărcările pot încă funcționa în firewall-uri de întreprindere și medii de rețea internă.
+- **Planul de control rămâne simplu**. Nu schimbăm logica de bază a `index.json`; adăugăm doar câteva câmpuri de metadate opționale.
+
+Beneficiul real este simplu: utilizatorii simt că „descărcările sunt mai rapide", în timp ce echipa de inginerie nu trebuie să suporte prea multă complexitate suplimentară. La urma urmei, protocolul BT este deja matur, și este puțin motivul de a reinventa roata.
+
+## Design arhitectural
+
+### Prezentare generală a arhitecturii stratificate
+
+Să începem cu diagrama arhitecturală generală pentru a construi un model mental de ansamblu:
+
+```
+┌─────────────────────────────────────┐
+│     Renderer (UI layer)             │
+├─────────────────────────────────────┤
+│     IPC/Preload (bridge layer)      │
+├─────────────────────────────────────┤
+│   VersionManager (version manager)  │
+├─────────────────────────────────────┤
+│ HybridDownloadCoordinator (coord.)  │
+│  ├── DistributionPolicyEvaluator    │
+│  ├── DownloadEngineAdapter          │
+│  ├── CacheRetentionManager          │
+│  └── SHA256 Verifier                │
+├─────────────────────────────────────┤
+│   WebTorrent (download engine)      │
+└─────────────────────────────────────┘
+```
+
+După cum arată diagrama, sistemul folosește un design stratificat. Motivul pentru separarea responsabilităților atât de clar este simplu: **testabilitate și înlocuire**.
+
+- **Stratul UI** este responsabil pentru afișarea progresului descărcării și comutarea accelerării prin partajare. Este suprafața.
+- **Stratul de coordonare** este nucleul. Conține evaluarea politicilor, adaptarea motorului, gestionarea cache-ului și verificarea integrității.
+- **Stratul motorului** încapsulează implementarea concretă a descărcării. În prezent, folosește WebTorrent.
+
+Stratul motorului este abstractizat în spatele interfeței `DownloadEngineAdapter`. Dacă vom dori vreodată să schimbăm cu un motor BT diferit, sau să mutăm implementarea într-un proces sidecar, acel lucru devine mult mai ușor.
+
+### Separarea planului de control și a planului de date
+
+HagiCode Desktop menține `index.json` ca singur plan de control, iar acel design este critic. Planul de control este responsabil pentru descoperirea versiunilor, selecția canalelor și politica centralizată, în timp ce planul de date este unde are loc transferul real de fișiere.
+
+Câmpurile noi adăugate la `index.json` sunt opționale:
+
+```json
+{
+  "asset": {
+    "torrentUrl": "https://cdn.example.com/app.torrent",
+    "infoHash": "abc123...",
+    "webSeeds": [
+      "https://cdn.example.com/app.zip",
+      "https://backup.example.com/app.zip"
+    ],
+    "sha256": "def456...",
+    "directUrl": "https://cdn.example.com/app.zip"
+  }
+}
+```
+
+Toate aceste câmpuri sunt opționale. Dacă lipsesc, clientul revine la modul tradițional de descărcare HTTP. Avantajul acestui design este **compatibilitate backward**: clienții mai vechi sunt complet neafectați.
+
+### Decizii conduse de politici
+
+Nu fiecare fișier merită distribuit prin P2P.
+
+`DistributionPolicyEvaluator` este responsabil pentru evaluarea politicii. Doar fișierele care îndeplinesc toate următoarele condiții vor folosi descărcarea hibridă:
+
+1. **Tipul sursei trebuie să fie un index HTTP**: descărcările directe de pe GitHub sau sursele de foldere locale nu folosesc această cale.
+2. **Dimensiunea fișierului trebuie să fie de cel puțin 100 MB**: pentru fișiere mai mici, overhead-ul P2P depășește beneficiul.
+3. **Metadate hibride complete trebuie să fie prezente**: `torrentUrl`, `webSeeds` și `sha256` sunt toate necesare.
+4. **Doar pachetul desktop cel mai recent și pachetul de implementare web sunt eligibile**: versiunile istorice continuă să folosească calea tradițională de distribuție.
+
+```typescript
+class DistributionPolicyEvaluator {
+  evaluate(version: Version, settings: SharingAccelerationSettings): HybridDownloadPolicy {
+    // Check source type
+    if (version.sourceType !== 'http-index') {
+      return { useHybrid: false, reason: 'not-http-index' };
+    }
+
+    // Check metadata completeness
+    if (!version.hybrid) {
+      return { useHybrid: false, reason: 'not-eligible' };
+    }
+
+    // Check whether the feature is enabled
+    if (!settings.enabled) {
+      return { useHybrid: false, reason: 'shared-disabled' };
+    }
+
+    // Check asset type (latest desktop/web packages only)
+    if (!version.hybrid.isLatestDesktopAsset && !version.hybrid.isLatestWebAsset) {
+      return { useHybrid: false, reason: 'latest-only' };
+    }
+
+    return { useHybrid: true, reason: 'shared-enabled' };
+  }
+}
+```
+
+Acest lucru oferă sistemului **comportament predictibil**. Atât dezvoltatorii cât și utilizatorii pot înțelege clar care fișiere vor folosi P2P și care nu.
+
+## Implementare de bază
+
+### Sistemul de definire a tipurilor
+
+Să începem cu definițiile de tipuri, deoarece ele formează fundația întregului sistem.
+
+```typescript
+// Hybrid distribution metadata
+interface HybridDistributionMetadata {
+  torrentUrl?: string;      // Torrent file URL
+  infoHash?: string;        // InfoHash
+  webSeeds: string[];       // WebSeed list
+  sha256?: string;          // File hash
+  directUrl?: string;       // HTTP direct link (for origin fallback)
+  eligible: boolean;        // Whether hybrid distribution is applicable
+  thresholdBytes: number;   // Threshold in bytes
+  assetKind: VersionAssetKind;
+  isLatestDesktopAsset: boolean;
+  isLatestWebAsset: boolean;
+}
+
+// Sharing acceleration settings
+interface SharingAccelerationSettings {
+  enabled: boolean;           // Master switch
+  uploadLimitMbps: number;    // Upload bandwidth limit
+  cacheLimitGb: number;       // Cache limit
+  retentionDays: number;      // Retention period
+  hybridThresholdMb: number;  // Hybrid distribution threshold
+  onboardingChoiceRecorded: boolean;
+}
+
+// Download progress
+interface VersionDownloadProgress {
+  current: number;
+  total: number;
+  percentage: number;
+  stage: VersionInstallStage;  // queued, downloading, backfilling, verifying, extracting, completed, error
+  mode: VersionDownloadMode;   // http-direct, shared-acceleration, source-fallback
+  peers?: number;              // Number of connected peers
+  p2pBytes?: number;           // Bytes received from P2P
+  fallbackBytes?: number;      // Bytes received from fallback
+  verified?: boolean;          // Whether verification has completed
+}
+```
+
+Odată ce sistemul de tipuri este clar, restul implementării decurge natural.
+
+### Coordonatorul de bază
+
+`HybridDownloadCoordinator` orchestrează întregul flux de descărcare. Coordonează evaluarea politicilor, execuția motorului, verificarea SHA256 și gestionarea cache-ului.
+
+```typescript
+class HybridDownloadCoordinator {
+  async download(
+    version: Version,
+    cachePath: string,
+    packageSource: PackageSource,
+    onProgress?: DownloadProgressCallback,
+  ): Promise<HybridDownloadResult> {
+    // 1. Evaluate the policy: should hybrid download be used?
+    const policy = this.policyEvaluator.evaluate(version, settings);
+
+    // 2. Execute the download
+    if (policy.useHybrid) {
+      await this.engine.download(version, cachePath, settings, onProgress);
+    } else {
+      await packageSource.downloadPackage(version, cachePath, onProgress);
+    }
+
+    // 3. SHA256 verification (hard gate)
+    const verified = await this.verify(version, cachePath, onProgress);
+    if (!verified) {
+      await this.cacheRetentionManager.discard(version.id, cachePath);
+      throw new Error(`sha256 verification failed for ${version.id}`);
+    }
+
+    // 4. Mark as trusted cache and begin controlled seeding
+    await this.cacheRetentionManager.markTrusted({
+      versionId: version.id,
+      cachePath,
+      cacheSize,
+    }, settings);
+
+    return { cachePath, policy, verified };
+  }
+}
+```
+
+Există un punct deosebit de important aici: **verificarea SHA256 este un gate hard**. Un fișier descărcat trebuie să treacă verificarea înainte de a intra în fluxul de instalare. Dacă verificarea eșuează, cache-ul este eliminat pentru a asigura că un fișier incorect nu cauzează niciodată probleme de instalare.
+
+### Abstracția motorului de descărcare
+
+`DownloadEngineAdapter` este o interfață abstractă care definește metodele pe care fiecare motor trebuie să le implementeze:
+
+```typescript
+interface DownloadEngineAdapter {
+  download(
+    version: Version,
+    destinationPath: string,
+    settings: SharingAccelerationSettings,
+    onProgress?: (progress: VersionDownloadProgress) => void,
+  ): Promise<void>;
+
+  stopAll(): Promise<void>;
+}
+```
+
+Implementarea V1 este bazată pe WebTorrent și este împachetată în `InProcessTorrentEngineAdapter`:
+
+```typescript
+class InProcessTorrentEngineAdapter implements DownloadEngineAdapter {
+  async download(...) {
+    const client = this.getClient(settings);  // Apply upload rate limiting
+    const torrent = client.add(torrentId, {
+      path: path.dirname(destinationPath),
+      destroyStoreOnDestroy: false,
+      maxWebConns: 8,
+    });
+
+    // Add WebSeed sources
+    torrent.on('ready', () => {
+      for (const seed of hybrid.webSeeds) {
+        torrent.addWebSeed(seed);
+      }
+      if (hybrid.directUrl) {
+        torrent.addWebSeed(hybrid.directUrl);
+      }
+    });
+
+    // Progress reporting - distinguish P2P from origin fallback
+    torrent.on('download', () => {
+      const hasP2PPeer = torrent.wires.some(w => w.type !== 'webSeed');
+      const mode = hasP2PPeer ? 'shared-acceleration' : 'source-fallback';
+      // ... report progress
+    });
+  }
+}
+```
+
+Un design de motor plug-and-play face optimizarea viitoare mult mai ușoară. De exemplu, V2 ar putea rula motorul într-un proces auxiliar pentru a evita prăbușirea procesului principal dacă motorul se blochează.
+
+### Distinguarea modurilor de raportare a progresului
+
+La stratul UI, cel mai mult le pasă utilizatorilor de un lucru simplu: „descarc în prezent prin P2P sau prin fallback HTTP?" `InProcessTorrentEngineAdapter` determină asta verificând tipurile din `torrent.wires`:
+
+```typescript
+const hasP2PPeer = torrent.wires.some((wire) => wire.type !== 'webSeed');
+const hasFallbackWire = torrent.wires.some((wire) => wire.type === 'webSeed');
+
+const mode = hasP2PPeer ? 'shared-acceleration'
+         : hasFallbackWire ? 'source-fallback'
+         : 'shared-acceleration';
+
+const stage = hasP2PPeer ? 'downloading'
+           : hasFallbackWire ? 'backfilling'
+           : 'downloading';
+```
+
+Logica pare simplă, dar este o parte cheie a experienței utilizatorului. Utilizatorii pot vedea clar dacă starea curentă este „accelerare prin partajare" sau „backfill de la origine", ceea ce face comportamentul mai ușor de înțeles.
+
+### Verificarea SHA256 streaming
+
+Verificarea integrității folosește modulul `crypto` din Node.js pentru a computa hash-ul într-un mod streaming, ceea ce evită încărcarea întregului fișier în memorie:
+
+```typescript
+private async computeSha256(filePath: string): Promise<string> {
+  const hash = createHash('sha256');
+  await new Promise<void>((resolve, reject) => {
+    const stream = fs.createReadStream(filePath);
+    stream.on('data', (chunk) => hash.update(chunk));
+    stream.on('error', reject);
+    stream.on('end', resolve);
+  });
+  return hash.digest('hex').toLowerCase();
+}
+```
+
+Această implementare este deosebit de prietenoasă pentru fișiere mari. Imaginați-vă că descărcați un pachet de instalare de 2 GB și apoi încercați să îl încărcați în întregime în memorie doar pentru a-l verifica. Streaming-ul rezolvă asta elegant.
+
+## Fluxul de date
+
+Fluxul complet de date arată astfel:
+
+```
+┌────────────────────────────────────────────────────────────────────┐
+│             User clicks install on a large-file version            │
+└────────────────────────────────────────────────────────────────────┘
+                                 │
+                                 ▼
+┌────────────────────────────────────────────────────────────────────┐
+│              VersionManager invokes the coordinator                │
+│              HybridDownloadCoordinator.download()                  │
+└────────────────────────────────────────────────────────────────────┘
+                                 │
+                                 ▼
+┌────────────────────────────────────────────────────────────────────┐
+│           DistributionPolicyEvaluator.evaluate()                   │
+│       Checks: source, metadata, switch, and asset type            │
+└────────────────────────────────────────────────────────────────────┘
+                                 │
+                    ┌───────────┴───────────┐
+                    │ useHybrid?            │
+                    └───────────┬───────────┘
+                        yes │         │ no
+                           ▼         ▼
+              ┌──────────────────┐  ┌─────────────────────┐
+              │ P2P + WebSeed    │  │ HTTP direct download│
+              │ Hybrid download  │  │ (compatibility path)│
+              └──────────────────┘  └─────────────────────┘
+                        │
+                        ▼
+              ┌──────────────────┐
+              │ SHA256 verify    │
+              │ (hard gate)      │
+              └────────┬─────────┘
+                       │
+              ┌────────┴─────────┐
+              │ Passed?          │
+              └────────┬─────────┘
+                   yes │    │ no
+                     ▼    ▼
+          ┌────────────┐ ┌────────────────┐
+          │ Extract +  │ │ Drop cache +   │
+          │ install +  │ │ return error   │
+          │ seed safely│ └────────────────┘
+          └────────────┘
+```
+
+Fluxul este foarte clar de la un capăt la altul, iar fiecare pas are o responsabilitate bine definită. Când ceva merge prost, este mult mai ușor să localizați etapa care eșuează.
+
+## Produsificare
+
+Chiar și cel mai bun design tehnic va eșua dacă experiența utilizatorului este slabă. HagiCode Desktop a investit o cantitate considerabilă de efort în produsificarea acestei capabilități.
+
+### Ascunderea terminologiei BT
+
+Majoritatea utilizatorilor nu știu ce înseamnă BitTorrent sau InfoHash. Deci la nivel de produs, prezentăm funcționalitatea folosind expresia „accelerare prin partajare":
+
+- Funcționalitatea se numește „accelerare prin partajare", nu descărcare P2P.
+- Setarea se numește „limită de upload", nu seeding.
+- Eticheta de progres spune „backfill de la origine", nu WebSeed fallback.
+
+Acest lucru reduce sarcina cognitivă a terminologiei și face funcționalitatea mai ușor de acceptat.
+
+### Activată implicit în expertul de prima rulare
+
+Când utilizatorii noi lansează aplicația desktop pentru prima dată, văd o pagină de expert care introduce accelerarea prin partajare:
+
+> Pentru a îmbunătăți viteza de descărcare, partajăm porțiunile pe care le-ați descărcat deja cu alți utilizatori în timp ce propria descărcare este în curs. Acest lucru este complet opțional, și îl puteți dezactiva oricând în Setări.
+
+Este activată implicit, dar utilizatorii au o modalitate clară de a renunța. Dacă utilizatorii de întreprindere nu o doresc, o pot dezactiva pur și simplu în timpul onboarding-ului.
+
+### Parametri controlați de utilizator
+
+Pagina de setări expune trei parametri ajustabili:
+
+| Parametru | Implicit | Descriere |
+|------|--------|------|
+| Limită upload | 2 MB/s | Previne utilizarea excesivă a lățimii de bandă upstream |
+| Limită cache | 10 GB | Controlează consumul de spațiu pe disc |
+| Zile retenție | 7 zile | Curăță automat cache-ul vechi după această perioadă |
+
+Acești parametri au toți implicite rezonabile. Majoritatea utilizatorilor nu au nevoie să îi schimbe niciodată, în timp ce utilizatorii avansați îi pot ajusta în funcție de propriul mediu de rețea.
+
+## Decizii cheie de design
+
+Privind înapoi la soluția generală, mai multe decizii de design merită menționate.
+
+### Motorul rulează în procesul principal (V1)
+
+De ce să nu începem cu un sidecar sau proces auxiliar imediat? Motivul este simplu: **livrare rapidă**. Un design in-process are un ciclu de dezvoltare mai scurt și este mai ușor de depanat. Prima prioritate este să punem funcționalitatea în funcțiune, apoi să îmbunătățim stabilitatea ulterior.
+
+Desigur, această decizie vine cu un cost: dacă motorul se blochează, poate afecta procesul principal. Reducem acel risc prin limite de adaptor și controale de timeout, și menținem de asemenea deschisă o cale de migrare astfel încât V2 să se poată muta mai ușor într-un proces separat.
+
+### SHA256 ca verificare de integritate
+
+Folosim SHA256 în loc de MD5 sau CRC32 deoarece SHA256 este mai securizat. Costul coliziunilor pentru MD5 și CRC32 este prea scăzut. Dacă cineva ar crea un pachet de instalare fals intenționat, consecințele ar putea fi severe. SHA256 costă mai mult de computat, dar câștigul de securitate merită.
+
+### Activat doar pentru surse de index HTTP
+
+Scenarii precum descărcările GitHub și sursele de foldere locale nu folosesc distribuția hibridă. Aceasta nu este o limitare tehnică; este despre **evitarea complexității inutile**. Protocoalele BT adaugă valoare limitată în scenariile de rețea privată și ar crește doar complexitatea codului.
+
+## Note practice
+
+### Normalizarea setărilor
+
+În interiorul `SharingAccelerationSettingsStore`, fiecare valoare numerică trebuie să treacă prin verificarea limitelor și normalizare:
+
+```typescript
+private normalize(settings: SharingAccelerationSettings): SharingAccelerationSettings {
+  return {
+    enabled: Boolean(settings.enabled),
+    uploadLimitMbps: this.clampNumber(settings.uploadLimitMbps, 1, 200, DEFAULT_SETTINGS.uploadLimitMbps),
+    cacheLimitGb: this.clampNumber(settings.cacheLimitGb, 1, 500, DEFAULT_SETTINGS.cacheLimitGb),
+    retentionDays: this.clampNumber(settings.retentionDays, 1, 90, DEFAULT_SETTINGS.retentionDays),
+    hybridThresholdMb: DEFAULT_SETTINGS.hybridThresholdMb,  // Fixed value, not user-configurable
+    onboardingChoiceRecorded: Boolean(settings.onboardingChoiceRecorded),
+  };
+}
+
+private clampNumber(value: number, min: number, max: number, fallback: number): number {
+  if (!Number.isFinite(value)) {
+    return fallback;
+  }
+  return Math.min(max, Math.max(min, Math.round(value)));
+}
+```
+
+Acest lucru previne ca utilizatorii să editeze manual fișierul de configurație cu valori invalide.
+
+### Curățare cache LRU
+
+`CacheRetentionManager.prune()` este responsabil pentru curățarea intrărilor de cache expirate sau prea mari. Strategia de curățare folosește LRU (cel mai puțin recent utilizat):
+
+```typescript
+const records = [...this.listRecords()]
+  .sort((left, right) =>
+    new Date(left.lastUsedAt).getTime() - new Date(right.lastUsedAt).getTime()
+  );
+
+// When over the limit, evict the least recently used entries first
+while (totalBytes > maxBytes && retainedEntries.length > 0) {
+  const evicted = records.find((record) => retainedEntries.includes(record.versionId));
+  retainedEntries.splice(retainedEntries.indexOf(evicted.versionId), 1);
+  removedEntries.push(evicted.versionId);
+  totalBytes -= evicted.cacheSize;
+  await fs.rm(evicted.cachePath, { force: true });
+}
+```
+
+Această logică asigură că spațiul pe disc este utilizat eficient păstrând în același timp versiunile istorice de care utilizatorul ar putea avea încă nevoie.
+
+### Comportamentul imediat de oprire-seeding
+
+Când utilizatorul dezactivează accelerarea prin partajare, aplicația trebuie să oprească imediat seeding-ul și să distrugă clientul torrent:
+
+```typescript
+async disableSharingAcceleration(): Promise<void> {
+  this.settingsStore.updateSettings({ enabled: false });
+  await this.cacheRetentionManager.stopAllSeeding();  // Stop seeding
+  await this.engine.stopAll();  // Destroy the torrent client
+}
+```
+
+Dacă un utilizator dezactivează funcționalitatea, produsul nu ar mai trebui să consume nicio resursă P2P. Aceasta este etică de bază de produs.
+
+## Riscuri și compromisuri
+
+Nu există o soluție perfectă, iar distribuția hibridă nu face excepție. Acestea sunt principalele compromisuri:
+
+**Izolarea blocărilor este mai slabă decât un sidecar**: V1 folosește un motor in-process, deci o blocare a motorului poate afecta procesul principal. Limitele de adaptor și controalele de timeout reduc riscul, dar nu sunt o remediere fundamentală. V2 include o cale de migrare planificată către un proces auxiliar.
+
+**Consum de resurse activat implicit**: setările implicite de 2 MB/s upload, 10 GB cache și retenție de 7 zile consumă unele resurse ale mașinii. Așteptările utilizatorilor sunt gestionate prin textul de onboarding și setări transparente.
+
+**Compatibilitate cu rețele de întreprindere**: fallback-ul automat WebSeed/HTTPS păstrează utilizabilitatea în rețele de întreprindere, dar poate reduce câștigurile de accelerare de la P2P. Acesta este un compromis intenționat care prioritizează disponibilitatea.
+
+**Metadate backward-compatibile**: toate câmpurile noi sunt opționale. Dacă lipsesc, sistemul revine la modul HTTP. Clienții mai vechi sunt complet neafectați, făcând upgrade-urile fluide.
+
+## Concluzie
+
+Acest articol a parcurs arhitectura de distribuție hibridă folosită în proiectul HagiCode Desktop. Principalele concluzii sunt:
+
+1. **Arhitectură stratificată**: planul de control și planul de date sunt separate, iar motorul este abstractizat în spatele unei interfețe plug-and-play pentru testare și extensie mai ușoară.
+
+2. **Comportament condus de politici**: nu fiecare fișier folosește P2P. Distribuția hibridă este activată doar pentru fișiere mari care îndeplinesc condițiile necesare.
+
+3. **Verificare integritate**: SHA256 servește ca gate hard, iar verificarea streaming evită presiunea pe memorie.
+
+4. **Prezentare produsificată**: terminologia BT este ascunsă în spatele frazei „accelerare prin partajare", iar funcționalitatea este activată implicit în timpul onboarding-ului.
+
+5. **Control utilizator**: limite de upload, limite de cache, zile de retenție și alți parametri rămân ajustabili de utilizator.
+
+Această arhitectură a fost deja implementată în proiectul HagiCode Desktop. Dacă o încercați, ne-ar plăcea să auzim feedback-ul dumneavoastră după instalare și utilizare în lumea reală.
+
+## Referințe
+
+- HagiCode Desktop GitHub: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Site-ul oficial HagiCode: [hagicode.com](https://hagicode.com)
+- Documentația oficială WebTorrent: [webtorrent.io](https://webtorrent.io)
+- Specificația protocolului BitTorrent: [bittorrent.org](https://www.bittorrent.org/beps/bep_0019.html)
+- Specificația extensiei WebSeed: [bittorrent.org/beps/bep_0017.html](https://www.bittorrent.org/beps/bep_0017.html)
+
+---
+
+Dacă acest articol v-a ajutat:
+
+- Dați proiectului un Star pe GitHub: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Vizitați site-ul web pentru a afla mai multe: [hagicode.com](https://hagicode.com)
+- Instalare rapidă pentru HagiCode Desktop: [hagicode.com/desktop/](https://hagicode.com/desktop/)
+- Beta publică este acum deschisă, și sunteți bineveniți să instalați și să încercați
+
+Poate că suntem cu toții doar oameni obișnuiți făcându-ne drum prin lumea tehnologiei, dar este în regulă. Oamenii obișnuiți pot fi încă persistenți, iar acea persistență contează.
+
+## Notă de copyright
+
+Vă mulțumim pentru lectură. Dacă ați găsit acest articol util, nu ezitați să dați like, salvați și partajați.
+Acest conținut a fost creat cu colaborare asistată de AI, versiunea finală fiind revizuită și aprobată de autor.
+- Autor: [newbe36524](https://www.newbe.pro)
+- Articol original: [https://docs.hagicode.com/blog/2026-03-27-hagicode-desktop-p2p-acceleration-architecture/](https://docs.hagicode.com/blog/2026-03-27-hagicode-desktop-p2p-acceleration-architecture/)
+- Notă de licență: Cu excepția cazului în care se specifică altfel, toate postările de pe acest blog sunt licențiate sub BY-NC-SA. Vă rugăm să includeți atribuirea la republicare.

@@ -1,0 +1,328 @@
+---
+title: "Hluboká integrace a praktické využití StreamJsonRpc v HagiCode"
+date: 2026-01-28
+truncate: true
+englishSlug: "streamjsonrpc-integration-in-hagicode"
+tags: [StreamJsonRpc, JSON-RPC, "C#", TypeScript, Communication Architecture]
+description: "Tento článek podrobně vysvětluje, jak projekt HagiCode (dříve PCode) úspěšně integroval komunikační knihovnu StreamJsonRpc společnosti Microsoft, aby nahradil"
+---
+
+## Hluboká integrace a praktické využití StreamJsonRpc v HagiCode
+
+> Tento článek podrobně vysvětluje, jak projekt HagiCode (dříve PCode) úspěšně integroval komunikační knihovnu StreamJsonRpc společnosti Microsoft, aby nahradil její původní vlastní implementaci JSON-RPC, a zároveň řeší technické problémy a architektonické problémy, které se vyskytly během integračního procesu.
+
+## Pozadí
+
+StreamJsonRpc je oficiálně udržovaná komunikační knihovna JSON-RPC společnosti Microsoft pro .NET a TypeScript, známá pro svou vysokou bezpečnost typu, automatické generování proxy a vyspělé mechanismy zpracování výjimek. V projektu HagiCode se tým rozhodl integrovat StreamJsonRpc, aby mohl komunikovat s externími nástroji AI, jako je iflow CLI a OpenCode CLI prostřednictvím ACP (Agent Communication Protocol), a zároveň eliminovat náklady na údržbu a potenciální chyby zavedené dřívější vlastní implementací JSON-RPC. Proces integrace však narazil na problémy specifické pro streamování JSON-RPC, zejména při práci s vazbou cíle proxy a rozpoznáváním obecných parametrů.
+
+Abychom se vypořádali s těmito bolestmi, učinili jsme odvážné rozhodnutí: přestavět celý systém sestavení od základů. Dopad tohoto rozhodnutí může být ještě větší, než očekáváte, a já vám jej brzy podrobně vysvětlím.
+
+## O HagiCode
+
+> Dovolte mi nejprve představit „hlavní projekt“ uvedený v tomto článku.
+
+Pokud jste během vývoje narazili na tyto frustrace:
+- Více projektů a více technologických zásobníků činí údržbu sestavovacích skriptů nákladnou
+- Konfigurace kanálu CI/CD je těžkopádná a každá změna vás pošle zpět do dokumentů
+- Stále se objevují problémy s kompatibilitou napříč platformami
+- Chcete, aby vám umělá inteligence pomohla psát kód, ale stávající nástroje nejsou dostatečně inteligentní
+
+Pak by vás mohl zajímat HagiCode, který budujeme.
+
+**Co je HagiCode?**
+- Inteligentní asistent kódování řízený umělou inteligencí
+- Podporuje vícejazyčné generování a optimalizaci kódu napříč platformami
+- Obsahuje vestavěné gamifikační mechanismy, takže kódování působí méně nudně
+
+**Proč to zde zmiňujete?**
+Integrační přístup StreamJsonRpc sdílený v tomto článku je odvozen z našich praktických zkušeností při vývoji HagiCode. Pokud považujete toto technické řešení za cenné, pravděpodobně to znamená, že náš technický vkus je docela solidní a samotný HagiCode také stojí za vyzkoušení.
+
+**Chcete se dozvědět více?**
+- GitHub: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site) (Hvězda by byla oceněna)
+- Oficiální stránky: [hagicode.com](https://hagicode.com)
+- Video ukázka: [www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/) (30minutová praktická ukázka)
+- Průvodce instalací: [hagicode.com/installation/docker-compose](https://hagicode.com/installation/docker-compose)
+- Veřejná beta byla zahájena: nainstalujte se a připojte se k beta verzi
+
+## Analýza
+
+Současný projekt je v kritické fázi integrace protokolu ACP a čelí následujícím technickým problémům a architektonickým výzvám:
+
+### 1. Omezení vlastní implementace
+Původní implementace JSON-RPC se nachází v `src/HagiCode.ClaudeHelper/AcpImp/` a zahrnuje komponenty jako např `JsonRpcEndpoint` a `ClientSideConnection`. Údržba této vlastní kódové základny je nákladná a postrádá pokročilé možnosti vyspělé knihovny, jako je hlášení průběhu a podpora zrušení.
+
+### 2. Překážky integrace StreamJsonRpc
+Při pokusu o migraci stávajícího `CallbackProxyTarget` vzor do StreamJsonRpc, zjistili jsme, že `_rpc.AddLocalRpcTarget(target)` metoda nemohla rozpoznat cíle vytvořené prostřednictvím vzoru proxy. Konkrétně StreamJsonRpc nemohl automaticky rozdělit vlastnosti obecného typu `T` do parametrů metody RPC, což způsobí selhání na straně serveru při zpracování volání metod iniciovaných klientem.
+
+### 3. Confused Architectural Layering
+Stávající `ClientSideConnection` mísí transportní vrstvu (WebSocket/Stdio), protokolovou vrstvu (JSON-RPC) a obchodní vrstvu (rozhraní ACP Agent), což vede k nejasným odpovědnostem. Trpí také chybějícími vazbami metod `AcpAgentCallbackRpcAdapter`.
+
+### 4. Chybějící protokoly
+Transportní vrstva WebSocket postrádá nezpracované protokolování obsahu JSON, takže je obtížné určit během ladění RPC, zda problém pochází ze serializace nebo ze sítě.
+
+## Řešení
+
+K vyřešení výše uvedených problémů jsme přijali následující systematické řešení, které optimalizuje ze tří dimenzí: architektonický refaktoring, integrace knihoven a vylepšené ladění.
+
+### 1. Plně migrujte na StreamJsonRpc
+
+#### Odstraňte starší kód
+Smazat `JsonRpcEndpoint.cs`, `AgentSideConnection.cs`a související uživatelské převodníky serializace, jako je např `JsonRpcMessageJsonConverter`.
+
+#### Integrujte oficiální knihovnu
+Představte `StreamJsonRpc` Balíček NuGet a použijte jeho `JsonRpc` třídy pro zpracování základní komunikační logiky.
+
+#### Abstraktní transportní vrstvu
+Definujte `IAcpTransport` rozhraní zvládnout obojí `WebSocket` a `Stdio` transportní režimy jednotným způsobem, čímž je zajištěno oddělení protokolové vrstvy od transportní vrstvy.
+
+```csharp
+// Definition of the IAcpTransport interface
+public interface IAcpTransport
+{
+    Task SendAsync(string message, CancellationToken cancellationToken = default);
+    Task<string> ReceiveAsync(CancellationToken cancellationToken = default);
+    Task CloseAsync(CancellationToken cancellationToken = default);
+}
+
+// WebSocket transport implementation
+public class WebSocketTransport : IAcpTransport
+{
+    private readonly WebSocket _webSocket;
+
+    public WebSocketTransport(WebSocket webSocket)
+    {
+        _webSocket = webSocket;
+    }
+
+    // Implement send and receive methods
+    // ...
+}
+
+// Stdio transport implementation
+public class StdioTransport : IAcpTransport
+{
+    private readonly StreamReader _reader;
+    private readonly StreamWriter _writer;
+
+    public StdioTransport(StreamReader reader, StreamWriter writer)
+    {
+        _reader = reader;
+        _writer = writer;
+    }
+
+    // Implement send and receive methods
+    // ...
+}
+```
+
+### 2. Opravte problémy s rozpoznáváním cíle proxy
+
+#### Analyzujte `CallbackProxyTarget`
+Zkontrolujte existující logiku generování dynamického proxy a identifikujte hlavní příčinu, proč ji StreamJsonRpc nemůže rozpoznat. Ve většině případů k tomu dochází, protože objekt proxy nezveřejňuje skutečné podpisy metod nebo používá typy parametrů, které StreamJsonRpc nepodporuje.
+
+#### Předávání parametrů faktoru
+Rozdělte obecné vlastnosti na explicitní parametry metody RPC. Namísto spoléhání se na dynamické vlastnosti definujte konkrétní Request/Response DTO (objekty přenosu dat), aby StreamJsonRpc mohl správně rozpoznat podpisy metod prostřednictvím reflexe.
+
+```csharp
+// Original generic property approach
+public class CallbackProxyTarget<T>
+{
+    public Func<T, Task> Callback { get; set; }
+}
+
+// Refactored concrete method approach
+public class ReadTextFileRequest
+{
+    public string FilePath { get; set; }
+}
+
+public class ReadTextFileResponse
+{
+    public string Content { get; set; }
+}
+
+public interface IAcpAgentCallback
+{
+    Task<ReadTextFileResponse> ReadTextFileAsync(ReadTextFileRequest request);
+    // Other methods...
+}
+```
+
+#### Použijte `Attach` Místo toho `AddLocalRpcTarget`
+V některých složitých scénářích ruční proxy server `JsonRpc` objektem a manipulací `RpcConnection` může být flexibilnější než přímé přidávání místního cíle.
+
+### 3. Implementujte metodu vázání a silnější protokolování
+
+#### Implementovat `AcpAgentCallbackRpcAdapter`
+Ujistěte se, že tato komponenta explicitně implementuje rozhraní proxy StreamJsonRpc a mapuje metody definované protokolem ACP, jako je např. `ReadTextFileAsync`, obslužným rutinám zpětného volání StreamJsonRpc.
+
+#### Integrujte protokolování
+Zachyťte a zaznamenejte nezpracovaný text požadavků a odpovědí JSON-RPC v kanálu zpracování zpráv WebSocket nebo Stdio. Použijte `ILogger` pro výstup surového užitečného zatížení před analýzou a po serializaci, takže problémy s formátováním lze snadněji diagnostikovat.
+
+```csharp
+// Transport wrapper with enhanced logging
+public class LoggingAcpTransport : IAcpTransport
+{
+    private readonly IAcpTransport _innerTransport;
+    private readonly ILogger<LoggingAcpTransport> _logger;
+
+    public LoggingAcpTransport(IAcpTransport innerTransport, ILogger<LoggingAcpTransport> logger)
+    {
+        _innerTransport = innerTransport;
+        _logger = logger;
+    }
+
+    public async Task SendAsync(string message, CancellationToken cancellationToken = default)
+    {
+        _logger.LogTrace("Sending message: {Message}", message);
+        await _innerTransport.SendAsync(message, cancellationToken);
+    }
+
+    public async Task<string> ReceiveAsync(CancellationToken cancellationToken = default)
+    {
+        var message = await _innerTransport.ReceiveAsync(cancellationToken);
+        _logger.LogTrace("Received message: {Message}", message);
+        return message;
+    }
+
+    public async Task CloseAsync(CancellationToken cancellationToken = default)
+    {
+        _logger.LogDebug("Closing connection");
+        await _innerTransport.CloseAsync(cancellationToken);
+    }
+}
+```
+
+### 4. Refaktorové architektonické vrstvení
+
+#### Transportní vrstva (`AcpRpcClient`)
+Zabalte připojení StreamJsonRpc a udělejte za něj odpovědnost `InvokeAsync` řízení životního cyklu hovorů a připojení.
+
+```csharp
+public class AcpRpcClient : IDisposable
+{
+    private readonly JsonRpc _rpc;
+    private readonly IAcpTransport _transport;
+
+    public AcpRpcClient(IAcpTransport transport)
+    {
+        _transport = transport;
+        _rpc = new JsonRpc(new StreamRpcTransport(transport));
+        _rpc.StartListening();
+    }
+
+    public async Task<TResponse> InvokeAsync<TResponse>(string methodName, object parameters)
+    {
+        return await _rpc.InvokeAsync<TResponse>(methodName, parameters);
+    }
+
+    public void Dispose()
+    {
+        _rpc.Dispose();
+        _transport.Dispose();
+    }
+
+    // StreamRpcTransport is the StreamJsonRpc adapter for IAcpTransport
+    private class StreamRpcTransport : IDuplexPipe
+    {
+        // Implement the IDuplexPipe interface
+        // ...
+    }
+}
+```
+
+#### Protokolová vrstva (`IAcpAgentClient` / `IAcpAgentCallback`)
+Definujte jasná rozhraní klient-agent a agent-klient. Odstraňte cyklický tovární vzor `Func<IAcpAgent, IAcpClient>` a nahradit ji vložením závislosti nebo přímou registrací zpětného volání.
+
+## Praxe
+
+Na základě osvědčených postupů a zkušeností z projektu StreamJsonRpc jsou následující klíčová doporučení pro implementaci:
+
+### 1. Silně typované DTO jsou lepší než dynamické objekty
+Hlavní výhoda StreamJsonRpc spočívá v silném psaní. Nepoužívejte `dynamic` nebo `JObject` předat parametry. Místo toho definujte explicitní třídy C# POCO jako parametry pro každou metodu RPC. To nejen řeší problém s rozpoznáváním cíle proxy, ale také zachycuje chyby typu v době kompilace.
+
+Příklad: nahraďte obecné vlastnosti v `CallbackProxyTarget` s konkrétními třídami jako např `ReadTextFileRequest` a `WriteTextFileRequest`.
+
+### 2. Explicitně deklarujte názvy metod
+Použijte `[JsonRpcMethod]` atribut explicitně specifikovat názvy metod RPC namísto spoléhání se na výchozí mapování názvů metod. To zabraňuje selháním vyvolání způsobeným rozdíly ve stylu pojmenování, jako je PascalCase versus camelCase.
+
+```csharp
+public interface IAcpAgentCallback
+{
+    [JsonRpcMethod("readTextFile")]
+    Task<ReadTextFileResponse> ReadTextFileAsync(ReadTextFileRequest request);
+    
+    [JsonRpcMethod("writeTextFile")]
+    Task WriteTextFileAsync(WriteTextFileRequest request);
+}
+```
+
+### 3. Využijte zpětná volání stavu připojení
+StreamJsonRpc poskytuje `JsonRpc.ConnectionLost` událost. Měli byste bezpodmínečně naslouchat této události, abyste zvládli neočekávané ukončení procesu nebo odpojení sítě, což je včasnější než spoléhat se pouze na detekci selhání Orleans Grain.
+
+```csharp
+_rpc.ConnectionLost += (sender, e) =>
+{
+    _logger.LogError("RPC connection lost: {Reason}", e.ToString());
+    // Handle reconnection logic or notify the user
+};
+```
+
+### 4. Záznam protokolů podle vrstvy
+- **Úroveň sledování**: Zaznamenejte celý nezpracovaný datový obsah požadavku/odpovědi JSON.
+- **Úroveň ladění**: Zaznamenejte zásobníky volání metody a souhrny parametrů.
+- **Poznámka**: Ujistěte se, že protokoly neobsahují citlivé autorizační tokeny nebo obsah velkých souborů kódovaný Base64.
+
+### 5. Zvládněte zvláštní povahu streamování
+StreamJsonRpc nativně podporuje `IAsyncEnumerable`. Při implementaci výzev streamování pro ACP použijte `IAsyncEnumerable` přímo namísto vlastní logiky stránkování. To může značně zjednodušit množství kódu potřebného pro zpracování streamování.
+
+```csharp
+public interface IAcpAgentCallback
+{
+    [JsonRpcMethod("streamText")]
+    IAsyncEnumerable<string> StreamTextAsync(StreamTextRequest request);
+}
+```
+
+### 6. Vzor adaptéru
+Nechat `ACPSession` a `ClientSideConnection` oddělit. `ACPSession` by se měl zaměřit na řízení stavu Orleans a obchodní logiku, jako je řazení zpráv, a měl by používat objekt připojení StreamJsonRpc prostřednictvím složení spíše než dědičnosti.
+
+## Závěr
+
+Komplexní integrací StreamJsonRpc se projekt HagiCode úspěšně vypořádal s vysokými náklady na údržbu, funkčními omezeními a zmatením architektonických vrstev původní vlastní implementace. Mezi klíčová vylepšení patří:
+
+1. Nahrazení dynamických vlastností silně typizovanými DTO, zlepšení udržovatelnosti a spolehlivosti
+2. Implementace abstrakce transportní vrstvy a separace protokolové vrstvy, zlepšení architektonické jasnosti
+3. Posílení schopností protokolování pro snadnější diagnostiku problémů s komunikací
+4. Představujeme podporu streamování pro zjednodušení implementace streamování
+
+Tato vylepšení poskytují HagiCode stabilnější a efektivnější komunikační základ, což mu umožňuje lepší interakci s externími nástroji AI a pokládá pevný základ pro budoucí rozšiřování funkcí.
+
+## Reference
+
+- Oficiální dokumentace StreamJsonRpc: [https://learn.microsoft.com/en-us/dotnet/api/microsoft.visualstudio.threading.streamjsonrpc](https://learn.microsoft.com/en-us/dotnet/api/microsoft.visualstudio.threading.streamjsonrpc)
+- Specifikace ACP (Agent Communication Protocol): [https://github.com/microsoft/agentcommunicationprotocol](https://github.com/microsoft/agentcommunicationprotocol)
+- Projekt HagiCode: [https://github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Oficiální dokumentace Orleans: [https://learn.microsoft.com/en-us/dotnet/orleans](https://learn.microsoft.com/en-us/dotnet/orleans)
+
+---
+
+Pokud vám tento článek pomohl:
+- Dejte like, ať to objeví více lidí
+- Dejte nám hvězdu na GitHubu: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Navštivte oficiální webovou stránku, kde se dozvíte více: [hagicode.com](https://hagicode.com)
+- Podívejte se na 30minutové praktické demo: [www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)
+- Vyzkoušejte instalaci jedním kliknutím: [hagicode.com/installation/docker-compose](https://hagicode.com/installation/docker-compose)
+- Veřejná beta byla spuštěna a můžete si ji nainstalovat a vyzkoušet
+
+
+
+---
+
+Děkuji za přečtení. Pokud se vám tento článek zdál užitečný, klikněte níže na tlačítko Líbí se mi, aby jej objevilo více lidí.
+
+Tento obsah byl vytvořen ve spolupráci s umělou inteligencí a zkontrolován mnou a odráží mé vlastní názory a postoj.
+
+- **Autor:** [newbe36524](https://www.newbe.pro)
+- **Odkaz na článek:** [https://hagicode.com/blog/2026/01/28/streamjsonrpc-integration-in-hagicode](https://hagicode.com/blog/2026/01/28/streamjsonrpc-integration-in-hagicode)
+- **Autorská práva:** Pokud není uvedeno jinak, všechny články blogu na tomto webu jsou licencovány podle BY-NC-SA. Při opětovném odeslání prosím uveďte zdroj!

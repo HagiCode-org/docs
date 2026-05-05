@@ -1,0 +1,375 @@
+---
+title: "SQLite Sharding dalam Praktek: Perbandingan Mendalam dari Tiga Strategi Sharding"
+date: 2026-04-17
+tags: [SQLite, Sharding, Performance Optimization, Architecture Design, HagiCode]
+description: "Ketika database SQLite file tunggal mengalami hambatan konkurensi, bagaimana kita menerobosnya? Artikel ini membagikan tiga pendekatan sharding SQLite dari HagiCode"
+---
+
+## SQLite Sharding dalam Praktek: Perbandingan Mendalam dari Tiga Strategi Sharding
+
+> Ketika database SQLite file tunggal mengalami hambatan konkurensi, bagaimana kita menerobosnya? Artikel ini membagikan tiga pendekatan sharding SQLite dari proyek HagiCode dalam berbagai skenario, membantu Anda memahami cara memilih strategi sharding yang tepat.
+
+Halo semuanya, saya Yu Kun, pencipta HagiCode.
+
+## Latar Belakang
+
+Saat membangun aplikasi berkinerja tinggi, database SQLite file tunggal mengalami masalah yang sangat praktis. Saat jumlah pengguna dan volume data bertambah, masalah berikut mulai muncul satu demi satu:
+
+- Operasi tulis mulai mengantri, dan waktu respons terasa meningkat
+- Performa kueri menurun seiring bertambahnya volume data
+- Sering `database is locked` kesalahan muncul di bawah akses multithread
+
+Banyak orang secara naluriah bertanya: haruskah kita langsung bermigrasi ke PostgreSQL atau MySQL? Hal ini dapat memecahkan masalah, namun kompleksitas penerapan meningkat tajam. Apakah ada opsi yang lebih ringan?
+
+Jawabannya adalah sharding. Pada akhirnya permasalahan rekayasa tetap harus diselesaikan dengan metode rekayasa. Dengan mendistribusikan data ke beberapa file SQLite, kami dapat meningkatkan kinerja konkurensi dan kueri secara signifikan sambil mempertahankan karakteristik ringan SQLite.
+
+## Tentang HagiCode
+
+Pendekatan yang dibagikan dalam artikel ini berasal dari pengalaman praktis kami di [Kode Hagi](https://hagicode.com) proyek. Sebagai proyek asisten pengkodean AI, HagiCode perlu menangani pesan percakapan dalam jumlah besar, persistensi status, dan catatan riwayat peristiwa. Melalui penyelesaian masalah nyata inilah kami merangkum tiga pendekatan sharding untuk skenario berbeda.
+
+Alat yang bagus itu penting, tetapi cara Anda menggunakannya bergantung pada pekerjaan yang sebenarnya perlu Anda lakukan.
+
+Repositori kode kami ada di [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site). Jangan ragu untuk melihat lebih dalam jika Anda tertarik.
+
+## Ikhtisar Tiga Pendekatan Sharding
+
+Setelah menganalisis basis kode HagiCode, kami mengidentifikasi tiga pendekatan sharding SQLite untuk skenario bisnis yang berbeda:
+
+1. **Penyimpanan pecahan Pesan Sesi**: penyimpanan untuk pesan percakapan AI, ditandai dengan penulisan frekuensi tinggi dan kueri terisolasi berbasis sesi
+2. **Penyimpanan pecahan Orleans Grain**: menyatakan persistensi untuk kerangka kerja terdistribusi, yang ditandai dengan akses lintas node dan kebutuhan perutean deterministik
+3. **Penyimpanan pecahan Riwayat Pahlawan**: catatan peristiwa historis untuk sistem yang digamifikasi, ditandai dengan sumber peristiwa dan kebutuhan akan kompatibilitas migrasi
+
+Meskipun skenario bisnisnya berbeda, ketiganya mengikuti prinsip desain inti yang sama:
+
+- **Perutean deterministik**: menghitung shard langsung dari ID bisnis, tanpa tabel metadata
+- **Akses transparan**: lapisan atas menggunakan antarmuka terpadu dan tetap tidak mengetahui pecahan yang mendasarinya
+- **Penyimpanan independen**: setiap pecahan adalah file SQLite yang sepenuhnya independen
+- **Pengoptimalan konkurensi**: Mode WAL plus `busy_timeout` mengurangi pertikaian kunci
+
+Banyak orang bertanya: mengapa tidak membangun satu solusi sharding yang umum? Itu adalah pertanyaan yang sangat praktis, dan kesimpulannya jelas: dalam bidang teknik, tidak ada solusi universal, yang ada hanyalah solusi yang paling sesuai dengan skenario bisnis saat ini. Selanjutnya, kami akan membandingkan implementasi konkrit ketiga pendekatan tersebut secara mendalam.
+
+## Perbandingan Strategi Sharding
+
+### Aturan Penghitungan dan Penamaan Pecahan
+
+| Aspek | Pesan Sesi | Biji-bijian Orleans | Sejarah Pahlawan |
+|------|----------------|---------------|--------------|
+| **Jumlah pecahan** | 256 (16²) | 100 | 10 |
+| **Aturan penamaan** | Heksadesimal (00-ff) | Desimal (00-99) | Desimal (0-9) |
+| **Direktori penyimpanan** | `DataDir/messages/` | `DataDir/orleans/grains/` | `DataDir/hero-history/` |
+| **Pola nama file** | `{shard}.db` | `grains-{shard}.db` | `{shard}.db` |
+
+Mengapa ada perbedaan besar dalam jumlah pecahan? Itu tergantung pada karakteristik bisnis. Dengan kata lain, model akan berubah, alat akan berkembang, dan alur kerja akan ditingkatkan, namun dasar-dasar tekniknya tetap sama: pertama-tama pahami masalah yang sebenarnya Anda coba selesaikan.
+
+- **Pesan Sesi** menggunakan 256 shard karena pesan percakapan memiliki frekuensi penulisan tertinggi dan memerlukan lebih banyak shard untuk menyebarkan muatannya
+- **Orleans Grain** menggunakan 100 shard, yang menyeimbangkan performa konkurensi dan kompleksitas operasional
+- **Riwayat Pahlawan** hanya menggunakan 10 pecahan karena penulisan peristiwa sejarah lebih jarang dan biaya migrasi harus dipertimbangkan
+
+### Perbedaan Algoritma Routing
+
+Algoritma perutean adalah inti dari skema sharding. Ini menentukan bagaimana data didistribusikan ke seluruh pecahan. Ketiga pendekatan tersebut menggunakan strategi perutean yang berbeda:
+
+```csharp
+// Session Message: last two hexadecimal characters of the GUID
+var normalized = Guid.Parse(sessionId.Value).ToString("N").ToLowerInvariant();
+return normalized[^2..];  // Take the last two hexadecimal characters
+
+// Orleans Grain: extract digits, then use the last two digits modulo shard count
+var digits = ExtractDigits(grainId);  // Extract all digits
+var lastTwoDigits = (digits[^2] * 10) + digits[^1];
+return lastTwoDigits % shardCount;
+
+// Hero History: modulo 10 using the ASCII value of the last character
+return heroId[^1] % 10;
+```
+
+**Analisis desain**:
+
+- **Pesan Sesi** ID adalah GUID. Setelah mengonversi ke heksadesimal, mengambil dua karakter terakhir memberikan distribusi yang merata di 256 pecahan
+- **Orleans Grain** ID tidak memiliki format yang konsisten dan mungkin berisi huruf dan angka, jadi semua digit diekstraksi sebelum mengambil modulo
+- **Riwayat Pahlawan** ID adalah string, sehingga nilai ASCII dari karakter terakhir digunakan langsung dengan modulo. Sederhana saja, namun distribusinya mungkin kurang seragam
+
+**Poin penting**: apa pun algoritme yang Anda gunakan, ID yang sama harus selalu dipetakan ke shard yang sama. Ini adalah salah satu persyaratan paling mendasar dalam sistem terdistribusi. Jika tidak, inkonsistensi data tidak dapat dihindari. Jika perutean tidak stabil, semua upaya lainnya akan gagal.
+
+### Perbedaan Strategi Inisialisasi
+
+| Aspek | Pesan Sesi | Biji-bijian Orleans | Sejarah Pahlawan |
+|------|----------------|---------------|--------------|
+| **Waktu inisialisasi** | Malas dimuat sesuai permintaan | Inisialisasi paralel penuh saat startup | Malas dimuat sesuai permintaan |
+| **Kontrol konkurensi** | `Lazy<Task>` mencegah inisialisasi duplikat | `Parallel.ForEachAsync` | `Lazy<Task>` mencegah inisialisasi duplikat |
+
+**Mengapa Orleans Grain memilih inisialisasi penuh saat startup?**
+
+Karena Orleans adalah kerangka terdistribusi, Grain dapat dijadwalkan ke node mana pun. Jika file shard ditemukan hilang hanya pada waktu proses, permintaan bisa gagal. Inisialisasi penuh saat startup memperpanjang waktu startup, namun menjamin stabilitas runtime. Menjalankannya hanyalah permulaan; menjaganya agar tetap dapat dipelihara adalah keterampilan yang sebenarnya.
+
+**Keuntungan dari pemuatan lambat**:
+
+Untuk Pesan Sesi dan Riwayat Pahlawan, pemuatan lambat mengurangi waktu startup. File dan skema dibuat hanya ketika pecahan benar-benar dibutuhkan. Menggunakan `Lazy<Task>` juga mencegah kondisi balapan selama inisialisasi bersamaan. Desainnya terlihat sederhana, tetapi dalam proyek nyata ini menghemat banyak masalah yang tidak perlu.
+
+### Karakteristik Desain Skema
+
+Desain skema ketiga pendekatan tersebut mencerminkan karakteristik bisnisnya masing-masing:
+
+**Pesan Sesi**:
+- Mendukung model Sumber Acara (tabel acara ditambah tabel snapshot)
+- Termasuk tabel anak untuk blok konten pesan (`MessageContentBlocks`)
+- Memiliki bidang kompresi dan bendera kompresi untuk mendukung pengoptimalan di masa mendatang
+
+**Gandum Orleans**:
+- Desain minimalis: tunggal `GrainState` meja
+- Menyimpan status sebagai JSON serial
+- Menggunakan kontrol konkurensi optimis berbasis ETag
+
+**Sejarah Pahlawan**:
+- Indeks pengoptimalan kueri garis waktu
+- Unik `DedupeKey` batasan mencegah duplikasi
+- Mendukung berbagai jenis dan status acara
+
+Desain ini menunjukkan bahwa desain skema harus tetap selaras dengan kebutuhan bisnis daripada mengejar keumuman. Orleans Grain sederhana karena hanya perlu menyimpan status serial dan tidak memerlukan kemampuan kueri yang rumit. Ini bukan mistisisme. Itu adalah rekayasa. Jangan terburu-buru memberi nama besar pada sesuatu sebelum memeriksa apakah ia dapat bertahan dalam dua iterasi dalam tim sebenarnya.
+
+### Perbandingan Konfigurasi Konkurensi
+
+Ketiga pendekatan tersebut menggunakan pengaturan optimasi konkurensi SQLite yang sama:
+
+```sql
+PRAGMA journal_mode=WAL;      -- Write-ahead logging mode
+PRAGMA synchronous=NORMAL;     -- Reduce persistence overhead
+PRAGMA busy_timeout=5000;      -- 5-second busy wait
+PRAGMA foreign_keys=ON;        -- Foreign key constraints
+```
+
+**Kelebihan mode WAL**:
+
+Mode jurnal rollback tradisional menyebabkan pertentangan kunci selama penulisan, sedangkan mode WAL memungkinkan pembacaan dan penulisan dilanjutkan secara bersamaan. Dalam skenario data besar, hal ini dapat meningkatkan kinerja secara signifikan. Banyak pengembang mengabaikan pengaturan ini, namun ini jauh lebih penting daripada yang mereka pikirkan.
+
+**Pengorbanan dari `synchronous=NORMAL`**:
+
+Menyetelnya ke `FULL` memberikan keamanan maksimal, namun secara signifikan mengurangi kinerja. `NORMAL` memberikan keseimbangan antara keselamatan dan kinerja, menjadikannya pilihan tepat untuk sebagian besar aplikasi. Tidak perlu terlalu memikirkan hal ini. `NORMAL` sudah cukup.
+
+## Cara Memilih Strategi Sharding
+
+Berdasarkan analisis ketiga pendekatan HagiCode, kita dapat merangkum matriks keputusan berikut:
+
+```
+High-throughput scenarios -> more shards (for example, Message uses 256)
+Simple maintainability   -> fewer shards (for example, Hero History uses 10)
+Mostly numeric IDs       -> modulo algorithm (Orleans Grain)
+Mostly GUIDs             -> hexadecimal suffix (Session Message)
+String IDs               -> ASCII modulo (Hero History)
+```
+
+**Aturan praktis dalam memilih jumlah pecahan**:
+
+- Terlalu sedikit (`< 10`): peningkatan konkurensi terbatas, membuat sharding menjadi kurang bermakna
+- Terlalu banyak (`> 1000`): manajemen file menjadi kompleks dan overhead kumpulan koneksi meningkat
+- Aturan praktisnya: 10 hingga 100 pecahan cocok untuk sebagian besar skenario
+- Skenario konkurensi yang sangat tinggi: 256 shard dapat dipertimbangkan
+
+Jika hanya melihat demo saja, mudah terbawa suasana. Namun begitu Anda memasuki produksi, setiap biaya harus diperhitungkan dengan cermat. Banyak hal yang bukannya tidak mungkin, hanya saja harganya tidak jujur.
+
+## Panduan Praktis
+
+### Menerapkan Penyelesai Pecahan Standar
+
+```csharp
+public interface IShardResolver<TId>
+{
+    string ResolveShardKey(TId id);
+}
+
+// Hexadecimal sharding (for GUIDs)
+public class HexSuffixShardResolver : IShardResolver<string>
+{
+    private readonly int _suffixLength;
+
+    public HexSuffixShardResolver(int suffixLength = 2)
+    {
+        _suffixLength = suffixLength;
+    }
+
+    public string ResolveShardKey(string id)
+    {
+        var normalized = id.Replace("-", "").ToLowerInvariant();
+        return normalized[^_suffixLength..];
+    }
+}
+
+// Numeric modulo sharding (for purely numeric IDs)
+public class NumericModuloShardResolver : IShardResolver<long>
+{
+    private readonly int _shardCount;
+
+    public NumericModuloShardResolver(int shardCount)
+    {
+        _shardCount = shardCount;
+    }
+
+    public string ResolveShardKey(long id)
+    {
+        return (id % _shardCount).ToString("D2");
+    }
+}
+```
+
+### Pola Pabrik Koneksi Terpadu
+
+```csharp
+public class ShardedConnectionFactory<TOptions>
+{
+    private readonly ConcurrentDictionary<string, Lazy<Task>> _initializationTasks = new();
+    private readonly TOptions _options;
+    private readonly IShardSchemaInitializer _initializer;
+
+    public ShardedConnectionFactory(
+        TOptions options,
+        IShardSchemaInitializer initializer)
+    {
+        _options = options;
+        _initializer = initializer;
+    }
+
+    public async Task<TDbContext> CreateAsync(string shardKey, CancellationToken ct)
+    {
+        var connectionString = BuildConnectionString(shardKey);
+
+        // Use Lazy<Task> to prevent concurrent initialization
+        var initTask = _initializationTasks.GetOrAdd(
+            connectionString,
+            _ => new Lazy<Task>(() => InitializeShardAsync(connectionString, ct))
+        );
+
+        await initTask.Value;
+        return CreateDbContext(connectionString);
+    }
+
+    private async Task InitializeShardAsync(string connectionString, CancellationToken ct)
+    {
+        await _initializer.InitializeAsync(connectionString, ct);
+    }
+
+    private string BuildConnectionString(string shardKey)
+    {
+        var shardPath = Path.Combine(_options.BaseDirectory, $"{shardKey}.db");
+        return $"Data Source={shardPath}";
+    }
+
+    private TDbContext CreateDbContext(string connectionString)
+    {
+        // Create the DbContext according to the specific ORM
+        return Activator.CreateInstance(typeof(TDbContext), connectionString) as TDbContext;
+    }
+}
+```
+
+### Praktik Terbaik untuk Inisialisasi Skema
+
+```csharp
+public class SqliteShardInitializer : IShardSchemaInitializer
+{
+    public async Task InitializeAsync(string connectionString, CancellationToken ct)
+    {
+        await using var connection = new SqliteConnection(connectionString);
+        await connection.OpenAsync(ct);
+
+        // Concurrency optimization settings
+        await connection.ExecuteAsync("""
+            PRAGMA journal_mode=WAL;
+            PRAGMA synchronous=NORMAL;
+            PRAGMA busy_timeout=5000;
+            PRAGMA foreign_keys=ON;
+        """);
+
+        // Create table schema
+        await connection.ExecuteAsync("""
+            CREATE TABLE IF NOT EXISTS Entities (
+                Id TEXT PRIMARY KEY,
+                CreatedAt TEXT NOT NULL,
+                UpdatedAt TEXT NOT NULL,
+                Data TEXT NOT NULL,
+                ETag TEXT
+            );
+        """);
+
+        // Create indexes
+        await connection.ExecuteAsync("""
+            CREATE INDEX IF NOT EXISTS IX_Entities_CreatedAt
+            ON Entities(CreatedAt DESC);
+
+            CREATE INDEX IF NOT EXISTS IX_Entities_UpdatedAt
+            ON Entities(UpdatedAt DESC);
+        """);
+    }
+}
+```
+
+### Pertimbangan Utama
+
+**1. Stabilitas perutean**
+
+Algoritme perutean harus menjamin bahwa ID yang sama selalu dipetakan ke shard yang sama. Hindari penghitungan acak atau bergantung pada waktu, dan jangan memasukkan parameter yang dapat diubah ke dalam algoritme.
+
+**2. Memilih jumlah pecahan**
+
+Jumlah pecahan harus ditentukan pada tahap desain. Mengubahnya nanti sangatlah sulit. Pertimbangkan:
+- Volume konkurensi saat ini dan masa depan
+- Biaya pengelolaan setiap pecahan
+- Kompleksitas migrasi data
+
+**3. Perencanaan migrasi**
+
+Pendekatan Hero History menunjukkan jalur migrasi yang lengkap:
+
+1. Bangun infrastruktur penyimpanan shard baru
+2. Menerapkan layanan migrasi untuk menyalin data dari database utama ke dalam pecahan
+3. Verifikasi kompatibilitas kueri setelah migrasi
+4. Beralih jalur baca dan tulis ke pecahan
+5. Bersihkan tabel lama di database utama
+
+Persyaratan migrasi di masa depan perlu dipertimbangkan saat merancang skema sharding. Bicara itu murah. Tunjukkan padaku kodenya. Namun kode saja tidak cukup. Anda juga memerlukan jalur migrasi yang lengkap. Kesuksesan yang terjadi satu kali bukanlah sebuah sistem; kesuksesan yang berkelanjutan adalah.
+
+**4. Pemantauan dan operasi**
+
+- Pantau distribusi ukuran di seluruh pecahan untuk mendeteksi penyimpangan data sejak dini
+- Tetapkan peringatan untuk titik panas shard untuk mencegah satu shard menjadi penghambat
+- Periksa ukuran file WAL secara teratur untuk menghindari penggunaan disk yang berlebihan
+- Tetapkan mekanisme pemeriksaan kesehatan pecahan
+
+**5. Cakupan tes**
+
+- Uji kondisi batas seperti ID kosong, karakter khusus, dan ID yang terlalu panjang
+- Verifikasi determinisme perutean untuk memastikan ID yang sama selalu dipetakan ke shard yang sama
+- Jalankan tes stres tulis secara bersamaan untuk memastikan pertikaian kunci berkurang secara efektif
+- Jalankan pengujian migrasi untuk memastikan integritas dan konsistensi data
+
+## Ringkasan
+
+Dengan membandingkan tiga pendekatan sharding SQLite dalam proyek HagiCode, kita dapat melihat bahwa:
+
+1. **Tidak ada solusi universal**: skenario bisnis yang berbeda memerlukan strategi sharding yang berbeda
+2. **Prinsip-prinsip inti dibagikan**: perutean deterministik, akses transparan, penyimpanan independen, dan optimalisasi konkurensi
+3. **Desain harus menghadap masa depan**: pertimbangkan jalur migrasi dan biaya operasional
+
+Jika proyek Anda menggunakan SQLite dan mulai menemui hambatan konkurensi, saya harap artikel ini memberi Anda beberapa ide berguna. Tidak perlu terburu-buru bermigrasi ke database kelas berat. Terkadang strategi sharding yang tepat sudah cukup untuk menyelesaikan masalah.
+
+Tentu saja, sharding bukanlah solusi terbaik. Sebelum memilih strategi sharding, pastikan terlebih dahulu bahwa:
+- Anda telah mengoptimalkan kinerja kueri tabel tunggal
+- Anda telah menambahkan indeks yang sesuai
+- Anda telah mengaktifkan mode WAL
+
+Hanya setelah pengoptimalan ini selesai, dan hambatan kinerja masih ada, Anda harus mempertimbangkan untuk memperkenalkan sharding. Melakukan hal sederhana dengan baik merupakan sebuah kemampuan tersendiri.
+
+Terkadang melakukan pekerjaan sekali mengatakan lebih banyak daripada menjelaskannya sepuluh kali. Dari sini, biarkan hasil rekayasa yang berbicara sendiri.
+
+## Referensi
+
+- Repositori proyek HagiCode: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Dokumentasi mode SQLite WAL: [sqlite.org/wal.html](https://www.sqlite.org/wal.html)
+- Kerangka kerja terdistribusi Orleans: [dotnet.github.io/orleans](https://dotnet.github.io/orleans/)
+
+## Pemberitahuan Hak Cipta
+
+Terima kasih telah membaca. Jika Anda merasa artikel ini bermanfaat, silakan sukai, tandai, dan bagikan.
+Konten ini dibuat dengan kolaborasi bantuan AI, dan konten akhir ditinjau dan dikonfirmasi oleh penulis.
+- Penulis: [baru36524](https://www.newbe.pro)
+- Tautan asli: [https://docs.hagicode.com/blog/2026-04-17-sqlite-sharding-strategies-comparison/](https://docs.hagicode.com/blog/2026-04-17-sqlite-sharding-strategies-comparison/)
+- Hak Cipta: Kecuali dinyatakan lain, semua artikel blog dilisensikan di bawah BY-NC-SA. Harap mencantumkan sumbernya saat memposting ulang.

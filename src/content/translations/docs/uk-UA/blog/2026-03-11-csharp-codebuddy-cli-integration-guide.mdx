@@ -1,0 +1,478 @@
+---
+title: "Практичний посібник з інтеграції CodeBuddy CLI у C# Backend"
+date: 2026-03-12
+tags: ["C#", CodeBuddy, AI Provider, ACP, "Integration Guide"]
+description: "У цій статті описано повний підхід до інтеграції CodeBuddy CLI у серверний проект C#, щоб ви могли надати можливості помічника кодування штучного інтелекту."
+---
+
+## Практичний посібник з інтеграції CodeBuddy CLI у C# Backend
+
+> У цій статті описано повний підхід до інтеграції CodeBuddy CLI у бекенд-проект C#, щоб ви могли повністю надати можливості помічника кодування ШІ.
+
+:::note[часовий контекст]
+У цій статті обговорюється дизайн інтеграції CodeBuddy і структура постачальника, як вони існували на момент публікації. Для поточної постійно підтримуваної області див [Інсталяція агента AI Agent CLI](/uk-UA/related-software-installation/ai-agent-cli/) і [Керівництво по установці](/uk-UA/installation); `IFlowCli` тепер зберігається лише як історичне значення сумісності та не є частиною поточної активної підтримки.
+:::
+
+## Фон
+
+У сучасній розробці помічника кодування AI один постачальник AI часто не може задовольнити складні та мінливі сценарії розробки. HagiCode, як багатофункціональний помічник кодування штучного інтелекту, має підтримувати кілька постачальників штучного інтелекту, щоб забезпечити кращий досвід роботи з користувачем. Користувачі повинні мати достатньо свободи вибору. На початку 2026 року проект зіткнувся з ключовим рішенням: як відновити можливості інтеграції CodeBuddy ACP (Agent Communication Protocol) у серверній частині C#.
+
+У проекті раніше була реалізована інтеграція CodeBuddy, але пов’язаний код було видалено під час рефакторизму. Там нема чого скаржитися; під час ітеративної розробки щось завжди залишається позаду. Мета цього технічного рішення полягала в тому, щоб повністю відновити ці можливості та покращити архітектуру, щоб вона була більш надійною та зручною для обслуговування.
+
+Якщо ви також плануєте підключити кілька помічників кодування штучного інтелекту до свого власного проекту, наведений нижче підхід може дати вам деякі ідеї. Він відображає уроки, які ми узагальнили після того, як потрапили в безліч пасток, і, можливо, це допоможе вам уникнути кількох обхідних шляхів.
+
+## Про HagiCode
+
+Підхід, поширений у цій статті, базується на нашому практичному досвіді в [HagiCode](https://hagicode.com) проект. HagiCode — це проект помічника з кодування штучного інтелекту з відкритим кодом, який підтримує кілька постачальників штучного інтелекту та роботу між платформами. Щоб задовольнити різні уподобання користувачів, нам потрібно гнучко перемикатися між різними помічниками кодування ШІ, саме тому ми створили інтеграцію CodeBuddy, описану тут.
+
+HagiCode використовує модульну конструкцію з постачальниками штучного інтелекту, реалізованими як підключаються компоненти. Ця архітектура дозволяє нам легко додавати нову підтримку ШІ, не впливаючи на наявні функції. Якщо дизайн добре зроблений на початку, це позбавляє від багатьох проблем пізніше. Якщо вас цікавить наша технічна архітектура, ви можете переглянути повний вихідний код на GitHub.
+
+## Архітектурний дизайн
+
+### Огляд багаторівневої архітектури
+
+Інтеграція між C# і CodeBuddy використовує чітку багаторівневу архітектуру. Ця конструкція чітко визначає відповідальність і значно спрощує довгострокове обслуговування:
+
+```
+┌─────────────────────────────────────────────┐
+│           Provider Contract Layer           │
+│   AIProviderType enum + extension methods   │
+├─────────────────────────────────────────────┤
+│           Provider Factory Layer            │
+│   AIProviderFactory dependency injection factory │
+├─────────────────────────────────────────────┤
+│           Provider Implementation Layer     │
+│   CodebuddyCliProvider concrete implementation │
+├─────────────────────────────────────────────┤
+│           ACP Infrastructure Layer          │
+│  ACPSessionManager / StdioAcpTransport      │
+│  AcpRpcClient / AcpAgentClient              │
+└─────────────────────────────────────────────┘
+```
+
+Які переваги цього нашарування? Простіше кажучи, кожен шар не заважає іншим. Якщо пізніше ми захочемо змінити механізм зв’язку, наприклад, з `stdio` до WebSocket, нам потрібно лише змінити нижній рівень, а бізнес-логіка над ним залишається недоторканою. Ніхто не хоче, щоб комунікаційні зміни вплинули на всю кодову базу.
+
+### Розбивка основних компонентів
+
+**Договірний рівень постачальника** є основою всієї архітектури. Ми визначаємо `AIProviderType` enum, де `CodebuddyCli = 3` використовується як значення enum і реалізує двонаправлене відображення між рядками та enum за допомогою методів розширення. Це дозволяє зручно перетворювати рядки у файлах конфігурації на переліки, а переліки перетворювати назад на рядки для виведення налагодження.
+
+**Заводський рівень постачальника** відповідає за створення відповідного екземпляра постачальника на основі конфігурації. Він використовує впровадження залежностей .NET разом із `ActivatorUtilities.CreateInstance` для динамічного створення. Перевага фабричного шаблону полягає в тому, що під час додавання нового постачальника вам потрібно лише додати логіку створення, а не змінювати існуючий код.
+
+**Рівень реалізації постачальника** — це місце, де відбувається фактична робота. `CodebuddyCliProvider` реалізує `IAIProvider` інтерфейс і забезпечує два режими виклику: `ExecuteAsync` для не потокових дзвінків і `StreamAsync` для потокових дзвінків.
+
+**Рівень інфраструктури ACP** забезпечує комунікаційну основу. Цей рівень обробляє всі деталі протоколу, включаючи керування процесом, серіалізацію повідомлень і аналіз відповіді. Це фундамент, який утримує все, що над ним, стабільним.
+
+## Механізм зв'язку
+
+### Транспортний режим Stdio
+
+CodeBuddy використовує **Stdio (стандартний ввід/вивід)** для зв’язку із зовнішніми процесами. Команда запуску проста:
+
+```bash
+codebuddy --acp
+```
+
+Після цього відбувається обмін повідомленнями JSON-RPC через стандартний вхід і вихід. Цей підхід має кілька переваг:
+
+1. **Швидкий запуск**: зв’язок локального процесу дозволяє уникнути затримки мережі
+2. **Проста конфігурація**: потрібно лише вказати шлях до виконуваного файлу
+3. **Ізоляція середовища**: кожен сеанс виконується як незалежний процес, тому вони не впливають один на одного
+
+Під час спілкування підтримується ін’єкція змінних середовища. Загальні приклади:
+
+- `CODEBUDDY_API_KEY`: Аутентифікація ключа API
+- `CODEBUDDY_INTERNET_ENVIRONMENT`: конфігурація мережевого середовища
+
+Як і у випадку спілкування між людьми, це допомагає спочатку вибрати зручний канал.
+
+### Протокол повідомлень
+
+ACP базується на JSON-RPC 2.0. Формат повідомлення виглядає приблизно так:
+
+```json
+// Request message
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "agent/prompt",
+  "params": {
+    "prompt": "Help me write a sorting algorithm",
+    "sessionId": "session-123"
+  }
+}
+
+// Response message
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "content": "Here is the AI response..."
+  }
+}
+```
+
+У реальній реалізації ми інкапсулюємо всі ці деталі протоколу, тому верхній бізнес-рівень повинен дбати лише про підказку та відповідь.
+
+## Основна реалізація
+
+### 1. Відновити Договір провайдера
+
+Спочатку відновіть тип CodeBuddy у файлі enum:
+
+```csharp
+// PCode.Models/AIProviderType.cs
+public enum AIProviderType
+{
+    ClaudeCodeCli = 0,
+    CodexCli = 1,
+    GitHubCopilot = 2,
+    CodebuddyCli = 3,  // Restore this enum value
+    OpenCodeCli = 4,
+    IFlowCli = 5,
+}
+```
+
+Потім додайте зіставлення рядків у методи розширення, щоб у файлі конфігурації можна було вказати постачальника за допомогою рядка:
+
+```csharp
+// AIProviderTypeExtensions.cs
+private static readonly Dictionary<string, AIProviderType> _typeMap = new(
+    StringComparer.OrdinalIgnoreCase)
+{
+    ["CodebuddyCli"] = AIProviderType.CodebuddyCli,
+    ["Codebuddy"] = AIProviderType.CodebuddyCli,
+    ["codebuddy"] = AIProviderType.CodebuddyCli,
+    // ... Mappings for other providers
+};
+```
+
+### 2. Інтегруйте Provider Factory
+
+Додайте гілку створення CodeBuddy у фабричний клас:
+
+```csharp
+// AIProviderFactory.cs
+private IAIProvider? CreateProvider(AIProviderType providerType, ProviderConfiguration config)
+{
+    return providerType switch
+    {
+        AIProviderType.CodebuddyCli =>
+            ActivatorUtilities.CreateInstance<CodebuddyCliProvider>(
+                _serviceProvider,
+                Options.Create(config)),
+        // ... Other providers
+        _ => throw new NotSupportedException($"Provider {providerType} not supported")
+    };
+}
+```
+
+Це використовує впровадження залежностей `ActivatorUtilities`, який автоматично обробляє введення параметрів конструктора і є дуже зручним.
+
+### 3. Повне впровадження постачальника
+
+Нижче наведено основну реалізацію `CodebuddyCliProvider`, що охоплює як потоковий, так і непотоковий режими виклику:
+
+```csharp
+public class CodebuddyCliProvider : IAIProvider
+{
+    private readonly ILogger<CodebuddyCliProvider> _logger;
+    private readonly IACPSessionManager _sessionManager;
+    private readonly ProviderConfiguration _config;
+
+    public string Name => "CodebuddyCli";
+    public bool SupportsStreaming => true;
+    public ProviderCapabilities Capabilities { get; }
+
+    public CodebuddyCliProvider(
+        ILogger<CodebuddyCliProvider> logger,
+        IACPSessionManager sessionManager,
+        IOptions<ProviderConfiguration> config)
+    {
+        _logger = logger;
+        _sessionManager = sessionManager;
+        _config = config.Value;
+
+        // Define the capabilities of the current Provider
+        Capabilities = new ProviderCapabilities
+        {
+            SupportsStreaming = true,
+            SupportsTools = true,
+            SupportsSystemMessages = true,
+            SupportsArtifacts = false,
+            MaxTokens = 8192
+        };
+    }
+
+    // Non-streaming call: return all results together after completion
+    public async Task<AIResponse> ExecuteAsync(
+        AIRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        // Create an independent session for the request
+        var session = await _sessionManager.CreateSessionAsync(
+            "CodebuddyCli",
+            request.WorkingDirectory,
+            cancellationToken,
+            request.SessionId);
+
+        try
+        {
+            var fullPrompt = BuildPrompt(request);
+            await session.SendPromptAsync(fullPrompt, cancellationToken);
+
+            var responseBuilder = new StringBuilder();
+            var toolCalls = new List<AIToolCall>();
+
+            // Collect all response chunks
+            await foreach (var chunk in StreamFromSession(session, cancellationToken))
+            {
+                if (!string.IsNullOrEmpty(chunk.Content))
+                {
+                    responseBuilder.Append(chunk.Content);
+                }
+                // Handle tool calls...
+            }
+
+            return new AIResponse
+            {
+                Content = AIResultContentSanitizer.SanitizeResultContent(
+                    responseBuilder.ToString()),
+                ToolCalls = toolCalls,
+                Provider = Name,
+                Model = string.Empty
+            };
+        }
+        finally
+        {
+            // Release session resources
+            await session.DisposeAsync();
+        }
+    }
+
+    // Streaming call: return response chunks in real time
+    public async IAsyncEnumerable<AIStreamingChunk> StreamAsync(
+        AIRequest request,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        var session = await _sessionManager.CreateSessionAsync(
+            "CodebuddyCli",
+            request.WorkingDirectory,
+            cancellationToken);
+
+        try
+        {
+            var fullPrompt = BuildPrompt(request);
+            await session.SendPromptAsync(fullPrompt, cancellationToken);
+
+            await foreach (var chunk in StreamFromSession(session, cancellationToken))
+            {
+                yield return chunk;
+            }
+        }
+        finally
+        {
+            await session.DisposeAsync();
+        }
+    }
+
+    private async IAsyncEnumerable<AIStreamingChunk> StreamFromSession(
+        IACPSession session,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        // Iterate through all updates in the session
+        await foreach (var notification in session.ReceiveUpdatesAsync(cancellationToken))
+        {
+            switch (notification.Update)
+            {
+                case AgentMessageChunkSessionUpdate agentMessage:
+                    // Handle text content chunks
+                    if (agentMessage.Content is AcpImp.TextContentBlock textContent)
+                    {
+                        yield return new AIStreamingChunk
+                        {
+                            Content = textContent.Text,
+                            Type = StreamingChunkType.ContentDelta,
+                            IsComplete = false
+                        };
+                    }
+                    break;
+
+                case ToolCallSessionUpdate toolCall:
+                    // Handle tool calls
+                    yield return new AIStreamingChunk
+                    {
+                        Content = string.Empty,
+                        Type = StreamingChunkType.ToolCallDelta,
+                        ToolCallDelta = new AIToolCallDelta
+                        {
+                            Id = toolCall.ToolCallId,
+                            Name = toolCall.Kind.ToString(),
+                            Arguments = toolCall.RawInput?.ToString()
+                        }
+                    };
+                    break;
+
+                case AcpImp.PromptCompletedSessionUpdate:
+                    // Response complete
+                    yield break;
+            }
+        }
+    }
+
+    // Build the full prompt
+    private string BuildPrompt(AIRequest request, string? embeddedCommandPrompt = null)
+    {
+        var sb = new StringBuilder();
+
+        // Embedded command prompt, if present
+        if (!string.IsNullOrEmpty(embeddedCommandPrompt))
+        {
+            sb.AppendLine(embeddedCommandPrompt);
+            sb.AppendLine();
+        }
+
+        // System message
+        if (!string.IsNullOrEmpty(request.SystemMessage))
+        {
+            sb.AppendLine(request.SystemMessage);
+            sb.AppendLine();
+        }
+
+        // User prompt
+        sb.Append(request.Prompt);
+        return sb.ToString();
+    }
+}
+```
+
+У цьому коді є кілька ключових моментів:
+
+1. **Керування сеансом**: кожен запит створює незалежний сеанс і звільняє ресурси після завершення запиту. Це урок, отриманий методом проб і помилок. Якщо повторне використання сеансу не обробляється належним чином, легко виникає забруднення стану.
+
+2. **Потокова обробка**: `IAsyncEnumerable` дозволяє повертати відповідь, поки вона ще генерується, замість того, щоб чекати завершення всього вмісту. Це особливо важливо для сценаріїв з довгим текстом і значно покращує взаємодію з користувачем.
+
+3. **Виклики інструментів**: CodeBuddy підтримує виклик інструментів (виклик функцій), що обробляється `ToolCallSessionUpdate`. Ця можливість є критичною для складних завдань редагування коду.
+
+4. **Фільтрація вмісту**: `AIResultContentSanitizer` використовується для фільтрації вмісту блоку Think і збереження чистого результату.
+
+### 4. Конфігурація ін’єкції залежностей
+
+Додайте відповідні послуги під час реєстрації модуля:
+
+```csharp
+// PCodeClaudeHelperModule.cs
+public void ConfigureModule(IServiceCollection context)
+{
+    // Register Provider
+    context.Services.AddTransient<CodebuddyCliProvider>();
+
+    // Register ACP infrastructure
+    context.Services.AddSingleton<IACPSessionManager, ACPSessionManager>();
+    context.Services.AddSingleton<IAcpPlatformConfigurationResolver, AcpPlatformConfigurationResolver>();
+    context.Services.AddSingleton<IAIRequestToAcpMapper, AIRequestToAcpMapper>();
+    context.Services.AddSingleton<IAcpToAIResponseMapper, AcpToAIResponseMapper>();
+}
+```
+
+## Приклад конфігурації
+
+### Файл конфігурації
+
+Додайте конфігурацію, пов’язану з CodeBuddy `appsettings.json`:
+
+```yaml
+AI:
+  # Default Provider to use
+  DefaultProvider: "CodebuddyCli"
+
+  # Provider configuration
+  Providers:
+    CodebuddyCli:
+      Type: "CodebuddyCli"
+      WorkingDirectory: "C:/projects/my-app"
+      ExecutablePath: "C:/tools/codebuddy.cmd"
+
+  # Platform-specific configuration
+  PlatformConfigurations:
+    CodebuddyCli:
+      ExecutablePath: "C:/tools/codebuddy.cmd"
+      Arguments: "--acp"
+      StartupTimeoutMs: 5000
+      EnvironmentVariables:
+        CODEBUDDY_API_KEY: "${CODEBUDDY_API_KEY}"
+        CODEBUDDY_INTERNET_ENVIRONMENT: "production"
+```
+
+### Модель конфігурації
+
+Відповідне визначення моделі конфігурації:
+
+```csharp
+public class CodebuddyPlatformConfiguration : IAcpPlatformConfiguration
+{
+    public string ProviderName => "CodebuddyCli";
+    public AcpTransportType TransportType => AcpTransportType.Stdio;
+
+    public string ExecutablePath { get; set; } = "codebuddy";
+    public string Arguments { get; set; } = "--acp";
+    public int StartupTimeoutMs { get; set; } = 5000;
+
+    public Dictionary<string, string?>? EnvironmentVariables { get; set; }
+}
+```
+
+## Отримані практичні уроки
+
+### Журнал підводного каменю
+
+Ми зіткнулися з кількома типовими підводними каменями під час впровадження, і, якщо поділитися ними тут, ви можете допомогти іншим уникнути тих самих обхідних шляхів:
+
+1. **Проблема витоку сеансу**: спочатку сеанси не вивільнялися належним чином, що виснажило ресурси процесу. Вихід був у використанні `try-finally` щоб забезпечити вивільнення ресурсів для кожного запиту.
+
+2. **Передача змінних середовища**: Windows і Linux використовують різний синтаксис змінних середовища, тому пізніше ми стандартизували `Dictionary<string, string?>` впоратися з цим.
+
+3. **Конфігурація тайм-ауту**: запуск CLI потребує часу, тому ми встановили 5-секундний тайм-аут запуску, щоб уникнути швидких помилок запитів.
+
+4. **Проблеми з кодуванням**: у Windows кодування за замовчуванням може викликати спотворення китайського тексту, тому кодування UTF-8 явно вказується під час запуску процесу.
+
+### Оптимізація продуктивності
+
+1. **Пул сеансів**: для частих коротких запитів подумайте про впровадження пулу сеансів для повторного використання процесів
+2. **Кеш підключень**: фабричний клас уже підтримує кешування екземплярів постачальника
+3. **Спочатку асинхронне**: використовуйте асинхронне програмування, щоб уникнути блокування потоків
+
+Продуктивність завжди варто оптимізувати. Чим довше користувачі чекають, тим гіршим стає досвід.
+
+## Висновок
+
+У цій статті представлено повне рішення для інтеграції CodeBuddy CLI у серверну частину C#, що охоплює весь процес від проектування архітектури до конкретної реалізації. Завдяки багаторівневій архітектурі ми відокремлюємо деталі протоколу від бізнес-логіки, роблячи код зрозумілішим і зручнішим для обслуговування.
+
+Ключові висновки:
+
+- Використовуйте багаторівневу архітектуру з рівнем контракту постачальника, фабричним рівнем, рівнем реалізації та рівнем інфраструктури
+- Використовуйте JSON-RPC поверх Stdio для зв’язку між процесами
+- Реалізуйте гнучку конфігурацію та розширюваність за допомогою впровадження залежностей
+- Забезпечте як потоковий, так і непотоковий режими виклику
+
+Цей підхід підходить не лише для CodeBuddy; додавання нових постачальників ШІ може відбуватися за тією ж схемою. Якщо ви також створюєте подібну інтеграцію кількох постачальників штучного інтелекту, сподіваюся, ця стаття дасть вам корисну довідку.
+
+---
+
+## Список літератури
+
+- [Офіційна документація CodeBuddy](https://codebuddy.example.com)
+- [Специфікація протоколу ACP](https://acp-protocol.example.com)
+- [Домашня сторінка проекту HagiCode](https://hagicode.com)
+- [Репозиторій HagiCode GitHub](https://github.com/HagiCode-org/site)
+- [Рекомендації щодо впровадження залежностей .NET](https://docs.microsoft.com/zh-cn/dotnet/core/extensions/dependency-injection)
+
+---
+
+**Якщо ця стаття допомогла вам:**
+
+- Поставте нам зірку на GitHub: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Відвідайте офіційний веб-сайт, щоб дізнатися більше: [hagicode.com](https://hagicode.com)
+- Перегляньте 30-хвилинну практичну демонстрацію: [www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)
+- Спробуйте установку в один клік: [docs.hagicode.com/installation/docker-compose](https://docs.hagicode.com/installation/docker-compose)
+- Швидке встановлення програми Desktop: [hagicode.com/desktop/](https://hagicode.com/desktop/)
+- Публічна бета-версія почалася; не соромтеся встановити та спробувати

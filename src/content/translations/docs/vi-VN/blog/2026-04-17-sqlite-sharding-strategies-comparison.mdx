@@ -1,0 +1,375 @@
+---
+title: "Thực hành phân mảnh SQLite: So sánh chuyên sâu về ba chiến lược phân mảnh"
+date: 2026-04-17
+tags: [SQLite, Sharding, Performance Optimization, Architecture Design, HagiCode]
+description: "Khi cơ sở dữ liệu SQLite một tệp gặp phải tắc nghẽn đồng thời, chúng ta làm cách nào để vượt qua? Bài viết này chia sẻ ba phương pháp phân mảnh SQLite từ HagiCode"
+---
+
+## Thực hành phân mảnh SQLite: So sánh chuyên sâu về ba chiến lược phân mảnh
+
+> Khi cơ sở dữ liệu SQLite một tệp gặp phải tắc nghẽn đồng thời, chúng ta làm cách nào để vượt qua? Bài viết này chia sẻ ba phương pháp phân chia SQLite từ dự án HagiCode trong các tình huống khác nhau, giúp bạn hiểu cách chọn chiến lược phân chia phù hợp.
+
+Xin chào mọi người, tôi là Yu Kun, người tạo ra HagiCode.
+
+## Nền
+
+Khi xây dựng các ứng dụng hiệu suất cao, cơ sở dữ liệu SQLite một tệp sẽ gặp phải những vấn đề rất thực tế. Khi số lượng người dùng và khối lượng dữ liệu tăng lên, các vấn đề này bắt đầu nối tiếp nhau:
+
+- Các thao tác ghi bắt đầu xếp hàng và thời gian phản hồi tăng lên rõ rệt
+- Hiệu suất truy vấn giảm khi khối lượng dữ liệu tăng lên
+- Thường xuyên `database is locked` lỗi xuất hiện dưới quyền truy cập đa luồng
+
+Nhiều người theo bản năng hỏi: chúng ta có nên di chuyển trực tiếp sang PostgreSQL hay MySQL không? Điều đó có thể giải quyết vấn đề, nhưng độ phức tạp khi triển khai tăng mạnh. Có lựa chọn nào nhẹ hơn không?
+
+Câu trả lời là sharding. Cuối cùng, các vấn đề kỹ thuật vẫn cần được giải quyết bằng các phương pháp kỹ thuật. Bằng cách phân phối dữ liệu trên nhiều tệp SQLite, chúng tôi có thể cải thiện đáng kể hiệu suất truy vấn và đồng thời trong khi vẫn duy trì các đặc tính nhẹ của SQLite.
+
+## Giới thiệu về HagiCode
+
+Các cách tiếp cận được chia sẻ trong bài viết này xuất phát từ kinh nghiệm thực tế của chúng tôi trong [Mã Hagi](https://hagicode.com) dự án. Là một dự án trợ lý mã hóa AI, HagiCode cần xử lý một lượng lớn tin nhắn hội thoại, tính bền vững của trạng thái và bản ghi lịch sử sự kiện. Thông qua việc giải quyết những vấn đề thực tế này, chúng tôi đã tóm tắt ba phương pháp phân chia cho các tình huống khác nhau.
+
+Công cụ tốt cũng quan trọng, nhưng cách bạn sử dụng chúng còn phụ thuộc vào công việc bạn thực sự cần làm.
+
+Kho lưu trữ mã của chúng tôi nằm ở [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site). Hãy nhìn sâu hơn nếu bạn quan tâm.
+
+## Tổng quan về ba phương pháp tiếp cận Sharding
+
+Sau khi phân tích cơ sở mã HagiCode, chúng tôi đã xác định ba phương pháp phân chia SQLite cho các tình huống kinh doanh khác nhau:
+
+1. **Bộ nhớ phân đoạn tin nhắn phiên**: bộ nhớ dành cho tin nhắn hội thoại AI, đặc trưng bởi khả năng ghi tần suất cao và các truy vấn riêng biệt dựa trên phiên
+2. **Bộ lưu trữ phân đoạn Orleans Grain**: trạng thái ổn định cho một khung phân tán, được đặc trưng bởi khả năng truy cập nhiều nút và nhu cầu định tuyến xác định
+3. **Bộ lưu trữ phân chia Lịch sử anh hùng**: bản ghi sự kiện lịch sử cho hệ thống được trò chơi hóa, đặc trưng bởi nguồn cung ứng sự kiện và nhu cầu về khả năng tương thích di chuyển
+
+Mặc dù các kịch bản kinh doanh của họ khác nhau nhưng cả ba đều tuân theo các nguyên tắc thiết kế cốt lõi giống nhau:
+
+- **Định tuyến xác định**: tính toán phân đoạn trực tiếp từ ID doanh nghiệp mà không cần bảng siêu dữ liệu
+- **Truy cập minh bạch**: các lớp trên sử dụng giao diện hợp nhất và không biết về các phân đoạn bên dưới
+- **Bộ lưu trữ độc lập**: mỗi phân đoạn là một tệp SQLite hoàn toàn độc lập
+- **Tối ưu hóa đồng thời**: Chế độ WAL plus `busy_timeout` giảm tranh chấp khóa
+
+Nhiều người hỏi: tại sao không xây dựng một giải pháp sharding chung? Đó là một câu hỏi rất thực tế và kết luận rất đơn giản: trong kỹ thuật, không có giải pháp chung nào, chỉ có giải pháp phù hợp nhất với kịch bản kinh doanh hiện tại. Tiếp theo, chúng ta sẽ so sánh sâu hơn việc triển khai cụ thể của ba phương pháp này.
+
+## So sánh các chiến lược Sharding
+
+### Quy tắc đặt tên và đếm phân đoạn
+
+| Khía cạnh | Tin nhắn phiên | hạt Orleans | Lịch sử anh hùng |
+|------|----------------|---------------|--------------|
+| **Số lượng mảnh** | 256 (16²) | 100 | 10 |
+| **Quy tắc đặt tên** | Hệ thập lục phân (00-ff) | Thập phân (00-99) | Thập phân (0-9) |
+| **Thư mục lưu trữ** | `DataDir/messages/` | `DataDir/orleans/grains/` | `DataDir/hero-history/` |
+| **Mẫu tên tệp** | `{shard}.db` | `grains-{shard}.db` | `{shard}.db` |
+
+Tại sao lại có sự khác biệt lớn về số lượng mảnh vỡ như vậy? Nó phụ thuộc vào đặc điểm kinh doanh. Nói cách khác, các mô hình sẽ thay đổi, các công cụ sẽ phát triển và quy trình công việc sẽ được nâng cấp, nhưng các nguyên tắc cơ bản về kỹ thuật vẫn giữ nguyên: trước tiên hãy hiểu vấn đề mà bạn thực sự đang cố gắng giải quyết.
+
+- **Tin nhắn phiên** sử dụng 256 phân đoạn vì tin nhắn hội thoại có tần suất ghi cao nhất và cần nhiều phân đoạn hơn để phân bổ tải
+- **Orleans Grain** sử dụng 100 phân đoạn, cân bằng giữa hiệu suất xử lý đồng thời và độ phức tạp trong vận hành
+- **Lịch sử anh hùng** chỉ sử dụng 10 phân đoạn vì việc ghi sự kiện lịch sử ít thường xuyên hơn và phải tính đến chi phí di chuyển
+
+### Sự khác biệt trong thuật toán định tuyến
+
+Thuật toán định tuyến là cốt lõi của sơ đồ sharding. Nó xác định cách dữ liệu được phân phối trên các phân đoạn. Ba cách tiếp cận sử dụng các chiến lược định tuyến khác nhau:
+
+```csharp
+// Session Message: last two hexadecimal characters of the GUID
+var normalized = Guid.Parse(sessionId.Value).ToString("N").ToLowerInvariant();
+return normalized[^2..];  // Take the last two hexadecimal characters
+
+// Orleans Grain: extract digits, then use the last two digits modulo shard count
+var digits = ExtractDigits(grainId);  // Extract all digits
+var lastTwoDigits = (digits[^2] * 10) + digits[^1];
+return lastTwoDigits % shardCount;
+
+// Hero History: modulo 10 using the ASCII value of the last character
+return heroId[^1] % 10;
+```
+
+**Phân tích thiết kế**:
+
+- **Thông báo phiên** ID là GUID. Sau khi chuyển đổi sang hệ thập lục phân, việc lấy hai ký tự cuối cùng sẽ phân phối đồng đều trên 256 phân đoạn
+- **Orleans Grain** ID không có định dạng nhất quán và có thể chứa cả chữ cái và chữ số, vì vậy tất cả các chữ số đều được trích xuất trước khi lấy modulo
+- **Lịch sử anh hùng** ID là các chuỗi nên giá trị ASCII của ký tự cuối cùng được sử dụng trực tiếp với modulo. Nó đơn giản nhưng sự phân bố có thể kém đồng đều hơn
+
+**Điểm mấu chốt**: bất kể bạn sử dụng thuật toán nào, cùng một ID phải luôn ánh xạ tới cùng một phân đoạn. Đây là một trong những yêu cầu cơ bản nhất trong hệ thống phân tán. Nếu không, sự không nhất quán dữ liệu là không thể tránh khỏi. Nếu định tuyến không ổn định, mọi nỗ lực khác sẽ sụp đổ về 0.
+
+### Sự khác biệt trong chiến lược khởi tạo
+
+| Khía cạnh | Tin nhắn phiên | hạt Orleans | Lịch sử anh hùng |
+|------|----------------|---------------|--------------|
+| **Thời gian khởi tạo** | Tải lười biếng theo yêu cầu | Khởi tạo song song hoàn toàn khi khởi động | Tải lười biếng theo yêu cầu |
+| **Kiểm soát đồng thời** | `Lazy<Task>` ngăn chặn việc khởi tạo trùng lặp | `Parallel.ForEachAsync` | `Lazy<Task>` ngăn chặn việc khởi tạo trùng lặp |
+
+**Tại sao Orleans Grain chọn khởi tạo hoàn toàn khi khởi động?**
+
+Vì Orleans là một khung phân tán nên Grain có thể được lên lịch cho bất kỳ nút nào. Nếu phát hiện thấy tệp phân đoạn chỉ bị thiếu trong thời gian chạy, các yêu cầu có thể không thành công. Khởi tạo hoàn toàn khi khởi động sẽ kéo dài thời gian khởi động nhưng nó đảm bảo tính ổn định trong thời gian chạy. Bắt nó chạy chỉ là bước khởi đầu; giữ cho nó có thể duy trì được là kỹ năng thực sự.
+
+**Ưu điểm của việc lười tải**:
+
+Đối với Tin nhắn phiên và Lịch sử anh hùng, tải chậm giúp giảm thời gian khởi động. Các tệp và lược đồ chỉ được tạo khi thực sự cần một phân đoạn. sử dụng `Lazy<Task>` cũng ngăn ngừa tình trạng chủng tộc trong quá trình khởi tạo đồng thời. Thiết kế trông đơn giản nhưng trong các dự án thực tế, nó giúp tiết kiệm rất nhiều rắc rối không đáng có.
+
+### Đặc điểm thiết kế lược đồ
+
+Các thiết kế lược đồ của ba phương pháp tiếp cận phản ánh các đặc điểm kinh doanh tương ứng của chúng:
+
+**Thông báo phiên**:
+- Hỗ trợ mô hình Tìm nguồn cung ứng sự kiện (bảng sự kiện cộng với bảng chụp nhanh)
+- Bao gồm một bảng con cho các khối nội dung tin nhắn (`MessageContentBlocks`)
+- Có các trường nén và cờ nén để hỗ trợ tối ưu hóa trong tương lai
+
+**Hạt Orleans**:
+- Thiết kế tối giản: một chiếc `GrainState` bàn
+- Lưu trữ trạng thái dưới dạng JSON được tuần tự hóa
+- Sử dụng kiểm soát đồng thời lạc quan dựa trên ETag
+
+**Lịch sử anh hùng**:
+- Chỉ mục tối ưu hóa truy vấn dòng thời gian
+- Một sự độc đáo `DedupeKey` hạn chế ngăn chặn sự trùng lặp
+- Hỗ trợ nhiều loại sự kiện và trạng thái
+
+Những thiết kế này cho thấy rằng thiết kế lược đồ phải phù hợp chặt chẽ với các yêu cầu kinh doanh thay vì chạy theo sự chung chung. Orleans Grain chính xác là đơn giản vì nó chỉ cần lưu trữ trạng thái được tuần tự hóa và không yêu cầu khả năng truy vấn phức tạp. Đây không phải là chủ nghĩa thần bí. Đó là kỹ thuật. Đừng vội đặt cho thứ gì đó một cái tên hoành tráng trước khi kiểm tra xem liệu nó có thể tồn tại qua hai lần lặp lại trong một đội thực sự hay không.
+
+### So sánh cấu hình đồng thời
+
+Tất cả ba phương pháp đều sử dụng cùng một cài đặt tối ưu hóa đồng thời SQLite:
+
+```sql
+PRAGMA journal_mode=WAL;      -- Write-ahead logging mode
+PRAGMA synchronous=NORMAL;     -- Reduce persistence overhead
+PRAGMA busy_timeout=5000;      -- 5-second busy wait
+PRAGMA foreign_keys=ON;        -- Foreign key constraints
+```
+
+**Ưu điểm của chế độ WAL**:
+
+Chế độ nhật ký khôi phục truyền thống gây ra tranh chấp khóa trong khi ghi, trong khi chế độ WAL cho phép đọc và ghi tiến hành đồng thời. Trong các kịch bản dữ liệu lớn, điều này có thể cải thiện đáng kể hiệu suất. Nhiều nhà phát triển bỏ qua cài đặt này nhưng nó quan trọng hơn họ nghĩ rất nhiều.
+
+**Sự đánh đổi của `synchronous=NORMAL`**:
+
+Đặt nó thành `FULL` mang lại sự an toàn tối đa, nhưng nó làm giảm đáng kể hiệu suất. `NORMAL` tạo ra sự cân bằng giữa an toàn và hiệu suất, khiến nó trở thành lựa chọn phù hợp cho hầu hết các ứng dụng. Không cần phải suy nghĩ quá nhiều về điều này. `NORMAL` là đủ.
+
+## Cách chọn chiến lược Sharding
+
+Dựa trên việc phân tích ba cách tiếp cận của HagiCode, chúng ta có thể tóm tắt ma trận quyết định sau:
+
+```
+High-throughput scenarios -> more shards (for example, Message uses 256)
+Simple maintainability   -> fewer shards (for example, Hero History uses 10)
+Mostly numeric IDs       -> modulo algorithm (Orleans Grain)
+Mostly GUIDs             -> hexadecimal suffix (Session Message)
+String IDs               -> ASCII modulo (Hero History)
+```
+
+**Quy tắc chung để chọn số lượng phân đoạn**:
+
+- Quá ít (`< 10`): cải tiến đồng thời bị hạn chế, làm cho sharding trở nên ít ý nghĩa hơn
+- Quá nhiều (`> 1000`): việc quản lý tệp trở nên phức tạp và chi phí chung của nhóm kết nối tăng lên
+- Nguyên tắc chung: 10 đến 100 phân đoạn phù hợp với hầu hết các tình huống
+- Các kịch bản tương tranh cực cao: có thể xem xét 256 phân đoạn
+
+Nếu bạn chỉ nhìn vào các bản demo thì rất dễ bị cuốn hút. Nhưng một khi đã bước vào sản xuất thì mọi chi phí đều phải được tính toán kỹ lưỡng. Nhiều thứ không phải là không thể, chỉ là không có giá trung thực.
+
+## Hướng dẫn thực hành
+
+### Triển khai Trình giải quyết phân đoạn được tiêu chuẩn hóa
+
+```csharp
+public interface IShardResolver<TId>
+{
+    string ResolveShardKey(TId id);
+}
+
+// Hexadecimal sharding (for GUIDs)
+public class HexSuffixShardResolver : IShardResolver<string>
+{
+    private readonly int _suffixLength;
+
+    public HexSuffixShardResolver(int suffixLength = 2)
+    {
+        _suffixLength = suffixLength;
+    }
+
+    public string ResolveShardKey(string id)
+    {
+        var normalized = id.Replace("-", "").ToLowerInvariant();
+        return normalized[^_suffixLength..];
+    }
+}
+
+// Numeric modulo sharding (for purely numeric IDs)
+public class NumericModuloShardResolver : IShardResolver<long>
+{
+    private readonly int _shardCount;
+
+    public NumericModuloShardResolver(int shardCount)
+    {
+        _shardCount = shardCount;
+    }
+
+    public string ResolveShardKey(long id)
+    {
+        return (id % _shardCount).ToString("D2");
+    }
+}
+```
+
+### Mô hình nhà máy kết nối hợp nhất
+
+```csharp
+public class ShardedConnectionFactory<TOptions>
+{
+    private readonly ConcurrentDictionary<string, Lazy<Task>> _initializationTasks = new();
+    private readonly TOptions _options;
+    private readonly IShardSchemaInitializer _initializer;
+
+    public ShardedConnectionFactory(
+        TOptions options,
+        IShardSchemaInitializer initializer)
+    {
+        _options = options;
+        _initializer = initializer;
+    }
+
+    public async Task<TDbContext> CreateAsync(string shardKey, CancellationToken ct)
+    {
+        var connectionString = BuildConnectionString(shardKey);
+
+        // Use Lazy<Task> to prevent concurrent initialization
+        var initTask = _initializationTasks.GetOrAdd(
+            connectionString,
+            _ => new Lazy<Task>(() => InitializeShardAsync(connectionString, ct))
+        );
+
+        await initTask.Value;
+        return CreateDbContext(connectionString);
+    }
+
+    private async Task InitializeShardAsync(string connectionString, CancellationToken ct)
+    {
+        await _initializer.InitializeAsync(connectionString, ct);
+    }
+
+    private string BuildConnectionString(string shardKey)
+    {
+        var shardPath = Path.Combine(_options.BaseDirectory, $"{shardKey}.db");
+        return $"Data Source={shardPath}";
+    }
+
+    private TDbContext CreateDbContext(string connectionString)
+    {
+        // Create the DbContext according to the specific ORM
+        return Activator.CreateInstance(typeof(TDbContext), connectionString) as TDbContext;
+    }
+}
+```
+
+### Thực tiễn tốt nhất để khởi tạo lược đồ
+
+```csharp
+public class SqliteShardInitializer : IShardSchemaInitializer
+{
+    public async Task InitializeAsync(string connectionString, CancellationToken ct)
+    {
+        await using var connection = new SqliteConnection(connectionString);
+        await connection.OpenAsync(ct);
+
+        // Concurrency optimization settings
+        await connection.ExecuteAsync("""
+            PRAGMA journal_mode=WAL;
+            PRAGMA synchronous=NORMAL;
+            PRAGMA busy_timeout=5000;
+            PRAGMA foreign_keys=ON;
+        """);
+
+        // Create table schema
+        await connection.ExecuteAsync("""
+            CREATE TABLE IF NOT EXISTS Entities (
+                Id TEXT PRIMARY KEY,
+                CreatedAt TEXT NOT NULL,
+                UpdatedAt TEXT NOT NULL,
+                Data TEXT NOT NULL,
+                ETag TEXT
+            );
+        """);
+
+        // Create indexes
+        await connection.ExecuteAsync("""
+            CREATE INDEX IF NOT EXISTS IX_Entities_CreatedAt
+            ON Entities(CreatedAt DESC);
+
+            CREATE INDEX IF NOT EXISTS IX_Entities_UpdatedAt
+            ON Entities(UpdatedAt DESC);
+        """);
+    }
+}
+```
+
+### Những cân nhắc chính
+
+**1. Độ ổn định định tuyến**
+
+Thuật toán định tuyến phải đảm bảo rằng cùng một ID luôn ánh xạ tới cùng một phân đoạn. Tránh tính toán ngẫu nhiên hoặc phụ thuộc vào thời gian và không đưa các tham số có thể thay đổi vào thuật toán.
+
+**2. Chọn số lượng mảnh**
+
+Số lượng phân đoạn nên được quyết định trong giai đoạn thiết kế. Việc thay đổi nó sau này là vô cùng khó khăn. Hãy xem xét:
+- Khối lượng đồng thời hiện tại và tương lai
+- Chi phí quản lý của mỗi phân đoạn
+- Sự phức tạp của việc di chuyển dữ liệu
+
+**3. Lập kế hoạch di cư**
+
+Cách tiếp cận Lịch sử anh hùng thể hiện một lộ trình di chuyển hoàn chỉnh:
+
+1. Xây dựng cơ sở hạ tầng lưu trữ phân đoạn mới
+2. Triển khai dịch vụ di chuyển để sao chép dữ liệu từ cơ sở dữ liệu chính vào phân đoạn
+3. Xác minh khả năng tương thích truy vấn sau khi di chuyển
+4. Chuyển đổi đường dẫn đọc và ghi tới các phân đoạn
+5. Dọn dẹp các bảng cũ trong cơ sở dữ liệu chính
+
+Các yêu cầu di chuyển trong tương lai cần được xem xét khi thiết kế sơ đồ sharding. Nói chuyện là rẻ tiền. Cho tôi xem mã. Nhưng chỉ mã thôi thì chưa đủ. Bạn cũng cần một đường dẫn di chuyển hoàn chỉnh. Thành công một lần không phải là một hệ thống; thành công bền vững là
+
+**4. Giám sát và vận hành**
+
+- Giám sát phân bổ kích thước trên các phân đoạn để phát hiện sớm dữ liệu sai lệch
+- Đặt cảnh báo cho các điểm nóng của phân đoạn để ngăn một phân đoạn duy nhất trở thành nút thắt cổ chai
+- Thường xuyên kiểm tra kích thước tệp WAL để tránh sử dụng đĩa quá mức
+- Thiết lập cơ chế kiểm tra tình trạng phân đoạn
+
+**5. Phạm vi kiểm tra**
+
+- Kiểm tra các điều kiện biên như ID trống, ký tự đặc biệt và ID quá dài
+- Xác minh tính xác định định tuyến để đảm bảo cùng một ID luôn ánh xạ tới cùng một phân đoạn
+- Chạy các bài kiểm tra căng thẳng ghi đồng thời để xác nhận sự tranh chấp khóa được giảm một cách hiệu quả
+- Chạy thử nghiệm di chuyển để đảm bảo tính toàn vẹn và nhất quán của dữ liệu
+
+## Tóm tắt
+
+Bằng cách so sánh ba phương pháp phân mảnh SQLite trong dự án HagiCode, chúng ta có thể thấy rằng:
+
+1. **Không có giải pháp chung**: các tình huống kinh doanh khác nhau cần các chiến lược phân chia khác nhau
+2. **Các nguyên tắc cốt lõi được chia sẻ**: định tuyến xác định, truy cập minh bạch, lưu trữ độc lập và tối ưu hóa đồng thời
+3. **Thiết kế phải hướng tới tương lai**: xem xét lộ trình di chuyển và chi phí vận hành
+
+Nếu dự án của bạn đang sử dụng SQLite và bắt đầu gặp phải tắc nghẽn đồng thời, tôi hy vọng bài viết này cung cấp cho bạn một số ý tưởng hữu ích. Không cần phải vội vàng di chuyển sang cơ sở dữ liệu nặng. Đôi khi chiến lược sharding phù hợp là đủ để giải quyết vấn đề.
+
+Tất nhiên, sharding không phải là viên đạn bạc. Trước khi chọn chiến lược sharding, trước tiên hãy đảm bảo rằng:
+- Bạn đã tối ưu hóa hiệu suất truy vấn một bảng
+- Bạn đã thêm các chỉ mục thích hợp
+- Bạn đã bật chế độ WAL
+
+Chỉ sau khi những tối ưu hóa này được thực hiện và nút thắt cổ chai về hiệu suất vẫn còn tồn tại, bạn mới nên cân nhắc việc giới thiệu sharding. Bản thân việc làm tốt những việc đơn giản đã là một khả năng.
+
+Đôi khi thực hiện công việc một lần nói lên nhiều điều hơn là giải thích nó gấp mười lần. Từ đây, hãy để kết quả kỹ thuật tự nói lên điều đó.
+
+## Tài liệu tham khảo
+
+- Kho dự án HagiCode: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Tài liệu về chế độ SQLite WAL: [sqlite.org/wal.html](https://www.sqlite.org/wal.html)
+- Khung phân phối Orleans: [dotnet.github.io/orleans](https://dotnet.github.io/orleans/)
+
+## Thông báo bản quyền
+
+Cảm ơn bạn đã đọc. Nếu bạn thấy bài viết này hữu ích, vui lòng thích, đánh dấu và chia sẻ nó.
+Nội dung này được tạo bằng sự cộng tác có sự hỗ trợ của AI và nội dung cuối cùng đã được tác giả xem xét và xác nhận.
+- tác giả: [newbe36524](https://www.newbe.pro)
+- Liên kết gốc: [https://docs.hagicode.com/blog/2026-04-17-sqlite-shending-strategies-comparison/](https://docs.hagicode.com/blog/2026-04-17-sqlite-sharding-strategies-comparison/)
+- Bản quyền: Trừ khi có quy định khác, tất cả các bài viết trên blog đều được cấp phép theo BY-NC-SA. Vui lòng trích dẫn nguồn khi đăng lại.

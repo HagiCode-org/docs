@@ -1,0 +1,373 @@
+---
+title: Praktyczna architektura dostawców wielu AI w platformie HagiCode
+date: 2026-03-11
+tags: [Orleans, AI, Architecture Design, WebSocket, HTTP, ACP, HagiCode]
+description: "W tym artykule przedstawiono podejście techniczne, które zastosowaliśmy w architekturze Orleans Grain w celu zintegrowania dwóch narzędzi AI, iflow i OpenCode, poprzez ujednolicony"
+---
+
+## Praktyczna architektura dostawców wielu AI w platformie HagiCode
+
+> W tym artykule przedstawiono podejście techniczne, które zastosowaliśmy w architekturze Orleans Grain w celu zintegrowania dwóch narzędzi AI, iflow i OpenCode, poprzez ujednolicony `IAIProvider` interfejs i szczegółowo porównuje różnice w implementacji pomiędzy komunikacją WebSocket i HTTP.
+
+:::note[Kontekst czasowy]
+W tym artykule opisano praktykę architektury dostawcy obowiązującą w momencie publikacji. Aby zapoznać się z aktualnie aktywnie obsługiwanym zakresem, zobacz [Instalacja interfejsu CLI agenta AI](/pl-PL/related-software-installation/ai-agent-cli/) i [Przewodnik instalacji](/pl-PL/installation); `IFlowCli` jest teraz zachowywany jedynie jako historyczna wartość zgodności i nie jest częścią bieżącego aktywnego zakresu wsparcia.
+:::
+
+## Tło
+
+Nie ma w tym nic szczególnie tajemniczego. Budując HagiCode, natknęliśmy się na bardzo praktyczny problem: użytkownicy chcieli pracować z różnymi narzędziami AI. Trudno się temu dziwić, skoro każdy ma swoje nawyki. Niektórzy wolą Claude Code, niektórzy kochają GitHub Copilot, a niektóre zespoły korzystają z narzędzi, które sami opracowali.
+
+Nasze początkowe rozwiązanie było proste i bezpośrednie: napisz dedykowany kod integracyjny dla każdego narzędzia AI. Ale wady szybko się ujawniły. Baza kodu została wypełniona `if-else` gałęzie, każda zmiana wymagała testów w wielu miejscach, a każde nowe narzędzie oznaczało napisanie od zera kolejnego stosu logiki.
+
+Później zdałem sobie sprawę, że lepiej byłoby stworzyć jedność `IAIProvider` interfejs i streścić możliwości wspólne dla wszystkich dostawców sztucznej inteligencji. W ten sposób, niezależnie od tego, które narzędzie zostanie użyte pod spodem, górne warstwy będą mogły je wywołać w ten sam sposób.
+
+Ostatnio w ramach projektu konieczne było zintegrowanie dwóch nowych narzędzi: iflow i OpenCode. Oba obsługują protokół ACP, ale ich style komunikacji są różne. iflow korzysta z protokołu WebSocket, podczas gdy OpenCode korzysta z interfejsu API HTTP. Stało się to przydatnym testem architektonicznym: zaadaptuj dwa różne środki transportu w ramach jednego ujednoliconego interfejsu.
+
+## O HagiCodzie
+
+Podejście przedstawione w tym artykule wynika z naszych praktycznych doświadczeń w zakresie [Kod Hagi](https://hagicode.com) projekt. HagiCode to platforma programistyczna wspomagana sztuczną inteligencją zbudowana na architekturze Orleans Grain. Integruje się z różnymi dostawcami sztucznej inteligencji w ramach ujednoliconego rozwiązania `IAIProvider` interfejs, pozwalający użytkownikom elastycznie wybierać preferowane narzędzia AI.
+
+## Projekt Architektury
+
+### Abstrakcja ujednoliconego interfejsu
+
+Najpierw zdefiniowaliśmy `IAIProvider` interfejs i wyabstrahował możliwości, które każdy dostawca AI musi wdrożyć:
+
+```csharp
+public interface IAIProvider
+{
+    string Name { get; }
+    bool SupportsStreaming { get; }
+    ProviderCapabilities Capabilities { get; }
+
+    Task<AIResponse> ExecuteAsync(AIRequest request, CancellationToken cancellationToken = default);
+    IAsyncEnumerable<AIStreamingChunk> StreamAsync(AIRequest request, CancellationToken cancellationToken = default);
+    Task<ProviderTestResult> PingAsync(CancellationToken cancellationToken = default);
+    IAsyncEnumerable<AIStreamingChunk> SendMessageAsync(AIRequest request, string? embeddedCommandPrompt = null, CancellationToken cancellationToken = default);
+}
+```
+
+Interfejs ten obejmuje kilka kluczowych metod:
+- `ExecuteAsync`: wykonaj jednorazowe żądanie AI
+- `StreamAsync`: uzyskaj odpowiedzi przesyłane strumieniowo do wyświetlania w czasie rzeczywistym
+- `PingAsync`: wykonaj kontrolę stanu, aby sprawdzić, czy dostawca jest dostępny
+- `SendMessageAsync`: wyślij wiadomość z obsługą osadzonych poleceń
+
+### IFlowCliProvider: implementacja oparta na protokole WebSocket
+
+iflow używa protokołu WebSocket do komunikacji ACP. Ogólna architektura wygląda następująco:
+
+```
+IFlowCliProvider → ACPSessionManager → WebSocketAcpTransport → iflow CLI
+                ↓
+         Dynamic port allocation + process management
+```
+
+Przepływ rdzenia jest również dość prosty:
+1. `ACPSessionManager` tworzy sesje ACP i zarządza nimi.
+2. `WebSocketAcpTransport` obsługuje komunikację WebSocket.
+3. Port jest przydzielany dynamicznie i rozpoczyna się proces iflow `iflow --experimental-acp --port`.
+4. `IAIRequestToAcpMapper` i `IAcpToAIResponseMapper` konwertuj żądania i odpowiedzi.
+
+Oto kod podstawowy:
+
+```csharp
+private async IAsyncEnumerable<AIStreamingChunk> StreamCoreAsync(
+    AIRequest request,
+    string? embeddedCommandPrompt,
+    [EnumeratorCancellation] CancellationToken cancellationToken)
+{
+    // Resolve working directory
+    var resolvedWorkingDirectory = ResolveWorkingDirectory(request);
+    var effectiveRequest = ApplyEmbeddedCommandPrompt(request, embeddedCommandPrompt);
+
+    // Create ACP session
+    await using var session = await _sessionManager.CreateSessionAsync(
+        Name,
+        resolvedWorkingDirectory,
+        cancellationToken,
+        request.SessionId);
+
+    // Send prompt
+    var prompt = _requestMapper.ToPromptString(effectiveRequest);
+    var promptResponse = await session.SendPromptAsync(prompt, cancellationToken);
+
+    // Receive streaming response
+    await foreach (var notification in session.ReceiveUpdatesAsync(cancellationToken))
+    {
+        if (_responseMapper.TryConvertToStreamingChunk(notification, out var chunk))
+        {
+            if (chunk.Type == StreamingChunkType.Metadata && chunk.IsComplete)
+            {
+                yield return chunk;
+                yield break;
+            }
+            yield return chunk;
+        }
+    }
+}
+```
+
+Warto tutaj zwrócić uwagę na kilka punktów konstrukcyjnych:
+- Użyj `await using` aby zapewnić prawidłowe zwolnienie sesji i uniknąć wycieków zasobów.
+- Zwróć odpowiedzi przesyłane strumieniowo `IAsyncEnumerable`, który w naturalny sposób obsługuje strumienie asynchroniczne.
+- Użyj `Metadata` fragmenty, aby określić zakończenie i upewnić się, że otrzymano pełną odpowiedź.
+
+### OpenCodeCliProvider: implementacja oparta na API HTTP
+
+OpenCode świadczy swoje usługi poprzez API HTTP, więc architektura jest nieco inna:
+
+```plaintext
+OpenCodeCliProvider → OpenCodeRuntimeManager → OpenCodeClient → OpenCode HTTP API
+                      ↓
+                OpenCodeProcessManager → opencode process management
+```
+
+Godną uwagi cechą OpenCode jest to, że wykorzystuje bazę danych SQLite do utrwalania powiązań sesji. Dzięki temu możliwe jest odzyskanie sesji i odzyskanie szybkiej odpowiedzi:
+
+```csharp
+private async Task<OpenCodePromptExecutionResult> ExecutePromptAsync(
+    AIRequest request,
+    string? embeddedCommandPrompt,
+    CancellationToken cancellationToken)
+{
+    var prompt = BuildPrompt(request, embeddedCommandPrompt);
+    var resolvedWorkingDirectory = ResolveWorkingDirectory(request.WorkingDirectory);
+    var client = await _runtimeManager.GetClientAsync(resolvedWorkingDirectory, cancellationToken);
+    var bindingSessionId = request.SessionId;
+    var boundSession = TryGetBinding(bindingSessionId, resolvedWorkingDirectory);
+
+    // Try to use the already bound session
+    if (boundSession is not null)
+    {
+        try
+        {
+            return await PromptSessionAsync(
+                client,
+                boundSession,
+                BuildPromptRequest(request, prompt, CreatePromptMessageId()),
+                request.Model ?? _settings.Model,
+                cancellationToken);
+        }
+        catch (OpenCodeApiException ex) when (IsStaleBinding(ex))
+        {
+            // The session has expired, remove the binding
+            RemoveBinding(bindingSessionId);
+        }
+    }
+
+    // Create a new session
+    var session = await client.Session.CreateAsync(new OpenCodeSessionCreateRequest
+    {
+        Title = BuildSessionTitle(request)
+    }, cancellationToken);
+
+    BindSession(bindingSessionId, session.Id, resolvedWorkingDirectory);
+    return await PromptSessionAsync(client, session.Id, ...);
+}
+```
+
+Ta implementacja ma kilka interesujących cech:
+- Mechanizm wiązania sesji: taki sam `SessionId` ponownie wykorzystuje tę samą sesję OpenCode, unikając wielokrotnego tworzenia sesji.
+- Obsługa wygaśnięcia: gdy okaże się, że sesja wygasła, powiązanie jest automatycznie czyszczone.
+- Trwałość bazy danych: powiązania są przechowywane w SQLite i pozostają skuteczne po ponownym uruchomieniu.
+
+### Porównanie dwóch podejść
+
+| Aspekt | Dostawca IFlowCli | Dostawca OpenCodeCli |
+|------|-----------------|---------------------|
+| Komunikacja | Gniazdo sieciowe (ACP) | API HTTP |
+| Zarządzanie procesami | Menedżer sesji ACPS | Menedżer procesów OpenCode |
+| Przydział portów | Port dynamiczny | Brak portu (używa protokołu HTTP) |
+| Zarządzanie sesją | Sesja ACPS | Sesja OpenCode |
+| Trwałość | Pamięć podręczna w pamięci | Baza danych SQLite |
+| Polecenie uruchomienia | `iflow --experimental-acp --port` | `opencode` |
+| Opóźnienie | Niższe (połączenie długotrwałe) | Stosunkowo wyższe (żądania HTTP) |
+
+To, które podejście wybierzesz, zależy głównie od Twoich potrzeb. WebSocket jest lepszy w przypadku scenariuszy o wysokich wymaganiach w czasie rzeczywistym, podczas gdy interfejs API HTTP jest prostszy i łatwiejszy do debugowania.
+
+## Praktyczny przewodnik
+
+### Skonfiguruj dostawców
+
+Najpierw włącz dwóch dostawców w pliku konfiguracyjnym:
+
+```yaml
+AI:
+  Providers:
+    IFlowCli:
+      Type: "IFlowCli"
+      Enabled: true
+      ExecutablePath: "iflow"
+      Model: null
+      WorkingDirectory: null
+    OpenCodeCli:
+      Type: "OpenCodeCli"
+      Enabled: true
+      ExecutablePath: "opencode"
+      Model: "anthropic/claude-sonnet-4"
+      WorkingDirectory: null
+
+OpenCode:
+  Enabled: true
+  BaseUrl: "http://localhost:38376"
+  ExecutablePath: "opencode"
+  StartupTimeoutSeconds: 30
+  RequestTimeoutSeconds: 120
+```
+
+### Użyj IFlowCliProvider
+
+```csharp
+// Get provider through the factory
+var provider = await _providerFactory.GetProviderAsync(AIProviderType.IFlowCli);
+
+// Execute an AI request
+var request = new AIRequest
+{
+    Prompt = "请帮我重构这个函数",
+    WorkingDirectory = "/path/to/project",
+    Model = "claude-sonnet-4"
+};
+
+// Get the complete response
+var response = await provider.ExecuteAsync(request, cancellationToken);
+Console.WriteLine(response.Content);
+
+// Or use streaming responses
+await foreach (var chunk in provider.StreamAsync(request, cancellationToken))
+{
+    if (chunk.Type == StreamingChunkType.ContentDelta)
+    {
+        Console.Write(chunk.Content);
+    }
+}
+```
+
+### Użyj OpenCodeCliProvider
+
+```csharp
+// Get provider through the factory
+var provider = await _providerFactory.GetProviderAsync(AIProviderType.OpenCodeCli);
+
+var request = new AIRequest
+{
+    Prompt = "请帮我分析这个错误",
+    WorkingDirectory = "/path/to/project",
+    Model = "anthropic/claude-sonnet-4"
+};
+
+var response = await provider.ExecuteAsync(request, cancellationToken);
+Console.WriteLine(response.Content);
+```
+
+### Kontrole stanu zdrowia
+
+Przed uruchomieniem lub przed użyciem możesz sprawdzić, czy dostawca jest dostępny:
+
+```csharp
+var iflowResult = await iflowProvider.PingAsync(cancellationToken);
+if (!iflowResult.Success)
+{
+    Console.WriteLine($"IFlow is unavailable: {iflowResult.ErrorMessage}");
+    return;
+}
+
+var openCodeResult = await openCodeProvider.PingAsync(cancellationToken);
+if (!openCodeResult.Success)
+{
+    Console.WriteLine($"OpenCode is unavailable: {openCodeResult.ErrorMessage}");
+    return;
+}
+```
+
+### Wbudowana obsługa poleceń
+
+Obaj dostawcy obsługują polecenia osadzone, takie jak `/file:xxx`:
+
+```csharp
+var request = new AIRequest
+{
+    Prompt = "分析这个文件的问题",
+    SystemMessage = "你是一个代码分析专家"
+};
+
+await foreach (var chunk in provider.SendMessageAsync(
+    request,
+    embeddedCommandPrompt: "/file:src/main.cs",
+    cancellationToken))
+{
+    Console.Write(chunk.Content);
+}
+```
+
+## Uwagi i najlepsze praktyki
+
+### Zarządzanie zasobami
+
+IFlow wykorzystuje długotrwałe połączenia WebSocket, dlatego zarządzanie zasobami zasługuje na szczególną uwagę:
+- Użyj `await using` aby zapewnić prawidłowe wydawanie sesji.
+- Anulowanie wyzwala czyszczenie procesu.
+- `ACPSessionManager` obsługuje maksymalny limit liczby sesji.
+
+Zarządzanie procesami OpenCode jest stosunkowo prostsze i `OpenCodeRuntimeManager` obsługuje to automatycznie.
+
+### Obsługa błędów
+
+Obaj dostawcy mają pełną obsługę błędów:
+- Błędy IFlow są propagowane poprzez aktualizacje sesji ACP.
+- Błędy OpenCode są wyrzucane `OpenCodeApiException`.
+- Zaleca się, aby obiekt wywołujący przechwytywał i obsługiwał te wyjątki.
+
+### Rozważania dotyczące wydajności
+
+- Komunikacja IFlow WebSocket ma mniejsze opóźnienia niż HTTP.
+- Ponowne wykorzystanie sesji OpenCode może zmniejszyć obciążenie żądań HTTP.
+- Mechanizm fabrycznej pamięci podręcznej pozwala uniknąć wielokrotnego tworzenia dostawców.
+- W scenariuszach o dużej współbieżności należy zwrócić szczególną uwagę na limity liczby procesów i połączeń.
+
+### Walidacja konfiguracji
+
+Ścieżka pliku wykonywalnego jest sprawdzana podczas uruchamiania, ale nadal mogą wystąpić problemy w czasie wykonywania. `PingAsync` to przydatne narzędzie do sprawdzenia poprawności konfiguracji:
+
+```csharp
+// Check at startup
+var provider = await _providerFactory.GetProviderAsync(providerType);
+var result = await provider.PingAsync(cancellationToken);
+if (!result.Success)
+{
+    _logger.LogError("Provider {ProviderType} is unavailable: {Error}", providerType, result.ErrorMessage);
+}
+```
+
+## Podsumowanie
+
+W tym artykule opisano podejście techniczne stosowane przez platformę HagiCode podczas integracji dwóch narzędzi AI iflow i OpenCode. Poprzez zjednoczoną `IAIProvider` interfejsie dostosowaliśmy różne style komunikacji, WebSocket i HTTP, zachowując spójność wzorca wywołań wyższej warstwy.
+
+Podstawowa idea jest w rzeczywistości dość prosta:
+1. Zdefiniuj ujednoliconą abstrakcję interfejsu.
+2. Twórz warstwy adapterów dla różnych implementacji.
+3. Zarządzaj wszystkim w sposób jednolity według wzorca fabrycznego.
+
+Zapewnia to systemowi dobrą rozszerzalność. Kiedy trzeba później zintegrować nowe narzędzie AI, jedyne, co musimy zrobić, to wdrożyć `IAIProvider` interfejs bez zmiany zbyt dużej ilości istniejącego kodu.
+
+Jeśli pracujesz również nad integracją wielu narzędzi AI, mam nadzieję, że ten artykuł będzie pomocny.
+
+## Referencje
+
+- HagiCode w GitHubie: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Oficjalna strona HagiCode: [hagicode.com](https://hagicode.com)
+- Przewodnik instalacji HagiCode: [docs.hagicode.com/installation](https://docs.hagicode.com/installation)
+- Specyfikacja protokołu ACP: [github.com/modelcontextprotocol/specyfikacja](https://github.com/modelcontextprotocol/specification)
+- Dokumentacja Orleanu: [Learn.microsoft.com/dotnet/orleans](https://learn.microsoft.com/dotnet/orleans)
+
+---
+
+Jeśli ten artykuł Ci pomógł:
+- Daj lajka, żeby więcej osób mogło to zobaczyć
+- Oznacz nas na GitHubie: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Odwiedź oficjalną stronę internetową, aby dowiedzieć się więcej: [hagicode.com](https://hagicode.com)
+- Obejrzyj 30-minutową praktyczną demonstrację: [www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)
+- Spróbuj instalacji jednym kliknięciem: [https://docs.hagicode.com/installation/docker-compose](https://docs.hagicode.com/installation/docker-compose)
+- Szybka instalacja na komputerze stacjonarnym: [hagicode.com/desktop/](https://hagicode.com/desktop/)
+- Rozpoczęła się publiczna wersja beta i możesz ją wypróbować

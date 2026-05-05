@@ -1,0 +1,512 @@
+---
+title: Komplett guide till Codex SDK Console Message Parsing
+date: 2026-03-10
+tags: [Codex SDK, TypeScript, AI Executor, Event Stream]
+description: "Den här artikeln förklarar Codex SDK-händelseströmningsmekanismen, parsning av meddelandetyp och bästa praxis i verkliga projekt, vilket hjälper utvecklare att snabbt bemästra"
+---
+
+## Komplett guide till Codex SDK Console Message Parsing
+
+> Den här artikeln förklarar Codex SDK-händelseströmningsmekanismen, parsning av meddelandetyp och bästa praxis i verkliga projekt, vilket hjälper utvecklare att snabbt bemästra kärnkompetensen bakom AI-exekveringstjänster.
+
+## Bakgrund
+
+När vi bygger en AI-exekveringstjänst baserad på Codex SDK stöter vi oundvikligen på en praktisk fråga: hur ska vi hantera de strömmade händelsemeddelanden som returneras av Codex? Dessa meddelanden innehåller viktig information som exekveringsstatus, utdatainnehåll och feldetaljer, så de förtjänar noggrann hantering.
+
+Som en del av HagiCode-projektet behövde vi en pålitlig exekutor för AI-kodningsassistentscenarier. Det är precis därför vi bestämde oss för att studera Codex SDK-händelseströmningsmekanismen på djupet. När allt kommer omkring, bara genom att förstå hur de underliggande meddelandena fungerar kan vi bygga en verkligt företagsklassad AI-exekveringsplattform.
+
+Codex SDK är en programmeringshjälp SDK släppt av OpenAI. Den returnerar exekveringsresultat genom en händelseström. Till skillnad från den traditionella begäran-svar-modellen använder Codex strömmade händelser så att vi kan:
+
+- Få exekveringsframsteg i realtid
+- Hantera fel omgående
+- Få detaljerad statistik för användning av token
+- Stöd långvariga komplexa uppgifter
+
+Att förstå dessa händelsetyper och analysera dem korrekt är viktigt för att implementera en fullt kapabel AI-exekutor. I slutändan vill ingen arbeta med en svart låda.
+
+## Om HagiCode
+
+Lösningen som delas i den här artikeln kommer från vår praktiska erfarenhet av [HagiCode](https://hagicode.com) projekt. HagiCode är ett AI-kodningsassistentprojekt med öppen källkod dedikerat till att ge utvecklare intelligent kodningsstöd. Under utvecklingen behövde vi bygga en pålitlig AI-exekveringstjänst för att hantera begäranden om körning av användarkod, vilket är den direkta anledningen till att vi introducerade Codex SDK.
+
+Som en AI-kodningsassistent måste HagiCode hantera en mängd komplexa kodexekveringsscenarier: få körningsframsteg i realtid, hantera fel snabbt och samla in detaljerad statistik för användning av token. Genom att på djupet förstå Codex SDK-händelseströmmekanismen kan vi bygga en executor som uppfyller produktionsmiljökraven. I slutändan, oavsett om det är programvara eller verkliga livet, gynnas allt av stadig ackumulering och förfining.
+
+## Event Stream Mechanism
+
+### Grundläggande koncept
+
+Codex SDK använder `thread.runStreamed()` metod för att returnera en asynkron händelseiterator:
+
+```typescript
+import { Codex } from '@openai/codex-sdk';
+
+const client = new Codex({
+  apiKey: process.env.CODEX_API_KEY,
+  baseUrl: process.env.CODEX_BASE_URL,
+});
+
+const thread = client.startThread({
+  workingDirectory: '/path/to/project',
+  skipGitRepoCheck: false,
+});
+
+const { events } = await thread.runStreamed('your prompt here', {
+  outputSchema: {
+    type: 'object',
+    properties: {
+      output: { type: 'string' },
+      status: { type: 'string', enum: ['ok', 'action_required'] },
+    },
+    required: ['output', 'status'],
+  },
+});
+
+for await (const event of events) {
+  // Handle each event
+}
+```
+
+### Detaljerad förklaring av händelsetyper
+
+| Händelsetyp | Beskrivning | Nyckeldata |
+|---------|------|----------|
+| `thread.started` | Tråden startade framgångsrikt | `thread_id` |
+| `item.updated` | Meddelandeinnehåll uppdaterat | `item.text` |
+| `item.completed` | Meddelandet slutfört | `item.text` |
+| `turn.completed` | Utförande avslutat | `usage` (tokenanvändning) |
+| `turn.failed` | Utförande misslyckades | `error.message` |
+| `error` | Felhändelse | `message` |
+
+I verkliga projekt byggs HagiCodes executor-komponent ovanpå dessa händelsetyper. Vi måste hantera varje typ av händelse noggrant för att säkerställa en smidig användarupplevelse. Bra system byggs genom att ta detaljer på allvar.
+
+## Implementering av meddelandetolkning
+
+### Extrahera meddelandeinnehåll
+
+Meddelandeinnehåll extraheras genom en händelsehanterare:
+
+```typescript
+private handleThreadEvent(event: ThreadEvent, onMessage: (content: string) => void): void {
+  // Only handle message update and completion events
+  if (event.type !== 'item.updated' && event.type !== 'item.completed') {
+    return;
+  }
+
+  // Only handle agent message content
+  if (event.item.type !== 'agent_message') {
+    return;
+  }
+
+  // Extract text content
+  onMessage(event.item.text);
+}
+```
+
+Huvudpunkter:
+- Endast handtag `item.updated` och `item.completed` händelser
+- Hantera endast innehåll av typ `agent_message`
+- Meddelandets innehåll finns i `event.item.text` fältet
+
+### Strukturerad utdataanalys
+
+Codex stöder JSON-strukturerad utdata. Du kan ange returformatet genom `outputSchema` parameter:
+
+```typescript
+const DEFAULT_OUTPUT_SCHEMA = {
+  type: 'object',
+  properties: {
+    output: { type: 'string' },
+    status: { type: 'string', enum: ['ok', 'action_required'] },
+  },
+  required: ['output', 'status'],
+  additionalProperties: false,
+} as const;
+```
+
+Parsningsfunktionen försöker tolka JSON, och om det misslyckas faller den tillbaka till den råa texten.
+
+```typescript
+function toStructuredOutput(raw: string): StructuredOutput {
+  try {
+    const parsed = JSON.parse(raw) as Partial<StructuredOutput>;
+    if (typeof parsed.output === 'string') {
+      return {
+        output: parsed.output,
+        status: parsed.status === 'action_required' ? 'action_required' : 'ok',
+      };
+    }
+  } catch {
+    // JSON parsing failed, fall back to the raw text
+  }
+
+  return {
+    output: raw,
+    status: 'ok',
+  };
+}
+```
+
+### Komplett händelsehanteringsflöde
+
+```typescript
+private async runWithStreaming(
+  thread: Thread,
+  input: CodexStageExecutionInput
+): Promise<{ output: string; usage: Usage | null }> {
+  const abortController = new AbortController();
+  const timeoutHandle = setTimeout(() => {
+    abortController.abort();
+  }, Math.max(1000, input.timeoutMs));
+
+  let latestMessage = '';
+  let usage: Usage | null = null;
+  let emittedLength = 0;
+
+  try {
+    const { events } = await thread.runStreamed(input.prompt, {
+      outputSchema: DEFAULT_OUTPUT_SCHEMA,
+      signal: abortController.signal,
+    });
+
+    for await (const event of events) {
+      // Handle message content
+      this.handleThreadEvent(event, (nextContent) => {
+        const delta = nextContent.slice(emittedLength);
+        if (delta.length > 0) {
+          emittedLength = nextContent.length;
+          input.callbacks?.onChunk?.(delta);  // Streaming callback
+        }
+        latestMessage = nextContent;
+      });
+
+      // Process different data based on the event type
+      if (event.type === 'thread.started') {
+        this.threadId = event.thread_id;
+      } else if (event.type === 'turn.completed') {
+        usage = event.usage;
+      } else if (event.type === 'turn.failed') {
+        throw new CodexExecutorError('gateway_unavailable', event.error.message, true);
+      } else if (event.type === 'error') {
+        throw new CodexExecutorError('gateway_unavailable', event.message, true);
+      }
+    }
+  } catch (error) {
+    if (abortController.signal.aborted) {
+      throw new CodexExecutorError(
+        'upstream_timeout',
+        `Codex stage timed out after ${input.timeoutMs}ms`,
+        true
+      );
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutHandle);
+  }
+
+  const structured = toStructuredOutput(latestMessage);
+  return { output: structured.output, usage };
+}
+```
+
+## Felhanteringsstrategi
+
+### Felkodsmappning
+
+Kartlägg specifika felmönster till konkreta felkoder så att de övre lagren kan hantera dem lättare:
+
+```typescript
+function mapError(error: unknown): CodexExecutorError {
+  if (error instanceof CodexExecutorError) {
+    return error;
+  }
+
+  const message = error instanceof Error ? error.message : String(error);
+  const normalized = message.toLowerCase();
+
+  // Authentication errors - not retryable
+  if (normalized.includes('401') ||
+      normalized.includes('403') ||
+      normalized.includes('api key') ||
+      normalized.includes('auth')) {
+    return new CodexExecutorError('auth_invalid', message, false);
+  }
+
+  // Rate limit errors - retryable
+  if (normalized.includes('429') || normalized.includes('rate limit')) {
+    return new CodexExecutorError('rate_limited', message, true);
+  }
+
+  // Timeout errors - retryable
+  if (normalized.includes('timeout') || normalized.includes('aborted')) {
+    return new CodexExecutorError('upstream_timeout', message, true);
+  }
+
+  // Default error
+  return new CodexExecutorError('gateway_unavailable', message, true);
+}
+```
+
+### Definitioner av feltyp
+
+```typescript
+export type CodexErrorCode =
+  | 'auth_invalid'      // Authentication failure
+  | 'upstream_timeout'  // Upstream timeout
+  | 'rate_limited'      // Rate limited
+  | 'gateway_unavailable'; // Gateway unavailable
+
+export class CodexExecutorError extends Error {
+  readonly code: CodexErrorCode;
+  readonly retryable: boolean;
+
+  constructor(code: CodexErrorCode, message: string, retryable: boolean) {
+    super(message);
+    this.name = 'CodexExecutorError';
+    this.code = code;
+    this.retryable = retryable;
+  }
+}
+```
+
+## Arbetskatalog och miljökonfiguration
+
+### Working Directory Validering
+
+Codex SDK kräver att arbetskatalogen är ett giltigt Git-förråd.
+
+```typescript
+export function validateWorkingDirectory(
+  workingDirectory: string,
+  skipGitRepoCheck: boolean
+): void {
+  const resolvedWorkingDirectory = path.resolve(workingDirectory);
+
+  if (!existsSync(resolvedWorkingDirectory)) {
+    throw new CodexExecutorError(
+      'gateway_unavailable',
+      'Working directory does not exist.',
+      false
+    );
+  }
+
+  if (!statSync(resolvedWorkingDirectory).isDirectory()) {
+    throw new CodexExecutorError(
+      'gateway_unavailable',
+      'Working directory is not a directory.',
+      false
+    );
+  }
+
+  if (skipGitRepoCheck) {
+    return;
+  }
+
+  const gitDir = path.join(resolvedWorkingDirectory, '.git');
+  if (!existsSync(gitDir)) {
+    throw new CodexExecutorError(
+      'gateway_unavailable',
+      'Working directory is not a git repository.',
+      false
+    );
+  }
+}
+```
+
+### Laddar miljövariabler
+
+Codex SDK måste ladda miljövariabler från inloggningsskalet så att AI-agenten kan komma åt systemkommandon:
+
+```typescript
+function parseEnvironmentOutput(output: Buffer): Record<string, string> {
+  const parsed: Record<string, string> = {};
+
+  for (const entry of output.toString('utf8').split('\0')) {
+    if (!entry) continue;
+
+    const separatorIndex = entry.indexOf('=');
+    if (separatorIndex <= 0) continue;
+
+    const key = entry.slice(0, separatorIndex);
+    const value = entry.slice(separatorIndex + 1);
+    if (key.length > 0) {
+      parsed[key] = value;
+    }
+  }
+
+  return parsed;
+}
+
+function tryLoadEnvironmentFromShell(shellPath: string): Record<string, string> | null {
+  const result = spawnSync(shellPath, ['-ilc', 'env -0'], {
+    env: process.env,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: 5000,
+  });
+
+  if (result.error || result.status !== 0) {
+    return null;
+  }
+
+  return parseEnvironmentOutput(result.stdout);
+}
+
+export function createExecutorEnvironment(
+  envOverrides: Record<string, string> = {}
+): Record<string, string> {
+  // Load environment variables from the login shell
+  const consoleEnv = loadConsoleEnvironmentFromShell();
+
+  return {
+    ...process.env,
+    ...consoleEnv,
+    ...envOverrides,
+  };
+}
+```
+
+## Komplett användningsexempel
+
+### Grundläggande användning
+
+I HagiCode-projektet använder vi följande tillvägagångssätt för att initiera Codex-klienten och utföra uppgifter:
+
+```typescript
+import { Codex } from '@openai/codex-sdk';
+
+async function executeWithCodex(prompt: string, workingDir: string) {
+  const client = new Codex({
+    apiKey: process.env.CODEX_API_KEY,
+    env: { PATH: process.env.PATH },
+  });
+
+  const thread = client.startThread({
+    workingDirectory: workingDir,
+  });
+
+  const { events } = await thread.runStreamed(prompt);
+
+  let result = '';
+  for await (const event of events) {
+    if (event.type === 'item.updated' && event.item.type === 'agent_message') {
+      result = event.item.text;
+    }
+    if (event.type === 'turn.completed') {
+      console.log('Token usage:', event.usage);
+    }
+  }
+
+  // Try to parse JSON output
+  try {
+    const parsed = JSON.parse(result);
+    return parsed.output;
+  } catch {
+    return result;
+  }
+}
+```
+
+### Slutför implementeringen med nya försök
+
+```typescript
+export class CodexSdkExecutor {
+  private readonly config: CodexRuntimeConfig;
+  private readonly client: Codex;
+  private threadId: string | null = null;
+
+  async executeStage(input: CodexStageExecutionInput): Promise<CodexStageExecutionResult> {
+    const maxAttempts = Math.max(1, this.config.retryCount + 1);
+    let attempt = 0;
+    let lastError: CodexExecutorError | null = null;
+
+    while (attempt < maxAttempts) {
+      attempt += 1;
+
+      try {
+        const thread = this.getThread(input.workingDirectory);
+        const { output, usage } = await this.runWithStreaming(thread, input);
+
+        return {
+          output,
+          usage,
+          threadId: this.threadId!,
+          attempts: attempt,
+          latencyMs: Date.now() - startedAt,
+        };
+      } catch (error) {
+        const mappedError = mapError(error);
+        lastError = mappedError;
+
+        // Non-retryable error or max retry attempts reached
+        if (!mappedError.retryable || attempt >= maxAttempts) {
+          throw mappedError;
+        }
+
+        // Wait before retrying
+        await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+      }
+    }
+
+    throw lastError!;
+  }
+}
+```
+
+## Bästa metoder
+
+### 1. Arbetskatalogkrav
+
+- Se till att arbetskatalogen är ett giltigt Git-förråd
+- Använd `PROJECT_ROOT` miljövariabel för att specificera den explicit
+- Under felsökning kan du ställa in `CODEX_SKIP_GIT_REPO_CHECK=true` att hoppa över kontrollen
+
+### 2. Konfiguration av miljövariabel
+
+- Skicka endast de nödvändiga miljövariablerna genom en vitlistamekanism
+- Använd inloggningsskalet för att ladda hela miljön
+- Undvik att lämna känslig information
+
+### 3. Timeout och strategi för försök igen
+
+- Ställ in rimliga tidsgränser baserat på uppgiftens komplexitet
+- Implementera exponentiell backoff för omprövningsbara fel
+- Registrera antalet försök och skäl
+
+### 4. Felhantering
+
+- Skilj mellan omförsökbara och icke-försökbara fel
+- Ge tydliga felmeddelanden och förslag
+- Använd enhetliga felkoder så att de övre lagren kan hantera dem konsekvent
+
+### 5. Strömmande utgång
+
+- Implementera inkrementella återuppringningar för att förbättra användarupplevelsen
+- Hantera inkrementella meddelandeuppdateringar korrekt
+- Registrera tokenanvändning för kostnadsanalys
+
+I själva produktionsmiljön för HagiCode-projektet har vi redan verifierat effektiviteten av de bästa metoderna ovan. Detta tillvägagångssätt har hjälpt oss att bygga en stabil och pålitlig AI-exekveringstjänst. I slutändan är praktisk validering viktigare än bara teori.
+
+## Slutsats
+
+Codex SDK-händelseströmningsmekanismen ger starka möjligheter för att bygga AI-exekveringstjänster. Genom att korrekt analysera olika typer av händelser kan vi:
+
+- Få körstatus och utdata i realtid
+- Implementera pålitlig felhantering och försök igen
+- Få detaljerad exekveringsstatistik
+- Bygg en fullfjädrad AI-exekveringsplattform
+
+Kärnkoncepten och kodexemplen som introduceras i den här artikeln kan tillämpas direkt i riktiga projekt, vilket hjälper utvecklare att snabbt komma igång med Codex SDK-integration. Om du tycker att detta tillvägagångssätt är värdefullt, återspeglar det också styrkan i HagiCodes ingenjörspraktik och gör HagiCode i sig värt att följa.
+
+## Referenser
+
+- [Officiell Codex SDK-dokumentation](https://platform.openai.com/docs/codex)
+- [HagiCode GitHub Repository](https://github.com/HagiCode-org/site)
+- [HagiCodes officiella webbplats](https://hagicode.com)
+
+---
+
+Tack för att du läser. Om du tyckte att den här artikeln var användbar, klicka på gilla-knappen nedan så att fler kan upptäcka den.
+
+Det här innehållet skapades med AI-assisterat samarbete, granskats av författaren och återspeglar författarens egna åsikter och ståndpunkter.
+
+- Författare: [newbe36524](https://www.newbe.pro)
+- Artikellänk: [https://docs.hagicode.com/blog/2026-03-09-codex-sdk-console-message-parsing/](https://docs.hagicode.com/blog/2026-03-09-codex-sdk-console-message-parsing/)
+- Upphovsrättsmeddelande: Om inget annat anges är alla artiklar på den här bloggen licensierade under BY-NC-SA. Ange källan vid nytryckning.
