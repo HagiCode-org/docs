@@ -42,7 +42,7 @@ const targetLocales = [
   { code: 'pt-PT', translateCode: 'pt' },
   { code: 'es-419', translateCode: 'es' },
 ];
-const separatorTemplate = '[[[TRSEP_%ID%]]]';
+const separatorTemplate = '|||TRSEP_%ID%|||';
 const tokenPattern = /@@TR_[0-9]+@@/gu;
 const translatableFrontmatterKeys = new Set(['title', 'description']);
 const translatablePropKeys = new Set(['title', 'description']);
