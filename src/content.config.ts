@@ -10,6 +10,7 @@ import {
   DOCS_LOCALES,
   DOCS_LOCALE_RESOURCES,
 } from './i18n/generated/docs-locale-resources.mjs';
+import { extendWithAIDisclosureFlags } from './lib/ai-disclosure-schema';
 import { DOCS_GENERATED_CONTENT_ROOT } from './lib/docs-content-paths.mjs';
 import { BLOG_LANGUAGE_INPUTS } from './lib/blog-i18n';
 
@@ -52,12 +53,14 @@ export const collections = {
       generateId: generateDocsEntryId,
     }),
 		schema: docsSchema({
-			extend: (context) => blogSchema(context).extend({
-				/** 隐藏博客文章中的广告区域 */
-				hideAd: z.boolean().optional(),
-				/** Optional explicit RSS language. Missing blog posts derive language from their locale path. */
-				language: z.enum(BLOG_LANGUAGE_INPUTS).optional(),
-			}),
+			extend: (context) => extendWithAIDisclosureFlags(
+        blogSchema(context).extend({
+          /** 隐藏博客文章中的广告区域 */
+          hideAd: z.boolean().optional(),
+          /** Optional explicit RSS language. Missing blog posts derive language from their locale path. */
+          language: z.enum(BLOG_LANGUAGE_INPUTS).optional(),
+        }),
+      ),
 		})
 	}),
 };

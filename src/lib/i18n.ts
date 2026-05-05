@@ -68,6 +68,20 @@ type DocsFooterCopy = {
   };
 };
 
+type DocsAIDisclosureCopy = {
+  translation: {
+    label: string;
+    title: string;
+    description: string;
+    viewOriginal: string;
+  };
+  author: {
+    label: string;
+    title: string;
+    description: string;
+  };
+};
+
 type GeneratedDocsLocaleOption = {
   code: DocsLocale;
   sourceLocale: string;
@@ -679,6 +693,15 @@ export function getDocsContentLayoutToggleCopy(
 export function getDocsFooterCopy(localeInput: string | null | undefined): DocsFooterCopy {
   const locale = resolveDocsLocale(localeInput);
   return DOCS_FOOTER_COPY_OVERRIDES[locale] ?? DEFAULT_DOCS_FOOTER_COPY;
+}
+
+export function getDocsAIDisclosureCopy(
+  localeInput: string | null | undefined,
+): DocsAIDisclosureCopy {
+  const locale = resolveDocsLocale(localeInput);
+  const sourceLocale = DOCS_ROUTE_TO_SOURCE_LOCALE[locale] as keyof typeof DOCS_LOCALE_RESOURCES;
+  const localeResources = DOCS_LOCALE_RESOURCES[sourceLocale] ?? DOCS_LOCALE_RESOURCES['en-US'];
+  return localeResources.common.aiDisclosure;
 }
 
 export const BLOG_ROUTE_LOCALES = DOCS_ROUTE_LOCALE_CODES;
