@@ -1,0 +1,435 @@
+---
+title: Come costruire una stazione di distribuzione di download veloce con server cloud a basso costo
+date: 2026-04-15
+tags: [cloud server, Nginx, cache, file distribution, cost optimization]
+description: "Come costruire una stazione di distribuzione di download veloce con server cloud a basso costo: la larghezza di banda di archiviazione nel cloud è assurdamente costosa, l'accesso transfrontaliero è dolorosamente"
+---
+
+## Come costruire una stazione di distribuzione di download veloce con server cloud a basso costo
+
+> La larghezza di banda dello storage cloud è assurdamente costosa, l'accesso transfrontaliero è terribilmente lento e i prezzi CDN sono sufficienti per spaventare chiunque... Se gestisci la distribuzione di file, probabilmente conosci bene questi problemi. In questo post, voglio condividere un approccio a basso costo che abbiamo elaborato durante la costruzione [HagiCode](https://hagicode.com): un server cloud più un livello di caching Nginx. Il costo è sceso di circa la metà, mentre la velocità di download è migliorata parecchio, il che è stato almeno un po’ confortante.
+
+## Sfondo
+
+Quando si tratta di Internet, la velocità di download e la stabilità fanno davvero parte dell'esperienza dell'utente. Che tu stia eseguendo un progetto open source o un prodotto commerciale, devi comunque fornire agli utenti un modo affidabile per scaricare file.
+
+Scaricare file direttamente dall'archiviazione cloud, come Azure Blob Storage o AWS S3, sembra semplice, ma presenta alcuni problemi pratici:
+
+**Latenza di rete**: l'accesso transfrontaliero e tra regioni può essere abbastanza lento da farti venir voglia di spaccare la tastiera. Se gli utenti devono aspettare per sempre, l’esperienza ovviamente non sarà eccezionale.
+
+**Costo della larghezza di banda**: il traffico in uscita dallo storage cloud è estremamente costoso. L'accesso all'archivio BLOB di Azure dalla Cina continentale costa circa 0,5 CNY per GB, il che significa che 1 TB al mese equivale a circa 500 CNY. Per un piccolo team, non si tratta di una cifra insignificante. Dopotutto, i soldi di nessuno vengono dal vento.
+
+**Restrizioni di accesso**: in alcune regioni, l'accesso ai servizi cloud esteri è instabile e talvolta semplicemente non disponibile. Gli utenti vogliono scaricare i file ma non possono, il che è frustrante per tutti.
+
+**Costo CDN**: i CDN commerciali possono risolvere questi problemi, ma il prezzo è altrettanto reale. La maggior parte dei piccoli team semplicemente non può giustificarlo.
+
+Quindi esiste una soluzione che sia conveniente e pratica? SÌ. Utilizza un server cloud, un proxy inverso e un livello di memorizzazione nella cache. È un approccio semplice, ma funziona. Il costo diminuisce di circa la metà e anche la velocità migliora, il che è un buon compromesso.
+
+## A proposito di HagiCode
+
+Non abbiamo ideato questa architettura dal nulla. È venuto dalla nostra esperienza nel mondo reale su cui abbiamo lavorato [HagiCode](https://hagicode.com).
+
+HagiCode è un assistente di codifica AI e dobbiamo fornire download sia per le distribuzioni lato server che per quelle desktop. Poiché si tratta di uno strumento per sviluppatori, è importante che gli utenti di tutto il mondo possano scaricarlo in modo rapido e affidabile. Questo è esattamente il motivo per cui abbiamo dovuto innanzitutto elaborare una strategia di distribuzione a basso costo.
+
+Se ritieni che questa soluzione sia utile, allora forse la nostra ingegneria è almeno abbastanza decente... e se è così, potrebbe valere la pena dare un'occhiata anche allo stesso HagiCode.
+
+## Progettazione dell'architettura
+
+### Architettura complessiva
+
+Cominciamo con l'architettura completa:
+
+```
+User request
+    ↓
+DNS resolution
+    ↓
+┌─────────────────────────────────────┐
+│   Reverse proxy layer (Traefik/Bunker Web) │ ← SSL termination, routing, security protection
+├─────────────────────────────────────┤
+│   Ports: 80/443                     │
+│   Features: Automatic Let's Encrypt certificates │
+│             Host routing            │
+└─────────────────────────────────────┘
+    ↓
+┌─────────────────────────────────────┐
+│   Cache layer (Nginx)               │ ← File caching, Gzip compression
+├─────────────────────────────────────┤
+│   Ports: 8080(server) / 8081(desktop) │
+│   Cache strategy:                   │
+│   - index.json: 1 hour              │
+│   - other files: 7 days             │
+│   Cache size: 1GB                   │
+└─────────────────────────────────────┘
+    ↓
+┌─────────────────────────────────────┐
+│   Origin (Azure Blob Storage)       │ ← File storage
+└─────────────────────────────────────┘
+```
+
+L'idea centrale di questa architettura è semplice: **mettere una cache tra gli utenti e l'archiviazione sul cloud**.
+
+Le richieste degli utenti arrivano prima al livello del proxy inverso sul server cloud, quindi subentra il livello della cache Nginx. Se il file richiesto è già memorizzato nella cache, viene restituito immediatamente. In caso contrario, Nginx lo recupera dal cloud storage e allo stesso tempo archivia una copia locale. La prossima volta che qualcuno richiede lo stesso file, non è necessario coinvolgere nuovamente l'archiviazione nel cloud.
+
+### Perché scegliere questa architettura?
+
+**Vantaggi dei server cloud**:
+- Costo prevedibile: fornitori come Alibaba Cloud offrono server cloud a basso costo, con istanze da 1-2 vCPU e 2 GB di RAM al prezzo di circa CNY 50-100 al mese
+- Distribuzione flessibile: puoi configurare liberamente le regole del proxy inverso e le policy di memorizzazione nella cache
+- Geografia flessibile: puoi scegliere le regioni server più vicine ai tuoi utenti
+- Buona scalabilità: puoi aggiornare le specifiche del server man mano che il traffico cresce
+
+**Proxy inverso + architettura cache**:
+- Riduci la pressione sull'origine: memorizza nella cache i file hot per ridurre l'accesso diretto allo spazio di archiviazione nel cloud
+- Costi inferiori: il traffico del server cloud è molto più economico dell'uscita dallo storage cloud
+- Migliora la velocità: l'accesso nelle vicinanze e la larghezza di banda del server sono generalmente migliori rispetto alla consegna diretta dell'archiviazione nel cloud
+
+**Perché scegliere Nginx come livello di cache?**
+
+Questa non è stata una scelta casuale. Nginx ha diversi vantaggi reali qui:
+
+1. Prestazioni elevate: Nginx è ampiamente riconosciuto per le eccellenti prestazioni del proxy inverso
+2. Caching maturo: il built-in `proxy_cache` la funzionalità è stabile e affidabile
+3. Basso utilizzo delle risorse: può essere eseguito con un minimo di 256 MB di memoria
+4. Configurazione flessibile: puoi applicare diverse policy di cache a diversi tipi di file
+
+## Livello proxy inverso: Traefik vs Bunker Web
+
+La soluzione di distribuzione di HagiCode supporta due opzioni di proxy inverso e ognuna ha i propri punti di forza:
+
+| Opzione | Caratteristiche | Scenari adatti |
+|------|------|----------|
+| **Traefik** | SSL leggero e automatico, configurazione semplice | Distribuzione di base, scenari a traffico ridotto |
+| **Ragnatela bunker** | WAF integrato, protezione DDoS, protezione anti-bot | Scenari ad alta sicurezza e ad alto traffico |
+
+### Traefik: la prima scelta leggera
+
+Traefik è un moderno proxy inverso HTTP e bilanciatore del carico. Il suo più grande vantaggio è che la configurazione è semplice e può ottenere automaticamente i certificati Let's Encrypt.
+
+Per le distribuzioni iniziali o gli scenari a basso traffico, Traefik è spesso un'ottima scelta:
+- Utilizza relativamente poche risorse; Sono sufficienti 1,5 CPU e 512 MB di memoria
+- I certificati SSL vengono configurati automaticamente, quindi non è necessario gestirli tu stesso
+- Il routing è configurato tramite etichette Docker, il che è abbastanza conveniente
+
+### Bunker Web: per scenari ad alta sicurezza
+
+Bunker Web è un firewall per applicazioni Web basato su Nginx con una protezione di sicurezza più completa.
+
+Quando dovresti considerare di passare a Bunker Web? Di solito in casi come questi:
+- Sei sotto attacco DDoS
+- Hai bisogno della protezione ModSecurity
+- Vuoi una protezione anti-bot
+- Hai requisiti di sicurezza più severi
+
+HagiCode fornisce il file `switch-deployment.sh` script in modo da poter passare rapidamente tra le due opzioni:
+
+```bash
+# Switch to Bunker Web
+./switch-deployment.sh bunkerweb
+
+# Switch back to Traefik
+./switch-deployment.sh traefik
+
+# Check current status
+./switch-deployment.sh status
+```
+
+Lo script esegue controlli preliminari, controlli di integrità e rollback automatico, quindi il processo di passaggio è abbastanza sicuro e affidabile.
+
+## Configurazione del livello della cache Nginx
+
+Il livello della cache è il nucleo dell’intera architettura, quindi la configurazione di Nginx fa un’enorme differenza nelle prestazioni della cache.
+
+### Configurazione del percorso della cache
+
+```nginx
+# Cache path configuration
+proxy_cache_path /var/cache/nginx levels=1:2 keys_zone=azure_cache:10m
+                   max_size=1g inactive=7d use_temp_path=off;
+```
+
+Dettagli dei parametri:
+- `levels=1:2`: gerarchia delle directory della cache con due livelli per migliorare l'efficienza dell'accesso ai file
+- `keys_zone=azure_cache:10m`: zona di archiviazione della chiave della cache; 10 MB sono sufficienti per un gran numero di chiavi
+- `max_size=1g`: la dimensione massima della cache è 1 GB
+- `inactive=7d`: elimina i file memorizzati nella cache se non viene effettuato l'accesso per 7 giorni
+- `use_temp_path=off`: scrive direttamente nella directory della cache per prestazioni migliori
+
+### Strategia della cache a più livelli
+
+Tipi di file diversi richiedono strategie di cache diverse:
+
+```nginx
+# Server download service
+server {
+    listen 8080;
+
+    # Short-term cache for index.json (to allow timely updates)
+    location /index.json {
+        proxy_cache azure_cache;
+        proxy_cache_valid 200 1h;
+        proxy_cache_key "$scheme$server_port$request_uri";
+        add_header X-Cache-Status $upstream_cache_status;
+        add_header Cache-Control "public, max-age=3600";
+
+        # Reverse proxy to Azure OSS
+        proxy_pass https://${SERVER_DL_HOST}/${SERVER_DL_CONTAINER}$uri?${SERVER_DL_SAS_TOKEN};
+        proxy_ssl_server_name on;
+        proxy_ssl_protocols TLSv1.2 TLSv1.3;
+    }
+
+    # Long-term cache for static files such as installation packages
+    location / {
+        proxy_cache azure_cache;
+        proxy_cache_valid 200 7d;
+        proxy_cache_key "$scheme$server_port$request_uri";
+        add_header X-Cache-Status $upstream_cache_status;
+        add_header Cache-Control "public, max-age=604800";
+
+        proxy_pass https://${SERVER_DL_HOST}/${SERVER_DL_CONTAINER}$uri?${SERVER_DL_SAS_TOKEN};
+        proxy_ssl_server_name on;
+        proxy_ssl_protocols TLSv1.2 TLSv1.3;
+    }
+}
+```
+
+**Perché è stato progettato in questo modo?**
+
+`index.json` è il file di controllo della versione, quindi deve essere aggiornato tempestivamente. Con una finestra cache di 1 ora, gli utenti possono rilevare una nuova versione entro al massimo un'ora dalla pubblicazione.
+
+I file statici come i pacchetti di installazione cambiano raramente, quindi memorizzarli nella cache per 7 giorni riduce notevolmente l'accesso all'origine. Quando è necessario un aggiornamento, puoi semplicemente svuotare la cache manualmente.
+
+**`X-Cache-Status` intestazione della risposta**:
+
+Questa intestazione ti aiuta a controllare il comportamento degli hit della cache:
+- `HIT`: riscontro nella cache
+- `MISS`: cache mancante, recuperata dall'origine
+- `EXPIRED`: cache scaduta, recuperata di nuovo dall'origine
+- `BYPASS`: cache bypassata
+
+Come controllarlo:
+```bash
+curl -I https://server.dl.hagicode.com/app.zip
+```
+
+## Analisi dei costi
+
+Supponiamo che ci sia 1 TB di traffico di download al mese. Facciamo i conti:
+
+| Opzione | Costo del traffico | Costo del server | Totale |
+|------|----------|------------|------|
+| Sistema operativo OSS diretto di Azure | Circa 500 yuan | CNY 0 | 500 yuan |
+| Server cloud + OSS (percentuale di riscontri cache dell'80%) | 100 yuan + 80 yuan | 60 yuan | 240 yuan |
+| CDN commerciale | 300-500 yuan | CNY 0 | 300-500 yuan |
+
+**Conclusione**: l'aggiunta di un livello di cache può ridurre i costi di distribuzione di circa il 50%.
+
+Questa stima presuppone un tasso di riscontri nella cache dell'80%. In pratica, se i file non cambiano spesso, il tasso di successo potrebbe essere ancora più alto.
+
+## Pratica di distribuzione
+
+### Preparazione dell'ambiente
+
+Innanzitutto, configura le variabili di ambiente:
+
+```bash
+cd /path/to/hagicode_aliyun_deployment/docker
+cp .env.example .env
+vi .env  # Fill in the Azure OSS SAS URL and Lark Webhook URL
+```
+
+**Importante**: il `.env` il file contiene informazioni sensibili come il token SAS e l'URL del webhook. Non impegnarlo mai nel controllo della versione.
+
+### Configurazione DNS
+
+Aggiungi i seguenti record DNS A:
+- `server.dl.hagicode.com` → IP del server
+- `desktop.dl.hagicode.com` → IP del server
+
+### Inizializzare il server
+
+Utilizza Ansible per inizializzare automaticamente il server:
+
+```bash
+cd /path/to/hagicode_aliyun_deployment
+ansible-playbook -i ./ansible/inventory/hosts.yml ./ansible/playbooks/init.yml
+```
+
+Questo playbook gestisce automaticamente le seguenti attività:
+- Creare l'utente di distribuzione
+- Installa Docker e Docker Compose
+- Configura le chiavi SSH
+- Imposta le regole del firewall
+
+Questo è il lavoro di configurazione principale e l'automazione fa risparmiare molto tempo.
+
+### Distribuire i servizi
+
+```bash
+./deploy.sh
+```
+
+Lo script di distribuzione consente di eseguire le seguenti operazioni:
+- Controlla la configurazione dell'ambiente
+- Estrai il codice più recente
+- Avvia i contenitori Docker
+- Esegui controlli sanitari
+- Invia notifiche di distribuzione (Lark)
+
+È sufficiente un comando, il che mantiene il processo conveniente.
+
+### Verificare la distribuzione
+
+```bash
+# Check container status
+docker ps
+
+# Test the download domains
+curl -I https://server.dl.hagicode.com/index.json
+curl -I https://desktop.dl.hagicode.com/index.json
+```
+
+## Suggerimenti per le operazioni
+
+### Gestione della cache
+
+Anche le cache necessitano di manutenzione di tanto in tanto:
+
+**Controlla l'utilizzo del disco della cache**:
+```bash
+docker volume inspect docker_nginx-cache
+du -sh /var/lib/docker/volumes/docker_nginx-cache/_data
+```
+
+**Svuota la cache manualmente**:
+```bash
+./clear-cache.sh
+```
+
+Oppure esegui direttamente i comandi manuali, se necessario:
+```bash
+docker exec nginx sh -c "rm -rf /var/cache/nginx/*"
+docker restart nginx
+```
+
+### Limiti delle risorse
+
+Su un server con 1 core e 2 GB, la configurazione del limite delle risorse è simile alla seguente:
+
+```yaml
+services:
+  traefik:
+    deploy:
+      resources:
+        limits:
+          cpus: '1.50'
+          memory: 512M
+
+  nginx:
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 256M
+```
+
+Per monitorare l'utilizzo delle risorse, è possibile eseguire occasionalmente:
+```bash
+docker stats
+```
+
+### Pratiche di sicurezza dei token SAS
+
+Il token SAS è la credenziale utilizzata per accedere all'archivio BLOB di Azure, quindi perderlo sarebbe grave:
+
+- Non commettere il `.env` file al controllo della versione; è già dentro `.gitignore`
+- Imposta una data di scadenza del token SAS appropriata, consigliando 1 anno
+- Limita le autorizzazioni del token SAS alla sola lettura
+- Ruota regolarmente i token SAS
+
+### Monitoraggio e avvisi
+
+HagiCode integra le notifiche Lark/Feishu Webhook, che possono inviare avvisi per i seguenti eventi:
+- Successo o fallimento della distribuzione
+- Stato di svuotamento della cache
+- Eccezioni del servizio
+
+Le notifiche includono informazioni sul server, timestamp e dettagli sugli errori, rendendo la risoluzione dei problemi molto più rapida.
+
+### Estensioni ad alta disponibilità
+
+Quando un server non è più sufficiente, puoi considerare quanto segue:
+
+1. **Scalabilità orizzontale**: distribuisci più nodi e distribuisci il traffico con round robin DNS o un bilanciatore del carico
+2. **CDN davanti**: metti un CDN davanti ai server cloud per un accesso ancora più veloce
+3. **Riscaldamento della cache**: utilizza gli script per precaricare i file caldi nella cache
+
+## Note
+
+Ci sono alcune cose che vale la pena tenere a mente:
+
+1. **Certificati SSL**: Let's Encrypt prevede limiti di velocità, quindi non cambiare distribuzione troppo frequentemente altrimenti l'emissione del certificato potrebbe non riuscire
+2. **Svuotamento della cache**: dopo aver aggiornato i file importanti, ricordati di svuotare la cache altrimenti gli utenti potrebbero continuare a scaricare la vecchia versione
+3. **Gestione dei log**: pulisci regolarmente i log di Docker, altrimenti il disco potrebbe riempirsi
+4. **Strategia di backup**: esegui il backup di file come `Traefik acme.json` e configurazione Web bunker
+5. **Monitoraggio e avvisi**: configura le notifiche Feishu in modo da poter monitorare lo stato della distribuzione e rispondere rapidamente ai problemi
+
+## Conclusione
+
+Un server cloud e un livello di caching Nginx sono tutto ciò che serve. HagiCode utilizza questa soluzione con un costo mensile abbastanza basso, intorno ai 60-100 CNY per il server, e i risultati sono stati molto solidi. I principali vantaggi sono:
+
+- **Costo prevedibile**: circa il 50% più economico rispetto all'utilizzo diretto dell'archiviazione nel cloud o al pagamento di un CDN commerciale
+- **Implementazione flessibile**: scegli Traefik o Bunker Web a seconda delle tue esigenze
+- **Forte scalabilità**: puoi ridimensionare orizzontalmente o aggiungere un CDN in un secondo momento, se necessario
+- **Operazioni semplici**: gli script di shell e Ansible semplificano la distribuzione automatizzata
+
+Per piccoli team e sviluppatori indipendenti che necessitano di distribuzione di file, questa è sicuramente un'opzione pratica che vale la pena provare.
+
+HagiCode utilizza stabilmente questa architettura in produzione già da un po' e i download degli utenti globali sono rimasti affidabili. Se stai cercando una soluzione simile, vale la pena provarla.
+
+## Riepilogo dello stack tecnologico
+
+Per concludere, ecco un riepilogo delle tecnologie coinvolte:
+
+| Componente | Scelta | Scopo |
+|------|------|------|
+| Server nuvola | Alibaba Cloud ECS | Ambiente di runtime di base |
+| Procura inversa | Traefik/Bunker Web | Terminazione SSL, routing, protezione della sicurezza |
+| Livello di cache | Nginx | Caching proxy inverso, compressione Gzip |
+| Archiviazione di file | Archiviazione BLOB di Azure | Origine del file |
+| Containerizzazione | Docker Componi | Orchestrazione del servizio |
+| Automazione | Ansible | Gestione della configurazione del server |
+| Notifiche | Webhook Lark/Feishu | Notifiche sullo stato della distribuzione |
+
+## Riferimenti
+
+Ecco i materiali di riferimento menzionati in questo post:
+
+- Progetto HagiCode: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Sito web HagiCode: [hagicode.com](https://hagicode.com)
+- Demo pratica di 30 minuti: [www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)
+- Docker Compose installazione con un clic: [docs.hagicode.com/installation/docker-compose](https://docs.hagicode.com/installation/docker-compose)
+- Installazione rapida sul desktop: [hagicode.com/desktop/](https://hagicode.com/desktop/)
+
+---
+
+Se questo post ti ha aiutato, ne vale già la pena:
+- Metti un mi piace così più persone potranno trovarlo
+- Inizia il progetto su GitHub: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Visita il sito ufficiale per maggiori informazioni: [hagicode.com](https://hagicode.com)
+- Guarda la demo pratica di 30 minuti: [www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)
+- Prova l'installazione con un clic: [docs.hagicode.com/installation/docker-compose](https://docs.hagicode.com/installation/docker-compose)
+- Installa rapidamente l'app desktop: [hagicode.com/desktop/](https://hagicode.com/desktop/)
+- La beta pubblica è iniziata e puoi provarla
+
+---
+
+Per questo post è tutto. Spero che questa soluzione ti aiuti. Se hai idee migliori, sentiti libero di condividerle. La tecnologia è sempre più facile da migliorare quando le persone imparano le une dalle altre.
+
+## Avviso sul diritto d'autore
+
+Grazie per aver letto Se hai trovato utile questo articolo, ti invitiamo a mettere mi piace, aggiungerlo ai segnalibri e condividerlo.
+Questo contenuto è stato creato con la collaborazione assistita dall'intelligenza artificiale e la versione finale è stata rivista e approvata dall'autore.
+- Autore: [newbe36524](https://www.newbe.pro)
+- Collegamento originale: [https://docs.hagicode.com/blog/2026-04-15-low-cost-cloud-server-download-distribution-station/](https://docs.hagicode.com/blog/2026-04-15-low-cost-cloud-server-download-distribution-station/)
+- Avviso sul copyright: se non diversamente specificato, tutti gli articoli su questo blog sono concessi in licenza da BY-NC-SA. Si prega di includere la fonte quando si ripubblica.

@@ -1,0 +1,378 @@
+---
+title: Steam-julkaisujen automatisointi GitHub-toiminnoilla
+date: 2026-04-16
+tags: [GitHub Actions, Steam, Automated Release, DevOps, CI/CD]
+description: "Tämä artikkeli jakaa täydellisen ratkaisun, jonka otimme käyttöön automaattisille Steam-julkaisuille HagiCode Desktop -projektissa ja joka kattaa päästä päähän automatisoinnin."
+---
+
+## Steam-julkaisujen automatisointi GitHub-toiminnoilla
+
+> Tämä artikkeli jakaa täydellisen ratkaisun, jonka otimme käyttöön automaattisille Steam-julkaisuille HagiCode Desktop -projektissa. Se kattaa päästä päähän automatisoinnin GitHub Releasesta Steam-alustalle, mukaan lukien tärkeimmät tekniset yksityiskohdat, kuten Steam Guard -todennus ja usean alustan Depot-lataukset.
+
+## Tausta
+
+Steamin julkaisutyönkulku eroaa itse asiassa melkoisesti perinteisestä sovellusten jakelusta. Steamilla on oma täydellinen päivitysjärjestelmä. Kehittäjien on käytettävä SteamCMD:tä koontiartefaktien lataamiseen Steamin CDN-verkkoon sen sijaan, että he jättäisivät latauslinkin, kuten muilla alustoilla.
+
+HagiCode Desktop -projekti valmistautuu Steam-julkaisuun, joka toi muutaman uuden haasteen julkaisutyönkulkuumme:
+
+1. Meidän täytyi muuntaa olemassa olevat koontiartefaktit Steam-yhteensopivaan muotoon.
+2. Meidän piti ladata ne Steamiin SteamCMD:n kautta.
+3. Meidän piti myös käsitellä Steam Guard -todennusta.
+4. Meidän piti tukea usean alustan Depot-latauksia Linuxille, Windowsille ja macOS:lle.
+5. Halusimme täysin automatisoidun tiedonkulun GitHub Releasesta Steamiin.
+
+Projekti oli jo ottanut käyttöön "portable version mode", jonka avulla sovellus havaitsee kiinteät palvelun hyötykuormat, jotka on pakattu `extra` hakemistosta. Tavoitteenamme oli integroida tämä kannettava versiotila saumattomasti Steam-jakelun kanssa.
+
+## Tietoja HagiCodesta
+
+Tässä artikkelissa jaettu ratkaisu on peräisin käytännön kokemuksestamme [HagiCode](https://hagicode.com) hanke. HagiCode on AI-koodausavustaja, joka tukee työpöydän käyttöä. Koska työskentelemme aktiivisesti Steam-julkaisun eteen, meidän oli luotava luotettava automaattinen julkaisutyönkulku.
+
+## Arkkitehtuurisuunnittelu
+
+Koko Steam-julkaisuprosessin ydin on GitHub Actions -työnkulku, joka jakaa prosessin kolmeen päävaiheeseen:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ GitHub Actions Workflow (Steam Release)                    │
+├─────────────────────────────────────────────────────────────┤
+│ 1. Preparation Stage:                                      │
+│    - Check out portable-version code                       │
+│    - Download build artifacts from GitHub Release          │
+│    - Extract and prepare the Steam content directory       │
+│                                                             │
+│ 2. SteamCMD Setup:                                         │
+│    - Install or reuse SteamCMD                             │
+│    - Authenticate with Steam Guard                         │
+│                                                             │
+│ 3. Release Stage:                                          │
+│    - Generate Depot VDF configuration files                │
+│    - Generate App Build VDF configuration files            │
+│    - Invoke SteamCMD to upload to Steam                    │
+└─────────────────────────────────────────────────────────────┘
+```
+
+Tämä muotoilu tarjoaa useita etuja:
+- Se käyttää uudelleen olemassa olevia GitHub Release -artefaktteja ja välttää samojen tulosteiden uudelleenrakentamisen.
+- Se käyttää itse isännöityjä juoksijoita turvalliseen eristykseen.
+- Se tukee vaihtoa esikatselutilan ja virallisen julkaisuhaarojen välillä.
+- Se sisältää täydellisen virheiden käsittelyn ja kirjaamisen, mikä helpottaa vikojen diagnosointia.
+
+## Työnkulun toteutus
+
+### Liipaisuparametrien suunnittelu
+
+Työnkulkumme tukee seuraavia avainparametreja:
+
+```yaml
+inputs:
+  release:           # Portable Version release tag
+    description: 'Version tag to release (for example v1.0.0)'
+    required: true
+  steam_preview:     # Whether to generate a preview build
+    description: 'Whether to use preview mode'
+    required: false
+    default: 'false'
+  steam_branch:      # Steam branch to set live
+    description: 'Target Steam branch'
+    required: false
+    default: 'preview'
+  steam_description: # Build description override
+    description: 'Build description'
+    required: false
+```
+
+### Itseisännöity juoksijakokoonpano
+
+Turvallisuussyistä käytämme itse isännöityä juoksijaa `steam` etiketti:
+
+```yaml
+runs-on:
+  - self-hosted
+  - Linux
+  - X64
+  - steam
+```
+
+Tämä varmistaa, että Steam-julkaisut toimivat omistetulla runnerilla ja pitää arkaluontoiset kirjautumistiedot turvallisesti erillään.
+
+### Samanaikaisuuden valvonta
+
+Jotta saman version julkaisut eivät häiritse toisiaan, määritimme samanaikaisuuden hallinnan:
+
+```yaml
+concurrency:
+  group: portable-version-steam-${{ github.event.inputs.release }}
+  cancel-in-progress: false
+```
+
+Huomaa se `cancel-in-progress: false` on asetettu tähän, koska Steam-julkaisut voivat kestää hetken, emmekä halua, että äskettäin käynnistetty ajo peruuttaa jo lataamisen.
+
+## Ydinkomentosarjan toteutus
+
+### Release-tulojen valmistelu
+
+The `prepare-steam-release-input.mjs` script vastaa julkaisuun tarvittavien syötteiden valmistelusta:
+
+```javascript
+// Download the GitHub Release build manifest and artifact inventory
+const buildManifest = await downloadBuildManifest(releaseTag);
+const artifactInventory = await downloadArtifactInventory(releaseTag);
+
+// Download compressed archives for each platform
+for (const platform of ['linux-x64', 'win-x64', 'osx-universal']) {
+  const artifactUrl = getArtifactUrl(artifactInventory, platform);
+  await downloadArtifact(artifactUrl, platform);
+}
+
+// Extract into the Steam content directory structure
+await extractToSteamContent(sources, contentRoot);
+```
+
+### Steam Guard -todennus
+
+Steam vaatii, että tilit on suojattu Steam Guardilla, joten otimme käyttöön jaettuun salaisuuteen perustuvan koodinluontialgoritmin:
+
+```javascript
+function generateSteamGuardCode(sharedSecret, timestamp = Date.now()) {
+  const secret = decodeSharedSecret(sharedSecret);
+  const time = Math.floor(timestamp / 1000 / 30);
+
+  const timeBuffer = Buffer.alloc(8);
+  timeBuffer.writeBigUInt64BE(BigInt(time));
+
+  // Use HMAC-SHA1 to generate a time-based one-time code
+  const hash = crypto.createHmac('sha1', secret)
+    .update(timeBuffer)
+    .digest();
+
+  // Convert it into a 5-character Steam Guard code
+  const code = steamGuardCode(hash);
+  return code;
+}
+```
+
+Tämä toteutus perustuu Steam Guardin TOTP (Time-based One-Time Password) -mekanismiin, joka luo uuden vahvistuskoodin 30 sekunnin välein.
+
+### VDF-määritysten luominen
+
+VDF (Valve Data Format) on Steamin käyttämä konfigurointimuoto. Meidän on luotava kahden tyyppisiä VDF-tiedostoja:
+
+**Depot VDF**:a käytetään sisällön määrittämiseen jokaiselle alustalle:
+
+```javascript
+function buildDepotVdf(depotId, contentRoot) {
+  return [
+    '"DepotBuildConfig"',
+    '{',
+    `  "DepotID" "${escapeVdf(depotId)}"`,
+    `  "ContentRoot" "${escapeVdf(contentRoot)}"`,
+    '  "FileMapping"',
+    '  {',
+    '    "LocalPath" "*"',
+    '    "DepotPath" "."',
+    '    "recursive" "1"',
+    '  }',
+    '}'
+  ].join('\n');
+}
+```
+
+**App Build VDF** käytetään koko sovelluksen koontiversion määrittämiseen:
+
+```javascript
+function buildAppBuildVdf(appId, depotBuilds, description, setLive) {
+  const vdf = [
+    '"appbuild"',
+    '{',
+    `  "appid" "${appId}"`,
+    `  "desc" "${escapeVdf(description)}"`,
+    `  "contentroot" "${escapeVdf(contentRoot)}"`,
+    '  "buildoutput" "build_output"',
+    '  "depots"',
+    '  {'
+  ];
+
+  for (const [depotId, depotVdfPath] of Object.entries(depotBuilds)) {
+    vdf.push(`    "${depotId}" "${depotVdfPath}"`);
+  }
+
+  if (setLive) {
+    vdf.push(`  }`);
+    vdf.push(`  "setlive" "${setLive}"`);
+  }
+
+  vdf.push('}');
+  return vdf.join('\n');
+}
+```
+
+### SteamCMD-kutsu
+
+Lopuksi lataus suoritetaan kutsumalla SteamCMD:
+
+```javascript
+await runCommand(steamcmdPath, [
+  '+login', steamUsername, steamPassword, steamGuardCode,
+  '+run_app_build', appBuildPath,
+  '+quit'
+]);
+```
+
+Tämä on viimeinen hyppy koko työnkulussa. Kun se onnistuu, julkaisu on tehty.
+
+## Monialustainen varastokäsittely
+
+Steam käyttää Depot-järjestelmää sisällön hallintaan eri alustoille. Tuemme kolmea päävarastoa:
+
+| Alusta | Varaston tunniste | Arkkitehtuurin tuki |
+|-----|-----------|---------|
+| Linux | `linux-x64` | x64_64 |
+| Windows | `win-x64` | x64_64 |
+| macOS | `osx-universal` | universaali, x64_64, arm64 |
+
+Jokaisella Depotilla on oma sisältöhakemisto ja VDF-määritystiedosto. Tämä varmistaa, että käyttäjät eri alustoilla lataavat vain sen sisällön, jota he todella tarvitsevat.
+
+## Vapauta työnkulku
+
+### Vaihe 1: Valmistele GitHub-julkaisu
+
+Luo ensin GitHub-julkaisu `portable-version` arkisto, joka sisältää:
+- Pakatut arkistot jokaiselle alustalle
+- Rakenna manifesti (`{tag}.build-manifest.json`)
+- Artefaktivarasto (`{tag}.artifact-inventory.json`)
+
+### Vaihe 2: Käynnistä Steam Release -työnkulku
+
+Käynnistä työnkulku manuaalisesti GitHub Actionsin kautta ja täytä vaaditut parametrit:
+- `release`: julkaistava versiotunniste, kuten `v1.0.0`
+- `steam_branch`: kohdehaara, kuten `preview` tai `public`
+- `steam_preview`: käytetäänkö esikatselutilaa
+
+### Vaihe 3: Suorita vapautusprosessi automaattisesti
+
+Työnkulku suorittaa automaattisesti seuraavat vaiheet:
+
+1. Lataa ja pura GitHub Release -artefaktit.
+2. Asenna tai päivitä SteamCMD.
+3. Luo Steam VDF -määritystiedostoja.
+4. Todenna Steam Guardilla.
+5. Lataa sisältöä Steam CDN:ään.
+6. Aseta määritetty haara toimivaksi.
+
+Kun tämä sarja on valmis, koko julkaisupolku on peitetty.
+
+## Asetusopas
+
+### Vaadittu Secrets-määritys
+
+Määritä seuraavat salaisuudet GitHub-tietovaraston asetuksissa:
+
+| Salainen nimi | Kuvaus |
+|-----------|------|
+| `STEAM_USERNAME` | Steam-tilin käyttäjätunnus |
+| `STEAM_PASSWORD` | Steam-tilin salasana |
+| `STEAM_SHARED_SECRET` | Steam Guardin jaettu salaisuus (valinnainen) |
+| `STEAM_GUARD_CODE` | Steam Guard -koodi (valinnainen) |
+| `STEAM_APP_ID` | Steam-sovelluksen tunnus |
+| `STEAM_DEPOT_ID_LINUX` | Linux Depot ID |
+| `STEAM_DEPOT_ID_WINDOWS` | Windows Depot ID |
+| `STEAM_DEPOT_ID_MACOS` | macOS Depot ID |
+
+Näissä asetuksissa ei ole mitään erityisen epätavallista. Tarvitset vain kaikki odotetut arvot paikoillaan.
+
+### Ympäristömuuttujan kokoonpano
+
+| Muuttujan nimi | Kuvaus | Oletusarvo |
+|---------|------|--------|
+| `PORTABLE_VERSION_STEAMCMD_ROOT` | SteamCMD asennushakemisto | `~/.local/share/portable-version/steamcmd` |
+
+## Parhaat käytännöt
+
+### Steam Guard -todennuksen hallinta
+
+Ensimmäisellä kerralla sinun on syötettävä Steam Guard -koodi manuaalisesti. Tämän jälkeen on suositeltavaa määrittää jaettu salaisuus, jotta koodi voidaan luoda automaattisesti. Tämä välttää manuaaliset toimet jokaisessa julkaisussa.
+
+SteamCMD tallentaa kirjautumistunnuksen ja voi käyttää sitä uudelleen myöhemmissä ajoissa. Sinun on silti pidettävä silmällä tunnuksen vanhenemista, koska uudelleentodennus vaaditaan tunnuksen vanhenemisen jälkeen.
+
+### Sisältöhakemistorakenne
+
+Varmista, että Steamin sisältöhakemistorakenne on oikea:
+
+```
+steam-content/
+├── linux-x64/     # Linux platform content
+├── win-x64/       # Windows platform content
+└── osx-universal/ # macOS universal binary content
+```
+
+Jokaisen hakemiston tulee sisältää vastaavan alustan täydelliset sovellustiedostot.
+
+### Esikatselutilan käyttö
+
+Esikatselutila ei aseta yhtään haaraa livenä, joten se sopii testaukseen ja validointiin:
+
+```yaml
+if [ "$STEAM_PREVIEW_INPUT" = 'true' ]; then
+  cmd+=(--preview)
+fi
+```
+
+Tämän avulla voit ladata ensin Steamiin vahvistusta varten ja vaihtaa sitten viralliseen haaraan, kun kaikki on suoritettu.
+
+### Virheiden käsittely ja kirjaaminen
+
+Skriptit sisältävät täydellisen virheiden käsittelyn ja kirjaamisen:
+- Tarkista, että GitHub-julkaisu on olemassa.
+- Tarkista vaaditut metatietotiedostot.
+- Varmista, että alustan sisältö on läsnä.
+- Luo GitHub Actions -yhteenvetoraportti.
+
+Nämä tiedot ovat erittäin arvokkaita sekä virheenkorjauksen että tarkastuksen kannalta.
+
+### Artefakttien hallinta
+
+Työnkulku luo kahdenlaisia artefakteja:
+- `portable-steam-release-preparation-{tag}`: julkaisun valmistelun metatiedot
+- `portable-steam-build-metadata-{tag}`: Steam-koon metatiedot
+
+Näitä artefakteja voidaan käyttää myöhempään tarkastukseen ja virheenkorjaukseen. 30 päivän säilytysaika on käytännössä oletusarvo.
+
+## Tosimaailman käyttö
+
+HagiCode-projektissa tämä automaattisen julkaisun työnkulku on jo suoritettu onnistuneesti useissa versioissa. Koko reitti GitHub Releasesta Steam-alustalle on täysin automatisoitu eikä vaadi manuaalista puuttumista.
+
+Tämä paransi merkittävästi sekä vapauttamistehokkuutta että luotettavuutta. Aiemmin yhden version manuaalinen julkaiseminen kesti yli 30 minuuttia. Nyt koko prosessi päättyy muutamassa minuutissa.
+
+Vielä tärkeämpää on, että automatisoitu työnkulku vähentää inhimillisten virheiden mahdollisuutta. Jokainen julkaisu noudattaa samaa standardoitua prosessia, mikä tekee tuloksista paremmin ennakoitavissa.
+
+## Yhteenveto
+
+Tässä artikkelissa kuvatulla lähestymistavalla saavutimme:
+1. Täysi automaatio GitHub-julkaisusta Steam-alustalle.
+2. Usean alustan Depot-lataukset.
+3. Steam Guardiin perustuva suojattu todennus.
+4. Joustava vaihto esikatselutilan ja virallisen julkaisun välillä.
+5. Täydellinen virheenkäsittely ja kirjaus.
+
+Tämä ratkaisu ei sovellu vain HagiCode-projektiin, vaan se voi toimia myös referenssinä muille projekteille, jotka suunnittelevat julkaisua Steamissä. Jos harkitset myös Steam-julkaisuautomaatiota, toivottavasti tästä käytännön kokemuksesta on sinulle hyötyä.
+
+Tekniikka voi tuntua monimutkaiselta tai yksinkertaiselta riippuen valitsemastasi polusta. Tärkeintä on löytää tarpeisiisi sopiva työnkulku.
+
+Jos tämä artikkeli auttoi sinua, merkitse HagiCode GitHub -tietovarasto tähdellä tai vieraile virallisella verkkosivustolla saadaksesi lisätietoja.
+
+## Viitteet
+
+- [SteamCMD:n dokumentaatio](https://developer.valvesoftware.com/wiki/SteamCMD)
+- [Steamworks SDK](https://partner.steamgames.com/)
+- [HagiCode Project Repository](https://github.com/HagiCode-org/site)
+- [HagiCode virallinen verkkosivusto](https://hagicode.com)
+- [HagiCode Asennusopas](https://docs.hagicode.com/installation/docker-compose)
+- [HagiCode-työpöytä](https://hagicode.com/desktop/)
+
+## Tekijänoikeusilmoitus
+
+Kiitos kun luit. Jos pidit tästä artikkelista hyödyllisenä, voit tykätä, merkitä kirjanmerkkeihin ja jakaa sen.
+Tämä sisältö luotiin tekoälyn avustuksella yhteistyössä, ja kirjoittaja tarkasteli ja vahvisti lopullisen sisällön.
+- Tekijä: [newbe36524](https://www.newbe.pro)
+- Alkuperäinen artikkeli: [https://docs.hagicode.com/blog/2026-04-16-steam-release-automation-github-actions/](https://docs.hagicode.com/blog/2026-04-16-steam-release-automation-github-actions/)
+- Tekijänoikeusilmoitus: Ellei toisin mainita, kaikki tämän blogin artikkelit on lisensoitu BY-NC-SA:n alaisuudessa. Mainitse lähde, kun julkaiset uudelleen.
