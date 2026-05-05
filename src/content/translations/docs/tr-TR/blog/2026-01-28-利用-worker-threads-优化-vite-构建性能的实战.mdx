@@ -1,0 +1,353 @@
+---
+title: "Çalışan Konularıyla Vite Oluşturma Performansını Optimize Etmeye Yönelik Pratik Bir Kılavuz"
+date: 2026-01-28
+truncate: true
+tags: [Vite, Worker Threads, Build Performance, Node.js, Frontend Engineering]
+description: "Büyük ön uç projelerle çalışırken üretim yapıları acı verici derecede yavaş olabilir. Bu makale, Node.js Worker Threads'i nasıl kullandığımızı paylaşıyor."
+---
+
+## 120 Saniyeden 45 Saniyeye: Çalışan Konularıyla Vite Oluşturma Performansını Optimize Etmeye Yönelik Pratik Bir Kılavuz
+
+> Büyük ön uç projelerle çalışırken üretim yapıları acı verici derecede yavaş olabilir. Bu makale, HagiCode projesinde uygulama ayrıntıları ve öğrenilen derslerle birlikte, bir Vite yapısında gizleme aşamasını 120 saniyeden 45 saniyeye düşürmek için Node.js Worker Threads'i nasıl kullandığımızı paylaşıyor.
+
+## Arka plan
+
+Ön uç mühendislik uygulamamızda, proje büyüdükçe yapı verimliliği sorunları giderek daha belirgin hale geldi. Özellikle, üretim oluşturma süreci sırasında genellikle aşağıdakiler gibi JavaScript gizleme araçlarını kullanırız: `javascript-obfuscator` kaynak kodu mantığını korumak için. Bu adım gereklidir, ancak aynı zamanda hesaplama açısından pahalıdır ve yoğun şekilde CPU'ya bağlıdır.
+
+**HagiCode**'un erken geliştirme aşamasında çok zorlu bir performans darboğazıyla karşılaştık: kod tabanı büyüdükçe üretim oluşturma süreleri hızla kötüleşti.
+
+**Belirli sorun yaratan noktalar şunlardı**:
+- Gizleme görevleri tek bir iş parçacığı üzerinde seri olarak yürütüldü ve bir CPU çekirdeği maksimuma çıkarken diğerleri boşta kaldı
+- Oluşturma süresi orijinal 30 saniyeden 110-120 saniyeye çıktı
+- Değişiklik sonrası derleme doğrulama döngüsü son derece uzun hale geldi ve geliştirme yinelemesini ciddi şekilde yavaşlattı
+- CI/CD hattında oluşturma aşaması en çok zaman alan kısım haline geldi
+
+**HagiCode'un buna neden ihtiyacı vardı?**
+HagiCode, ön uç mimarisi karmaşık iş mantığı ve yapay zeka etkileşim modülleri içeren yapay zeka odaklı bir kod yardımcısıdır. Temel kodumuzun güvenliğini sağlamak için üretim sürümlerinde yüksek yoğunluklu gizleme uyguladık. İki dakikaya yaklaşan derleme beklemeleriyle karşı karşıya kaldığımızda, derleme sisteminde kapsamlı bir performans optimizasyonu gerçekleştirmeye karar verdik.
+
+## HagiCode Hakkında
+
+> Madem projeden bahsettik, biraz daha bahsedeyim.
+
+Geliştirme sırasında buna benzer hayal kırıklıklarıyla karşılaştıysanız:
+- Derleme komut dosyaları için yüksek bakım maliyetlerine sahip birden çok proje ve birden çok teknoloji yığını
+- Her değişiklik yaptığınızda sizi belgeleri kontrol etmeye zorlayan karmaşık CI/CD işlem hattı yapılandırması
+- Sonsuz platformlar arası uyumluluk sorunları
+- Yapay zekanın kod yazmaya yardımcı olmasını istemek, ancak mevcut araçları bulmak yeterince akıllı değil
+
+O halde geliştirdiğimiz **HagiCode** ilginizi çekebilir.
+
+**HagiCode nedir?**
+- Yapay zeka destekli bir kod asistanı
+- Çoklu dil, platformlar arası kod oluşturma ve optimizasyonu destekler
+- Yerleşik oyunlaştırmayla birlikte gelir, böylece kodlama daha az sıkıcı olur
+
+**Neden burada bahsetmelisiniz?**
+Bu makalede paylaşılan **paralel JavaScript gizleme çözümü**, HagiCode'u oluştururken tam olarak geliştirdiğimiz çözümdür. Bu mühendislik yaklaşımını değerli buluyorsanız, bu bizim teknik zevkimizin muhtemelen oldukça iyi olduğunu gösterir ve HagiCode'un kendisi de bir göz atmaya değer olabilir.
+
+**Daha fazla bilgi edinmek ister misiniz?**
+- GitHub: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site) (lütfen bize bir yıldız verin)
+- Resmi web sitesi: [hagicode.com](https://hagicode.com)
+- Video demosu: [www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/) (30 dakikalık uygulamalı demo)
+- Kurulum kılavuzu: [hagicode.com/installation/docker-compose](https://hagicode.com/installation/docker-compose)
+- Herkese açık beta artık açık: betaya katılmak için hemen yükleyin
+
+---
+
+## Analiz: Performans Darboğazındaki Atılım Noktasını Bulma
+
+Performans sorununu çözmeden önce düşüncemizi netleştirmemiz ve en iyi teknik çözümü belirlememiz gerekiyordu.
+
+### Temel Karar: Neden Çalışan Konularını Seçmelisiniz?
+
+Node.js'de paralel hesaplamayı gerçekleştirmenin üç ana yolu vardır:
+1. **child_process**: bağımsız alt süreçler oluşturun
+2. **Web Çalışanları**: çoğunlukla tarayıcı tarafında kullanılır
+3. **worker_threads**: Node.js'de yerel çoklu iş parçacığı desteği
+
+Seçenekleri karşılaştırdıktan sonra HagiCode aşağıdaki nedenlerden dolayı **Worker Threads**'i seçti:
+- **Serileştirme yükü sıfır**: Çalışan İş Parçacıkları aynı süreçte çalışır ve belleği paylaşabilir `SharedArrayBuffer` veya süreçler arası iletişimin ağır serileştirme maliyetinden kaçınarak sahipliği aktarın.
+- **Yerel destek**: Ekstra ağır bağımlılıklara ihtiyaç duymadan Node.js 12+ sürümünde yerleşik olarak bulunur.
+- **Birleşik bağlam**: Hata ayıklama ve günlüğe kaydetme, alt işlemlere göre daha kullanışlıdır.
+
+### Görev Parçalılığı: Gizleme Görevleri Nasıl Bölünmelidir?
+
+Kodun bağımlılıkları olması nedeniyle büyük bir JS paket dosyasının şaşırtmasını paralelleştirmek zordur, ancak Vite derleme çıktısı birden fazla **parçadan** oluşur. Bu bize doğal bir paralel sınır verir:
+
+- **Bağımsızlık**: Vite paketlemeden sonra, farklı parçalar arasındaki bağımlılıklar zaten ayrıştırılmıştır, böylece paralel olarak güvenli bir şekilde işlenebilirler.
+- **Uygun ayrıntı düzeyi**: projeler genellikle 10-30 parçadan oluşur; bu, paralel planlama için mükemmel bir ölçektir.
+- **Kolay entegrasyon**: `generateBundle` hook in Vite eklentileri, dosyalar yayılmadan önce bu parçaları yakalayıp işlememize olanak tanır.
+
+### Mimari Tasarım
+
+Dört temel bileşenden oluşan paralel bir işleme sistemi tasarladık:
+
+1. **Görev Ayırıcı**: Vite'ın paket nesnesi üzerinde yinelenir, satıcı parçaları gibi gizleme gerektirmeyen dosyaları filtreler ve bir görev kuyruğu oluşturur.
+2. **Çalışan Havuzu Yöneticisi**: Çalışan yaşam döngüsünü yönetir ve görev dağıtımını, geri dönüşümü ve başarısızlık durumunda yeniden denemeyi yönetir.
+3. **İlerleme Raporlayıcısı**: çıktılar, bekleme kaygısını azaltmak için gerçek zamanlı ilerleme sağlar.
+4. **ObfuscationWorker**: Aslında gizleme mantığını gerçekleştiren Worker iş parçacığı.
+
+## Çözüm: Uygulamalı Uygulama
+
+Yukarıdaki analize dayanarak bu paralel gizleme sistemini uygulamaya başladık.
+
+### 1. Vite Eklentisini Yapılandırın
+
+Öncelikle paralel gizleme eklentisini entegre ettik. `vite.config.ts`. Yapılandırma basittir. Yalnızca İşçi sayısını ve gizleme kurallarını belirtmeniz gerekir.
+
+```typescript
+import { defineConfig } from 'vite'
+import { parallelJavascriptObfuscator } from './buildTools/plugin'
+
+export default defineConfig(({ mode }) => {
+  const isProduction = mode === 'production'
+  
+  return {
+    build: {
+      rollupOptions: {
+        ...(isProduction
+          ? {
+              plugins: [
+                parallelJavascriptObfuscator({
+                  enabled: true,
+                  // Automatically adjust based on CPU core count; leave one core for the main thread
+                  workerCount: 4, 
+                  retryAttempts: 3,
+                  fallbackToMainThread: true, // Automatically degrade to single-thread mode on failure
+                  // Filter out vendor chunks; third-party libraries usually do not need obfuscation
+                  isVendorChunk: (fileName: string) => fileName.includes('vendor-'),
+                  obfuscationConfig: {
+                    compact: true,
+                    controlFlowFlattening: true,
+                    deadCodeInjection: true,
+                    disableConsoleOutput: true,
+                    // ... more obfuscation options
+                  },
+                }),
+              ],
+            }
+          : {}),
+      },
+    },
+  }
+})
+```
+
+### 2. Çalışan Mantığını Uygulayın
+
+İşçi, görevleri yürüten birimdir. Giriş ve çıkış veri yapılarını net bir şekilde tanımlamamız gerekiyor.
+
+**Not**: Buradaki kod basit olmasına rağmen, dikkat edilmesi gereken birkaç tuzak vardır; `parentPort` null ve hataları düzgün bir şekilde ele alıyor. HagiCode'un uygulamasında, bazı özel ES6 sözdizimi kalıplarının karartıcının çökmesine neden olabileceğini gördük ve bu nedenle şunu ekledik: `try-catch` koruma.
+
+```typescript
+import { parentPort } from 'worker_threads'
+import javascriptObfuscator from 'javascript-obfuscator'
+
+export interface ObfuscationTask {
+  chunkId: string
+  code: string
+  config: any
+}
+
+export interface ObfuscationResult {
+  chunkId: string
+  obfuscatedCode: string
+  error?: string
+}
+
+// Listen for tasks sent from the main thread
+if (parentPort) {
+  parentPort.on('message', async (task: ObfuscationTask) => {
+    try {
+      // Perform obfuscation
+      const obfuscated = javascriptObfuscator.obfuscate(task.code, task.config)
+      const result: ObfuscationResult = {
+        chunkId: task.chunkId,
+        obfuscatedCode: obfuscated.getObfuscatedCode(),
+      }
+      // Send the result back to the main thread
+      parentPort?.postMessage(result)
+    } catch (error) {
+      // Handle exceptions so one Worker crash does not block the whole build
+      const result: ObfuscationResult = {
+        chunkId: task.chunkId,
+        obfuscatedCode: '',
+        error: error instanceof Error ? error.message : 'Unknown error',
+      }
+      parentPort?.postMessage(result)
+    }
+  })
+}
+```
+
+### 3. İşçi Havuzu Yöneticisi
+
+Bu, tüm çözümün özüdür. Sabit boyutlu bir Çalışan havuzunu korumamız ve görevleri **FIFO (ilk giren ilk çıkar)** stratejisini kullanarak planlamamız gerekiyor.
+
+```typescript
+import { Worker } from 'worker_threads'
+import os from 'os'
+
+export class WorkerPool {
+  private workers: Worker[] = []
+  private taskQueue: Array<{
+    task: ObfuscationTask
+    resolve: (result: ObfuscationResult) => void
+    reject: (error: Error) => void
+  }> = []
+  
+  constructor(options: WorkerPoolOptions = {}) {
+    // Default to core count - 1 so the main thread still has some breathing room
+    const workerCount = options.workerCount ?? Math.max(1, (os.cpus().length || 4) - 1)
+    
+    for (let i = 0; i < workerCount; i++) {
+      this.createWorker()
+    }
+  }
+
+  private createWorker() {
+    const worker = new Worker('./worker.ts')
+    
+    worker.on('message', (result) => {
+      // After one task finishes, take the next task from the queue
+      const nextTask = this.taskQueue.shift()
+      if (nextTask) {
+        this.dispatchTask(worker, nextTask)
+      } else {
+        // If there are no pending tasks, mark the Worker as idle
+        this.activeWorkers.delete(worker)
+      }
+    })
+    
+    this.workers.push(worker)
+  }
+
+  // Submit a task to the pool
+  public runTask(task: ObfuscationTask): Promise<ObfuscationResult> {
+    return new Promise((resolve, reject) => {
+      const job = { task, resolve, reject }
+      const idleWorker = this.workers.find(w => !this.activeWorkers.has(w))
+      
+      if (idleWorker) {
+        this.dispatchTask(idleWorker, job)
+      } else {
+        this.taskQueue.push(job)
+      }
+    })
+  }
+
+  private dispatchTask(worker: Worker, job: any) {
+    this.activeWorkers.set(worker, job.task)
+    worker.postMessage(job.task)
+  }
+}
+```
+
+### 4. İlerleme Raporlaması
+
+Beklemek acı vericidir, özellikle de ne kadar süreceği hakkında hiçbir fikriniz olmadığında. Bu nedenle mevcut durum hakkında gerçek zamanlı geri bildirim sağlamak için basit bir ilerleme raporlayıcısı ekledik.
+
+```typescript
+export class ProgressReporter {
+  private completed = 0
+  private readonly total: number
+  private readonly startTime: number
+
+  constructor(total: number) {
+    this.total = total
+    this.startTime = Date.now()
+  }
+
+  increment(): void {
+    this.completed++
+    this.report()
+  }
+
+  private report(): void {
+    const now = Date.now()
+    const elapsed = now - this.startTime
+    const percentage = (this.completed / this.total) * 100
+    
+    // Simple ETA estimate
+    const avgTimePerChunk = elapsed / this.completed
+    const remaining = (this.total - this.completed) * avgTimePerChunk
+
+    console.log(
+      `[Parallel Obfuscation] ${this.completed}/${this.total} chunks completed (${percentage.toFixed(1)}%) | ETA: ${(remaining / 1000).toFixed(1)}s`
+    )
+  }
+}
+```
+
+## Alıştırma: Sonuçlar ve Öğrenilen Dersler
+
+Bu çözümün konuşlandırılmasının ardından HagiCode projesinin derleme performansı hemen iyileşti.
+
+### Performans Karşılaştırma Verileri
+
+Aşağıdaki ortamda test ettik:
+- CPU: Intel Core i7-12700K (12 çekirdek / 20 iş parçacığı)
+- RAM: 32 GB DDR4
+- Node.js: v18.17.0
+- İşletim Sistemi: Ubuntu 22.04
+
+**Sonuç karşılaştırması**:
+- **Tek iş parçacıklı (optimizasyondan önce)**: 118 saniye
+- **4 İşçi**: 55 saniye (**%53** iyileşme)
+- **8 İşçi**: 48 saniye (**%60** iyileşme)
+- **12 İşçi**: 45 saniye (**%62** iyileşme)
+
+Gördüğünüz gibi kazanımlar doğrusal değildi. İşçi sayısı 8'i aştığında iyileşme küçüldü. Bu, esas olarak görev dağıtımının eşitliği ve bellek bant genişliği darboğazlarıyla sınırlıydı.
+
+### Yaygın Sorunlar ve Çözümler
+
+HagiCode'un gerçek dünyadaki kullanımında da birçok tuzakla karşılaştık, işte referans olması açısından bunlar:
+
+**S1: Oluşturma süresi çok fazla azalmadı, hatta yavaşladı mı?**
+- **Sebep**: İşçi oluşturmanın kendi ek yükü vardır veya çok fazla İşçi yapılandırılmıştır, bu da sık sık içerik değişimine neden olur.
+- **Çözüm**: Çalışan sayısını şu şekilde ayarlamanızı öneririz: `CPU core count - 1`. Ayrıca herhangi bir parçanın özellikle büyük olup olmadığını kontrol edin, örneğin `> 5MB`. Bu tür bir "canavar" dosya darboğaz haline gelecektir, dolayısıyla kod bölme stratejinizi optimize etmeniz gerekebilir.
+
+**S2: Çalışanlar ara sıra kaza yapıyor ve derleme hatalarına neden oluyor mu?**
+- **Sebep**: Bazı özel kod sözdizimi kalıpları, karartıcının içinde dahili hatalara neden olabilir.
+- **Çözüm**: **otomatik bir bozulma mekanizması** uyguladık. Bir Worker başarısızlık eşiğine ulaştığında eklenti, yapının durmamasını sağlamak için otomatik olarak tek iş parçacığı moduna geri döner. Aynı zamanda daha sonra düzeltilebilmesi için hataya neden olan dosya adını da kaydeder.
+
+**S3: Bellek kullanımı çok mu yüksek (OOM)?**
+- **Sebep**: Her Worker'ın obfuscator'ı yüklemek ve AST'yi ayrıştırmak için kendi hafıza alanına ihtiyacı vardır.
+- **Çözüm**:
+  - İşçi sayısını azaltın.
+  - Node.js bellek sınırını artırın: `NODE_OPTIONS="--max-old-space-size=4096" npm run build`.
+  - Çalışanların büyük nesnelere yönelik gereksiz referansları saklamadıklarından emin olun.
+
+## Sonuç
+
+Node.js Worker Threads'i kullanıma sunarak, HagiCode projesinin üretim oluşturma süresini başarıyla 120 saniyeden yaklaşık 45 saniyeye düşürdük, bu da geliştirme deneyimini ve CI/CD verimliliğini büyük ölçüde artırdı.
+
+Bu çözümün özü şudur:
+1. **Görevleri düzgün şekilde bölün**: Vite parçalarını paralel birim olarak kullanın.
+2. **Kaynakların kontrolü**: Kaynak tükenmesini önlemek için Çalışan havuzu kullanın.
+3. **Hata toleransı için tasarım**: Otomatik bozulma mekanizması yapının kararlılığını sağlar.
+
+Ayrıca ön uç oluşturma verimliliğiyle de mücadele ediyorsanız veya projeniz aynı zamanda ağır kod işleme yapıyorsa, bu çözüm denemeye değer. Elbette bu mühendislik detaylarının zaten entegre olduğu HagiCode'a doğrudan göz atmanızı öneririz.
+
+Bu makale size yardımcı olduysa GitHub'da bize bir Yıldız vermekten veya herkese açık betaya katılıp denemekten çekinmeyin.
+
+## Referanslar
+
+- Node.js Worker Threads'in resmi belgeleri: [nodejs.org/api/worker_threads.html](https://nodejs.org/api/worker_threads.html)
+- javascript-obfuscator belgeleri: [github.com/javascript-obfuscator/javascript-obfuscator](https://github.com/javascript-obfuscator/javascript-obfuscator)
+- Vite eklentisi geliştirme kılavuzu: [vitejs.dev/guide/api-plugin.html](https://vitejs.dev/guide/api-plugin.html)
+- **HagiCode GitHub**: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- **HagiCode resmi web sitesi**: [hagicode.com](https://hagicode.com)
+- **Kurulum kılavuzu**: [hagicode.com/installation/docker-compose](https://hagicode.com/installation/docker-compose)
+
+
+
+---
+
+Okuduğunuz için teşekkür ederiz. Bu makaleyi yararlı bulduysanız, daha fazla kişinin keşfedebilmesi için lütfen aşağıdaki beğen düğmesine tıklayın.
+
+Bu içerik yapay zeka destekli işbirliğiyle oluşturuldu, tarafımdan incelendi ve kendi görüşlerimi ve konumumu yansıtıyor.
+
+- **Yazar:** [yenibe36524](https://www.newbe.pro)
+- **Makale bağlantısı:** [https://hagicode.com/blog/2026/01/27/optimizing-vite-build-with-worker-threads](https://hagicode.com/blog/2026/01/27/optimizing-vite-build-with-worker-threads)
+- **Telif hakkı bildirimi:** Aksi belirtilmediği sürece bu blogdaki tüm makaleler BY-NC-SA kapsamında lisanslıdır. Lütfen tekrar paylaşırken kaynak belirtin.

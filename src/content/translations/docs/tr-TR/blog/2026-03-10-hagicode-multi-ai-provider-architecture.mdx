@@ -1,0 +1,373 @@
+---
+title: HagiCode Platformunda Pratik Çoklu Yapay Zeka Sağlayıcı Mimarisi
+date: 2026-03-11
+tags: [Orleans, AI, Architecture Design, WebSocket, HTTP, ACP, HagiCode]
+description: "Bu makale, Orleans Grain mimarisi altında iki yapay zeka aracını (iflow ve OpenCode) birleşik bir sistem aracılığıyla entegre etmek için kullandığımız teknik yaklaşımı paylaşıyor."
+---
+
+## HagiCode Platformunda Pratik Çoklu Yapay Zeka Sağlayıcı Mimarisi
+
+> Bu makale, Orleans Grain mimarisi altında iki yapay zeka aracını (iflow ve OpenCode) birleşik bir sistem aracılığıyla entegre etmek için kullandığımız teknik yaklaşımı paylaşıyor. `IAIProvider` arayüzünü inceliyor ve WebSocket ile HTTP iletişimi arasındaki uygulama farklılıklarını ayrıntılı olarak karşılaştırıyor.
+
+:::not[Zaman Bağlamı]
+Bu makale, yayınlandığı tarihteki sağlayıcı mimarisi uygulamasını kaydetmektedir. Aktif olarak desteklenen mevcut kapsam için bkz. [AI Aracısı CLI Kurulumu](/tr-TR/related-software-installation/ai-agent-cli/) ve [Kurulum Kılavuzu](/tr-TR/installation); `IFlowCli` artık yalnızca geçmiş uyumluluk değeri olarak tutuluyor ve mevcut aktif destek kapsamının bir parçası değil.
+:::
+
+## Arka plan
+
+Bunda özellikle gizemli bir şey yok. HagiCode'u oluştururken çok pratik bir sorunla karşılaştık: kullanıcılar farklı yapay zeka araçlarıyla çalışmak istiyordu. Herkesin kendi alışkanlıkları olduğu için bu pek de şaşırtıcı değil. Bazıları Claude Code'u tercih ediyor, bazıları GitHub Copilot'u seviyor, bazı ekipler ise kendi geliştirdikleri araçları kullanıyor.
+
+İlk çözümümüz basit ve doğrudandı: Her yapay zeka aracı için özel entegrasyon kodu yazın. Ancak dezavantajları hızla ortaya çıktı. Kod tabanı şununla doldu: `if-else` şubeler, her değişiklik birden fazla yerde test gerektiriyordu ve her yeni araç, sıfırdan başka bir mantık yığını yazmak anlamına geliyordu.
+
+Daha sonra birleşik bir yapı oluşturmanın daha iyi olacağını fark ettim. `IAIProvider` tüm yapay zeka sağlayıcıları tarafından paylaşılan yetenekleri arayüzleyin ve soyutlayın. Böylece altta hangi alet kullanılırsa kullanılsın, üst katmanlar da onu aynı şekilde çağırabilir.
+
+Son zamanlarda projenin iki yeni aracı entegre etmesi gerekiyordu: iflow ve OpenCode. Her ikisi de ACP protokolünü destekler ancak iletişim tarzları farklıdır. iflow WebSocket'i kullanırken OpenCode bir HTTP API'si kullanır. Bu yararlı bir mimari test haline geldi: iki farklı taşıma modunu tek bir birleşik arayüzün arkasına uyarlayın.
+
+## HagiCode Hakkında
+
+Bu makalede paylaşılan yaklaşım, uygulamadaki deneyimlerimizden gelmektedir. [Hagi Kodu](https://hagicode.com) proje. HagiCode, Orleans Tahıl mimarisi üzerine inşa edilmiş yapay zeka destekli bir geliştirme platformudur. Birleşik bir platform aracılığıyla farklı yapay zeka sağlayıcılarıyla bütünleşir `IAIProvider` Kullanıcıların tercih ettikleri AI araçlarını esnek bir şekilde seçmelerine olanak tanıyan arayüz.
+
+## Mimari Tasarım
+
+### Birleşik Arayüz Soyutlaması
+
+İlk olarak tanımladık `IAIProvider` arayüz ve her yapay zeka sağlayıcısının uygulaması gereken yetenekleri özetledi:
+
+```csharp
+public interface IAIProvider
+{
+    string Name { get; }
+    bool SupportsStreaming { get; }
+    ProviderCapabilities Capabilities { get; }
+
+    Task<AIResponse> ExecuteAsync(AIRequest request, CancellationToken cancellationToken = default);
+    IAsyncEnumerable<AIStreamingChunk> StreamAsync(AIRequest request, CancellationToken cancellationToken = default);
+    Task<ProviderTestResult> PingAsync(CancellationToken cancellationToken = default);
+    IAsyncEnumerable<AIStreamingChunk> SendMessageAsync(AIRequest request, string? embeddedCommandPrompt = null, CancellationToken cancellationToken = default);
+}
+```
+
+Bu arayüz birkaç temel yöntem içerir:
+- `ExecuteAsync`: tek seferlik bir yapay zeka isteği yürütün
+- `StreamAsync`: gerçek zamanlı görüntüleme için akış yanıtlarını alın
+- `PingAsync`: sağlayıcının müsait olup olmadığını doğrulamak için bir sağlık kontrolü gerçekleştirin
+- `SendMessageAsync`: katıştırılmış komut desteği içeren bir mesaj gönderin
+
+### IFlowCliProvider: WebSocket Tabanlı Bir Uygulama
+
+iflow, ACP iletişimi için WebSocket'i kullanır. Genel mimari şuna benzer:
+
+```
+IFlowCliProvider → ACPSessionManager → WebSocketAcpTransport → iflow CLI
+                ↓
+         Dynamic port allocation + process management
+```
+
+Çekirdek akışı da oldukça basittir:
+1. `ACPSessionManager` ACP oturumlarını oluşturur ve yönetir.
+2. `WebSocketAcpTransport` WebSocket iletişimini yönetir.
+3. Dinamik olarak bir port tahsis edilir ve ifflow süreci şu şekilde başlatılır: `iflow --experimental-acp --port`.
+4. `IAIRequestToAcpMapper` ve `IAcpToAIResponseMapper` istekleri ve yanıtları dönüştürün.
+
+İşte temel kod:
+
+```csharp
+private async IAsyncEnumerable<AIStreamingChunk> StreamCoreAsync(
+    AIRequest request,
+    string? embeddedCommandPrompt,
+    [EnumeratorCancellation] CancellationToken cancellationToken)
+{
+    // Resolve working directory
+    var resolvedWorkingDirectory = ResolveWorkingDirectory(request);
+    var effectiveRequest = ApplyEmbeddedCommandPrompt(request, embeddedCommandPrompt);
+
+    // Create ACP session
+    await using var session = await _sessionManager.CreateSessionAsync(
+        Name,
+        resolvedWorkingDirectory,
+        cancellationToken,
+        request.SessionId);
+
+    // Send prompt
+    var prompt = _requestMapper.ToPromptString(effectiveRequest);
+    var promptResponse = await session.SendPromptAsync(prompt, cancellationToken);
+
+    // Receive streaming response
+    await foreach (var notification in session.ReceiveUpdatesAsync(cancellationToken))
+    {
+        if (_responseMapper.TryConvertToStreamingChunk(notification, out var chunk))
+        {
+            if (chunk.Type == StreamingChunkType.Metadata && chunk.IsComplete)
+            {
+                yield return chunk;
+                yield break;
+            }
+            yield return chunk;
+        }
+    }
+}
+```
+
+Burada belirtilmeye değer birkaç tasarım noktası var:
+- Kullanım `await using` oturumun doğru şekilde yayınlanmasını sağlamak ve kaynak sızıntılarını önlemek için.
+- Akış yanıtlarını şununla döndür: `IAsyncEnumerable`doğal olarak eşzamansız akışları destekler.
+- Kullanım `Metadata` Tamamlanmayı belirlemek ve tam yanıtın alındığından emin olmak için parçalar.
+
+### OpenCodeCliProvider: HTTP API Tabanlı Bir Uygulama
+
+OpenCode, hizmetini bir HTTP API aracılığıyla sağlar, dolayısıyla mimarisi biraz farklıdır:
+
+```plaintext
+OpenCodeCliProvider → OpenCodeRuntimeManager → OpenCodeClient → OpenCode HTTP API
+                      ↓
+                OpenCodeProcessManager → opencode process management
+```
+
+OpenCode'un dikkate değer bir özelliği, oturum bağlamalarını sürdürmek için bir SQLite veritabanı kullanmasıdır. Bu, oturum kurtarmayı ve hızlı yanıt kurtarmayı mümkün kılar:
+
+```csharp
+private async Task<OpenCodePromptExecutionResult> ExecutePromptAsync(
+    AIRequest request,
+    string? embeddedCommandPrompt,
+    CancellationToken cancellationToken)
+{
+    var prompt = BuildPrompt(request, embeddedCommandPrompt);
+    var resolvedWorkingDirectory = ResolveWorkingDirectory(request.WorkingDirectory);
+    var client = await _runtimeManager.GetClientAsync(resolvedWorkingDirectory, cancellationToken);
+    var bindingSessionId = request.SessionId;
+    var boundSession = TryGetBinding(bindingSessionId, resolvedWorkingDirectory);
+
+    // Try to use the already bound session
+    if (boundSession is not null)
+    {
+        try
+        {
+            return await PromptSessionAsync(
+                client,
+                boundSession,
+                BuildPromptRequest(request, prompt, CreatePromptMessageId()),
+                request.Model ?? _settings.Model,
+                cancellationToken);
+        }
+        catch (OpenCodeApiException ex) when (IsStaleBinding(ex))
+        {
+            // The session has expired, remove the binding
+            RemoveBinding(bindingSessionId);
+        }
+    }
+
+    // Create a new session
+    var session = await client.Session.CreateAsync(new OpenCodeSessionCreateRequest
+    {
+        Title = BuildSessionTitle(request)
+    }, cancellationToken);
+
+    BindSession(bindingSessionId, session.Id, resolvedWorkingDirectory);
+    return await PromptSessionAsync(client, session.Id, ...);
+}
+```
+
+Bu uygulamanın birkaç ilginç özelliği vardır:
+- Oturum bağlama mekanizması: aynı `SessionId` aynı OpenCode oturumunu yeniden kullanır ve tekrarlanan oturum oluşturulmasını önler.
+- Süre sonu yönetimi: Bir oturumun süresinin dolduğu tespit edildiğinde bağlama otomatik olarak temizlenir.
+- Veritabanı kalıcılığı: bağlamalar SQLite'ta saklanır ve yeniden başlatmanın ardından etkili kalır.
+
+### İki Yaklaşımın Karşılaştırılması
+
+| Görünüş | IFlowCliProvider | OpenCodeCliProvider |
+|------|-----------------|---------------------|
+| İletişim | WebSocket (ACP) | HTTP API'si |
+| Süreç yönetimi | ACPSessionManager'ı | OpenCodeProcessManager'ı |
+| Bağlantı noktası tahsisi | Dinamik bağlantı noktası | Bağlantı noktası yok (HTTP kullanır) |
+| Oturum yönetimi | ACPS oturumu | OpenCodeSession |
+| Kalıcılık | Bellek içi önbellek | SQLite veritabanı |
+| Başlatma komutu | `iflow --experimental-acp --port` | `opencode` |
+| Gecikme | Daha düşük (uzun ömürlü bağlantı) | Nispeten daha yüksek (HTTP istekleri) |
+
+Hangi yaklaşımı seçeceğiniz esas olarak ihtiyaçlarınıza bağlıdır. WebSocket, gerçek zamanlı gereksinimlerin yüksek olduğu senaryolar için daha iyidir; HTTP API ise daha basit ve hata ayıklaması daha kolaydır.
+
+## Pratik Kılavuz
+
+### Sağlayıcıları Yapılandırma
+
+İlk olarak, yapılandırma dosyasındaki iki sağlayıcıyı etkinleştirin:
+
+```yaml
+AI:
+  Providers:
+    IFlowCli:
+      Type: "IFlowCli"
+      Enabled: true
+      ExecutablePath: "iflow"
+      Model: null
+      WorkingDirectory: null
+    OpenCodeCli:
+      Type: "OpenCodeCli"
+      Enabled: true
+      ExecutablePath: "opencode"
+      Model: "anthropic/claude-sonnet-4"
+      WorkingDirectory: null
+
+OpenCode:
+  Enabled: true
+  BaseUrl: "http://localhost:38376"
+  ExecutablePath: "opencode"
+  StartupTimeoutSeconds: 30
+  RequestTimeoutSeconds: 120
+```
+
+### IFlowCliProvider'ı kullanın
+
+```csharp
+// Get provider through the factory
+var provider = await _providerFactory.GetProviderAsync(AIProviderType.IFlowCli);
+
+// Execute an AI request
+var request = new AIRequest
+{
+    Prompt = "请帮我重构这个函数",
+    WorkingDirectory = "/path/to/project",
+    Model = "claude-sonnet-4"
+};
+
+// Get the complete response
+var response = await provider.ExecuteAsync(request, cancellationToken);
+Console.WriteLine(response.Content);
+
+// Or use streaming responses
+await foreach (var chunk in provider.StreamAsync(request, cancellationToken))
+{
+    if (chunk.Type == StreamingChunkType.ContentDelta)
+    {
+        Console.Write(chunk.Content);
+    }
+}
+```
+
+### OpenCodeCliProvider'ı kullanın
+
+```csharp
+// Get provider through the factory
+var provider = await _providerFactory.GetProviderAsync(AIProviderType.OpenCodeCli);
+
+var request = new AIRequest
+{
+    Prompt = "请帮我分析这个错误",
+    WorkingDirectory = "/path/to/project",
+    Model = "anthropic/claude-sonnet-4"
+};
+
+var response = await provider.ExecuteAsync(request, cancellationToken);
+Console.WriteLine(response.Content);
+```
+
+### Sağlık Kontrolleri
+
+Başlatmadan veya kullanmadan önce sağlayıcının mevcut olup olmadığını kontrol edebilirsiniz:
+
+```csharp
+var iflowResult = await iflowProvider.PingAsync(cancellationToken);
+if (!iflowResult.Success)
+{
+    Console.WriteLine($"IFlow is unavailable: {iflowResult.ErrorMessage}");
+    return;
+}
+
+var openCodeResult = await openCodeProvider.PingAsync(cancellationToken);
+if (!openCodeResult.Success)
+{
+    Console.WriteLine($"OpenCode is unavailable: {openCodeResult.ErrorMessage}");
+    return;
+}
+```
+
+### Gömülü Komut Desteği
+
+Her iki sağlayıcı da aşağıdaki gibi gömülü komutları destekler: `/file:xxx`:
+
+```csharp
+var request = new AIRequest
+{
+    Prompt = "分析这个文件的问题",
+    SystemMessage = "你是一个代码分析专家"
+};
+
+await foreach (var chunk in provider.SendMessageAsync(
+    request,
+    embeddedCommandPrompt: "/file:src/main.cs",
+    cancellationToken))
+{
+    Console.Write(chunk.Content);
+}
+```
+
+## Notlar ve En İyi Uygulamalar
+
+### Kaynak Yönetimi
+
+IFlow, uzun ömürlü WebSocket bağlantılarını kullanır, bu nedenle kaynak yönetimi özel ilgiyi hak eder:
+- Kullanım `await using` oturumların düzgün bir şekilde yayınlandığından emin olmak için.
+- İptal işlemin temizlenmesini tetikler.
+- `ACPSessionManager` maksimum oturum sayısı sınırını destekler.
+
+OpenCode süreç yönetimi nispeten daha basittir ve `OpenCodeRuntimeManager` otomatik olarak halleder.
+
+### Hata İşleme
+
+Her iki sağlayıcı da tam hata işleme özelliğine sahiptir:
+- IFlow hataları ACP oturum güncellemeleri aracılığıyla yayılır.
+- OpenCode hataları atılıyor `OpenCodeApiException`.
+- Arayanın bu istisnaları yakalayıp işlemesi önerilir.
+
+### Performansla İlgili Hususlar
+
+- IFlow WebSocket iletişiminin gecikme süresi HTTP'den daha düşüktür.
+- OpenCode oturumunun yeniden kullanılması, HTTP isteklerinin yükünü azaltabilir.
+- Fabrika önbellek mekanizması, sağlayıcıların tekrar tekrar oluşturulmasını önler.
+- Yüksek eşzamanlılık senaryolarında, işlem sayısı ve bağlantı sayısındaki sınırlara çok dikkat edin.
+
+### Yapılandırma Doğrulaması
+
+Yürütülebilir yol başlangıçta doğrulanır ancak çalışma zamanı sorunları yine de ortaya çıkabilir. `PingAsync` yapılandırmanın doğru olup olmadığını doğrulamak için yararlı bir araçtır:
+
+```csharp
+// Check at startup
+var provider = await _providerFactory.GetProviderAsync(providerType);
+var result = await provider.PingAsync(cancellationToken);
+if (!result.Success)
+{
+    _logger.LogError("Provider {ProviderType} is unavailable: {Error}", providerType, result.ErrorMessage);
+}
+```
+
+## Özet
+
+Bu makale, HagiCode platformunun iki AI aracı iflow ve OpenCode'u entegre ederken kullandığı teknik yaklaşımı paylaşmaktadır. Birleşik bir aracılığıyla `IAIProvider` arayüzünde, üst katman çağrı modelini tutarlı tutarken WebSocket ve HTTP gibi farklı iletişim stillerini uyarladık.
+
+Temel fikir aslında oldukça basit:
+1. Birleşik bir arayüz soyutlamasını tanımlayın.
+2. Farklı uygulamalar için bağdaştırıcı katmanları oluşturun.
+3. Fabrika modeli aracılığıyla her şeyi eşit şekilde yönetin.
+
+Bu, sisteme iyi bir genişletilebilirlik sağlar. Daha sonra yeni bir yapay zeka aracının entegre edilmesi gerektiğinde tek yapmamız gereken, `IAIProvider` mevcut kodu çok fazla değiştirmeden arayüz.
+
+Eğer siz de çoklu yapay zeka araç entegrasyonu üzerinde çalışıyorsanız bu makalenin faydalı olacağını umuyorum.
+
+## Referanslar
+
+- HagiCode GitHub: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- HagiCode'un resmi web sitesi: [hagicode.com](https://hagicode.com)
+- HagiCode Kurulum Kılavuzu: [docs.hagicode.com/installation](https://docs.hagicode.com/installation)
+- ACP protokolü spesifikasyonu: [github.com/modelcontextprotocol/specation](https://github.com/modelcontextprotocol/specification)
+- Orleans belgeleri: [Learn.microsoft.com/dotnet/orleans](https://learn.microsoft.com/dotnet/orleans)
+
+---
+
+Bu makale size yardımcı olduysa:
+- Beğeni yapın ki daha çok kişi görsün
+- GitHub'da bize yıldız verin: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Daha fazla bilgi edinmek için resmi web sitesini ziyaret edin: [hagicode.com](https://hagicode.com)
+- 30 dakikalık uygulamalı demoyu izleyin: [www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)
+- Tek tıklamayla kurulumu deneyin: [docs.hagicode.com/installation/docker-compose](https://docs.hagicode.com/installation/docker-compose)
+- Masaüstü için hızlı kurulum: [hagicode.com/desktop/](https://hagicode.com/desktop/)
+- Herkese açık beta başladı; deneyebilirsiniz

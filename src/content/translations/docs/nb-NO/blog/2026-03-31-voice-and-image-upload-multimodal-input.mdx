@@ -1,0 +1,310 @@
+---
+title: Å skrive er tregere enn å snakke, og å snakke er tregere enn et skjermbilde - Multimodal input-praksis for AI-kodingsassistenter
+date: 2026-03-31
+tags: [WebSocket, Speech Recognition, Image Upload, Multimodal Interaction]
+description: "Å skrive er tregere enn å snakke, og å snakke er tregere enn et skjermbilde - Multimodal input-praksis for AI-kodingsassistenter: Å skrive kode har en fartsgrense nr."
+---
+
+## Å skrive er tregere enn å snakke, og å snakke er tregere enn et skjermbilde - Multimodal input-praksis for AI-kodingsassistenter
+
+> Å skrive kode har en fartsgrense uansett hvor fort du skriver. Noen ganger tar det en evighet å skrive ut noe du kan si i én setning; noen ganger forklarer ett skjermbilde alt, men du må fortsatt beskrive det med en haug med tekst. Denne artikkelen snakker om hva vi møtte under byggingen [HagiCode](https://hagicode.com), fra talegjenkjenning til bildeopplasting. Til slutt ønsket vi bare å gjøre en AI-kodingsassistent litt enklere å bruke.
+
+## Bakgrunn
+
+Mens vi bygde HagiCode, la vi merke til et problem – eller rettere sagt, et problem som naturlig dukket opp når folk begynte å bruke det mye: Å stole på å skrive alene kan være slitsomt.
+
+Tenk på det: samhandling mellom brukere og agenten er et kjernescenario. Men hvis hver utveksling krever ustanselig skriving på tastaturet, er effektiviteten ikke stor:
+
+1. **Takning er for sakte**: For kompliserte problemer, som feilmeldinger eller problemer med brukergrensesnittet, kan det ta et halvt minutt å skrive alt ut, mens det kan ta ti sekunder å si det høyt. Det gapet er reelt.
+
+2. **Bildene er mer direkte**: Noen ganger gir brukergrensesnittet en feil, noen ganger vil du sammenligne et designutkast, og noen ganger må du vise en kodestruktur. «Et bilde er verdt tusen ord» er kanskje et gammelt ordtak, men det holder fortsatt. Å la AI direkte "se" problemet er mye klarere enn å beskrive det i evigheter.
+
+3. **Interaksjon skal føles naturlig**: Moderne AI-assistenter bør støtte tekst, stemme og bilder. Brukere skal kunne velge hvilken inndatametode som føles mest naturlig.
+
+Så vi bestemte oss for å legge til støtte for talegjenkjenning og bildeopplasting til HagiCode for å gjøre agentinteraksjoner mer praktiske. Hvis brukere kan skrive litt mindre, er det allerede en gevinst.
+
+## Om HagiCode
+
+Løsningene som er delt i denne artikkelen kommer fra vårt praktiske arbeid i [HagiCode](https://hagicode.com) prosjekt - eller, mer nøyaktig, fra erfaringer mens du snublet gjennom en del fallgruver.
+
+HagiCode er et åpen kildekode AI-kodeassistentprosjekt med et enkelt mål: bruk AI for å forbedre utviklingseffektiviteten. Etter hvert som vi fortsatte å bygge, ble det klart at brukerne ønsket multimodale innspill. Noen ganger er det raskere å si én setning enn å skrive et langt avsnitt, og noen ganger er et skjermbilde langt klarere enn en lang forklaring.
+
+Disse behovene presset oss fremover, og det var slik funksjoner som talegjenkjenning og bildeopplastinger til slutt tok form. Brukere kan nå samhandle med AI på den mest naturlige måten som er tilgjengelig for dem, og det føles bra.
+
+## Analyse
+
+### Tekniske utfordringer innen talegjenkjenning
+
+Da vi bygde talegjenkjenning, møtte vi et vanskelig problem: **nettleserens WebSocket API støtter ikke tilpassede HTTP-hoder**.
+
+Talegjenkjenningstjenesten vi valgte var ByteDances Doubao Speech Recognition API. Dessverre krever denne API-en autentiseringsinformasjon som f.eks `accessToken` og `secretKey` sendes gjennom HTTP-hoder. Det skapte en umiddelbar teknisk konflikt:
+
+```javascript
+// The browser WebSocket API does not support this approach
+const ws = new WebSocket('wss://api.com/ws', {
+  headers: {
+    'Authorization': 'Bearer token'  // Not supported
+  }
+});
+```
+
+Vi hadde i hovedsak to alternativer:
+
+1. **Nettadressespørringsparametertilnærming**: legg inn autentiseringsinformasjonen i nettadressen
+   - Fordelen er at den er enkel å implementere
+   - Ulempen er at legitimasjonen er utsatt for frontend, som er usikker; noen APIer krever også hodebasert autentisering
+
+2. **Backend proxy-tilnærming**: implementer en WebSocket-proxy på backend
+   - Fordelen er at legitimasjon forblir sikkert lagret på backend og løsningen er fullt kompatibel med API-krav
+   - Ulempen er at implementeringen er litt mer kompleks
+
+Til slutt valgte vi **backend proxy-tilnærmingen**. Sikkerhet er ikke noe du går på akkord med.
+
+### Funksjonelle krav for bildeopplasting
+
+Kravene våre for bildeopplasting var faktisk ganske enkle:
+
+1. **Flere opplastingsmetoder**: klikk for å velge en fil, dra og slipp og lim inn fra utklippstavlen
+2. **Filvalidering**: typebegrensninger (PNG, JPG, WebP, GIF) og størrelsesgrenser (5–10 MB) er grunnleggende krav
+3. **Brukeropplevelse**: last opp fremdrift, forhåndsvisninger og feilmeldinger slik at brukerne alltid vet hva som skjer
+4. **Sikkerhet**: validering på serversiden og beskyttelse mot ondsinnede filopplastinger er avgjørende
+
+## Løsning
+
+### Talegjenkjenning: WebSocket Proxy Architecture
+
+Vi designet en trelagsarkitektur for talegjenkjenning og fant en vei som fungerte:
+
+```
+Browser WebSocket
+       |
+       | ws://backend/api/voice/ws
+       | (binary audio)
+       v
+Backend Proxy
+       |
+       | wss://openspeech.bytedance.com/ (with auth header)
+       v
+Doubao API
+```
+
+**Kjernekomponentimplementeringer**:
+
+1. **Frontend AudioWorklet-prosessor**:
+
+```javascript
+class AudioProcessorWorklet extends AudioWorkletProcessor {
+  process(inputs, outputs, parameters) {
+    const input = inputs[0]?.[0];
+    if (!input) return true;
+
+    // Resample to 16 kHz (required by the Doubao API)
+    const samples = this.resampleAudio(input, 48000, 16000);
+
+    // Accumulate samples into 500 ms chunks
+    this.accumulatedSamples.push(...samples);
+
+    if (this.accumulatedSamples.length >= 8000) {
+      // Convert to 16-bit PCM and send
+      const pcm = this.floatToPcm16(this.accumulatedSamples);
+      this.port.postMessage({ type: 'audioData', data: pcm.buffer }, [pcm.buffer]);
+      this.accumulatedSamples = [];
+    }
+    return true;
+  }
+}
+```
+
+2. **Backend WebSocket-behandler** (C#):
+
+```csharp
+[HttpGet("ws")]
+public async Task GetWebSocket()
+{
+    if (HttpContext.WebSockets.IsWebSocketRequest)
+    {
+        await _webSocketHandler.HandleAsync(HttpContext);
+    }
+}
+```
+
+3. **Frontend `VoiceTextArea` komponent**:
+
+```tsx
+export const VoiceTextArea = forwardRef<HTMLTextAreaElement, VoiceTextAreaProps>(
+  ({ value, onChange, onTextRecognized, maxDuration }, ref) => {
+    const { isRecording, interimText, volume, duration, startRecording, stopRecording } =
+      useVoiceRecording({ onTextRecognized, maxDuration });
+
+    return (
+      <div className="flex gap-2">
+        {/* Voice button */}
+        <button onClick={handleButtonClick}>
+          {isRecording ? <VolumeWaveform volume={volume} /> : <Mic />}
+        </button>
+        {/* Text input area */}
+        <textarea value={displayValue} onChange={handleChange} />
+      </div>
+    );
+  }
+);
+```
+
+### Bildeopplastinger: Multi-Method Upload Component
+
+Vi bygde en fullverdig bildeopplastingskomponent med støtte for alle tre opplastingsmetodene, og dekker de vanligste scenariene brukere støter på.
+
+**Kjernefunksjoner**:
+
+1. **Tre opplastingsmetoder**:
+
+```tsx
+// Click to upload
+const handleClick = () => fileInputRef.current?.click();
+
+// Drag-and-drop upload
+const handleDrop = (e: React.DragEvent) => {
+  const file = e.dataTransfer.files?.[0];
+  if (file) uploadFile(file);
+};
+
+// Clipboard paste
+const handlePaste = (e: ClipboardEvent) => {
+  for (const item of Array.from(e.clipboardData?.items || [])) {
+    if (item.type.startsWith('image/')) {
+      const file = item.getAsFile();
+      if (file) uploadFile(file);
+    }
+  }
+};
+```
+
+2. **Frontend-validering**:
+
+```tsx
+const validateFile = (file: File): { valid: boolean; error?: string } => {
+  if (!acceptedTypes.includes(file.type)) {
+    return { valid: false, error: 'Only PNG, JPG, JPEG, WebP, and GIF images are allowed' };
+  }
+  if (file.size > maxSize) {
+    return { valid: false, error: `Maximum file size is ${(maxSize / 1024 / 1024).toFixed(1)}MB` };
+  }
+  return { valid: true };
+};
+```
+
+3. **Backend opplastingsbehandler** (TypeScript):
+
+```typescript
+export const Route = createFileRoute('/api/upload')({
+  server: {
+    handlers: {
+      POST: async ({ request }) => {
+        const formData = await request.formData();
+        const file = formData.get('file') as File;
+
+        // Validation
+        const validation = validateFile(file);
+        if (!validation.isValid) {
+          return Response.json({ error: validation.error }, { status: 400 });
+        }
+
+        // Save file
+        const uuid = uuidv4();
+        const filePath = join(uploadDir, `${uuid}${extension}`);
+        await writeFile(filePath, buffer);
+
+        return Response.json({ url: `/uploaded/${today}/${uuid}${extension}` });
+      }
+    }
+  }
+});
+```
+
+## Praktisk veiledning
+
+### Slik bruker du talegjenkjenning
+
+1. **Konfigurer talegjenkjenningstjenesten**:
+   - Åpne innstillingssiden for talegjenkjenning
+   - Konfigurer Doubao-talen `AppId` og `AccessToken`
+   - Valgfritt konfigurer kommandoord for å forbedre gjenkjenningsnøyaktigheten for domenespesifikke termer
+
+2. **Bruk den i inndataboksen**:
+   - Klikk på mikrofonikonet på venstre side av inndataboksen
+   - Begynn å snakke etter at bølgeformanimasjonen vises
+   - Klikk på ikonet igjen for å stoppe opptaket
+   - Den gjenkjente teksten settes automatisk inn ved markørposisjonen
+
+3. **Eksempel på konfigurasjon av kommandoord**:
+
+```text
+TypeScript
+React
+useState
+useEffect
+```
+
+### Hvordan bruke bildeopplastinger
+
+1. **Opplastningsmetoder**:
+   - Klikk på opplastingsknappen for å velge en fil
+   - Dra et bilde direkte inn i opplastingsområdet
+   - Bruk `Ctrl+V` for å lime inn et skjermbilde fra utklippstavlen
+
+2. **Støttede formater**: PNG, JPG, JPEG, WebP, GIF
+3. **Størrelsesgrense**: 5 MB som standard (konfigurerbar)
+
+### Notater
+
+1. **Talegjenkjenning**:
+   - Mikrofontillatelse kreves
+   - Bruk i rolige omgivelser når det er mulig
+   - Maksimal støttet opptaksvarighet er 300 sekunder som standard (konfigurerbar)
+
+2. **Bildeopplasting**:
+   - Bare vanlige bildeformater støttes
+   - Vær oppmerksom på filstørrelsesgrensene
+   - Opplastede bilder mottar automatisk en forhåndsvisnings-URL
+
+3. **Sikkerhetshensyn**:
+   - Talegjenkjenningslegitimasjon er lagret på baksiden
+   - Bildeopplastinger går gjennom streng validering på serversiden
+   - HTTPS/WSS anbefales i produksjonsmiljøer
+
+## Konklusjon
+
+Etter å ha lagt til talegjenkjenning og bildeopplasting, ble HagiCode-brukeropplevelsen merkbart forbedret. Brukere kan nå samhandle med AI på en mer naturlig måte – snakke i stedet for å skrive, og dele skjermbilder i stedet for å beskrive alt manuelt. Det føles som å endelig finne en mer behagelig måte å kommunisere på.
+
+Mens vi bygde denne funksjonen, møtte vi problemet med at nettleserens WebSocket APIer ikke støtter tilpassede overskrifter. Til slutt løste vi det med en backend proxy-tilnærming. Denne løsningen bevarte ikke bare sikkerheten, men la også grunnlaget for å integrere andre autentiserte WebSocket-tjenester senere.
+
+Bildeopplastingskomponenten drar også nytte av å støtte flere opplastingsmetoder, slik at brukerne kan velge det som er mest praktisk for øyeblikket. Klikk, dra eller lim inn alt arbeid, og hver bane gjør jobben raskt unna.
+
+«Å skrive er tregere enn å snakke, og å snakke er tregere enn et skjermbilde» passer ganske bra til temaet her. Hvis du bygger et lignende AI-assistentprodukt, håper jeg disse erfaringene hjelper, selv om det bare er litt.
+
+## Referanser
+
+- [HagiCode GitHub Repository](https://github.com/HagiCode-org/site)
+- [HagiCode offisielle nettsted](https://hagicode.com)
+- [Doubao Speech Recognition API Dokumentasjon](https://www.volcengine.com/docs/6561/79829)
+- [Web Audio API](https://developer.mozilla.org/en-US/docs/Web/API/Web_Audio_API)
+- [WebSocket API](https://developer.mozilla.org/en-US/docs/Web/API/WebSocket)
+
+---
+
+Hvis denne artikkelen hjalp deg:
+- Gi den et like slik at flere kan finne den
+- Stjerne oss på GitHub: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Besøk den offisielle siden for å lære mer: [hagicode.com](https://hagicode.com)
+- Se den 30-minutters praktiske demoen: [www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)
+- Prøv ett-klikks installasjon: [docs.hagicode.com/installation/docker-compose](https://docs.hagicode.com/installation/docker-compose)
+- Hurtiginstallasjon for skrivebord: [hagicode.com/desktop/](https://hagicode.com/desktop/)
+- Offentlig beta har startet - installer og prøv den
+
+## Merknad om opphavsrett
+
+Takk for at du leser. Hvis du synes denne artikkelen var nyttig, kan du gjerne like, bokmerke og dele den.
+Dette innholdet ble laget med AI-assistert samarbeid, og den endelige versjonen ble gjennomgått og bekreftet av forfatteren.
+- Forfatter: [newbe36524](https://www.newbe.pro)
+- Original link: [https://docs.hagicode.com/blog/2026-03-31-voice-and-image-upload-multimodal-input/](https://docs.hagicode.com/blog/2026-03-31-voice-and-image-upload-multimodal-input/)
+- Opphavsrett: Med mindre annet er oppgitt, er alle blogginnlegg på dette nettstedet lisensiert under BY-NC-SA. Vennligst inkluder kilden når du legger ut på nytt.

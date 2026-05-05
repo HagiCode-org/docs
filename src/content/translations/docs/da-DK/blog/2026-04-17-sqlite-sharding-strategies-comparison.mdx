@@ -1,0 +1,375 @@
+---
+title: "SQLite Sharding i praksis: En dybdegående sammenligning af tre shading-strategier"
+date: 2026-04-17
+tags: [SQLite, Sharding, Performance Optimization, Architecture Design, HagiCode]
+description: "Når en enkelt-fil SQLite-database rammer samtidige flaskehalse, hvordan bryder vi så igennem? Denne artikel deler tre SQLite-sharding-tilgange fra HagiCode"
+---
+
+## SQLite Sharding i praksis: En dybdegående sammenligning af tre shading-strategier
+
+> Når en enkelt-fil SQLite-database rammer samtidige flaskehalse, hvordan bryder vi så igennem? Denne artikel deler tre SQLite-sharding-tilgange fra HagiCode-projektet på tværs af forskellige scenarier, der hjælper dig med at forstå, hvordan du vælger den rigtige sharding-strategi.
+
+Hej alle sammen, jeg er Yu Kun, skaberen af HagiCode.
+
+## Baggrund
+
+Når du bygger højtydende applikationer, støder enkeltfils SQLite-databaser ind i meget praktiske problemer. Når brugerantallet og datamængden vokser, begynder disse problemer at stå i kø efter hinanden:
+
+- Skriveoperationer begynder at stå i kø, og svartider øges synligt
+- Forespørgselsydeevne falder, efterhånden som datamængden vokser
+- Hyppige `database is locked` fejl vises under flertrådsadgang
+
+Mange mennesker spørger instinktivt: skal vi bare migrere direkte til PostgreSQL eller MySQL? Det kan løse problemet, men implementeringskompleksiteten stiger markant. Er der en lettere mulighed?
+
+Svaret er sønderdeling. I sidste ende bør ingeniørproblemer stadig løses med ingeniørmetoder. Ved at distribuere data på tværs af flere SQLite-filer kan vi forbedre samtidigheds- og forespørgselsydeevnen betydeligt og samtidig bevare SQLites lette egenskaber.
+
+## Om HagiCode
+
+De tilgange, der er delt i denne artikel, kommer fra vores praktiske erfaring i [HagiCode](https://hagicode.com) projekt. Som et AI-kodningsassistentprojekt skal HagiCode håndtere en stor mængde samtalebeskeder, tilstandsvedholdenhed og hændelseshistorik. Det var ved at løse disse reelle problemer, at vi opsummerede tre sharding-tilgange for forskellige scenarier.
+
+Gode værktøjer betyder noget, men hvordan du bruger dem afhænger af det arbejde, du faktisk skal udføre.
+
+Vores kodelager er kl [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site). Tag gerne et dybere kig, hvis du er interesseret.
+
+## Oversigt over tre shading-tilgange
+
+Efter at have analyseret HagiCode-kodebasen identificerede vi tre SQLite-sharding-tilgange til forskellige forretningsscenarier:
+
+1. **Session Message sharded storage**: lagring til AI-samtalebeskeder, karakteriseret ved højfrekvente skrivninger og sessionsbaserede isolerede forespørgsler
+2. **Orleans Grain sharded storage**: tilstandsvedholdenhed for en distribueret ramme, karakteriseret ved cross-node-adgang og behovet for deterministisk routing
+3. **Hero History sharded storage**: historiske hændelsesregistreringer for et gamified system, kendetegnet ved event sourcing og behovet for migreringskompatibilitet
+
+Selvom deres forretningsscenarier er forskellige, følger alle tre de samme kernedesignprincipper:
+
+- **Deterministisk routing**: beregn shard direkte fra forretnings-id'et uden en metadatatabel
+- **Transparent adgang**: Øvre lag bruger en samlet grænseflade og forbliver uvidende om de underliggende shards
+- **Uafhængig lagring**: Hver shard er en fuldstændig uafhængig SQLite-fil
+- **Samtidig optimering**: WAL-tilstand plus `busy_timeout` reducerer låsestrid
+
+Mange mennesker spørger: hvorfor ikke bygge én generisk skæringsløsning? Det er et meget praktisk spørgsmål, og konklusionen er ligetil: Inden for teknik er der ingen universel løsning, kun den, der passer bedst til det aktuelle forretningsscenario. Dernæst vil vi sammenligne de konkrete implementeringer af disse tre tilgange i dybden.
+
+## Sammenligning af sønderdelingsstrategier
+
+### Regler for optælling af skærver og navngivning
+
+| Aspekt | Session besked | Orléans korn | Heltehistorie |
+|------|----------------|---------------|--------------|
+| **Skårantal** | 256 (16²) | 100 | 10 |
+| **Navngivningsregel** | Hexadecimal (00-ff) | Decimal (00-99) | Decimal (0-9) |
+| **Opbevaringskatalog** | `DataDir/messages/` | `DataDir/orleans/grains/` | `DataDir/hero-history/` |
+| **Filnavnemønster** | `{shard}.db` | `grains-{shard}.db` | `{shard}.db` |
+
+Hvorfor er der så stor forskel på antallet af skærver? Det afhænger af virksomhedens karakteristika. Sagt på en anden måde, modeller vil ændre sig, værktøjer vil udvikle sig, og arbejdsgange vil blive opgraderet, men de tekniske grundprincipper forbliver de samme: Forstå først det problem, du faktisk forsøger at løse.
+
+- **Sessionsmeddelelse** bruger 256 shards, fordi samtalebeskeder har den højeste skrivefrekvens og har brug for flere shards for at sprede belastningen
+- **Orleans Grain** bruger 100 skår, der balancerer samtidig ydeevne og operationel kompleksitet
+- **Hero History** bruger kun 10 shards, fordi historiske begivenhedsskrivninger er mindre hyppige, og migrationsomkostninger skal tages i betragtning
+
+### Forskelle i routingalgoritmer
+
+Routingalgoritmen er kernen i et sønderdelingsskema. Det bestemmer, hvordan data fordeles på tværs af shards. De tre tilgange bruger forskellige routingstrategier:
+
+```csharp
+// Session Message: last two hexadecimal characters of the GUID
+var normalized = Guid.Parse(sessionId.Value).ToString("N").ToLowerInvariant();
+return normalized[^2..];  // Take the last two hexadecimal characters
+
+// Orleans Grain: extract digits, then use the last two digits modulo shard count
+var digits = ExtractDigits(grainId);  // Extract all digits
+var lastTwoDigits = (digits[^2] * 10) + digits[^1];
+return lastTwoDigits % shardCount;
+
+// Hero History: modulo 10 using the ASCII value of the last character
+return heroId[^1] % 10;
+```
+
+**Designanalyse**:
+
+- **Sessionsmeddelelse** ID'er er GUID'er. Efter konvertering til hexadecimal giver det at tage de sidste to tegn en jævn fordeling på 256 shards
+- **Orleans Grain** ID'er har ikke et ensartet format og kan indeholde både bogstaver og cifre, så alle cifre udtrækkes, før du tager modulo
+- **Heltehistorie**-id'er er strenge, så ASCII-værdien af det sidste tegn bruges direkte med modulo. Det er enkelt, men fordelingen kan være mindre ensartet
+
+**Nøglepunkt**: uanset hvilken algoritme du bruger, skal det samme ID altid knyttes til det samme shard. Dette er et af de mest grundlæggende krav i distribuerede systemer. Ellers er datainkonsistens uundgåelig. Hvis routing er ustabil, kollapser hver anden indsats til nul.
+
+### Forskelle i initialiseringsstrategier
+
+| Aspekt | Session besked | Orléans korn | Heltehistorie |
+|------|----------------|---------------|--------------|
+| **Initialiseringstidspunkt** | Lazy-loaded on demand | Fuld parallel initialisering ved opstart | Lazy-loaded on demand |
+| **Samtidig kontrol** | `Lazy<Task>` forhindrer duplikatinitialisering | `Parallel.ForEachAsync` | `Lazy<Task>` forhindrer duplikatinitialisering |
+
+**Hvorfor vælger Orleans Grain fuld initialisering ved opstart?**
+
+Fordi Orleans er en distribueret ramme, kan en Grain planlægges til enhver node. Hvis en shard-fil først opdages at mangle under kørsel, kan anmodninger mislykkes. Fuld initialisering ved opstart forlænger opstartstiden, men det garanterer køretidsstabilitet. At få det til at køre er kun begyndelsen; at holde det vedligeholdelsesdygtigt er den virkelige færdighed.
+
+**Fordele ved doven læsning**:
+
+For Session Message og Hero History reducerer doven indlæsning opstartstiden. Filer og skema oprettes kun, når der faktisk er brug for et shard. Bruger `Lazy<Task>` forhindrer også løbsforhold under samtidig initialisering. Designet ser simpelt ud, men i rigtige projekter sparer det en masse unødvendige problemer.
+
+### Skema Design Karakteristika
+
+Skemadesignet for de tre tilgange afspejler deres respektive forretningskarakteristika:
+
+**Sessionsmeddelelse**:
+- Understøtter Event Sourcing-modellen (hændelsestabel plus snapshottabel)
+- Indeholder en undertabel til meddelelsesindholdsblokke (`MessageContentBlocks`)
+- Har komprimerings- og komprimeringsflagfelter for at understøtte fremtidige optimeringer
+
+**Orleans Grain**:
+- Minimalistisk design: en enkelt `GrainState` bord
+- Butikkers tilstand som serialiseret JSON
+- Bruger ETag-baseret optimistisk samtidighedskontrol
+
+**Heltehistorie**:
+- Tidslinjeforespørgselsoptimeringsindekser
+- En unik `DedupeKey` begrænsning forhindrer overlapning
+- Understøtter flere hændelsestyper og statusser
+
+Disse designs viser, at skemadesign bør forblive tæt på linje med forretningskrav i stedet for at jagte genericitet. Orleans Grain er enkel, netop fordi den kun skal gemme serialiseret tilstand og ikke kræver komplekse forespørgselsfunktioner. Dette er ikke mystik. Det er ingeniørarbejde. Skynd dig ikke at give noget et stort navn, før du tjekker, om det kan overleve to gentagelser inde i et rigtigt hold.
+
+### Sammenligning af samtidighedskonfiguration
+
+Alle tre tilgange bruger de samme SQLite samtidighedsoptimeringsindstillinger:
+
+```sql
+PRAGMA journal_mode=WAL;      -- Write-ahead logging mode
+PRAGMA synchronous=NORMAL;     -- Reduce persistence overhead
+PRAGMA busy_timeout=5000;      -- 5-second busy wait
+PRAGMA foreign_keys=ON;        -- Foreign key constraints
+```
+
+**Fordele ved WAL-tilstand**:
+
+Traditionel rollback-journaltilstand forårsager låsestrid under skrivninger, mens WAL-tilstand tillader læsning og skrivning at fortsætte samtidigt. I scenarier med store data kan dette forbedre ydeevnen betydeligt. Mange udviklere overser denne indstilling, men det betyder meget mere, end de tror.
+
+**Afvejningen af `synchronous=NORMAL`**:
+
+Indstiller den til `FULL` giver maksimal sikkerhed, men det reducerer ydeevnen markant. `NORMAL` skaber en balance mellem sikkerhed og ydeevne, hvilket gør det til det rigtige valg til de fleste applikationer. Der er ingen grund til at overtænke denne. `NORMAL` er nok.
+
+## Sådan vælger du en sønderdelingsstrategi
+
+Baseret på analysen af HagiCodes tre tilgange kan vi opsummere følgende beslutningsmatrix:
+
+```
+High-throughput scenarios -> more shards (for example, Message uses 256)
+Simple maintainability   -> fewer shards (for example, Hero History uses 10)
+Mostly numeric IDs       -> modulo algorithm (Orleans Grain)
+Mostly GUIDs             -> hexadecimal suffix (Session Message)
+String IDs               -> ASCII modulo (Hero History)
+```
+
+**Tommelfingerregler for valg af skårtal**:
+
+- For få (`< 10`): begrænset samtidighedsforbedring, hvilket gør skæring mindre meningsfuld
+- for mange (`> 1000`): filhåndtering bliver kompleks, og overhead til forbindelsespuljen stiger
+- Tommelfingerregel: 10 til 100 skår passer til de fleste scenarier
+- Ekstremt høje samtidighedsscenarier: 256 shards kan overvejes
+
+Hvis man kun ser på demoer, er det nemt at lade sig rive med. Men når først du går ind i produktionen, skal alle omkostninger beregnes omhyggeligt. Mange ting er ikke umulige, bare ikke ærligt prissat.
+
+## Praktisk vejledning
+
+### Implementer en standardiseret Shard Resolver
+
+```csharp
+public interface IShardResolver<TId>
+{
+    string ResolveShardKey(TId id);
+}
+
+// Hexadecimal sharding (for GUIDs)
+public class HexSuffixShardResolver : IShardResolver<string>
+{
+    private readonly int _suffixLength;
+
+    public HexSuffixShardResolver(int suffixLength = 2)
+    {
+        _suffixLength = suffixLength;
+    }
+
+    public string ResolveShardKey(string id)
+    {
+        var normalized = id.Replace("-", "").ToLowerInvariant();
+        return normalized[^_suffixLength..];
+    }
+}
+
+// Numeric modulo sharding (for purely numeric IDs)
+public class NumericModuloShardResolver : IShardResolver<long>
+{
+    private readonly int _shardCount;
+
+    public NumericModuloShardResolver(int shardCount)
+    {
+        _shardCount = shardCount;
+    }
+
+    public string ResolveShardKey(long id)
+    {
+        return (id % _shardCount).ToString("D2");
+    }
+}
+```
+
+### Unified Connection Factory Pattern
+
+```csharp
+public class ShardedConnectionFactory<TOptions>
+{
+    private readonly ConcurrentDictionary<string, Lazy<Task>> _initializationTasks = new();
+    private readonly TOptions _options;
+    private readonly IShardSchemaInitializer _initializer;
+
+    public ShardedConnectionFactory(
+        TOptions options,
+        IShardSchemaInitializer initializer)
+    {
+        _options = options;
+        _initializer = initializer;
+    }
+
+    public async Task<TDbContext> CreateAsync(string shardKey, CancellationToken ct)
+    {
+        var connectionString = BuildConnectionString(shardKey);
+
+        // Use Lazy<Task> to prevent concurrent initialization
+        var initTask = _initializationTasks.GetOrAdd(
+            connectionString,
+            _ => new Lazy<Task>(() => InitializeShardAsync(connectionString, ct))
+        );
+
+        await initTask.Value;
+        return CreateDbContext(connectionString);
+    }
+
+    private async Task InitializeShardAsync(string connectionString, CancellationToken ct)
+    {
+        await _initializer.InitializeAsync(connectionString, ct);
+    }
+
+    private string BuildConnectionString(string shardKey)
+    {
+        var shardPath = Path.Combine(_options.BaseDirectory, $"{shardKey}.db");
+        return $"Data Source={shardPath}";
+    }
+
+    private TDbContext CreateDbContext(string connectionString)
+    {
+        // Create the DbContext according to the specific ORM
+        return Activator.CreateInstance(typeof(TDbContext), connectionString) as TDbContext;
+    }
+}
+```
+
+### Bedste praksis for skemainitialisering
+
+```csharp
+public class SqliteShardInitializer : IShardSchemaInitializer
+{
+    public async Task InitializeAsync(string connectionString, CancellationToken ct)
+    {
+        await using var connection = new SqliteConnection(connectionString);
+        await connection.OpenAsync(ct);
+
+        // Concurrency optimization settings
+        await connection.ExecuteAsync("""
+            PRAGMA journal_mode=WAL;
+            PRAGMA synchronous=NORMAL;
+            PRAGMA busy_timeout=5000;
+            PRAGMA foreign_keys=ON;
+        """);
+
+        // Create table schema
+        await connection.ExecuteAsync("""
+            CREATE TABLE IF NOT EXISTS Entities (
+                Id TEXT PRIMARY KEY,
+                CreatedAt TEXT NOT NULL,
+                UpdatedAt TEXT NOT NULL,
+                Data TEXT NOT NULL,
+                ETag TEXT
+            );
+        """);
+
+        // Create indexes
+        await connection.ExecuteAsync("""
+            CREATE INDEX IF NOT EXISTS IX_Entities_CreatedAt
+            ON Entities(CreatedAt DESC);
+
+            CREATE INDEX IF NOT EXISTS IX_Entities_UpdatedAt
+            ON Entities(UpdatedAt DESC);
+        """);
+    }
+}
+```
+
+### Nøgleovervejelser
+
+**1. Rutestabilitet**
+
+Routingalgoritmen skal garantere, at det samme ID altid er knyttet til det samme shard. Undgå tilfældige eller tidsafhængige beregninger, og indfør ikke foranderlige parametre i algoritmen.
+
+**2. Valg af skårtal**
+
+Antallet af skår bør besluttes under designfasen. Det er ekstremt svært at ændre det senere. Overvej:
+- Nuværende og fremtidig samtidighedsvolumen
+- Administrationsomkostningerne for hvert skær
+- Kompleksiteten af datamigrering
+
+**3. Migrationsplanlægning**
+
+Hero History-tilgangen viser en komplet migrationsvej:
+
+1. Byg den nye sharded storage-infrastruktur
+2. Implementer en migreringstjeneste til at kopiere data fra den primære database til shards
+3. Bekræft forespørgselskompatibilitet efter migrering
+4. Skift læse- og skrivestier til skårene
+5. Ryd op i ældre tabeller i den primære database
+
+Fremtidige migreringskrav skal tages i betragtning under udformningen af sharding-ordningen. Snak er billigt. Vis mig koden. Men kode alene er ikke nok. Du har også brug for en komplet migreringssti. En engangssucces er ikke et system; vedvarende succes er.
+
+**4. Overvågning og drift**
+
+- Overvåg størrelsesfordeling på tværs af shards for at opdage dataskævhed tidligt
+- Indstil advarsler for shard hot spots for at forhindre et enkelt shard i at blive flaskehalsen
+- Undersøg regelmæssigt WAL-filstørrelser for at undgå overdreven diskbrug
+- Etabler mekanismer til sundhedstjek af skår
+
+**5. Testdækning**
+
+- Test grænsebetingelser såsom tomme id'er, specialtegn og alt for lange id'er
+- Bekræft routingdeterminisme for at sikre, at det samme id altid er knyttet til det samme shard
+- Kør samtidig skrivestresstest for at bekræfte, at låsestrid er effektivt reduceret
+- Kør migrationstests for at sikre dataintegritet og konsistens
+
+## Resumé
+
+Ved at sammenligne de tre SQLite-sharding-tilgange i HagiCode-projektet kan vi se, at:
+
+1. **Der er ingen universel løsning**: Forskellige forretningsscenarier kræver forskellige sønderdelingsstrategier
+2. **Kerneprincipperne er fælles**: deterministisk routing, gennemsigtig adgang, uafhængig lagring og samtidighedsoptimering
+3. **Design skal se fremtiden i øjnene**: Overvej migrationsstier og driftsomkostninger
+
+Hvis dit projekt bruger SQLite og er begyndt at ramme samtidighedsflaskehalse, håber jeg, at denne artikel giver dig nogle nyttige ideer. Der er ingen grund til at skynde sig at migrere til en tungvægtsdatabase. Nogle gange er den rigtige skæringsstrategi nok til at løse problemet.
+
+Selvfølgelig er sønderdeling ikke en sølvkugle. Før du vælger en sønderdelingsstrategi, skal du først sikre dig, at:
+- Du har allerede optimeret enkelttabel-forespørgselsydeevne
+- Du har allerede tilføjet passende indekser
+- Du har allerede aktiveret WAL-tilstand
+
+Først efter at disse optimeringer er udført, og der stadig er en flaskehals i ydeevnen, bør du overveje at introducere sharding. At gøre simple ting godt er en evne i sig selv.
+
+Nogle gange siger det mere at udføre arbejdet én gang end at forklare det ti gange. Lad de tekniske resultater herfra tale for sig selv.
+
+## Referencer
+
+- HagiCode projektopbevaring: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- SQLite WAL-tilstand dokumentation: [sqlite.org/wal.html](https://www.sqlite.org/wal.html)
+- Orleans distribuerede rammer: [dotnet.github.io/orleans](https://dotnet.github.io/orleans/)
+
+## Ophavsretsmeddelelse
+
+Tak fordi du læste med. Hvis du fandt denne artikel nyttig, er du velkommen til at like, bogmærke og dele den.
+Dette indhold blev skabt med AI-assisteret samarbejde, og det endelige indhold blev gennemgået og bekræftet af forfatteren.
+- Forfatter: [newbe36524](https://www.newbe.pro)
+- Originalt link: [https://docs.hagicode.com/blog/2026-04-17-sqlite-sharding-strategies-comparison/](https://docs.hagicode.com/blog/2026-04-17-sqlite-sharding-strategies-comparison/)
+- Copyright: Medmindre andet er angivet, er alle blogartikler licenseret under BY-NC-SA. Angiv venligst kilden, når du genposter.

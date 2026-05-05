@@ -1,0 +1,541 @@
+---
+title: "HagiCode desktop hybride distributiearchitectuur uitgelegd: hoe P2P het downloaden van grote bestanden versnelt"
+date: 2026-03-27
+tags: [HagiCode, Desktop, P2P, BitTorrent, WebSeed, Hybrid Distribution, Technical Architecture]
+description: "HagiCode Desktop Hybrid Distribution Architecture uitgelegd: hoe P2P het downloaden van grote bestanden versnelt: ik heb dit artikel lang achtergehouden voordat ik eindelijk"
+---
+
+## HagiCode desktop hybride distributiearchitectuur uitgelegd: hoe P2P het downloaden van grote bestanden versnelt
+
+> Ik heb dit artikel lang uitgesteld voordat ik het eindelijk schreef, en ik weet nog steeds niet zeker of het goed leest. Technisch schrijven is eenvoudig genoeg om te produceren, maar moeilijk om echt boeiend te maken. Maar nogmaals, ik ben geen groot literair meester, dus ik kan net zo goed deze duidelijke uitleg opschrijven.
+
+## Achtergrond
+
+Teams die desktopapplicaties bouwen, zullen vroeg of laat allemaal tegen dezelfde hoofdpijn aanlopen: hoe distribueer je grote bestanden?
+
+Het is een lastig probleem. Traditionele directe HTTP/HTTPS-downloads kunnen nog steeds standhouden als de bestanden klein zijn en het aantal gebruikers beperkt is. Maar de tijd is zelden vriendelijk. Naarmate een project blijft groeien, groeien de installatiepakketten mee: Desktop ZIP-pakketten, draagbare pakketten, webimplementatiearchieven en meer. Dan beginnen de problemen naar boven te komen:
+
+- **Downloadsnelheid wordt beperkt door de oorspronkelijke bandbreedte**: hoeveel bandbreedte een enkele server ook heeft, het blijft lastig als iedereen tegelijk downloadt.
+- **Cv-ondersteuning is vrijwel onbestaande**: als een HTTP-download wordt onderbroken, moet je vaak opnieuw vanaf het begin beginnen. Dat verspilt zowel tijd als bandbreedte.
+- **De oorspronkelijke server neemt alle druk op**: al het verkeer stroomt terug naar een centrale server, de bandbreedtekosten blijven stijgen en schaalbaarheid wordt een echt probleem.
+
+Het HagiCode Desktop-project was geen uitzondering. Toen we het distributiesysteem ontwierpen, bleven we ons afvragen: kunnen we een hybride distributieaanpak introduceren zonder het bestaande te veranderen `index.json` controle vliegtuig? Met andere woorden: kunnen we de gedistribueerde aard van P2P-netwerken gebruiken om downloads te versnellen en toch de terugval op de HTTP-oorsprong te behouden, zodat het systeem bruikbaar blijft in beperkte omgevingen zoals bedrijfsnetwerken?
+
+De impact van dat besluit bleek groter dan je zou verwachten. Laten we er stap voor stap doorheen lopen.
+
+## Over HagiCode
+
+De aanpak die in dit artikel wordt gedeeld, komt voort uit onze praktijkervaring in de [HagiCode](https://hagicode.com) project. HagiCode is een open-source AI-coderingsassistentproject gericht op het helpen van ontwikkelingsteams bij het verbeteren van de technische efficiëntie. Het project omvat meerdere subsystemen, waaronder de frontend, backend, desktoplauncher, documentatie, build-pijplijn en serverimplementatie.
+
+De hybride desktopdistributiearchitectuur is precies het soort oplossing dat HagiCode heeft verfijnd door middel van echte operationele ervaring en herhaalde optimalisatie. Als dit ontwerp nuttig blijkt, laat het misschien ook zien dat HagiCode zelf de moeite waard is om aandacht aan te besteden.
+
+De GitHub-repository van het project is [HagiCode-org/site](https://github.com/HagiCode-org/site). Als het je interesseert, geef het dan gerust een ster en bewaar het voor later.
+
+## Kernontwerpfilosofie: eerst P2P, HTTP-fallback
+
+In essentie kan het hybride distributiemodel in één zin worden samengevat: **P2P eerst, HTTP fallback**.
+
+De sleutel ligt in het woord 'hybride'. Dit gaat niet over simpelweg het toevoegen van BitTorrent en het beëindigen ervan. Het gaat erom dat de twee leveringsmethoden samenwerken en elkaar aanvullen:
+
+- **Het P2P-netwerk** biedt gedistribueerde versnelling. Hoe meer mensen downloaden, hoe meer peers zich aansluiten en hoe sneller de overdracht verloopt.
+- **WebSeed/HTTP fallback** garandeert beschikbaarheid, zodat downloads nog steeds kunnen werken in bedrijfsfirewalls en interne netwerkomgevingen.
+- **Het besturingsvlak blijft eenvoudig**. We veranderen niets aan de kernlogica van `index.json`; we voegen slechts een paar optionele metadatavelden toe.
+
+Het echte voordeel is duidelijk: gebruikers hebben het gevoel dat "downloads sneller zijn", terwijl het technische team niet al te veel extra complexiteit hoeft te dragen. Het BT-protocol is immers al volwassen en er is weinig reden om het wiel opnieuw uit te vinden.
+
+## Architectuurontwerp
+
+### Overzicht van gelaagde architectuur
+
+Laten we beginnen met het algemene architectuurdiagram om een mentaal model op hoog niveau te bouwen:
+
+```
+┌─────────────────────────────────────┐
+│     Renderer (UI layer)             │
+├─────────────────────────────────────┤
+│     IPC/Preload (bridge layer)      │
+├─────────────────────────────────────┤
+│   VersionManager (version manager)  │
+├─────────────────────────────────────┤
+│ HybridDownloadCoordinator (coord.)  │
+│  ├── DistributionPolicyEvaluator    │
+│  ├── DownloadEngineAdapter          │
+│  ├── CacheRetentionManager          │
+│  └── SHA256 Verifier                │
+├─────────────────────────────────────┤
+│   WebTorrent (download engine)      │
+└─────────────────────────────────────┘
+```
+
+Zoals het diagram laat zien, maakt het systeem gebruik van een gelaagd ontwerp. De reden om de verantwoordelijkheden zo duidelijk te scheiden is eenvoudig: **testbaarheid en vervangbaarheid**.
+
+- **De UI-laag** is verantwoordelijk voor het weergeven van de downloadvoortgang en de schakelaar voor het versnellen van delen. Het is het oppervlak.
+- **De coördinatielaag** is de kern. Het omvat beleidsevaluatie, engine-aanpassing, cachebeheer en integriteitsverificatie.
+- **De enginelaag** omvat de concrete downloadimplementatie. Momenteel maakt het gebruik van WebTorrent.
+
+De motorlaag is geabstraheerd achter de `DownloadEngineAdapter` interface. Als we later ooit een andere BT-engine willen inruilen, of de implementatie naar een zijspanproces willen verplaatsen, wordt dat veel eenvoudiger.
+
+### Scheiding van besturingsvlak en datavlak
+
+HagiCode Desktop bewaart `index.json` als het enige controlevlak, en dat ontwerp is van cruciaal belang. Het controlevlak is verantwoordelijk voor versiedetectie, kanaalselectie en gecentraliseerd beleid, terwijl op het datavlak de daadwerkelijke bestandsoverdracht plaatsvindt.
+
+De nieuwe velden toegevoegd `index.json` zijn optioneel:
+
+```json
+{
+  "asset": {
+    "torrentUrl": "https://cdn.example.com/app.torrent",
+    "infoHash": "abc123...",
+    "webSeeds": [
+      "https://cdn.example.com/app.zip",
+      "https://backup.example.com/app.zip"
+    ],
+    "sha256": "def456...",
+    "directUrl": "https://cdn.example.com/app.zip"
+  }
+}
+```
+
+Al deze velden zijn optioneel. Als ze ontbreken, valt de client terug naar de traditionele HTTP-downloadmodus. Het voordeel van dit ontwerp is **achterwaartse compatibiliteit**: oudere clients ondervinden hier helemaal geen hinder van.
+
+### Beleidsgestuurde beslissingen
+
+Niet elk bestand is de moeite waard om via P2P te verspreiden.
+
+`DistributionPolicyEvaluator` is verantwoordelijk voor de evaluatie van het beleid. Alleen bestanden die aan alle volgende voorwaarden voldoen, maken gebruik van hybride download:
+
+1. **Het brontype moet een HTTP-index zijn**: directe GitHub-downloads of lokale mapbronnen gebruiken dit pad niet.
+2. **De bestandsgrootte moet minimaal 100 MB zijn**: voor kleinere bestanden weegt de overhead van P2P zwaarder dan het voordeel.
+3. **Volledige hybride metadata moeten aanwezig zijn**: `torrentUrl`, `webSeeds`, en `sha256` zijn allemaal vereist.
+4. **Alleen het nieuwste desktoppakket en het nieuwste webimplementatiepakket komen in aanmerking**: historische versies blijven het traditionele distributiepad gebruiken.
+
+```typescript
+class DistributionPolicyEvaluator {
+  evaluate(version: Version, settings: SharingAccelerationSettings): HybridDownloadPolicy {
+    // Check source type
+    if (version.sourceType !== 'http-index') {
+      return { useHybrid: false, reason: 'not-http-index' };
+    }
+
+    // Check metadata completeness
+    if (!version.hybrid) {
+      return { useHybrid: false, reason: 'not-eligible' };
+    }
+
+    // Check whether the feature is enabled
+    if (!settings.enabled) {
+      return { useHybrid: false, reason: 'shared-disabled' };
+    }
+
+    // Check asset type (latest desktop/web packages only)
+    if (!version.hybrid.isLatestDesktopAsset && !version.hybrid.isLatestWebAsset) {
+      return { useHybrid: false, reason: 'latest-only' };
+    }
+
+    return { useHybrid: true, reason: 'shared-enabled' };
+  }
+}
+```
+
+Dit geeft het systeem **voorspelbaar gedrag**. Zowel ontwikkelaars als gebruikers kunnen duidelijk begrijpen welke bestanden P2P zullen gebruiken en welke niet.
+
+## Kernimplementatie
+
+### Typedefinitiesysteem
+
+Laten we beginnen met de typedefinities, omdat deze de basis vormen van het hele systeem.
+
+```typescript
+// Hybrid distribution metadata
+interface HybridDistributionMetadata {
+  torrentUrl?: string;      // Torrent file URL
+  infoHash?: string;        // InfoHash
+  webSeeds: string[];       // WebSeed list
+  sha256?: string;          // File hash
+  directUrl?: string;       // HTTP direct link (for origin fallback)
+  eligible: boolean;        // Whether hybrid distribution is applicable
+  thresholdBytes: number;   // Threshold in bytes
+  assetKind: VersionAssetKind;
+  isLatestDesktopAsset: boolean;
+  isLatestWebAsset: boolean;
+}
+
+// Sharing acceleration settings
+interface SharingAccelerationSettings {
+  enabled: boolean;           // Master switch
+  uploadLimitMbps: number;    // Upload bandwidth limit
+  cacheLimitGb: number;       // Cache limit
+  retentionDays: number;      // Retention period
+  hybridThresholdMb: number;  // Hybrid distribution threshold
+  onboardingChoiceRecorded: boolean;
+}
+
+// Download progress
+interface VersionDownloadProgress {
+  current: number;
+  total: number;
+  percentage: number;
+  stage: VersionInstallStage;  // queued, downloading, backfilling, verifying, extracting, completed, error
+  mode: VersionDownloadMode;   // http-direct, shared-acceleration, source-fallback
+  peers?: number;              // Number of connected peers
+  p2pBytes?: number;           // Bytes received from P2P
+  fallbackBytes?: number;      // Bytes received from fallback
+  verified?: boolean;          // Whether verification has completed
+}
+```
+
+Zodra het typesysteem duidelijk is, volgt de rest van de implementatie vanzelf.
+
+### Kerncoördinator
+
+`HybridDownloadCoordinator` orkestreert de gehele downloadworkflow. Het coördineert beleidsevaluatie, engine-uitvoering, SHA256-verificatie en cachebeheer.
+
+```typescript
+class HybridDownloadCoordinator {
+  async download(
+    version: Version,
+    cachePath: string,
+    packageSource: PackageSource,
+    onProgress?: DownloadProgressCallback,
+  ): Promise<HybridDownloadResult> {
+    // 1. Evaluate the policy: should hybrid download be used?
+    const policy = this.policyEvaluator.evaluate(version, settings);
+
+    // 2. Execute the download
+    if (policy.useHybrid) {
+      await this.engine.download(version, cachePath, settings, onProgress);
+    } else {
+      await packageSource.downloadPackage(version, cachePath, onProgress);
+    }
+
+    // 3. SHA256 verification (hard gate)
+    const verified = await this.verify(version, cachePath, onProgress);
+    if (!verified) {
+      await this.cacheRetentionManager.discard(version.id, cachePath);
+      throw new Error(`sha256 verification failed for ${version.id}`);
+    }
+
+    // 4. Mark as trusted cache and begin controlled seeding
+    await this.cacheRetentionManager.markTrusted({
+      versionId: version.id,
+      cachePath,
+      cacheSize,
+    }, settings);
+
+    return { cachePath, policy, verified };
+  }
+}
+```
+
+Er is hier één bijzonder belangrijk punt: **SHA256-verificatie is een harde poort**. Een gedownload bestand moet worden geverifieerd voordat het in het installatieproces kan worden opgenomen. Als de verificatie mislukt, wordt de cache verwijderd om ervoor te zorgen dat een onjuist bestand nooit installatieproblemen veroorzaakt.
+
+### Download engine-abstractie
+
+`DownloadEngineAdapter` is een abstracte interface die de methoden definieert die elke engine moet implementeren:
+
+```typescript
+interface DownloadEngineAdapter {
+  download(
+    version: Version,
+    destinationPath: string,
+    settings: SharingAccelerationSettings,
+    onProgress?: (progress: VersionDownloadProgress) => void,
+  ): Promise<void>;
+
+  stopAll(): Promise<void>;
+}
+```
+
+De V1-implementatie is gebaseerd op WebTorrent en is verpakt in `InProcessTorrentEngineAdapter`:
+
+```typescript
+class InProcessTorrentEngineAdapter implements DownloadEngineAdapter {
+  async download(...) {
+    const client = this.getClient(settings);  // Apply upload rate limiting
+    const torrent = client.add(torrentId, {
+      path: path.dirname(destinationPath),
+      destroyStoreOnDestroy: false,
+      maxWebConns: 8,
+    });
+
+    // Add WebSeed sources
+    torrent.on('ready', () => {
+      for (const seed of hybrid.webSeeds) {
+        torrent.addWebSeed(seed);
+      }
+      if (hybrid.directUrl) {
+        torrent.addWebSeed(hybrid.directUrl);
+      }
+    });
+
+    // Progress reporting - distinguish P2P from origin fallback
+    torrent.on('download', () => {
+      const hasP2PPeer = torrent.wires.some(w => w.type !== 'webSeed');
+      const mode = hasP2PPeer ? 'shared-acceleration' : 'source-fallback';
+      // ... report progress
+    });
+  }
+}
+```
+
+Een plugbaar motorontwerp maakt toekomstige optimalisatie veel eenvoudiger. V2 zou de motor bijvoorbeeld in een hulpproces kunnen laten draaien om te voorkomen dat het hoofdproces wordt uitgeschakeld als de motor crasht.
+
+### Onderscheidende voortgangsrapportagemodi
+
+Op de UI-laag is hetgene waar gebruikers het meest om geven eenvoudig: "download ik momenteel via P2P of via HTTP-fallback?" `InProcessTorrentEngineAdapter` bepaalt dat door de typen erin te controleren `torrent.wires`:
+
+```typescript
+const hasP2PPeer = torrent.wires.some((wire) => wire.type !== 'webSeed');
+const hasFallbackWire = torrent.wires.some((wire) => wire.type === 'webSeed');
+
+const mode = hasP2PPeer ? 'shared-acceleration'
+         : hasFallbackWire ? 'source-fallback'
+         : 'shared-acceleration';
+
+const stage = hasP2PPeer ? 'downloading'
+           : hasFallbackWire ? 'backfilling'
+           : 'downloading';
+```
+
+De logica ziet er eenvoudig uit, maar is een belangrijk onderdeel van de gebruikerservaring. Gebruikers kunnen duidelijk zien of de huidige status 'versnelling delen' of 'oorsprong-opvulling' is, waardoor het gedrag gemakkelijker te begrijpen is.
+
+### SHA256 Streamingverificatie
+
+Integriteitsverificatie maakt gebruik van Node.js `crypto` module om de hash op een streaming-manier te berekenen, waardoor wordt voorkomen dat het hele bestand in het geheugen wordt geladen:
+
+```typescript
+private async computeSha256(filePath: string): Promise<string> {
+  const hash = createHash('sha256');
+  await new Promise<void>((resolve, reject) => {
+    const stream = fs.createReadStream(filePath);
+    stream.on('data', (chunk) => hash.update(chunk));
+    stream.on('error', reject);
+    stream.on('end', resolve);
+  });
+  return hash.digest('hex').toLowerCase();
+}
+```
+
+Deze implementatie is vooral geschikt voor grote bestanden. Stel je voor dat je een installatiepakket van 2 GB downloadt en vervolgens probeert het hele ding in het geheugen te laden, alleen maar om het te verifiëren. Streaming lost dat netjes op.
+
+## Gegevensstroom
+
+De volledige gegevensstroom ziet er als volgt uit:
+
+```
+┌────────────────────────────────────────────────────────────────────┐
+│             User clicks install on a large-file version            │
+└────────────────────────────────────────────────────────────────────┘
+                                 │
+                                 ▼
+┌────────────────────────────────────────────────────────────────────┐
+│              VersionManager invokes the coordinator                │
+│              HybridDownloadCoordinator.download()                  │
+└────────────────────────────────────────────────────────────────────┘
+                                 │
+                                 ▼
+┌────────────────────────────────────────────────────────────────────┐
+│           DistributionPolicyEvaluator.evaluate()                   │
+│       Checks: source, metadata, switch, and asset type            │
+└────────────────────────────────────────────────────────────────────┘
+                                 │
+                    ┌───────────┴───────────┐
+                    │ useHybrid?            │
+                    └───────────┬───────────┘
+                        yes │         │ no
+                           ▼         ▼
+              ┌──────────────────┐  ┌─────────────────────┐
+              │ P2P + WebSeed    │  │ HTTP direct download│
+              │ Hybrid download  │  │ (compatibility path)│
+              └──────────────────┘  └─────────────────────┘
+                        │
+                        ▼
+              ┌──────────────────┐
+              │ SHA256 verify    │
+              │ (hard gate)      │
+              └────────┬─────────┘
+                       │
+              ┌────────┴─────────┐
+              │ Passed?          │
+              └────────┬─────────┘
+                   yes │    │ no
+                     ▼    ▼
+          ┌────────────┐ ┌────────────────┐
+          │ Extract +  │ │ Drop cache +   │
+          │ install +  │ │ return error   │
+          │ seed safely│ └────────────────┘
+          └────────────┘
+```
+
+De stroom is van begin tot eind heel duidelijk en elke stap heeft een goed gedefinieerde verantwoordelijkheid. Als er iets misgaat, is het veel gemakkelijker om de fase van falen aan te wijzen.
+
+## Productisering
+
+Zelfs het beste technische ontwerp zal falen als de gebruikerservaring slecht is. HagiCode Desktop heeft behoorlijk wat moeite gestoken in het produceren van deze mogelijkheid.
+
+### BT-terminologie verbergen
+
+De meeste gebruikers weten niet wat BitTorrent of InfoHash betekent. Dus op productniveau presenteren we de functie met de uitdrukking 'versnelling delen':
+
+- De functie wordt 'versnelling van delen' genoemd, niet P2P-download.
+- De instelling heet 'uploadlimiet', niet 'zaaien'.
+- Het voortgangslabel zegt 'origin backfilling', niet WebSeed fallback.
+
+Dit verlaagt de cognitieve last van de terminologie en maakt het kenmerk gemakkelijker te accepteren.
+
+### Standaard ingeschakeld in de wizard Eerste run
+
+Wanneer nieuwe gebruikers de desktop-app voor de eerste keer starten, zien ze een wizardpagina die de versnelling van het delen introduceert:
+
+> Om de downloadsnelheid te verbeteren, delen we de gedeelten die u al hebt gedownload met andere gebruikers terwijl uw eigen download bezig is. Dit is volledig optioneel en je kunt het op elk gewenst moment uitschakelen via Instellingen.
+
+Het is standaard ingeschakeld, maar gebruikers krijgen een duidelijke manier om zich af te melden. Als zakelijke gebruikers dit niet willen, kunnen ze dit eenvoudigweg uitschakelen tijdens de onboarding.
+
+### Door de gebruiker gecontroleerde parameters
+
+De instellingenpagina toont drie afstembare parameters:
+
+| Parameter | Standaard | Beschrijving |
+|------|--------|------|
+| Uploadlimiet | 2 MB/s | Voorkomt overmatig upstream bandbreedtegebruik |
+| Cachelimiet | 10 GB | Beheert het schijfruimteverbruik |
+| Retentie dagen | 7 dagen | Reinigt automatisch de oude cache na deze periode |
+
+Deze parameters hebben allemaal verstandige standaardwaarden. De meeste gebruikers hoeven deze nooit te wijzigen, terwijl gevorderde gebruikers ze kunnen aanpassen op basis van hun eigen netwerkomgeving.
+
+## Belangrijke ontwerpbeslissingen
+
+Terugkijkend op de algehele oplossing zijn verschillende ontwerpbeslissingen de moeite waard om te noemen.
+
+### Motor draait in het hoofdproces (V1)
+
+Waarom niet meteen beginnen met een zijspan- of hulptraject? De reden is simpel: **snel verzenden**. Een in-process ontwerp heeft een kortere ontwikkelingscyclus en is gemakkelijker te debuggen. De eerste prioriteit is om de functie actief te krijgen en daarna de stabiliteit te verbeteren.
+
+Natuurlijk brengt deze beslissing kosten met zich mee: als de motor crasht, kan dit het hoofdproces beïnvloeden. We verminderen dat risico door middel van adaptergrenzen en time-outcontroles, en we houden ook een migratiepad open zodat V2 gemakkelijker naar een afzonderlijk proces kan overgaan.
+
+### SHA256 als integriteitscontrole
+
+We gebruiken SHA256 in plaats van MD5 of CRC32 omdat SHA256 veiliger is. De botsingskosten voor MD5 en CRC32 zijn te laag. Als iemand kwaadwillig een nep-installatiepakket heeft gemaakt, kunnen de gevolgen ernstig zijn. SHA256 kost meer om te berekenen, maar de veiligheidswinst is het waard.
+
+### Alleen ingeschakeld voor HTTP-indexbronnen
+
+Scenario's zoals GitHub-downloads en lokale mapbronnen maken geen gebruik van hybride distributie. Dit is geen technische beperking; het gaat over **het vermijden van onnodige complexiteit**. BT-protocollen voegen beperkte waarde toe binnen particuliere netwerkscenario's en zouden de codecomplexiteit alleen maar vergroten.
+
+## Praktische opmerkingen
+
+### Instellingen Normalisatie
+
+Binnen `SharingAccelerationSettingsStore`, moet elke numerieke waarde grenscontroles en normalisatie ondergaan:
+
+```typescript
+private normalize(settings: SharingAccelerationSettings): SharingAccelerationSettings {
+  return {
+    enabled: Boolean(settings.enabled),
+    uploadLimitMbps: this.clampNumber(settings.uploadLimitMbps, 1, 200, DEFAULT_SETTINGS.uploadLimitMbps),
+    cacheLimitGb: this.clampNumber(settings.cacheLimitGb, 1, 500, DEFAULT_SETTINGS.cacheLimitGb),
+    retentionDays: this.clampNumber(settings.retentionDays, 1, 90, DEFAULT_SETTINGS.retentionDays),
+    hybridThresholdMb: DEFAULT_SETTINGS.hybridThresholdMb,  // Fixed value, not user-configurable
+    onboardingChoiceRecorded: Boolean(settings.onboardingChoiceRecorded),
+  };
+}
+
+private clampNumber(value: number, min: number, max: number, fallback: number): number {
+  if (!Number.isFinite(value)) {
+    return fallback;
+  }
+  return Math.min(max, Math.max(min, Math.round(value)));
+}
+```
+
+Dit voorkomt dat gebruikers het configuratiebestand handmatig in ongeldige waarden kunnen bewerken.
+
+### LRU-opruiming in cache opslaan
+
+`CacheRetentionManager.prune()` is verantwoordelijk voor het opschonen van verlopen of te grote cachegegevens. De opruimstrategie maakt gebruik van LRU (minst recent gebruikt):
+
+```typescript
+const records = [...this.listRecords()]
+  .sort((left, right) =>
+    new Date(left.lastUsedAt).getTime() - new Date(right.lastUsedAt).getTime()
+  );
+
+// When over the limit, evict the least recently used entries first
+while (totalBytes > maxBytes && retainedEntries.length > 0) {
+  const evicted = records.find((record) => retainedEntries.includes(record.versionId));
+  retainedEntries.splice(retainedEntries.indexOf(evicted.versionId), 1);
+  removedEntries.push(evicted.versionId);
+  totalBytes -= evicted.cacheSize;
+  await fs.rm(evicted.cachePath, { force: true });
+}
+```
+
+Deze logica zorgt ervoor dat schijfruimte efficiënt wordt gebruikt, terwijl historische versies behouden blijven die de gebruiker mogelijk nog nodig heeft.
+
+### Onmiddellijk stop-zaaigedrag
+
+Wanneer de gebruiker de versnelling van het delen uitschakelt, moet de app onmiddellijk stoppen met het seeden en de torrent-client vernietigen:
+
+```typescript
+async disableSharingAcceleration(): Promise<void> {
+  this.settingsStore.updateSettings({ enabled: false });
+  await this.cacheRetentionManager.stopAllSeeding();  // Stop seeding
+  await this.engine.stopAll();  // Destroy the torrent client
+}
+```
+
+Als een gebruiker de functie uitschakelt, zou het product geen P2P-bronnen meer moeten verbruiken. Dat is de basisproductetiquette.
+
+## Risico's en afwegingen
+
+Er bestaat geen perfecte oplossing, en hybride distributie vormt hierop geen uitzondering. Dit zijn de belangrijkste afwegingen:
+
+**Crashisolatie is zwakker dan een zijspan**: V1 maakt gebruik van een in-process-motor, dus een motorcrash kan het hoofdproces beïnvloeden. Adaptergrenzen en time-outcontroles verminderen het risico, maar vormen geen fundamentele oplossing. V2 bevat een gepland migratiepad naar een helperproces.
+
+**Standaard ingeschakeld resourcegebruik**: de standaardinstellingen van 2 MB/s uploaden, 10 GB cache en 7 dagen bewaren verbruiken bepaalde machinebronnen. De verwachtingen van gebruikers worden beheerd via onboarding-kopieën en transparante instellingen.
+
+**Compatibiliteit met bedrijfsnetwerken**: automatische WebSeed/HTTPS-fallback behoudt de bruikbaarheid in bedrijfsnetwerken, maar kan de versnellingswinst van P2P verminderen. Dit is een opzettelijke afweging waarbij prioriteit wordt gegeven aan beschikbaarheid.
+
+**Achterwaarts compatibele metadata**: alle nieuwe velden zijn optioneel. Als ze ontbreken, valt het systeem terug naar de HTTP-modus. Oudere clients hebben hier geen last van, waardoor upgrades soepel verlopen.
+
+## Conclusie
+
+In dit artikel werd de hybride distributiearchitectuur besproken die wordt gebruikt in het HagiCode Desktop-project. De belangrijkste afhaalrestaurants zijn:
+
+1. **Gelaagde architectuur**: het besturingsvlak en het datavlak zijn gescheiden, en de engine is geabstraheerd achter een plug-in interface voor eenvoudiger testen en uitbreiden.
+
+2. **Beleidsgestuurd gedrag**: niet elk bestand maakt gebruik van P2P. Hybride distributie is alleen ingeschakeld voor grote bestanden die aan de vereiste voorwaarden voldoen.
+
+3. **Integriteitsverificatie**: SHA256 fungeert als een harde poort en streamingverificatie vermijdt geheugendruk.
+
+4. **Geproductiseerde presentatie**: BT-terminologie is verborgen achter de uitdrukking 'versnelling van delen' en de functie is standaard ingeschakeld tijdens de onboarding.
+
+5. **Gebruikerscontrole**: uploadlimieten, cachelimieten, bewaardagen en andere parameters blijven door de gebruiker aanpasbaar.
+
+Deze architectuur is al geïmplementeerd in het HagiCode Desktop-project. Als u het uitprobeert, horen we graag uw feedback na de installatie en het gebruik in de echte wereld.
+
+## Referenties
+
+- HagiCode Desktop GitHub: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- HagiCode officiële website: [hagicode.com](https://hagicode.com)
+- Officiële WebTorrent-documentatie: [webtorrent.io](https://webtorrent.io)
+- BitTorrent-protocolspecificatie: [bittorrent.org](https://www.bittorrent.org/beps/bep_0019.html)
+- Specificatie WebSeed-extensie: [bittorrent.org/beps/bep_0017.html](https://www.bittorrent.org/beps/bep_0017.html)
+
+---
+
+Als dit artikel je heeft geholpen:
+
+- Geef het project een ster op GitHub: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Bezoek de website voor meer informatie: [hagicode.com](https://hagicode.com)
+- Snelle installatie voor HagiCode Desktop: [hagicode.com/desktop/](https://hagicode.com/desktop/)
+- De openbare bèta is nu geopend en u bent van harte welkom om het te installeren en uit te proberen
+
+Misschien zijn we allemaal maar gewone mensen die zich een weg banen door de wereld van de technologie, maar dat is prima. Gewone mensen kunnen nog steeds volhardend zijn, en die volharding doet er toe.
+
+## Auteursrechtkennisgeving
+
+Bedankt voor het lezen. Als u dit artikel nuttig vond, kunt u het leuk vinden, opslaan en delen.
+Deze inhoud is gemaakt met behulp van AI-ondersteunde samenwerking, waarbij de definitieve versie is beoordeeld en goedgekeurd door de auteur.
+- Auteur: [nieuwbe36524](https://www.newbe.pro)
+- Origineel artikel: [https://docs.hagicode.com/blog/2026-03-27-hagicode-desktop-p2p-acceleration-architecture/](https://docs.hagicode.com/blog/2026-03-27-hagicode-desktop-p2p-acceleration-architecture/)
+- Licentiekennisgeving: Tenzij anders vermeld, zijn alle blogposts op deze site gelicentieerd onder BY-NC-SA. Vermeld bij het opnieuw posten de naamsvermelding.

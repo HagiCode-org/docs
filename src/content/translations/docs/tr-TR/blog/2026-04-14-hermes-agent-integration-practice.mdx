@@ -1,0 +1,419 @@
+---
+title: "Hermes Temsilci Entegrasyon Uygulaması: Protokolden Üretime"
+date: 2026-04-14
+tags: [Hermes, ACP, Agent, Integration, Orleans]
+description: "ACP protokol uyarlaması, oturum havuzu yönetimi ve"
+---
+
+## Hermes Temsilci Entegrasyon Uygulaması: Protokolden Üretime
+
+> ACP protokol uyarlaması, oturum havuzu yönetimi ve ön uç/arka uç sözleşme senkronizasyonu ile ilgili temel dersler de dahil olmak üzere Hermes Agent'ın entegrasyonuna ilişkin HagiCode deneyiminin tamamının paylaşılması.
+
+## Arka plan
+
+Yapay zeka destekli bir kodlama platformu olan HagiCode'u oluştururken ekibimizin yerel olarak çalışabilen ve aynı zamanda buluta ölçeklenebilen bir Aracı çerçevesini entegre etmesi gerekiyordu. Araştırmanın ardından, genel amaçlı Ajan yeteneklerimizin temelini oluşturan motor olarak Nous Research'ten Hermes Agent seçildi.
+
+Gerçekte teknoloji seçimi ne özellikle zor ne de özellikle kolaydır. Piyasada pek çok güçlü Agent çerçevesi mevcut ancak Hermes, ACP protokolü ve araç sisteminin HagiCode'un zorlu gereksinimlerine özellikle iyi uyması nedeniyle öne çıktı: yerel geliştirme, ekip işbirliği ve bulut genişletme. Yine de Hermes'i gerçek bir üretim sistemine dahil etmek, uzun bir mühendislik problemleri listesinin çözülmesi anlamına geliyordu. Bu kısım önemsiz olmaktan çok uzaktı.
+
+HagiCode'un yığını, dağıtılmış bir sistem oluşturmak için Orleans'ı kullanırken, ön uç React + TypeScript ile oluşturulmuştur. Hermes'i entegre etmek, Hermes'i ClaudeCode ve OpenCode'un yanında birinci sınıf bir uygulayıcı haline getirirken mimari tutarlılığı korumak anlamına geliyordu. Yeterince basit gibi görünse de uygulama her zaman gerçek hikayeyi anlatır.
+
+Bu makale, Hermes Agent'ı HagiCode'a entegre etme konusundaki pratik deneyimimizi paylaşıyor ve benzer ihtiyaçlarla karşı karşıya kalan ekipler için yararlı referans materyali sunacağını umuyoruz. Sonuçta bir kez çukura düştüğünüzde, başka birinin de aynı çukura düşmesine izin vermenizin hiçbir anlamı yok.
+
+## HagiCode Hakkında
+
+Bu makalede açıklanan çözüm, uygulamalı çalışmalarımızdan gelmektedir. [Hagi Kodu](https://hagicode.com) proje. HagiCode, birden fazla Yapay Zeka Sağlayıcısına birleşik erişimi ve bunların yönetimini destekleyen, yapay zeka odaklı bir kodlama yardım platformudur. Hermes Agent entegrasyonu sırasında, yeni Agent türlerinin mevcut sisteme sorunsuz bir şekilde bağlanabilmesi için genel bir Sağlayıcı soyutlama katmanı tasarladık.
+
+HagiCode ile ilgileniyorsanız, ziyaret etmekten çekinmeyin [GitHub](https://github.com/HagiCode-org/site) daha fazlasını öğrenmek için. Ne kadar çok insan dikkat ederse, ivme o kadar güçlü olur.
+
+## Mimari Tasarım
+
+### Katmanlı tasarım yaklaşımı
+
+HagiCode'un Hermes entegrasyonu, her katmanın kendi sorumluluklarına odaklandığı net, katmanlı bir mimari kullanır:
+
+**Arka uç çekirdek katmanı**
+- `HermesCliProvider`: uygular `IAIProvider` birleşik Yapay Zeka Sağlayıcısı giriş noktası olarak arayüz
+- `HermesPlatformConfiguration`: Hermes yürütülebilir yolunu, argümanları, kimlik doğrulamayı ve ilgili ayarları yönetir
+- `ICliProvider<HermesOptions>`: alt süreç yaşam döngülerini yönetmek için HagiCode.Libs tarafından sağlanan düşük seviyeli CLI soyutlaması
+
+**Aktarım katmanı**
+- `StdioAcpTransport`: standart giriş ve çıkış aracılığıyla Hermes ACP alt süreciyle iletişim kurar
+- ACP protokolü yöntemleri: `initialize`, `authenticate`, `session/new`, `session/prompt`
+
+**Çalışma zamanı katmanı**
+- `HermesGrain`: Dağıtılmış oturumun yürütülmesini yöneten Orleans Grain uygulaması
+- `CliAcpSessionPool`: sık sık başlatılan başlatma masraflarını önlemek için ACP alt süreçlerini yeniden kullanan oturum havuzu
+
+**Ön uç katmanı**
+- `ExecutorAvatar`: Hermes görsel kimliği ve simgesi
+- `executorTypeAdapter`: Sağlayıcı türü eşleme mantığı
+- SignalR gerçek zamanlı mesajlaşma: mesaj akışı boyunca Hermes kimlik tutarlılığını korur
+
+Bu katmanlı tasarım, her katmanın bağımsız olarak gelişmesine olanak tanır. Örneğin gelecekte WebSocket gibi yeni bir aktarım mekanizması eklemek istiyorsak yalnızca aktarım katmanını değiştirmemiz yeterlidir. Tek bir taşıma değiştiği için tüm sistemi devretmeye gerek yok.
+
+### Birleşik arayüz soyutlaması
+
+Tüm AI Sağlayıcıları aşağıdakileri uygular: `IAIProvider` HagiCode mimarisindeki temel tasarım seçeneklerinden biri olan arayüz:
+
+```csharp
+public interface IAIProvider
+{
+    string Name { get; }
+    ProviderCapabilities Capabilities { get; }
+
+    IAsyncEnumerable<AIStreamingChunk> StreamAsync(
+        AIRequest request,
+        CancellationToken cancellationToken = default);
+
+    Task<AIResponse> ExecuteAsync(
+        AIRequest request,
+        CancellationToken cancellationToken = default);
+}
+```
+
+`HermesCliProvider` bu arayüzü uygular ve aşağıdakilerle eşit düzeyde durur: `ClaudeCodeProvider`, `OpenCodeProvider`ve diğerleri. Bu tasarımın faydaları şunlardır:
+
+1. **Değiştirilebilirlik**: Sağlayıcıları değiştirmek üst katman iş mantığını etkilemez
+2. **Test edilebilirlik**: Sağlayıcılarla birim testi için kolayca alay edilebilir
+3. **Genişletilebilirlik**: yeni bir Sağlayıcı eklemek yalnızca arayüzün uygulanmasını gerektirir
+
+Sonuçta arayüzler kurallara çok benzer. Kurallar uygulamaya konulduğunda herkes uyum içinde bir arada yaşayabilir, güçlü yönlerini ortaya çıkarabilir ve birbirinin üzerine basmaktan kaçınabilir. Bunda belli bir zarafet var.
+
+## Temel Uygulama
+
+### Sağlayıcı katmanı uygulaması
+
+`HermesCliProvider` tüm entegrasyonun özüdür. Tek bir yapay zeka çağrısını tamamlamak için gereken çeşitli bileşenleri koordine eder:
+
+```csharp
+public sealed class HermesCliProvider : IAIProvider, IVersionedAIProvider
+{
+    private readonly ICliProvider<LibsHermesOptions> _provider;
+    private readonly ConcurrentDictionary<string, string> _sessionBindings;
+
+    public ProviderCapabilities Capabilities { get; } = new()
+    {
+        SupportsStreaming = true,
+        SupportsTools = true,
+        SupportsSystemMessages = true,
+        SupportsArtifacts = false
+    };
+
+    public async IAsyncEnumerable<AIStreamingChunk> StreamAsync(
+        AIRequest request,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        // 1. Resolve the session binding key
+        var bindingKey = ResolveBindingKey(request.CessionId);
+
+        // 2. Get or create a Hermes session through the session pool
+        var options = new HermesOptions
+        {
+            ExecutablePath = _platformConfiguration.ExecutablePath,
+            Arguments = _platformConfiguration.Arguments,
+            SessionId = _sessionBindings.TryGetValue(bindingKey, out var sessionId) ? sessionId : null,
+            WorkingDirectory = request.WorkingDirectory,
+            Model = request.Model
+        };
+
+        // 3. Execute and collect the streaming response
+        await foreach (var message in _provider.ExecuteAsync(options, request.Prompt, cancellationToken))
+        {
+            // 4. Map ACP messages to AIStreamingChunk
+            if (_responseMapper.TryConvertToStreamingChunk(message, out var chunk))
+            {
+                yield return chunk;
+            }
+        }
+    }
+}
+```
+
+Burada birkaç tasarım noktası özellikle önemlidir:
+
+1. **Oturum bağlama**: kullanımlar `CessionId` birden fazla isteği aynı Hermes alt sürecine bağlamak, çok turlu görüşmelerde bağlam sürekliliğini korumak
+2. **Yanıt eşleme**: Hermes ACP mesaj formatını birleşik mesaj formatına dönüştürür `AIStreamingChunk` biçim
+3. **Yayın desteği**: kullanımlar `IAsyncEnumerable` gerçek akış yanıtlarını desteklemek için
+
+Oturum bağlama biraz insan ilişkilerine benzer. Bağlantı kurulduğunda gelecekteki iletişimin bağlamı olur, dolayısıyla her seferinde sıfırdan başlamanıza gerek kalmaz. Elbette bu ilişkinin sürdürülmesi gerekiyor.
+
+### ACP protokolü uyarlaması
+
+Hermes, geleneksel HTTP API'sinden farklı olan ACP'yi (Ajan İletişim Protokolü) kullanır. ACP, standart giriş ve çıkışa dayalı bir protokoldür ve çeşitli özelliklere sahiptir:
+
+1. **Başlangıç işaretçisi**: Hermes işlemi başladıktan sonra, `//ready` işaretleyici
+2. **Dinamik kimlik doğrulama**: Kimlik doğrulama yöntemleri sabit değildir ve protokol aracılığıyla görüşülmesi gerekir
+3. **Oturumun yeniden kullanımı**: Oluşturulan oturumlar, `SessionId`
+4. **Parçalanmış yanıtlar**: Tam bir yanıt birden fazla yanıta bölünebilir `session/update` bildirimler
+
+HagiCode bu özellikleri şu şekilde ele alır: `StdioAcpTransport`:
+
+```csharp
+public class StdioAcpTransport
+{
+    public async Task InitializeAsync(CancellationToken cancellationToken)
+    {
+        // Wait for the //ready marker
+        var readyLine = await _outputReader.ReadLineAsync(cancellationToken);
+        if (readyLine != "//ready")
+        {
+            throw new InvalidOperationException("Hermes did not send ready signal");
+        }
+
+        // Send the initialize request
+        await SendRequestAsync(new
+        {
+            jsonrpc = "2.0",
+            id = 1,
+            method = "initialize",
+            @params = new
+            {
+                protocolVersion = "2024-11-05",
+                capabilities = new { },
+                clientInfo = new { name = "HagiCode", version = "1.0.0" }
+            }
+        }, cancellationToken);
+    }
+}
+```
+
+Protokoller bir nevi insanlar arasındaki karşılıklı anlayışa benzer. Bu anlayış bir kez orada olduğunda, iletişim çok daha sorunsuz bir şekilde akar. Bunu inşa etmek sadece zaman alır.
+
+### Oturum havuzu yönetimi
+
+Hermes alt süreçlerini sıklıkla başlatmak pahalıdır, bu nedenle bir oturum havuzu mekanizması uyguladık:
+
+```csharp
+services.AddSingleton(static _ =>
+{
+    var registry = new CliProviderPoolConfigurationRegistry();
+    registry.Register("hermes", new CliPoolSettings
+    {
+        MaxActiveSessions = 50,
+        IdleTimeout = TimeSpan.FromMinutes(10)
+    });
+    return registry;
+});
+```
+
+Anahtar oturum havuzu parametreleri:
+- `MaxActiveSessions`: Kaynakların tükenmesini önlemek için eşzamanlılık sınırını kontrol eder
+- `IdleTimeout`: başlatma maliyetini bellek kullanımına göre dengeleyen boşta kalma zaman aşımı
+
+Uygulamada şunu bulduk:
+1. Boşta kalma zaman aşımı çok kısaysa oturumlar sıklıkla yeniden başlatılır; çok uzunsa hafıza dolu kalır
+2. Eşzamanlılık sınırının gerçek yüke göre ayarlanması gerekir çünkü çok yükseğe ayarlanması sistemin yavaşlamasına neden olabilir
+3. Parametrelerin zamanında ayarlanabilmesi için oturum havuzu kullanımının izlenmesi gerekir
+
+Bu, hayattaki birçok seçeneğe çok benziyor: Çok agresif olmak sorun yaratırken, çok muhafazakar olmak fırsatları kaçırır. Amaç sadece doğru dengeyi bulmaktır.
+
+## Ön Uç Entegrasyonu
+
+### Tür eşleme
+
+Ön ucun Hermes Sağlayıcısını doğru bir şekilde tanımlaması ve ilgili görsel öğeleri göstermesi gerekir:
+
+```typescript
+// executorTypeAdapter.ts
+export const resolveExecutorVisualTypeFromProviderType = (
+  providerType: PCode_Models_AIProviderType | null | undefined
+): ExecutorVisualType => {
+  switch (providerType) {
+    case PCode_Models_AIProviderType.HERMES_CLI:
+      return 'Hermes';
+    default:
+      return 'Unknown';
+  }
+};
+```
+
+### Görsel sunum
+
+Hermes'in kendi simgesi ve renk kimliği vardır:
+
+```typescript
+// ExecutorAvatar.tsx
+const renderExecutorGlyph = (executorType: ExecutorVisualType, iconSize: number) => {
+  switch (executorType) {
+    case 'Hermes':
+      return (
+        <svg viewBox="0 0 24 24" fill="none" className="h-4 w-4">
+          <rect x="4" y="4" width="16" height="16" rx="4" fill="currentColor" opacity="0.16" />
+          <path d="M8 7v10M16 7v10M8 12h8" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+        </svg>
+      );
+    default:
+      return <DefaultAvatar />;
+  }
+};
+```
+
+Sonuçta güzel şeyler güzel sunumu hak eder. Güzelliğin gerçekten görünür olmasını sağlamak hâlâ ön uç işçiliğine bağlı.
+
+### Sözleşme senkronizasyonu
+
+Ön uç ve arka uç, sözleşmelerini OpenAPI oluşturma yoluyla uyumlu tutar. Arka uç şunları tanımlar: `AIProviderType` numaralandırma:
+
+```csharp
+public enum AIProviderType
+{
+    Unknown,
+    ClaudeCode,
+    OpenCode,
+    HermesCli  // Newly added
+}
+```
+
+Ön uç, OpenAPI aracılığıyla karşılık gelen TypeScript türünü oluşturarak enum değerlerinin tutarlı kalmasını sağlar. Bu, ön uç görüntülemeyi önlemenin anahtarıdır `Unknown`.
+
+Bir sözleşme bir söze çok benzer. Bir kez kabul edildikten sonra buna saygı duyulması gerekir, aksi takdirde aşağıdaki gibi tuhaf durumlarla karşı karşıya kalırsınız: `Unknown`.
+
+## Konfigürasyon Yönetimi
+
+Hermes konfigürasyonu şu şekilde yönetilir: `appsettings.json`:
+
+```json
+{
+  "Providers": {
+    "HermesCli": {
+      "ExecutablePath": "hermes",
+      "Arguments": "acp",
+      "StartupTimeoutMs": 10000,
+      "ClientName": "HagiCode",
+      "Authentication": {
+        "PreferredMethodId": "api-key",
+        "MethodInfo": {
+          "api-key": "your-api-key-here"
+        }
+      },
+      "SessionDefaults": {
+        "Model": "claude-sonnet-4-20250514",
+        "ModeId": "default"
+      }
+    }
+  }
+}
+```
+
+Bu konfigürasyona dayalı tasarım esneklik sağlar:
+- yürütülebilir yollar geçersiz kılınabilir, bu da geliştirme ve test için uygundur
+- başlangıç argümanları farklı Hermes sürümleriyle eşleşecek şekilde özelleştirilebilir
+- kimlik doğrulama bilgileri birden fazla kimlik doğrulama yöntemini destekleyecek şekilde yapılandırılabilir
+
+Yapılandırma biraz hayattaki çoktan seçmeli sorulara benzer. Yeterli seçenek mevcutsa genellikle uygun olanı bulunur. Bununla birlikte, çok fazla seçenek başlı başına karar yorgunluğu yaratabilir.
+
+## Pratik Deneyim
+
+### Sağlık kontrolleri
+
+Güvenilir bir Sağlayıcı oluşturmak kapsamlı sağlık kontrolleri gerektirir:
+
+```csharp
+public async Task<ProviderTestResult> PingAsync(CancellationToken cancellationToken = default)
+{
+    var response = await ExecuteAsync(new AIRequest
+    {
+        Prompt = "Reply with exactly PONG.",
+        CessionId = null,
+        AllowedTools = Array.Empty<string>(),
+        WorkingDirectory = ResolveWorkingDirectory(null)
+    }, cancellationToken);
+
+    var success = string.Equals(response.Content.Trim(), "PONG", StringComparison.OrdinalIgnoreCase);
+    return new ProviderTestResult
+    {
+        ProviderName = Name,
+        Success = success,
+        ResponseTimeMs = stopwatch.ElapsedMilliseconds,
+        ErrorMessage = success ? null : $"Unexpected Hermes ping response: '{response.Content}'."
+    };
+}
+```
+
+Sağlık kontrollerinde dikkat edilmesi gereken noktalar:
+1. Basit test senaryolarını kullanın ve aşırı karmaşık senaryolardan kaçının
+2. Makul zaman aşımı değerlerini ayarlayın
+3. Performans analizini desteklemek için yanıt süresini kaydedin
+
+İnsanların fiziki kontrollere ihtiyacı olduğu gibi sistemlerin de sağlık kontrollerine ihtiyacı var. Sorunlar ne kadar erken bulunursa, düzeltilmesi de o kadar kolay olur.
+
+### Doğrulama aracı
+
+HagiCode, Hermes entegrasyonunu doğrulamak için özel bir konsol sağlar:
+
+```bash
+# Basic validation
+HagiCode.Libs.Hermes.Console --test-provider
+
+# Full suite (including repository analysis)
+HagiCode.Libs.Hermes.Console --test-provider-full --repo .
+
+# Custom executable
+HagiCode.Libs.Hermes.Console --test-provider-full --executable /path/to/hermes
+```
+
+Bu araç, geliştirme sırasında son derece kullanışlıdır çünkü entegrasyonun doğru olup olmadığını hızlı bir şekilde doğrulamamıza olanak tanır. Sonuçta hiç kimse test yapmayı hatırlamadan önce bir sorun ortaya çıkana kadar beklemek istemez.
+
+### Ortak sorunları ele alma
+
+**Kimlik doğrulama hatası**
+- olup olmadığını kontrol edin `Authentication.PreferredMethodId` Hermes'in gerçekte desteklediği kimlik doğrulama yöntemiyle eşleşir
+- API Anahtarı veya Taşıyıcı Simgesi gibi kimlik doğrulama bilgileri biçiminin doğru olduğunu onaylayın
+
+**Oturum zaman aşımı**
+- Artırın `StartupTimeoutMs` değer
+- MCP sunucusunun erişilebilirliğini kontrol edin
+- Sistem kaynağı kullanımını gözden geçirin
+
+**Eksik yanıt**
+- Emin ol `session/update` bildirimler ve nihai sonuç doğru bir şekilde toplanıyor
+- Akış işlemede iptal mantığını kontrol edin
+- Hata işlemenin tamamlandığını doğrulayın
+
+**Ön uçta Bilinmeyen görüntüleniyor**
+- OpenAPI oluşturma işleminin zaten aşağıdakileri içerdiğini doğrulayın: `HermesCli` numaralandırma değeri
+- Tür eşlemenin doğru olup olmadığını kontrol edin
+- Tarayıcı önbelleğini temizleyin ve türleri yeniden oluşturun
+
+Sorunlar her zaman var olacaktır. Ortaya çıktıklarında önemli olan paniğe kapılmamaktır. Nedeni adım adım takip edin ve sonunda çoğu çözülebilir.
+
+### Performans optimizasyonu önerileri
+
+1. **Oturum havuzunu kullanın**: Başlangıç yükünü azaltmak için ACP alt işlemlerini yeniden kullanın
+2. **Zaman aşımlarını uygun şekilde ayarlayın**: Bellek kullanımını başlangıç maliyetiyle dengeleyin
+3. **Oturum kimliklerini yeniden kullanın**: aynısını kullanın `CessionId` toplu görevler için
+4. **MCP'yi isteğe bağlı olarak yapılandırın**: gereksiz araç çağrılarından kaçının
+
+Performans, günlük yaşamdaki verimliliğe çok benzer. Doğru yaptığınızda daha azıyla daha fazlasını elde edersiniz; Yanlış anladığınızda çabalar artarken sonuçlar küçülür. Bu "doğru" noktayı bulmak hem tecrübe hem de şans gerektirir.
+
+## Sonuç
+
+Hermes Agent'ın bir üretim sistemine entegre edilmesi, sorunların birden fazla boyutta değerlendirilmesini gerektirir:
+
+1. **Mimari**: birleşik bir Sağlayıcı arayüzü tasarlayın ve değiştirilebilir bir bileşen mimarisi uygulayın
+2. **Protokol**: Başlangıç işaretçileri ve dinamik kimlik doğrulama gibi ACP'ye özgü davranışları doğru şekilde yönetin
+3. **Performans**: oturum havuzu aracılığıyla kaynakları yeniden kullanın ve başlangıç maliyetini bellek kullanımıyla dengeleyin
+4. **Ön uç**: Sözleşme senkronizasyonunu sağlayın ve tutarlı bir görsel deneyim sağlayın
+
+HagiCode'un deneyimi, iyi katmanlı tasarım ve konfigürasyona dayalı uygulama ile karmaşık bir Agent sisteminin mevcut bir mimariye sorunsuz bir şekilde entegre edilebileceğini göstermektedir.
+
+Bu ilkeler kelimelerle anlatıldığında basit gibi görünür, ancak fiili uygulama her zaman birçok farklı türde sorunu beraberinde getirir. Bu iyi. Bir sorun çözülürse deneyim olur. Olmazsa ders olur. Her ne olursa olsun hâlâ değeri var.
+
+Güzel şeylere veya insanlara sahip olunmaya gerek yoktur; Güzel kaldıkları sürece o güzelliği sessizce takdir etmek yeterlidir. Teknoloji hemen hemen aynı. Sistemin daha iyi hale getirilmesine yardımcı oluyorsa, o zaman belirli bir çerçeve veya protokol, insanların bazen düşündüğünden çok daha az önem taşır.
+
+## Referanslar
+
+- [HagiCode proje deposu](https://github.com/HagiCode-org/site)
+- [HagiCode'un resmi web sitesi](https://hagicode.com)
+- [Hermes Temsilcisi belgeleri](https://hermes.nousresearch.com/)
+- [ACP protokolü spesifikasyonu](https://github.com/NousResearch/Hermes/blob/main/docs/acp.md)
+- [HagiCode kurulum kılavuzu](https://docs.hagicode.com/installation/docker-compose)
+- [HagiCode Masaüstü](https://hagicode.com/desktop/)
+
+## Telif Hakkı Uyarısı
+
+Okuduğunuz için teşekkür ederiz. Bu makaleyi faydalı bulduysanız beğenmekten, yer imlerine eklemekten ve paylaşmaktan çekinmeyin.
+Bu içerik, yapay zeka destekli işbirliğiyle oluşturuldu ve nihai içerik, yazar tarafından incelenip onaylandı.
+- Yazar: [yenibe36524](https://www.newbe.pro)
+- Orijinal makale: [https://docs.hagicode.com/blog/2026-04-14-hermes-agent-integration-practice/](https://docs.hagicode.com/blog/2026-04-14-hermes-agent-integration-practice/)
+- Telif Hakkı: Aksi belirtilmediği sürece bu blogdaki tüm makaleler BY-NC-SA kapsamında lisanslıdır. Lütfen yeniden basarken kaynağı belirtin.

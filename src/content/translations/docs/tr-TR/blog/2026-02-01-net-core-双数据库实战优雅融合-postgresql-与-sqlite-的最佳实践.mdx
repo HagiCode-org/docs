@@ -1,0 +1,227 @@
+---
+title: "Uygulamada .NET Core Çift Veritabanı: PostgreSQL ve SQLite'ı Zarif Bir Şekilde Birleştirmek için En İyi Uygulamalar"
+date: 2026-02-01
+tags: [ASP.NET Core, PostgreSQL, SQLite, Database Architecture, Orleans]
+description: "NET Core Çift Veritabanı Uygulamasında: PostgreSQL ve SQLite'ı Zarif Bir Şekilde Birleştirmek için En İyi Uygulamalar: Modern uygulamalar oluştururken sıklıkla bununla karşılaşırız"
+---
+
+## Uygulamada .NET Core Çift Veritabanı: PostgreSQL ve SQLite'ın Barış İçinde Bir Arada Var Olmasına İzin Verin
+
+> Modern uygulamalar geliştirirken sıklıkla şu ödünleşimle karşı karşıya kalırız: Geliştirme ortamları hafif ve kullanışlı bir şey isterken, üretim ortamları yüksek eşzamanlılık ve yüksek kullanılabilirlik gerektirir. Bu makalede, bir .NET Core projesinde hem PostgreSQL hem de SQLite'nin nasıl zarif bir şekilde destekleneceği ve "geliştirme için SQLite, üretim için PostgreSQL"in en iyi uygulamasının nasıl uygulanacağı paylaşılmaktadır.
+
+
+## Arka plan
+
+Yazılım geliştirmede ortamlar arasındaki farklılıklar her zaman mühendislik ekipleri için en zor sorunlardan biri olmuştur. Örnek olarak oluşturduğumuz **HagiCode** platformunu ele alalım: Bu, ASP.NET Core 10 ve React'ı temel alan, Orleans'ın dağıtılmış durum yönetimi için dahili olarak entegre edildiği, yapay zeka destekli bir geliştirme sistemidir. Yığın modern ve oldukça sofistike.
+
+Projenin başlarında klasik bir mühendislik sorunuyla karşılaştık: geliştiriciler, ağır bir PostgreSQL veritabanı kurup yapılandırmaya gerek kalmadan yerel ortamın kutudan çıktığı gibi çalışmasını istediler. Ancak üretimde, yüksek eşzamanlılıktaki yazma işlemlerini ve karmaşık JSON sorgularını ele almamız gerekiyordu ve bu da tam olarak hafif SQLite'ın sınırlarını göstermeye başladığı yerdir.
+
+Uygulamanın bir masaüstü uygulaması gibi SQLite'ın taşınabilirliğinden faydalanmasına ve aynı zamanda kurumsal düzeyde bir hizmet gibi PostgreSQL'in güçlü performansından yararlanmasına izin verirken tek bir kod tabanını nasıl koruyabiliriz? Bu makalenin araştırdığı temel soru budur.
+
+## HagiCode Hakkında
+
+Bu makalede paylaşılan ikili veritabanı uyarlama yaklaşımı, doğrudan **HagiCode** projesindeki uygulamalı deneyimimizden gelmektedir. HagiCode, yapay zeka istem yönetimini ve OpenSpec iş akışını entegre eden yeni nesil bir geliştirme platformudur. Bu kanıtlanmış mimari modele tam da geliştirici deneyimini üretim kararlılığıyla dengelemek için ulaştık.
+
+Projenin tamamını görmek için GitHub depomuzu ziyaret etmekten çekinmeyin: [HagiCode-org/site](https://github.com/HagiCode-org/site).
+
+## Temel Konu 1: Mimari Tasarım ve Birleşik Soyutlama
+
+.NET Core'da iki veritabanını desteklemek için temel fikir, somut uygulamalar yerine soyutlamalara dayanmaktır. Veritabanı seçimini iş kodundan ayırmamız ve konfigürasyon katmanının karar vermesine izin vermemiz gerekiyor.
+
+### Tasarım Yaklaşımı
+
+1.  **Birleşik arayüz**: Tüm iş mantığı, `DbContext` belirli bir arayüz yerine temel sınıf veya özel arayüzler `PostgreSqlDbContext`.
+2.  **Yapılandırma odaklı**: Yapılandırma öğelerini kullanın `appsettings.json` uygulama başlangıcında hangi veritabanı sağlayıcısının yükleneceğine dinamik olarak karar vermek için.
+3.  **Özellik izolasyonu**: JSONB gibi PostgreSQL'e özgü yetenekler için uyarlama mantığı ekleyin, böylece uygulama SQLite'ta sorunsuz bir şekilde bozulmaya devam edebilir.
+
+### Kod Uygulaması: Dinamik Bağlam Yapılandırması
+
+ASP.NET Core'da `Program.cs`, sabit kod yazmamalıyız `UseNpgsql` veya `UseSqlite`. Bunun yerine konfigürasyonu okuyup dinamik olarak karar vermeliyiz.
+
+İlk önce konfigürasyon sınıfını tanımlayın:
+
+```csharp
+public class DatabaseSettings
+{
+    public const string SectionName = "Database";
+    
+    // Database type: PostgreSQL or SQLite
+    public string DbType { get; set; } = "PostgreSQL"; 
+    
+    // Connection string
+    public string ConnectionString { get; set; } = string.Empty;
+}
+```
+
+Daha sonra hizmeti kaydedin `Program.cs` konfigürasyona göre:
+
+```csharp
+// Read configuration
+var databaseSettings = builder.Configuration.GetSection(DatabaseSettings.SectionName).Get<DatabaseSettings>();
+
+// Register DbContext
+builder.Services.AddDbContext<ApplicationDbContext>(options =>
+{
+    if (databaseSettings?.DbType?.ToLower() == "sqlite")
+    {
+        // SQLite configuration
+        options.UseSqlite(databaseSettings.ConnectionString);
+        
+        // Handling SQLite's concurrent write limitations
+        // Note: in production, enabling WAL mode is recommended to improve concurrency performance
+    }
+    else
+    {
+        // PostgreSQL configuration (default)
+        options.UseNpgsql(databaseSettings.ConnectionString, npgsqlOptions =>
+        {
+            // Enable JSONB support, which is very useful when handling AI conversation records
+            npgsqlOptions.UseJsonNet(); 
+        });
+        
+        // Configure connection pool retry policy
+        options.EnableRetryOnFailure(3);
+    }
+});
+```
+
+## Temel Konu 2: Farklılıkların Ele Alınması ve Geçiş Stratejisi
+
+PostgreSQL ve SQLite'ın her ikisi de SQL standardını desteklese de, belirli yetenekler ve davranışlar bakımından önemli ölçüde farklılık gösterirler. Bu farklılıklar dikkatli bir şekilde ele alınmazsa, her şeyin yerel olarak çalıştığı ancak dağıtımdan sonra başarısız olduğu garip bir durumla kolayca karşılaşabilirsiniz.
+
+### 1. JSON Türlerini Kullanma
+
+HagiCode'da, genellikle JSON sütunlarını içeren büyük miktarda istemi ve AI meta verilerini depolamamız gerekir.
+- **PostgreSQL**: Yerel bir yapıya sahiptir `JSONB` mükemmel sorgu performansıyla yazın.
+- **SQLite**: Yerel bir JSON türü yoktur (daha yeni sürümler JSON1 uzantısını içerir ancak nesne eşleme hala farklıdır), dolayısıyla veriler genellikle TEXT olarak depolanır.
+
+**Çözüm**:
+EF Core varlık eşlemesinde dönüştürülebilir tür olarak yapılandırıyoruz.
+
+```csharp
+protected override void OnModelCreating(ModelBuilder modelBuilder)
+{
+    base.OnModelCreating(modelBuilder);
+
+    // Configure entity
+    modelBuilder.Entity<PromptTemplate>(entity => 
+    {
+        entity.Property(e => e.Metadata)
+              .HasColumnType("jsonb") // PG uses jsonb
+              .HasConversion(
+                  v => JsonSerializer.Serialize(v, (JsonSerializerOptions)null),
+                  v => JsonSerializer.Deserialize<Dictionary<string, object>>(v, (JsonSerializerOptions)null)
+              ); 
+    });
+}
+```
+
+SQLite kullanıldığında `HasColumnType("jsonb")` göz ardı edilebilir veya bir uyarı tetiklenebilir. Ancak, çünkü `HasConversion` Yapılandırıldığında veriler hala bir TEXT alanında depolanan dizeler olarak doğru bir şekilde serileştirilir ve seri durumdan çıkarılır, böylece uyumluluk sağlanır.
+
+### 2. Göç Stratejilerini Ayırmak
+
+Asla bir Geçiş komut dosyası kümesinin aynı anda hem PostgreSQL hem de SQLite için çalışmasını sağlamaya çalışmayın. Birincil anahtar oluşturma stratejileri, dizin sözdizimi ve diğer veritabanı ayrıntılarındaki farklılıklar kaçınılmaz olarak hatalara neden olacaktır.
+
+**Önerilen uygulama**:
+İki geçiş şubesini veya projesini sürdürün. HagiCode geliştirme iş akışında bunu şu şekilde ele alıyoruz:
+
+1.  **Geliştirme aşaması**: Esas olarak SQLite ile çalışın. Kullanım `Add-Migration Init_Sqlite -OutputDir Migrations/Sqlite`.
+2.  **Uyarlama aşaması**: Bir özellik geliştirdikten sonra bağlantı dizesini PostgreSQL olarak değiştirin ve çalıştırın. `Add-Migration Init_Postgres -OutputDir Migrations/Postgres`.
+3.  **Otomasyon komut dosyaları**: Geçerli ortam değişkenine göre doğru geçişi otomatik olarak uygulamak için basit bir PowerShell veya Bash komut dosyası yazın.
+
+```bash
+# Pseudocode for simple deployment logic
+if [ "$DATABASE_PROVIDER" = "PostgreSQL" ]; then
+    dotnet ef database update --project Migrations.Postgres
+else
+    dotnet ef database update --project Migrations.Sqlite
+fi
+```
+
+## Temel Konu 3: Üretimde HagiCode'dan Öğrenilen Dersler
+
+**HagiCode**'u tek veritabanı modelinden çift veritabanı desteğine yeniden düzenlerken birkaç tuzağa düştük ve aynı hatalardan kaçınmanıza yardımcı olabilecek bazı önemli dersler topladık.
+
+### 1. Eşzamanlılık ve İşlemlerdeki Farklılıklar
+
+PostgreSQL, bir sunucu-istemci mimarisi kullanır ve güçlü işlem izolasyon düzeyleriyle yüksek eşzamanlılık yazmalarını destekler. SQLite dosya kilitlemeyi kullanır, bu nedenle WAL modu etkinleştirilmediği sürece yazma işlemleri tüm veritabanı dosyasını kilitler.
+
+**Öneri**:
+Bir kullanıcının düzenleme durumunun gerçek zamanlı olarak kaydedilmesi gibi sık yazma işlemleri içeren iş mantığını yazarken, SQLite'ın kilitleme modelini hesaba katmalısınız. **HagiCode**'da OpenSpec iş birliği modülünü tasarlarken, doğrudan veritabanı yazma sıklığını azaltmak için bir "yazmadan önce birleştir" mekanizmasını tanıttık, bu da her iki veritabanında da iyi performansı korumamıza olanak sağladı.
+
+### 2. Bağlantı Dizelerinin Yaşam Döngüsü Yönetimi
+
+PostgreSQL bağlantısı kurmak nispeten pahalıdır ve bağlantı havuzuna bağlıdır. SQLite bağlantıları çok hafiftir ancak hemen yayınlanmazlarsa dosya kilitleri daha sonraki işlemlerin zaman aşımına uğramasına neden olabilir.
+
+içinde `Program.cs`, her veritabanı için davranışta ince ayar yapabiliriz:
+
+```csharp
+if (databaseSettings?.DbType?.ToLower() == "sqlite")
+{
+    // SQLite: keeping connections open can improve performance, but watch out for file locks
+    options.UseSqlite(connectionString, sqliteOptions =>
+    {
+        // Set command timeout
+        sqliteOptions.CommandTimeout(30);
+    });
+}
+else
+{
+    // PG: make full use of connection pooling
+    options.UseNpgsql(connectionString, npgsqlOptions =>
+    {
+        npgsqlOptions.MaxBatchSize(100);
+        npgsqlOptions.CommandTimeout(30);
+    });
+}
+```
+
+### 3. Test Kapsamının Önemi
+
+Ekibimizin ilk üyeleri de dahil olmak üzere birçok geliştirici, yaygın bir hata yapma eğilimindedir: birim testlerini yalnızca geliştirme ortamında, genellikle SQLite'da çalıştırmak.
+
+HagiCode'un CI/CD hattında, her çekme isteğinin PostgreSQL entegrasyon testlerini çalıştırdığından emin olmak için GitHub Eylemleri adımını uyguladık.
+
+```yaml
+# Example snippet from .github/workflows/test.yml
+- name: Run Integration Tests (PostgreSQL)
+  run: |
+    docker-compose up -d db_postgres
+    dotnet test --filter "Category=Integration"
+```
+
+Bu, SQL sözdizimi farklılıkları ve büyük/küçük harf duyarlılığıyla ilgili sayısız hatayı yakalamamıza yardımcı oldu.
+
+## Sonuç
+
+Bir soyutlama katmanı ve konfigürasyona dayalı bağımlılık enjeksiyonu sunarak, **HagiCode** projesinde çift kanallı PostgreSQL ve SQLite kurulumunu başarıyla uyguladık. Bu, PostgreSQL yükleme ihtiyacını ortadan kaldırarak yeni geliştiricilerin işe alım engelini büyük ölçüde azaltmakla kalmadı, aynı zamanda üretim için güçlü performans garantileri de sağladı.
+
+Önemli noktaları özetlemek gerekirse:
+1.  **Önce soyutlama**: İş kodu somut veritabanı uygulamalarına bağlı olmamalıdır.
+2.  **Ayrı konfigürasyon**: Farklı konfigürasyon kullanın `appsettings.json` Geliştirme ve üretim için dosyalar.
+3.  **Ayrı geçişler**: Tek bir Geçiş kümesinin her yerde çalışmasını sağlamaya çalışmayın.
+4.  **Özellik bozulması**: SQLite'ta uyumluluğa ve PostgreSQL'de performansa öncelik verin.
+
+Bu mimari model yalnızca HagiCode için değil, aynı zamanda hafif geliştirme ile ağır üretim arasında denge kurması gereken herhangi bir .NET projesi için de uygundur.
+
+---
+
+Bu makale size yardımcı olduysa GitHub'da bize bir Yıldız vermekten çekinmeyin veya **HagiCode** tarafından sağlanan verimli geliştirme iş akışını doğrudan deneyimleyin:
+- GitHub'da bize bir Yıldız verin: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Daha fazla bilgi edinmek için resmi web sitesini ziyaret edin: [hagicode.com](https://hagicode.com)
+- 30 dakikalık uygulamalı demoyu izleyin: [www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)
+- Tek tıklamayla kurulum deneyimi: [hagicode.com/installation/docker-compose](https://hagicode.com/installation/docker-compose)
+
+Herkese açık beta başladı. Yüklemeye ve denemeye hoş geldiniz!
+
+
+
+---
+
+Okuduğunuz için teşekkür ederiz. Bu makaleyi faydalı bulduysanız lütfen aşağıdaki beğen butonuna tıklayın 👍 böylece daha fazla kişi keşfedebilir.
+
+Bu içerik yapay zeka destekli işbirliğiyle oluşturuldu, tarafımdan incelendi ve kendi görüşlerimi ve konumumu yansıtıyor.
+
+- **Yazar:** [yenibe36524](https://www.newbe.pro)
+- **Makale Bağlantısı:** [https://hagicode.com/blog/2026-02-01-dotnet-core-dual-database-postgresql-sqlite/](https://hagicode.com/blog/2026-02-01-dotnet-core-dual-database-postgresql-sqlite/)
+- **Telif Hakkı Uyarısı:** Aksi belirtilmediği sürece bu blogdaki tüm makaleler BY-NC-SA kapsamında lisanslıdır. Lütfen tekrar paylaşırken kaynak belirtin.

@@ -1,0 +1,423 @@
+---
+title: "Teknisk analyse af HagiCode Skill System: Opbygning af en skalerbar AI Skill Management Platform"
+date: 2026-03-24
+tags: [HagiCode, Skill, AI, Orleans, TanStack, Technical Architecture]
+description: "Denne artikel tager et dybdegående kig på arkitekturen og implementeringen af Skill Management-systemet i HagiCode-projektet, og dækker det tekniske"
+---
+
+## Teknisk analyse af HagiCode Skill System: Opbygning af en skalerbar AI Skill Management Platform
+
+> Denne artikel tager et dybtgående kig på arkitekturen og implementeringen af Skill Management-systemet i HagiCode-projektet, og dækker de tekniske detaljer bag fire kernefunktioner: lokal global ledelse, markedspladssøgning, intelligente anbefalinger og betroet udbyderstyring.
+
+## Baggrund
+
+Inden for AI-kodningsassistenter har det altid været et kernespørgsmål, hvordan man udvider grænserne for AI-kapaciteter. Claude Code selv er allerede stærk til kodeassistance, men forskellige udviklingsteams og forskellige teknologistacks har ofte brug for specialiserede kapaciteter til specifikke scenarier, såsom håndtering af Docker-implementeringer, databaseoptimering eller frontend-komponentgenerering. Det er præcis her, et færdighedssystem bliver særligt vigtigt.
+
+Under udviklingen af ​​HagiCode-projektet løb vi ind i en lignende udfordring: Hvordan lader vi Claude Code "lære" nye faglige færdigheder, som en person ville, samtidig med at vi bevarer en solid brugeroplevelse og god teknisk vedligeholdelse? Dette problem er både svært og enkelt på sin egen måde. Omkring det spørgsmål designede og implementerede vi et komplet færdighedsstyringssystem.
+
+Denne artikel gennemgår den tekniske arkitektur og kerneimplementering af systemet i detaljer. Det er beregnet til udviklere, der er interesseret i AI-udvidelsesmuligheder og kommandolinjeværktøjsintegration. Det kan være nyttigt for dig, eller måske ikke, men det er i det mindste skrevet ned nu.
+
+## Om HagiCode
+
+Den tilgang, der er delt i denne artikel, kommer fra vores praktiske erfaring i [HagiCode](https://hagicode.com) projekt. HagiCode er et open source AI-kodningsassistent-projekt designet til at hjælpe udviklingsteams med at forbedre ingeniøreffektiviteten. Projektets stack inkluderer ASP.NET Core, Orleans distribuerede framework, en TanStack Start + React frontend og Skill Management-undersystemet introduceret i denne artikel.
+
+GitHub-depotet er [HagiCode-org/site](https://github.com/HagiCode-org/site). Hvis du finder den tekniske tilgang i denne artikel værdifuld, er du velkommen til at give den en stjerne. Flere stjerner har en tendens til at forbedre stemningen, trods alt.
+
+## Oversigt over systemarkitektur
+
+Skill-systemet bruger en frontend-backend-separeret arkitektur. Der er ikke noget særligt mystisk ved det.
+
+**Frontend** bruger TanStack Start + React til at bygge brugergrænsefladen med Redux Toolkit-administrationstilstand. De fire hovedfunktioner knytter sig direkte til fire fanekomponenter: Lokale færdigheder, Færdighedsgalleri, Intelligente anbefalinger og Trusted Providers. I sidste ende handler designet mest om at gøre brugeroplevelsen bedre.
+
+**Backend** er baseret på ASP.NET Core + ABP Framework, der bruger Orleans Grain til distribueret statsstyring. Online API-klienten omslutter `IOnlineApiClient` grænseflade til at kommunikere med fjernfærdighedskatalogtjenesten.
+
+Det overordnede arkitektoniske princip er at adskille kommandoudførelse fra forretningslogik. Gennem adaptermønsteret er implementeringsdetaljerne for npm/npx-kommandoudførelse skjult inde i uafhængige moduler. Når alt kommer til alt, er der ingen, der virkelig ønsker kommandolinjekald spredt over hele kodebasen.
+
+## Kerneevne 1: Lokal global ledelse
+
+Lokal global ledelse er det mest grundlæggende modul. Det er ansvarligt for at liste installerede færdigheder og understøtte afinstallationsoperationer. Der er ikke noget alt for kompliceret her; det handler mest om at gøre det grundlæggende godt.
+
+### Teknisk tilgang
+
+Implementeringen lever ind `LocalSkillsTab.tsx` og `LocalSkillCommandAdapter.cs`. Kerneideen er at pakke ind `npx skills` kommando, parse dets JSON-output og konverter det til interne datastrukturer. Det lyder simpelt, og det er det i praksis for det meste.
+
+```csharp
+public async Task<IReadOnlyList<LocalSkillInventoryResponseDto>> GetLocalSkillsAsync(
+    CancellationToken cancellationToken = default)
+{
+    var result = await _commandAdapter.ListGlobalSkillsAsync(cancellationToken);
+    return result.Skills.Select(skill => new LocalSkillInventoryResponseDto
+    {
+        Name = skill.Name,
+        Version = skill.Version,
+        Source = skill.Source,
+        InstalledPath = skill.InstalledPath,
+        Description = skill.Description
+    }).ToList();
+}
+```
+
+Datastrømmen er meget klar: frontend sender en anmodning -> `SkillGalleryAppService` modtager det -> `LocalSkillCommandAdapter` udfører npx-kommandoen -> JSON-resultatet parses -> en DTO returneres. Hvert trin følger naturligt af det foregående.
+
+Skill afinstallation bruger `npx skills remove -g <skillName> -y` kommando, og systemet håndterer automatisk afhængigheder og oprydning. Installationsmetadata gemmes i `managed-install.json` inde i færdighedsbiblioteket, registrerer oplysninger såsom installationstidspunkt og kildeversion til senere opdateringer og revision. Nogle ting er simpelthen værd at optage.
+
+### Installationsflow i detaljer
+
+Færdighedsinstallation kræver flere koordinerede trin. I sandhed er det ikke specielt kompliceret:
+
+```csharp
+public async Task<SkillInstallResultDto> InstallAsync(
+    SkillInstallRequestDto request,
+    CancellationToken cancellationToken = default)
+{
+    // 1. Normalize the installation reference
+    var normalized = _referenceNormalizer.Normalize(
+        request.SkillId,
+        request.Source,
+        request.SkillSlug,
+        request.Version);
+
+    // 2. Check prerequisites
+    await _prerequisiteChecker.CheckAsync(cancellationToken);
+
+    // 3. Acquire installation lock
+    using var installLock = await _lockProvider.AcquireAsync(normalized.SkillId);
+
+    // 4. Execute installation command
+    var result = await _installCommandRunner.ExecuteAsync(
+        new SkillInstallCommandExecutionRequest
+        {
+            Command = $"npx skills add {normalized.FullReference} -g -y",
+            Timeout = TimeSpan.FromMinutes(4)
+        },
+        cancellationToken);
+
+    // 5. Persist installation metadata
+    await _metadataStore.WriteAsync(normalized.SkillPath, request);
+
+    return new SkillInstallResultDto { Success = result.Success };
+}
+```
+
+Her bruges flere nøgledesignmønstre: **referencenormalizeren** konverterer forskellige inputformater, som f.eks. `tanweai/pua` og `@opencode/docker-skill`, til en samlet intern repræsentation; **installationslåsemekanismen** sikrer, at kun én installationsoperation kan køre for den samme færdighed ad gangen; og **streaming output** skubber installationsfremskridt til frontend i realtid gennem Server-Sent Events, så brugere kan se terminallignende logfiler, mens de sker.
+
+I sidste ende er alle disse mønstre der med ét formål: at holde systemet enklere at bruge og vedligeholde.
+
+## Kerneevne 2: Markedspladssøgning
+
+Markedspladssøgning giver brugerne mulighed for at opdage og installere færdigheder fra fællesskabet. En persons evner er altid begrænset; kollektiv viden rækker meget længere.
+
+### Teknisk tilgang
+
+Søgefunktionen er afhængig af online API `https://api.hagicode.com/v1/skills/search`. For at forbedre responshastigheden implementerer systemet caching. Cache er lidt ligesom hukommelse: Hvis du har brugbare ting omkring dig, behøver du ikke tænke så hårdt næste gang.
+
+```csharp
+private async Task<IReadOnlyList<SkillGallerySkillDto>> SearchCatalogAsync(
+    string query,
+    CancellationToken cancellationToken,
+    IReadOnlySet<string>? allowedSources = null)
+{
+    var cacheKey = $"skill_search:{query}:{string.Join(",", allowedSources ?? Array.Empty<string>())}";
+
+    if (_memoryCache.TryGetValue(cacheKey, out var cached))
+        return (IReadOnlyList<SkillGallerySkillDto>)cached!;
+
+    var response = await _onlineApiClient.SearchAsync(
+        new SearchSkillsRequest
+        {
+            Query = query,
+            Limit = _options.LimitPerQuery,
+        },
+        cancellationToken);
+
+    var results = response.Skills
+        .Where(skill => allowedSources is null || allowedSources.Contains(skill.Source))
+        .Select(skill => new SkillGallerySkillDto { ... })
+        .ToList();
+
+    _memoryCache.Set(cacheKey, results, TimeSpan.FromMinutes(10));
+    return results;
+}
+```
+
+Søgeresultater understøtter filtrering efter pålidelige kilder, så brugere kun ser færdighedskilder, de har tillid til. Frøforespørgsler som f.eks `popular` og `recent` bruges til at initialisere kataloget, så brugerne kan se anbefalede populære færdigheder, første gang de åbner det. Det første indtryk betyder stadig noget.
+
+## Kernekapacitet 3: Intelligente anbefalinger
+
+Intelligente anbefalinger er den mest komplekse del af systemet. De kan automatisk anbefale de bedst egnede færdigheder baseret på den aktuelle projektkontekst. Komplekst som det er, er det stadig værd at bygge.
+
+### Anbefalingsflow
+
+Det fulde anbefalingsflow er opdelt i fem faser:
+
+```
+1. Build project context
+   ↓
+2. AI generates search queries
+   ↓
+3. Search the online catalog in parallel
+   ↓
+4. AI ranks the candidates
+   ↓
+5. Return the recommendation list
+```
+
+Først analyserer systemet karakteristika såsom projektets teknologistak, programmeringssprog og domænestruktur for at opbygge en "projektprofil". Den profil er lidt ligesom et CV, der registrerer de vigtigste træk ved projektet.
+
+Derefter bruges en AI Grain til at generere målrettede søgeforespørgsler. Dette design er faktisk ret interessant: i stedet for direkte at spørge AI'en, "Hvilke færdigheder skal jeg anbefale?", beder vi den først tænke over "Hvilke søgetermer vil sandsynligvis finde relevante færdigheder?" Nogle gange betyder den måde, du stiller spørgsmålet på, mere end selve svaret:
+
+```csharp
+var queryGeneration = await aiGrain.GenerateSkillRecommendationQueriesAsync(
+    projectContext,      // Project context
+    locale,              // User language preference
+    maxQueries,           // Maximum number of queries
+    effectiveSearchHero); // AI model selection
+```
+
+Dernæst udføres disse søgeforespørgsler parallelt for at samle en liste over kandidater. Parallel behandling er i sidste ende blot en måde at spare tid på.
+
+Endelig rangerer en anden AI Grain kandidatens færdigheder. Dette trin tager hensyn til faktorer såsom færdigheders relevans for projektet, tillidsstatus og brugerhistoriske præferencer:
+
+```csharp
+var ranking = await aiGrain.RankSkillRecommendationsAsync(
+    projectContext,
+    candidates,
+    installedSkillNames,
+    locale,
+    maxRecommendations,
+    effectiveRankingHero);
+
+response.Items = MergeRecommendations(projectContext, candidates, ranking, maxRecommendations);
+```
+
+### Tilbagefaldsmekanisme
+
+AI-modeller kan reagere langsomt eller blive midlertidigt utilgængelige. Selv de bedste systemer snubler nogle gange. Af den grund inkluderer systemet en deterministisk fallback-mekanisme: når AI-tjenesten er utilgængelig, bruger den en regelbaseret heuristisk algoritme til at generere anbefalinger, såsom at udlede sandsynlige nødvendige færdigheder fra afhængigheder i `package.json`.
+
+Kort sagt er denne reservemekanisme simpelthen en backup-plan for systemet.
+
+## Kerneevne 4: Trusted Provider Management
+
+Trusted provider-administration giver brugerne mulighed for at kontrollere, hvilke færdighedskilder der anses for at være troværdige. Tillid er stadig noget, brugere bør kunne definere for sig selv.
+
+### Matchende regler
+
+Betroede udbydere understøtter to matchningsregler: **eksakt match** (`exact`) og **præfiksmatch** (`prefix`).
+
+```csharp
+public static TrustedSkillProviderResolutionSnapshot Resolve(
+    TrustedSkillProviderSnapshot snapshot,
+    string source)
+{
+    var normalizedSource = Normalize(source);
+
+    foreach (var entry in snapshot.Entries.OrderBy(e => e.SortOrder))
+    {
+        if (!entry.IsEnabled) continue;
+
+        foreach (var rule in entry.MatchRules)
+        {
+            bool isMatch = rule.MatchType switch
+            {
+                TrustedSkillProviderMatchRuleType.Exact
+                    => string.Equals(normalizedSource, Normalize(rule.Value),
+                        StringComparison.OrdinalIgnoreCase),
+                TrustedSkillProviderMatchRuleType.Prefix
+                    => normalizedSource.StartsWith(Normalize(rule.Value) + "/",
+                        StringComparison.OrdinalIgnoreCase),
+                _ => false
+            };
+
+            if (isMatch)
+                return new TrustedSkillProviderResolutionSnapshot
+                {
+                    IsTrustedSource = true,
+                    ProviderId = entry.ProviderId,
+                    DisplayName = entry.DisplayName
+                };
+        }
+    }
+
+    return new TrustedSkillProviderResolutionSnapshot { IsTrustedSource = false };
+}
+```
+
+Indbyggede betroede udbydere omfatter velkendte organisationer og projekter såsom Vercel, Azure, anthropics, Microsoft og browserbrug. Brugerdefinerede udbydere kan tilføjes gennem konfigurationsfiler ved at angive et udbyder-id, visningsnavn, badge-etiket, matchende regler og mere. Verden er stor nok til, at det aldrig vil være nok at stole på nogle få indbyggede elementer.
+
+### Vedholdenhedsimplementering
+
+Pålidelig konfiguration opretholdes ved hjælp af en Orleans Grain:
+
+```csharp
+public class TrustedSkillProviderGrain : Grain<TrustedSkillProviderState>,
+    ITrustedSkillProviderGrain
+{
+    public async Task UpdateConfigurationAsync(TrustedSkillProviderSnapshot snapshot)
+    {
+        State.Snapshot = snapshot;
+        await WriteStateAsync();
+    }
+
+    public Task<TrustedSkillProviderSnapshot> GetConfigurationAsync()
+    {
+        return Task.FromResult(State.Snapshot);
+    }
+}
+```
+
+Fordelen ved denne tilgang er, at konfigurationsændringer automatisk synkroniseres på tværs af alle noder, uden at det er nødvendigt at opdatere caches manuelt. Automatisering handler i sidste ende om at lade folk bekymre sig mindre.
+
+## Nøgle teknisk design
+
+### Kommandoudførelsesadaptermønster
+
+Skill-systemet skal udføre forskellige npx-kommandoer. Hvis den logik var spredt overalt, ville koden hurtigt blive svær at vedligeholde. Derfor har vi designet en adaptergrænseflade. Designmønstre eksisterer i sidste ende for at gøre kode nemmere at vedligeholde:
+
+```csharp
+public interface ISkillInstallCommandRunner
+{
+    Task<SkillInstallCommandExecutionResult> ExecuteAsync(
+        SkillInstallCommandExecutionRequest request,
+        CancellationToken cancellationToken = default);
+}
+```
+
+Forskellige kommandoer har forskellige eksekveringsimplementeringer, men alle implementerer den samme grænseflade, hvilket gør test og udskiftning ligetil.
+
+### SSE Streaming Output
+
+Installationsfremskridt skubbes til frontend i realtid gennem Server-Sent Events:
+
+```csharp
+public async Task InstallWithProgressAsync(
+    SkillInstallRequestDto request,
+    IServerStreamWriter<SkillInstallProgressEventDto> stream,
+    CancellationToken cancellationToken)
+{
+    var process = new Process
+    {
+        StartInfo = new ProcessStartInfo
+        {
+            FileName = "npx",
+            Arguments = $"skills add {request.FullReference} -g -y",
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false
+        }
+    };
+
+    process.OutputDataReceived += async (sender, e) =>
+    {
+        await stream.WriteAsync(new SkillInstallProgressEventDto
+        {
+            EventType = "output",
+            Data = e.Data ?? string.Empty
+        });
+    };
+
+    process.Start();
+    process.BeginOutputReadLine();
+    await process.WaitForExitAsync(cancellationToken);
+}
+```
+
+På frontenden kan brugere se terminallignende output i realtid, hvilket gør oplevelsen meget intuitiv. Feedback i realtid hjælper folk med at føle sig godt tilpas.
+
+## Praktisk vejledning
+
+### Installation af en fællesskabsfærdighed
+
+Tag installationen af `pua` færdighed som et eksempel (det er en populær fællesskabsfærdighed):
+
+1. Åbn færdighedsskuffen og skift til `Skill Gallery` fanen
+2. Indtast `pua` i søgefeltet
+3. Klik på søgeresultatet for at se færdighedsdetaljerne
+4. Klik på `Install` knappen
+5. Skift til `Local Skills` fanen for at bekræfte, at installationen er lykkedes
+
+Installationskommandoen er `npx skills add tanweai/pua -g -y`, og systemet håndterer alle detaljer automatisk. Der er egentlig ikke så mange skridt, når du først tager dem et efter et.
+
+### Tilføjelse af en brugerdefineret betroet kilde
+
+Hvis dit team har sit eget færdighedslager, kan du tilføje det som en pålidelig kilde:
+
+```yaml
+providerId: "my-team"
+displayName: "My Team Skills"
+badgeLabel: "MyTeam"
+isEnabled: true
+sortOrder: 100
+matchRules:
+  - matchType: "prefix"
+    value: "my-team/"
+  - matchType: "exact"
+    value: "my-team/special-skill"
+```
+
+På denne måde vil alle færdigheder fra dit team vise et betroet badge, hvilket gør brugerne mere komfortable med at installere dem. Etiketter og signaler hjælper folk til at føle sig mere selvsikre.
+
+### Grundlæggende færdighedsudvikling
+
+Oprettelse af en tilpasset færdighed kræver følgende struktur:
+
+```
+my-skill/
+├── SKILL.md          # Skill metadata (YAML front matter)
+├── index.ts          # Skill entry point
+├── agents/           # Supported agent configuration
+└── references/       # Reference resources
+```
+
+Et eksempel `SKILL.md` format:
+
+```yaml
+---
+name: my-skill
+description: A brief description of what this skill does
+---
+
+# My Skill
+
+Detailed documentation...
+```
+
+## Noter
+
+1. **Netværkskrav**: færdighedssøgning og installation kræver adgang til `api.hagicode.com` og npm-registret
+2. **Node.js-version**: Node.js 18 eller nyere anbefales
+3. **Tilladelseskrav**: globale npm-installationstilladelser er påkrævet
+4. **Samtidighedskontrol**: Kun én installations- eller afinstallationshandling kan køre for den samme færdighed ad gangen
+5. **Timeout-indstillinger**: standard timeout for installation er 4 minutter, men komplekse scenarier kan kræve justering
+
+Disse noter eksisterer i sidste ende for at hjælpe tingene til at gå glat.
+
+## Konklusion
+
+Denne artikel introducerede den komplette implementering af Skill Management-systemet i HagiCode-projektet. Gennem en frontend-backend-separeret arkitektur, adaptermønsteret, Orleans-baseret distribueret tilstandsstyring og relaterede teknikker, leverer systemet:
+
+- **Lokal global styring**: en samlet grænseflade for færdighedsstyring bygget ved indpakning `npx skills` kommandoer
+- **Markedspladssøgning**: Hurtig opdagelse af fællesskabsfærdigheder gennem online-API og caching-mekanismer
+- **Intelligente anbefalinger**: AI-drevne færdighedsanbefalinger baseret på projektkontekst
+- **Tillidsstyring**: et fleksibelt konfigurationssystem, der lader brugere kontrollere tillidsgrænser
+
+Denne designtilgang er ikke kun anvendelig til Skill Management. Det er også nyttigt som reference til ethvert scenarie, der skal integrere kommandolinjeværktøjer, mens der balancerer lokal lagring og onlinetjenester.
+
+Hvis denne artikel hjalp dig, er du velkommen til at give os en stjerne på GitHub: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site). Du kan også besøge det officielle websted for at lære mere: [hagicode.com](https://hagicode.com).
+
+Du tror måske, at dette system er godt designet, eller måske ikke. Uanset hvad, så er det fint. Når koden er skrevet, vil nogen bruge den, og nogen vil ikke.
+
+## Referencer
+
+- HagiCode projektopbevaring: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- HagiCode officielle hjemmeside: [hagicode.com](https://hagicode.com)
+- Claude Code officielle færdighedsdokumentation: [docs.anthropic.com](https://docs.anthropic.com)
+- Orleans rammedokumentation: [dotnet.github.io/orleans](https://dotnet.github.io/orleans)
+- TanStack Start: [tanstack.com/start](https://tanstack.com/start)
+
+## Ophavsretsmeddelelse
+
+Tak fordi du læste med. Hvis du fandt denne artikel nyttig, er du velkommen til at like, bogmærke og dele den.
+Dette indhold blev produceret med AI-assisteret samarbejde, og det endelige indhold blev gennemgået og godkendt af forfatteren.
+- Forfatter: [newbe36524](https://www.newbe.pro)
+- Originalt link: [https://docs.hagicode.com/blog/2026-03-24-hagicode-skill-system-technical-analysis/](https://docs.hagicode.com/blog/2026-03-24-hagicode-skill-system-technical-analysis/)
+- Ophavsretsmeddelelse: Medmindre andet er angivet, er alle blogindlæg på dette websted licenseret under BY-NC-SA. Medtag venligst kilden, når du genindsender.

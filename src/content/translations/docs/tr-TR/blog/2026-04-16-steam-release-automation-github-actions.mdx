@@ -1,0 +1,378 @@
+---
+title: GitHub Eylemleriyle Steam Sürümleri Nasıl Otomatikleştirilir
+date: 2026-04-16
+tags: [GitHub Actions, Steam, Automated Release, DevOps, CI/CD]
+description: "Bu makale, uçtan uca otomasyon akışını kapsayan, HagiCode Masaüstü projesinde otomatik Steam sürümleri için uyguladığımız eksiksiz çözümü paylaşıyor"
+---
+
+## GitHub Eylemleriyle Steam Sürümleri Nasıl Otomatikleştirilir
+
+> Bu makale, Steam Guard kimlik doğrulaması ve çoklu platform Depo yüklemeleri gibi önemli teknik ayrıntılar da dahil olmak üzere GitHub Sürümünden Steam platformuna uçtan uca otomasyon akışını kapsayan HagiCode Masaüstü projesinde otomatik Steam sürümleri için uyguladığımız eksiksiz çözümü paylaşıyor.
+
+## Arka plan
+
+Steam'deki sürüm iş akışı aslında geleneksel uygulama dağıtımından oldukça farklıdır. Steam'in kendi eksiksiz güncelleme dağıtım sistemi vardır. Geliştiricilerin, diğer platformlarda olduğu gibi yalnızca bir indirme bağlantısı bırakmak yerine, yapı eserlerini Steam'in CDN ağına yüklemek için SteamCMD'yi kullanmaları gerekir.
+
+HagiCode Masaüstü projesi, sürüm iş akışımıza birkaç yeni zorluk getiren bir Steam sürümüne hazırlanıyor:
+
+1. Mevcut derleme yapıtlarını Steam uyumlu bir formata dönüştürmemiz gerekiyordu.
+2. Bunları SteamCMD aracılığıyla Steam'e yüklememiz gerekiyordu.
+3. Ayrıca Steam Guard kimlik doğrulamasını da halletmemiz gerekiyordu.
+4. Linux, Windows ve macOS için çok platformlu Depo yüklemelerini desteklememiz gerekiyordu.
+5. GitHub Sürümünden Steam'e tam otomatik bir akış istedik.
+
+Proje, uygulamanın pakette paketlenmiş sabit hizmet yüklerini tespit etmesine olanak tanıyan "taşınabilir sürüm modunu" zaten uygulamıştı. `extra` dizin. Amacımız bu taşınabilir sürüm modunu Steam dağıtımına sorunsuz bir şekilde entegre etmekti.
+
+## HagiCode Hakkında
+
+Bu makalede paylaşılan çözüm, şu alandaki pratik deneyimimizden gelmektedir: [Hagi Kodu](https://hagicode.com) proje. HagiCode, masaüstü kullanımını destekleyen bir AI kodlama yardımcısıdır. Oyunu Steam'de yayınlamak için aktif olarak çalıştığımızdan, güvenilir bir otomatik yayın iş akışı oluşturmamız gerekiyordu.
+
+## Mimari Tasarım
+
+Tüm Steam sürüm sürecinin özü, süreci üç ana aşamaya ayıran GitHub Eylemleri iş akışıdır:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ GitHub Actions Workflow (Steam Release)                    │
+├─────────────────────────────────────────────────────────────┤
+│ 1. Preparation Stage:                                      │
+│    - Check out portable-version code                       │
+│    - Download build artifacts from GitHub Release          │
+│    - Extract and prepare the Steam content directory       │
+│                                                             │
+│ 2. SteamCMD Setup:                                         │
+│    - Install or reuse SteamCMD                             │
+│    - Authenticate with Steam Guard                         │
+│                                                             │
+│ 3. Release Stage:                                          │
+│    - Generate Depot VDF configuration files                │
+│    - Generate App Build VDF configuration files            │
+│    - Invoke SteamCMD to upload to Steam                    │
+└─────────────────────────────────────────────────────────────┘
+```
+
+Bu tasarım çeşitli avantajlar sunar:
+- Mevcut GitHub Sürüm yapıtlarını yeniden kullanır ve aynı çıktıların yeniden oluşturulmasını önler.
+- Güvenli izolasyon için kendi kendine barındırılan koşucular kullanır.
+- Önizleme modu ile resmi sürüm dalları arasında geçişi destekler.
+- Arızaların teşhis edilmesini kolaylaştıran eksiksiz hata işleme ve günlük kaydını içerir.
+
+## İş Akışı Uygulaması
+
+### Tetikleyici Parametre Tasarımı
+
+İş akışımız aşağıdaki temel parametreleri destekler:
+
+```yaml
+inputs:
+  release:           # Portable Version release tag
+    description: 'Version tag to release (for example v1.0.0)'
+    required: true
+  steam_preview:     # Whether to generate a preview build
+    description: 'Whether to use preview mode'
+    required: false
+    default: 'false'
+  steam_branch:      # Steam branch to set live
+    description: 'Target Steam branch'
+    required: false
+    default: 'preview'
+  steam_description: # Build description override
+    description: 'Build description'
+    required: false
+```
+
+### Şirket İçinde Barındırılan Çalıştırıcı Yapılandırması
+
+Güvenlik nedeniyle, kendi kendine barındırılan bir koşucu kullanıyoruz. `steam` etiket:
+
+```yaml
+runs-on:
+  - self-hosted
+  - Linux
+  - X64
+  - steam
+```
+
+Bu, Steam sürümlerinin özel bir çalıştırıcıda çalışmasını sağlar ve hassas kimlik bilgilerinin güvenli bir şekilde izole edilmesini sağlar.
+
+### Eşzamanlılık Kontrolü
+
+Aynı sürümün sürümlerinin birbirini etkilemesini önlemek için eşzamanlılık kontrolünü yapılandırdık:
+
+```yaml
+concurrency:
+  group: portable-version-steam-${{ github.event.inputs.release }}
+  cancel-in-progress: false
+```
+
+Şuna dikkat edin `cancel-in-progress: false` Burada ayarlandı çünkü Steam sürümleri biraz zaman alabilir ve yeni tetiklenen bir çalıştırmanın halihazırda yüklenmekte olan bir çalıştırmayı iptal etmesini istemiyoruz.
+
+## Çekirdek Komut Dosyası Uygulaması
+
+### Sürüm Girişlerini Hazırlama
+
+ `prepare-steam-release-input.mjs` komut dosyası, yayın için gerekli girdilerin hazırlanmasından sorumludur:
+
+```javascript
+// Download the GitHub Release build manifest and artifact inventory
+const buildManifest = await downloadBuildManifest(releaseTag);
+const artifactInventory = await downloadArtifactInventory(releaseTag);
+
+// Download compressed archives for each platform
+for (const platform of ['linux-x64', 'win-x64', 'osx-universal']) {
+  const artifactUrl = getArtifactUrl(artifactInventory, platform);
+  await downloadArtifact(artifactUrl, platform);
+}
+
+// Extract into the Steam content directory structure
+await extractToSteamContent(sources, contentRoot);
+```
+
+### Steam Guard Kimlik Doğrulaması
+
+Steam, hesapların Steam Guard ile korunmasını gerektirir, bu nedenle paylaşılan sır tabanlı bir kod oluşturma algoritması uyguladık:
+
+```javascript
+function generateSteamGuardCode(sharedSecret, timestamp = Date.now()) {
+  const secret = decodeSharedSecret(sharedSecret);
+  const time = Math.floor(timestamp / 1000 / 30);
+
+  const timeBuffer = Buffer.alloc(8);
+  timeBuffer.writeBigUInt64BE(BigInt(time));
+
+  // Use HMAC-SHA1 to generate a time-based one-time code
+  const hash = crypto.createHmac('sha1', secret)
+    .update(timeBuffer)
+    .digest();
+
+  // Convert it into a 5-character Steam Guard code
+  const code = steamGuardCode(hash);
+  return code;
+}
+```
+
+Bu uygulama, Steam Guard'ın TOTP (Zamana Dayalı Tek Kullanımlık Şifre) mekanizmasını temel alır ve her 30 saniyede bir yeni bir doğrulama kodu oluşturur.
+
+### VDF Konfigürasyon Oluşturma
+
+VDF (Valf Veri Formatı), Steam tarafından kullanılan konfigürasyon formatıdır. İki tür VDF dosyası oluşturmamız gerekiyor:
+
+**Depo VDF** her platforma yönelik içeriği yapılandırmak için kullanılır:
+
+```javascript
+function buildDepotVdf(depotId, contentRoot) {
+  return [
+    '"DepotBuildConfig"',
+    '{',
+    `  "DepotID" "${escapeVdf(depotId)}"`,
+    `  "ContentRoot" "${escapeVdf(contentRoot)}"`,
+    '  "FileMapping"',
+    '  {',
+    '    "LocalPath" "*"',
+    '    "DepotPath" "."',
+    '    "recursive" "1"',
+    '  }',
+    '}'
+  ].join('\n');
+}
+```
+
+**App Build VDF** uygulama derlemesinin tamamını yapılandırmak için kullanılır:
+
+```javascript
+function buildAppBuildVdf(appId, depotBuilds, description, setLive) {
+  const vdf = [
+    '"appbuild"',
+    '{',
+    `  "appid" "${appId}"`,
+    `  "desc" "${escapeVdf(description)}"`,
+    `  "contentroot" "${escapeVdf(contentRoot)}"`,
+    '  "buildoutput" "build_output"',
+    '  "depots"',
+    '  {'
+  ];
+
+  for (const [depotId, depotVdfPath] of Object.entries(depotBuilds)) {
+    vdf.push(`    "${depotId}" "${depotVdfPath}"`);
+  }
+
+  if (setLive) {
+    vdf.push(`  }`);
+    vdf.push(`  "setlive" "${setLive}"`);
+  }
+
+  vdf.push('}');
+  return vdf.join('\n');
+}
+```
+
+### SteamCMD Çağırma
+
+Son olarak yükleme SteamCMD çağrılarak gerçekleştirilir:
+
+```javascript
+await runCommand(steamcmdPath, [
+  '+login', steamUsername, steamPassword, steamGuardCode,
+  '+run_app_build', appBuildPath,
+  '+quit'
+]);
+```
+
+Bu, tüm iş akışındaki son sıçramadır. Başarılı olduktan sonra sürüm tamamlanır.
+
+## Çok Platformlu Depo İşleme
+
+Steam, farklı platformlara yönelik içerikleri yönetmek için Depo sistemini kullanır. Üç ana Depoyu destekliyoruz:
+
+| platformu | Depo Tanımlayıcı | Mimari Desteği |
+|-----|-----------|---------|
+| Linux | `linux-x64` | x64_64 |
+| Windows | `win-x64` | x64_64 |
+| macOS | `osx-universal` | evrensel, x64_64, arm64 |
+
+Her Deponun kendi içerik dizini ve VDF yapılandırma dosyası vardır. Bu, farklı platformlardaki kullanıcıların yalnızca gerçekten ihtiyaç duydukları içeriği indirmelerini sağlar.
+
+## İş Akışını Serbest Bırak
+
+### 1. Adım: GitHub Sürümünü Hazırlayın
+
+İlk olarak, bir GitHub Sürümü oluşturun. `portable-version` şunları içeren depo:
+- Her platform için sıkıştırılmış arşivler
+- Derleme bildirimi (`{tag}.build-manifest.json`)
+- Eser envanteri (`{tag}.artifact-inventory.json`)
+
+### Adım 2: Steam Yayınlama İş Akışını Tetikleyin
+
+İş akışını GitHub Eylemleri aracılığıyla manuel olarak tetikleyin ve gerekli parametreleri girin:
+- `release`: yayınlanacak sürüm etiketi, örneğin `v1.0.0`
+- `steam_branch`: hedef dal, örneğin `preview` veya `public`
+- `steam_preview`: önizleme modunun kullanılıp kullanılmayacağı
+
+### 3. Adım: Sürüm Akışını Otomatik Olarak Yürütün
+
+İş akışı aşağıdaki adımları otomatik olarak gerçekleştirir:
+
+1. GitHub Sürüm yapıtlarını indirin ve çıkarın.
+2. SteamCMD'yi yükleyin veya güncelleyin.
+3. Steam VDF yapılandırma dosyalarını oluşturun.
+4. Steam Guard ile kimlik doğrulaması yapın.
+5. İçeriği Steam CDN'sine yükleyin.
+6. Belirtilen dalı canlı olarak ayarlayın.
+
+Bu sıra tamamlandığında tüm sürüm yolu kapsanır.
+
+## Yapılandırma Kılavuzu
+
+### Gerekli Gizli Anahtar Yapılandırması
+
+GitHub deposu ayarlarında aşağıdaki gizli dizileri yapılandırın:
+
+| Gizli Ad | Açıklama |
+|-----------|------|
+| `STEAM_USERNAME` | Steam hesabı kullanıcı adı |
+| `STEAM_PASSWORD` | Steam hesap şifresi |
+| `STEAM_SHARED_SECRET` | Steam Guard paylaşılan sır (isteğe bağlı) |
+| `STEAM_GUARD_CODE` | Steam Guard kodu (isteğe bağlı) |
+| `STEAM_APP_ID` | Steam uygulama kimliği |
+| `STEAM_DEPOT_ID_LINUX` | Linux Depo Kimliği |
+| `STEAM_DEPOT_ID_WINDOWS` | Windows Depo Kimliği |
+| `STEAM_DEPOT_ID_MACOS` | macOS Depo Kimliği |
+
+Bu ayarlarda özellikle olağandışı bir şey yoktur. Beklenen tüm değerlerin yerinde olması yeterlidir.
+
+### Ortam Değişkeni Yapılandırması
+
+| Değişken Adı | Açıklama | Varsayılan Değer |
+|---------|------|--------|
+| `PORTABLE_VERSION_STEAMCMD_ROOT` | SteamCMD kurulum dizini | `~/.local/share/portable-version/steamcmd` |
+
+## En İyi Uygulamalar
+
+### Steam Guard Kimlik Doğrulama Yönetimi
+
+İlk çalıştırmada Steam Guard kodunu manuel olarak girmeniz gerekir. Bundan sonra, kodun otomatik olarak oluşturulabilmesi için paylaşılan sırrın yapılandırılması önerilir. Bu, her sürümde manuel müdahaleyi önler.
+
+SteamCMD giriş jetonunu kaydeder ve daha sonraki çalıştırmalarda tekrar kullanabilir. Belirtecin süresi dolduktan sonra yeniden kimlik doğrulama yapılması gerektiğinden, belirtecin geçerlilik süresine dikkat etmeniz gerekir.
+
+### İçerik Dizini Yapısı
+
+Steam içerik dizini yapısının doğru olduğundan emin olun:
+
+```
+steam-content/
+├── linux-x64/     # Linux platform content
+├── win-x64/       # Windows platform content
+└── osx-universal/ # macOS universal binary content
+```
+
+Her dizin, ilgili platforma ilişkin uygulama dosyalarının tamamını içermelidir.
+
+### Önizleme Modu Kullanımı
+
+Önizleme modu herhangi bir şubeyi canlı olarak ayarlamaz, dolayısıyla test ve doğrulama için uygundur:
+
+```yaml
+if [ "$STEAM_PREVIEW_INPUT" = 'true' ]; then
+  cmd+=(--preview)
+fi
+```
+
+Bu, doğrulama için önce Steam'e yükleme yapmanızı, ardından her şey kontrol edildikten sonra resmi şubeye geçmenizi sağlar.
+
+### Hata İşleme ve Günlüğe Kaydetme
+
+Komut dosyaları, eksiksiz hata işleme ve günlüğe kaydetme işlemlerini içerir:
+- GitHub Sürümünün mevcut olduğunu doğrulayın.
+- Gerekli meta veri dosyalarını kontrol edin.
+- Platform içeriğinin mevcut olduğundan emin olun.
+- GitHub Eylemleri özet raporu oluşturun.
+
+Bu bilgi hem hata ayıklama hem de denetim açısından oldukça değerlidir.
+
+### Artefakt Yönetimi
+
+İş akışı iki tür yapıt üretir:
+- `portable-steam-release-preparation-{tag}`: yayın hazırlığı meta verileri
+- `portable-steam-build-metadata-{tag}`: Steam derleme meta verileri
+
+Bu yapılar daha sonra denetim ve hata ayıklama için kullanılabilir. 30 günlük bir saklama süresi pratikte varsayılan bir durumdur.
+
+## Gerçek Dünya Kullanımı
+
+HagiCode projesinde, bu otomatik sürüm iş akışı halihazırda birden fazla sürümde başarılı bir şekilde çalıştırılmıştır. GitHub Sürümünden Steam platformuna giden yolun tamamı tamamen otomatiktir ve manuel müdahale gerektirmez.
+
+Bu, hem sürüm verimliliğini hem de güvenilirliği önemli ölçüde artırdı. Geçmişte, bir sürümün manuel olarak yayınlanması 30 dakikadan fazla sürüyordu. Artık tüm süreç sadece birkaç dakika içinde tamamlanıyor.
+
+Daha da önemlisi, otomatikleştirilmiş iş akışı insan hatası olasılığını azaltır. Her sürüm aynı standartlaştırılmış süreci takip eder ve bu da sonuçların daha öngörülebilir olmasını sağlar.
+
+## Özet
+
+Bu makalede açıklanan yaklaşımla şunu başardık:
+1. GitHub Sürümünden Steam platformuna tam otomasyon.
+2. Çok platformlu Depo yüklemeleri.
+3. Steam Guard'a dayalı güvenli kimlik doğrulama.
+4. Önizleme modu ve resmi sürüm arasında esnek geçiş.
+5. Hata işlemeyi ve günlüğe kaydetmeyi tamamlayın.
+
+Bu çözüm yalnızca HagiCode projesi için uygun olmakla kalmayıp aynı zamanda Steam'de başlatılması planlanan diğer projeler için de referans görevi görebilir. Eğer siz de Steam sürüm otomasyonunu düşünüyorsanız bu pratik deneyimin sizin için yararlı olacağını umuyorum.
+
+Teknoloji, seçtiğiniz yola bağlı olarak karmaşık veya basit gelebilir. Önemli olan ihtiyaçlarınıza uygun bir iş akışı bulmaktır.
+
+Bu makale size yardımcı olduysa HagiCode GitHub deposuna yıldız eklemekten veya daha fazla bilgi edinmek için resmi web sitesini ziyaret etmekten çekinmeyin.
+
+## Referanslar
+
+- [SteamCMD Belgelendirmesi](https://developer.valvesoftware.com/wiki/SteamCMD)
+- [Steamworks SDK'sı](https://partner.steamgames.com/)
+- [HagiCode Proje Havuzu](https://github.com/HagiCode-org/site)
+- [HagiCode Resmi Web Sitesi](https://hagicode.com)
+- [HagiCode Kurulum Kılavuzu](https://docs.hagicode.com/installation/docker-compose)
+- [HagiCode Masaüstü](https://hagicode.com/desktop/)
+
+## Telif Hakkı Uyarısı
+
+Okuduğunuz için teşekkür ederiz. Bu makaleyi faydalı bulduysanız beğenebilir, favorilerinize ekleyebilir ve paylaşabilirsiniz.
+Bu içerik, yapay zeka destekli işbirliğiyle oluşturuldu ve nihai içerik, yazar tarafından incelenip onaylandı.
+- Yazar: [yenibe36524](https://www.newbe.pro)
+- Orijinal makale: [https://docs.hagicode.com/blog/2026-04-16-steam-release-automation-github-actions/](https://docs.hagicode.com/blog/2026-04-16-steam-release-automation-github-actions/)
+- Telif hakkı uyarısı: Aksi belirtilmediği sürece bu blogdaki tüm makaleler BY-NC-SA kapsamında lisanslıdır. Lütfen yeniden yayınlarken kaynak belirtin.

@@ -1,0 +1,435 @@
+---
+title: Sådan bygger du en distributionsstation til hurtig download med billige cloud-servere
+date: 2026-04-15
+tags: [cloud server, Nginx, cache, file distribution, cost optimization]
+description: "Sådan bygger du en distributionsstation til hurtig download med billige cloud-servere: Cloud-lagringsbåndbredde er absurd dyrt, grænseoverskridende adgang er smertefuldt"
+---
+
+## Sådan bygger du en distributionsstation til hurtig download med billige cloud-servere
+
+> Cloud storage-båndbredde er absurd dyrt, grænseoverskridende adgang er smerteligt langsom, og CDN-priser er nok til at skræmme nogen væk... Hvis du håndterer fildistribution, kender du sikkert godt disse problemer. I dette indlæg vil jeg dele en billig tilgang, vi har udarbejdet, mens vi byggede [HagiCode](https://hagicode.com): en skyserver plus et Nginx-cachelag. Omkostningerne faldt med omkring det halve, mens downloadhastigheden forbedredes en del, hvilket i det mindste var en smule trøstende.
+
+## Baggrund
+
+Når det kommer til internettet, er downloadhastighed og stabilitet virkelig en del af brugeroplevelsen. Uanset om du kører et open source-projekt eller et kommercielt produkt, skal du stadig give brugerne en pålidelig måde at downloade filer på.
+
+At downloade filer direkte fra cloud storage, såsom Azure Blob Storage eller AWS S3, ser simpelt ud, men det kommer med en del praktiske problemer:
+
+**Netværksforsinkelse**: Adgang på tværs af grænser og på tværs af regioner kan være langsom nok til at give dig lyst til at smadre dit tastatur. Hvis brugerne skal vente for evigt, bliver oplevelsen naturligvis ikke fantastisk.
+
+**Båndbreddeomkostninger**: Udgående trafik fra skylager er smerteligt dyrt. Adgang til Azure Blob Storage fra det kinesiske fastland koster omkring 0,5 CNY pr. GB, hvilket betyder, at 1 TB pr. måned summerer til ca. CNY 500. For et lille team er det ikke et ubetydeligt beløb. Når alt kommer til alt, kommer ingens penge fra vinden.
+
+**Adgangsbegrænsninger**: I nogle regioner er adgangen til oversøiske skytjenester ustabil, og nogle gange er den simpelthen ikke tilgængelig. Brugere ønsker at downloade filerne, men kan ikke, hvilket er frustrerende for alle.
+
+**CDN-omkostninger**: Kommercielle CDN'er kan løse disse problemer, men prisen er lige så reel. De fleste små teams kan simpelthen ikke retfærdiggøre det.
+
+Så er der en løsning, der er både overkommelig og praktisk? Ja. Brug en skyserver, en omvendt proxy og et cachelag. Det er en ligetil tilgang, men den virker. Omkostningerne falder med omkring det halve, og hastigheden forbedres også, hvilket er en anstændig afvejning.
+
+## Om HagiCode
+
+Vi kom ikke op med denne arkitektur ud af den blå luft. Det kom fra vores virkelige erfaring med at arbejde på [HagiCode](https://hagicode.com).
+
+HagiCode er en AI-kodningsassistent, og vi skal levere downloads til både server- og desktop-side distributioner. Da det er et værktøj for udviklere, er det vigtigt, at brugere over hele verden kan downloade det hurtigt og pålideligt. Netop derfor var vi nødt til at finde ud af en billig distributionsstrategi i første omgang.
+
+Hvis du synes, denne løsning ser brugbar ud, så er vores teknik måske i det mindste anstændig nok... og hvis det er tilfældet, kan HagiCode i sig selv også være værd at tjekke ud.
+
+## Arkitektur design
+
+### Overordnet arkitektur
+
+Lad os starte med den fulde arkitektur:
+
+```
+User request
+    ↓
+DNS resolution
+    ↓
+┌─────────────────────────────────────┐
+│   Reverse proxy layer (Traefik/Bunker Web) │ ← SSL termination, routing, security protection
+├─────────────────────────────────────┤
+│   Ports: 80/443                     │
+│   Features: Automatic Let's Encrypt certificates │
+│             Host routing            │
+└─────────────────────────────────────┘
+    ↓
+┌─────────────────────────────────────┐
+│   Cache layer (Nginx)               │ ← File caching, Gzip compression
+├─────────────────────────────────────┤
+│   Ports: 8080(server) / 8081(desktop) │
+│   Cache strategy:                   │
+│   - index.json: 1 hour              │
+│   - other files: 7 days             │
+│   Cache size: 1GB                   │
+└─────────────────────────────────────┘
+    ↓
+┌─────────────────────────────────────┐
+│   Origin (Azure Blob Storage)       │ ← File storage
+└─────────────────────────────────────┘
+```
+
+Kernen i denne arkitektur er enkel: **sæt en cache mellem brugere og cloud storage**.
+
+Brugeranmodninger ankommer først til det omvendte proxy-lag på cloud-serveren, og derefter tager Nginx-cachelaget over. Hvis den anmodede fil allerede er cachelagret, returneres den med det samme. Hvis ikke, henter Nginx det fra skylageret og gemmer en lokal kopi på samme tid. Næste gang nogen anmoder om den samme fil, behøver cloud storage ikke at blive involveret igen.
+
+### Hvorfor vælge denne arkitektur?
+
+**Fordele ved cloud-servere**:
+- Forudsigelige omkostninger: Udbydere som Alibaba Cloud tilbyder billige cloud-servere med 1-2 vCPU- og 2 GB RAM-instanser til en pris på omkring 50-100 CNY pr. måned
+- Fleksibel implementering: Du kan frit konfigurere reverse proxy-regler og cache-politikker
+- Fleksibel geografi: Du kan vælge serverregioner tættere på dine brugere
+- God skalerbarhed: Du kan opgradere serverspecifikationen, efterhånden som trafikken vokser
+
+**Omvendt proxy + cache-arkitektur**:
+- Reducer oprindelsestrykket: cache hot-filer for at reducere direkte adgang til skylager
+- Lavere omkostninger: Cloud-servertrafik er meget billigere end cloud storage-udgang
+- Forbedre hastigheden: Adgang i nærheden og serverbåndbredde er normalt bedre end direkte levering i skyen
+
+**Hvorfor vælge Nginx som cachelag?**
+
+Dette var ikke et tilfældigt valg. Nginx har flere reelle fordele her:
+
+1. Høj ydeevne: Nginx er bredt anerkendt for fremragende reverse proxy-ydeevne
+2. Moden caching: den indbyggede `proxy_cache` funktionen er stabil og pålidelig
+3. Lavt ressourceforbrug: det kan køre med så lidt som 256 MB hukommelse
+4. Fleksibel konfiguration: Du kan anvende forskellige cachepolitikker på forskellige filtyper
+
+## Omvendt proxy-lag: Traefik vs Bunker Web
+
+HagiCodes implementeringsløsning understøtter to reverse proxy-muligheder, og hver af dem har sine egne styrker:
+
+| Mulighed | Karakteristika | Egnede scenarier |
+|------|------|----------|
+| **Traefik** | Letvægts, automatisk SSL, enkel konfiguration | Grundlæggende implementering, scenarier med lav trafik |
+| **Bunker Web** | Indbygget WAF, DDoS-beskyttelse, anti-bot-beskyttelse | Scenarier med høj sikkerhed og høj trafik |
+
+### Traefik: Det lette førstevalg
+
+Traefik er en moderne HTTP reverse proxy og load balancer. Dens største fordel er, at konfigurationen er enkel, og den kan få Let's Encrypt-certifikater automatisk.
+
+Til indledende implementeringer eller scenarier med lav trafik er Traefik ofte et meget godt valg:
+- Det bruger relativt få ressourcer; 1,5 CPU og 512 MB hukommelse er nok
+- SSL-certifikater konfigureres automatisk, så du behøver ikke selv at administrere dem
+- Routing konfigureres gennem Docker-etiketter, hvilket er praktisk nok
+
+### Bunker Web: Til højsikkerhedsscenarier
+
+Bunker Web er en Nginx-baseret webapplikationsfirewall med mere omfattende sikkerhedsbeskyttelse.
+
+Hvornår bør du overveje at skifte til Bunker Web? Normalt i tilfælde som disse:
+- Du er under DDoS-angreb
+- Du har brug for ModSecurity-beskyttelse
+- Du vil have anti-bot-beskyttelse
+- Du har strengere sikkerhedskrav
+
+HagiCode leverer `switch-deployment.sh` script, så du hurtigt kan skifte mellem de to muligheder:
+
+```bash
+# Switch to Bunker Web
+./switch-deployment.sh bunkerweb
+
+# Switch back to Traefik
+./switch-deployment.sh traefik
+
+# Check current status
+./switch-deployment.sh status
+```
+
+Scriptet udfører forhåndstjek, sundhedstjek og automatisk tilbagerulning, så skiftprocessen er ret sikker og pålidelig.
+
+## Nginx Cache Layer Konfiguration
+
+Cachelaget er kernen i hele arkitekturen, så Nginx-konfiguration gør en enorm forskel i cache-ydeevne.
+
+### Konfiguration af cachesti
+
+```nginx
+# Cache path configuration
+proxy_cache_path /var/cache/nginx levels=1:2 keys_zone=azure_cache:10m
+                   max_size=1g inactive=7d use_temp_path=off;
+```
+
+Parameter detaljer:
+- `levels=1:2`: cache-mappehierarki med to niveauer for at forbedre filadgangseffektiviteten
+- `keys_zone=azure_cache:10m`: cache-nøglelagringszone; 10 MB er nok til et stort antal nøgler
+- `max_size=1g`: maksimal cachestørrelse er 1 GB
+- `inactive=7d`: slet cachelagrede filer, hvis de ikke har været tilgået i 7 dage
+- `use_temp_path=off`: skriv direkte ind i cache-mappen for bedre ydeevne
+
+### Lagdelt cachestrategi
+
+Forskellige filtyper har brug for forskellige cachestrategier:
+
+```nginx
+# Server download service
+server {
+    listen 8080;
+
+    # Short-term cache for index.json (to allow timely updates)
+    location /index.json {
+        proxy_cache azure_cache;
+        proxy_cache_valid 200 1h;
+        proxy_cache_key "$scheme$server_port$request_uri";
+        add_header X-Cache-Status $upstream_cache_status;
+        add_header Cache-Control "public, max-age=3600";
+
+        # Reverse proxy to Azure OSS
+        proxy_pass https://${SERVER_DL_HOST}/${SERVER_DL_CONTAINER}$uri?${SERVER_DL_SAS_TOKEN};
+        proxy_ssl_server_name on;
+        proxy_ssl_protocols TLSv1.2 TLSv1.3;
+    }
+
+    # Long-term cache for static files such as installation packages
+    location / {
+        proxy_cache azure_cache;
+        proxy_cache_valid 200 7d;
+        proxy_cache_key "$scheme$server_port$request_uri";
+        add_header X-Cache-Status $upstream_cache_status;
+        add_header Cache-Control "public, max-age=604800";
+
+        proxy_pass https://${SERVER_DL_HOST}/${SERVER_DL_CONTAINER}$uri?${SERVER_DL_SAS_TOKEN};
+        proxy_ssl_server_name on;
+        proxy_ssl_protocols TLSv1.2 TLSv1.3;
+    }
+}
+```
+
+**Hvorfor er det designet på denne måde?**
+
+`index.json` er versionstjekfilen, så den skal opdateres omgående. Med et 1-times cache-vindue kan brugere opdage en ny udgivelse inden for højst en time efter offentliggørelsen.
+
+Statiske filer som f.eks. installationspakker ændres sjældent, så at cache dem i 7 dage reducerer oprindelsesadgangen betydeligt. Når en opdatering er nødvendig, kan du bare rydde cachen manuelt.
+
+**`X-Cache-Status` svaroverskrift**:
+
+Denne header hjælper dig med at inspicere cache-hitadfærd:
+- `HIT`: cache hit
+- `MISS`: cache miss, hentet fra oprindelse
+- `EXPIRED`: cachen er udløbet, hentet fra oprindelsen igen
+- `BYPASS`: cache omgået
+
+Sådan tjekker du det:
+```bash
+curl -I https://server.dl.hagicode.com/app.zip
+```
+
+## Omkostningsanalyse
+
+Antag 1 TB downloadtrafik om måneden. Lad os regne ud:
+
+| Mulighed | Trafikomkostninger | Serveromkostninger | I alt |
+|------|----------|------------|------|
+| Direct Azure OSS | Omkring 500 CNY | CNY 0 | 500 CNY |
+| Cloud-server + OSS (80 % cache-hitforhold) | 100 CNY + 80 CNY | 60 CNY | 240 CNY |
+| Kommerciel CDN | CNY 300-500 | CNY 0 | CNY 300-500 |
+
+**Konklusion**: Tilføjelse af et cachelag kan reducere distributionsomkostningerne med ca. 50 %.
+
+Dette estimat antager et 80 % cache hit-forhold. I praksis, hvis filer ikke ændres ofte, kan hit-ratioen være endnu højere.
+
+## Implementeringspraksis
+
+### Miljøforberedelse
+
+Konfigurer først miljøvariablerne:
+
+```bash
+cd /path/to/hagicode_aliyun_deployment/docker
+cp .env.example .env
+vi .env  # Fill in the Azure OSS SAS URL and Lark Webhook URL
+```
+
+**Vigtigt**: den `.env` fil indeholder følsomme oplysninger såsom SAS Token og Webhook URL. Forpligt det aldrig til versionskontrol.
+
+### DNS-konfiguration
+
+Tilføj følgende DNS A-poster:
+- `server.dl.hagicode.com` → server IP
+- `desktop.dl.hagicode.com` → server IP
+
+### Initialiser serveren
+
+Brug Ansible til at initialisere serveren automatisk:
+
+```bash
+cd /path/to/hagicode_aliyun_deployment
+ansible-playbook -i ./ansible/inventory/hosts.yml ./ansible/playbooks/init.yml
+```
+
+Denne afspilningsbog håndterer følgende opgaver automatisk:
+- Opret installationsbrugeren
+- Installer Docker og Docker Compose
+- Konfigurer SSH-nøgler
+- Indstil firewall-regler
+
+Det er det vigtigste opsætningsarbejde, og automatisering sparer meget tid.
+
+### Implementer tjenesterne
+
+```bash
+./deploy.sh
+```
+
+Implementeringsscriptet hjælper dig med at gøre følgende:
+- Tjek miljøkonfigurationen
+- Træk den seneste kode
+- Start Docker-containere
+- Kør sundhedstjek
+- Send implementeringsmeddelelser (Lark)
+
+En kommando er nok, hvilket gør processen bekvem.
+
+### Bekræft implementeringen
+
+```bash
+# Check container status
+docker ps
+
+# Test the download domains
+curl -I https://server.dl.hagicode.com/index.json
+curl -I https://desktop.dl.hagicode.com/index.json
+```
+
+## Driftstips
+
+### Cachestyring
+
+Caches har også brug for vedligeholdelse fra tid til anden:
+
+**Tjek cache-diskbrug**:
+```bash
+docker volume inspect docker_nginx-cache
+du -sh /var/lib/docker/volumes/docker_nginx-cache/_data
+```
+
+**Ryd cachen manuelt**:
+```bash
+./clear-cache.sh
+```
+
+Eller kør de manuelle kommandoer direkte, hvis det er nødvendigt:
+```bash
+docker exec nginx sh -c "rm -rf /var/cache/nginx/*"
+docker restart nginx
+```
+
+### Ressourcegrænser
+
+På en 1-kerne, 2 GB server ser ressourcegrænsekonfigurationen sådan ud:
+
+```yaml
+services:
+  traefik:
+    deploy:
+      resources:
+        limits:
+          cpus: '1.50'
+          memory: 512M
+
+  nginx:
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 256M
+```
+
+For at overvåge ressourceforbrug kan du lejlighedsvis køre:
+```bash
+docker stats
+```
+
+### SAS Token-sikkerhedspraksis
+
+SAS-tokenet er legitimationsoplysningerne, der bruges til at få adgang til Azure Blob Storage, så det ville være alvorligt at lække det:
+
+- Forpligt dig ikke `.env` fil til versionskontrol; den er allerede inde `.gitignore`
+- Indstil en passende SAS Token-udløbstid, med 1 år anbefalet
+- Begræns SAS Token-tilladelser til skrivebeskyttet
+- Roter SAS-tokens regelmæssigt
+
+### Overvågning og advarsler
+
+HagiCode integrerer Lark/Feishu Webhook-meddelelser, som kan sende advarsler for følgende begivenheder:
+- Implementering succes eller fiasko
+- Cache-rydningsstatus
+- Service undtagelser
+
+Meddelelser omfatter serveroplysninger, tidsstempler og fejldetaljer, hvilket gør fejlfinding meget hurtigere.
+
+### Udvidelser med høj tilgængelighed
+
+Når én server ikke længere er nok, kan du overveje følgende:
+
+1. **Horisontal skalering**: implementer flere noder og distribuer trafik med DNS round-robin eller en load balancer
+2. **CDN foran**: Sæt et CDN foran skyserverne for endnu hurtigere adgang
+3. **Cache-opvarmning**: Brug scripts til at forudindlæse varme filer i cachen
+
+## Noter
+
+Der er et par ting, der er værd at huske på:
+
+1. **SSL-certifikater**: Let's Encrypt har hastighedsgrænser, så skift ikke implementeringer for ofte, ellers kan certifikatudstedelsen mislykkes
+2. **Cacherydning**: efter opdatering af vigtige filer, husk at rydde cachen, ellers kan brugere stadig downloade den gamle version
+3. **Logstyring**: Ryd regelmæssigt op i Docker-logfiler, ellers kan disken blive fyldt op
+4. **Sikkerhedskopieringsstrategi**: Sikkerhedskopier filer som f.eks `Traefik acme.json` og Bunker Web-konfiguration
+5. **Overvågning og advarsler**: Konfigurer Feishu-meddelelser, så du kan spore implementeringsstatus og reagere hurtigt på problemer
+
+## Konklusion
+
+En cloud-server plus et Nginx-cachelag er alt, hvad der skal til. HagiCode bruger denne løsning med en ret lav månedlig pris, omkring CNY 60-100 for serveren, og resultaterne har været meget solide. De vigtigste fordele er:
+
+- **Forudsigelige omkostninger**: Omtrent 50 % billigere end at bruge cloud storage direkte eller betale for et kommercielt CDN
+- **Fleksibel implementering**: vælg Traefik eller Bunker Web afhængigt af dine behov
+- **Stærk skalerbarhed**: Du kan skalere vandret eller tilføje et CDN senere, hvis det er nødvendigt
+- **Simple handlinger**: Shell-scripts plus Ansible gør automatiseret implementering ligetil
+
+For små teams og uafhængige udviklere, der har brug for fildistribution, er dette absolut en praktisk mulighed værd at prøve.
+
+HagiCode har kørt denne arkitektur stabilt i produktion i et stykke tid, og globale brugerdownloads er forblevet pålidelige. Hvis du leder efter en lignende løsning, er den et forsøg værd.
+
+## Teknologi Stack Recap
+
+For at afslutte, er her en oversigt over de involverede teknologier:
+
+| Komponent | Valg | Formål |
+|------|------|------|
+| Cloud server | Alibaba Cloud ECS | Base runtime miljø |
+| Omvendt proxy | Traefik / Bunker Web | SSL-opsigelse, routing, sikkerhedsbeskyttelse |
+| Cachelag | Nginx | Omvendt proxy-caching, Gzip-komprimering |
+| Fillagring | Azure Blob Storage | Filens oprindelse |
+| Containerisering | Docker Compose | Service orkestrering |
+| Automatisering | Ansible | Serverkonfigurationsstyring |
+| Meddelelser | Lærke/Feishu Webhook | Underretninger om implementeringsstatus |
+
+## Referencer
+
+Her er referencematerialerne nævnt i dette indlæg:
+
+- HagiCode projekt: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- HagiCode hjemmeside: [hagicode.com](https://hagicode.com)
+- 30-minutters hands-on demo: [www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)
+- Docker Compose installation med et enkelt klik: [docs.hagicode.com/installation/docker-compose](https://docs.hagicode.com/installation/docker-compose)
+- Desktop hurtig installation: [hagicode.com/desktop/](https://hagicode.com/desktop/)
+
+---
+
+Hvis dette indlæg hjalp dig, gør det det allerede umagen værd:
+- Giv den et like, så flere kan finde den
+- Stjerne projektet på GitHub: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Besøg den officielle hjemmeside for mere information: [hagicode.com](https://hagicode.com)
+- Se den 30-minutters hands-on demo: [www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)
+- Prøv installationen med et enkelt klik: [docs.hagicode.com/installation/docker-compose](https://docs.hagicode.com/installation/docker-compose)
+- Installer desktop-appen hurtigt: [hagicode.com/desktop/](https://hagicode.com/desktop/)
+- Offentlig beta er startet, og du er velkommen til at prøve den
+
+---
+
+Det er om det for dette indlæg. Jeg håber, at denne løsning hjælper dig. Hvis du har bedre ideer, er du velkommen til at dele dem. Teknologi er altid nemmere at forbedre, når folk lærer af hinanden.
+
+## Ophavsretsmeddelelse
+
+Tak fordi du læste med. Hvis du fandt denne artikel nyttig, er du velkommen til at like, bogmærke og dele den.
+Dette indhold blev skabt med AI-assisteret samarbejde, og den endelige version blev gennemgået og godkendt af forfatteren.
+- Forfatter: [newbe36524](https://www.newbe.pro)
+- Originalt link: [https://docs.hagicode.com/blog/2026-04-15-low-cost-cloud-server-download-distribution-station/](https://docs.hagicode.com/blog/2026-04-15-low-cost-cloud-server-download-distribution-station/)
+- Ophavsretsmeddelelse: Medmindre andet er angivet, er alle artikler på denne blog licenseret under BY-NC-SA. Medtag venligst kilden, når du genindsender.

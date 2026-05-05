@@ -1,0 +1,435 @@
+---
+title: Düşük Maliyetli Bulut Sunucularla Hızlı İndirme Dağıtım İstasyonu Nasıl Oluşturulur
+date: 2026-04-15
+tags: [cloud server, Nginx, cache, file distribution, cost optimization]
+description: "Düşük Maliyetli Bulut Sunucularla Hızlı İndirme Dağıtım İstasyonu Nasıl Oluşturulur: Bulut depolama bant genişliği inanılmaz derecede pahalı, sınır ötesi erişim acı verici"
+---
+
+## Düşük Maliyetli Bulut Sunucularla Hızlı İndirme Dağıtım İstasyonu Nasıl Oluşturulur
+
+> Bulut depolama bant genişliği inanılmaz derecede pahalı, sınır ötesi erişim acı verici derecede yavaş ve CDN fiyatlandırması herkesi korkutmaya yetiyor... Dosya dağıtımını üstleniyorsanız, muhtemelen bu sorunları iyi biliyorsunuzdur. Bu yazıda inşaat sırasında geliştirdiğimiz düşük maliyetli bir yaklaşımı paylaşmak istiyorum. [Hagi Kodu](https://hagicode.com): bir bulut sunucusu artı bir Nginx önbellekleme katmanı. Maliyet yaklaşık yarı yarıya düştü, indirme hızı ise biraz arttı, bu da en azından biraz rahatlatıcıydı.
+
+## Arka plan
+
+İnternet söz konusu olduğunda indirme hızı ve kararlılığı gerçekten kullanıcı deneyiminin bir parçasıdır. İster açık kaynaklı bir proje ister ticari bir ürün çalıştırıyor olun, yine de kullanıcılara dosyaları indirmeleri için güvenilir bir yol sağlamanız gerekir.
+
+Dosyaları doğrudan Azure Blob Storage veya AWS S3 gibi bulut depolama alanından indirmek basit görünebilir ancak birkaç pratik sorunu da beraberinde getirir:
+
+**Ağ gecikmesi**: Sınır ötesi ve bölgelerarası erişim, klavyenizi parçalama isteği uyandıracak kadar yavaş olabilir. Kullanıcıların sonsuza kadar beklemesi gerekiyorsa deneyimin pek iyi olmayacağı açıktır.
+
+**Bant genişliği maliyeti**: Bulut depolama çıkış trafiği son derece pahalıdır. Çin anakarasından Azure Blob Depolamaya erişmenin maliyeti GB başına yaklaşık 0,5 CNY'dir; bu da ayda 1 TB'nin kabaca 500 CNY'ye tekabül ettiği anlamına gelir. Küçük bir ekip için bu önemsiz bir miktar değildir. Sonuçta kimsenin parası rüzgardan gelmiyor.
+
+**Erişim kısıtlamaları**: Bazı bölgelerde yurt dışı bulut hizmetlerine erişim istikrarsızdır ve bazen tamamen kullanılamayabilir. Kullanıcılar dosyaları indirmek istiyor ancak yapamıyor; bu da herkes için sinir bozucu bir durum.
+
+**CDN maliyeti**: Ticari CDN'ler bu sorunları çözebilir, ancak fiyatı da bir o kadar gerçektir. Çoğu küçük takım bunu haklı gösteremez.
+
+Peki hem ekonomik hem de pratik bir çözüm var mı? Evet. Bir bulut sunucusu, bir ters proxy ve bir önbellek katmanı kullanın. Bu basit bir yaklaşım ama işe yarıyor. Maliyet yaklaşık yarı yarıya düşer ve hız da artar, bu da iyi bir dengedir.
+
+## HagiCode Hakkında
+
+Biz bu mimariyi bir anda ortaya çıkarmadık. Üzerinde çalıştığımız gerçek dünya deneyimimizden geldi. [Hagi Kodu](https://hagicode.com).
+
+HagiCode bir yapay zeka kodlama asistanıdır ve hem sunucu hem de masaüstü dağıtımları için indirmeler sağlamamız gerekiyor. Geliştiricilere yönelik bir araç olduğundan dünya çapındaki kullanıcıların onu hızlı ve güvenilir bir şekilde indirebilmesi önemlidir. İşte tam da bu yüzden ilk etapta düşük maliyetli bir dağıtım stratejisi bulmamız gerekiyordu.
+
+Bu çözümün yararlı göründüğünü düşünüyorsanız, belki de mühendisliğimiz en azından yeterince iyi durumdadır... ve eğer durum buysa, HagiCode'un kendisi de incelemeye değer olabilir.
+
+## Mimari Tasarım
+
+### Genel Mimari
+
+Tam mimariyle başlayalım:
+
+```
+User request
+    ↓
+DNS resolution
+    ↓
+┌─────────────────────────────────────┐
+│   Reverse proxy layer (Traefik/Bunker Web) │ ← SSL termination, routing, security protection
+├─────────────────────────────────────┤
+│   Ports: 80/443                     │
+│   Features: Automatic Let's Encrypt certificates │
+│             Host routing            │
+└─────────────────────────────────────┘
+    ↓
+┌─────────────────────────────────────┐
+│   Cache layer (Nginx)               │ ← File caching, Gzip compression
+├─────────────────────────────────────┤
+│   Ports: 8080(server) / 8081(desktop) │
+│   Cache strategy:                   │
+│   - index.json: 1 hour              │
+│   - other files: 7 days             │
+│   Cache size: 1GB                   │
+└─────────────────────────────────────┘
+    ↓
+┌─────────────────────────────────────┐
+│   Origin (Azure Blob Storage)       │ ← File storage
+└─────────────────────────────────────┘
+```
+
+Bu mimarinin temel fikri basittir: **kullanıcılar ile bulut depolama alanı arasına bir önbellek koyun**.
+
+Kullanıcı istekleri önce bulut sunucusundaki ters proxy katmanına ulaşır ve ardından Nginx önbellek katmanı görevi devralır. İstenen dosya zaten önbelleğe alınmışsa hemen döndürülür. Değilse, Nginx onu bulut depolama alanından alır ve aynı anda yerel bir kopyasını saklar. Bir dahaki sefere birisi aynı dosyayı istediğinde, bulut depolamanın tekrar devreye girmesine gerek yoktur.
+
+### Neden Bu Mimariyi Seçmelisiniz?
+
+**Bulut sunucuların avantajları**:
+- Tahmin edilebilir maliyet: Alibaba Cloud gibi sağlayıcılar, 1-2 vCPU ve 2 GB RAM örnekleriyle aylık 50-100 CNY civarında fiyatlandırılan düşük maliyetli bulut sunucuları sunuyor
+- Esnek dağıtım: Ters proxy kurallarını ve önbelleğe alma politikalarını özgürce yapılandırabilirsiniz
+- Esnek coğrafya: Kullanıcılarınıza daha yakın sunucu bölgelerini seçebilirsiniz
+- İyi ölçeklenebilirlik: trafik arttıkça sunucu özelliklerini yükseltebilirsiniz
+
+**Ters proxy + önbellek mimarisi**:
+- Kaynak baskısını azaltın: bulut depolama alanına doğrudan erişimi azaltmak için sıcak dosyaları önbelleğe alın
+- Daha düşük maliyet: Bulut sunucusu trafiği, bulut depolama çıkışından çok daha ucuzdur
+- Hızı artırın: Yakındaki erişim ve sunucu bant genişliği genellikle doğrudan bulut depolama dağıtımından daha iyidir
+
+**Neden önbellek katmanı olarak Nginx'i seçmelisiniz?**
+
+Bu rastgele bir seçim değildi. Nginx'in burada birkaç gerçek avantajı var:
+
+1. Yüksek performans: Nginx, mükemmel ters proxy performansıyla geniş çapta tanınmaktadır
+2. Olgun önbelleğe alma: yerleşik `proxy_cache` özellik istikrarlı ve güvenilirdir
+3. Düşük kaynak kullanımı: 256 MB kadar az bellekle çalışabilir
+4. Esnek yapılandırma: farklı dosya türlerine farklı önbellek politikaları uygulayabilirsiniz
+
+## Ters Proxy Katmanı: Traefik vs Bunker Web
+
+HagiCode'un dağıtım çözümü iki ters proxy seçeneğini destekler ve her birinin kendine göre güçlü yönleri vardır:
+
+| Seçenek | Özellikler | Uygun Senaryolar |
+|------|------|----------|
+| **Trafik** | Hafif, otomatik SSL, basit yapılandırma | Temel dağıtım, düşük trafik senaryoları |
+| **Bunker Web** | Dahili WAF, DDoS koruması, anti-bot koruması | Yüksek güvenlikli, yüksek trafikli senaryolar |
+
+### Traefik: Hafifliğin İlk Tercihi
+
+Traefik, modern bir HTTP ters proxy ve yük dengeleyicidir. En büyük avantajı konfigürasyonunun basit olması ve Let's Encrypt sertifikalarını otomatik olarak alabilmesidir.
+
+İlk dağıtımlar veya trafiğin düşük olduğu senaryolar için Traefik genellikle çok iyi bir seçimdir:
+- Nispeten az kaynak kullanır; 1,5 CPU ve 512 MB bellek yeterlidir
+- SSL sertifikaları otomatik olarak yapılandırıldığından bunları sizin yönetmenize gerek yoktur
+- Yönlendirme, yeterince kullanışlı olan Docker etiketleri aracılığıyla yapılandırılır
+
+### Bunker Web: Yüksek Güvenlikli Senaryolar İçin
+
+Bunker Web, daha kapsamlı güvenlik korumasına sahip, Nginx tabanlı bir web uygulaması güvenlik duvarıdır.
+
+Bunker Web'e ne zaman geçmeyi düşünmelisiniz? Genellikle şu gibi durumlarda:
+- DDoS saldırısı altındasınız
+- ModSecurity korumasına ihtiyacınız var
+- Bot karşıtı koruma istiyorsunuz
+- Daha katı güvenlik gereksinimleriniz var
+
+HagiCode şunları sağlar: `switch-deployment.sh` komut dosyası sayesinde iki seçenek arasında hızla geçiş yapabilirsiniz:
+
+```bash
+# Switch to Bunker Web
+./switch-deployment.sh bunkerweb
+
+# Switch back to Traefik
+./switch-deployment.sh traefik
+
+# Check current status
+./switch-deployment.sh status
+```
+
+Komut dosyası ön kontroller, durum kontrolleri ve otomatik geri alma işlemlerini gerçekleştirir, böylece geçiş işlemi oldukça güvenli ve güvenilir olur.
+
+## Nginx Önbellek Katmanı Yapılandırması
+
+Önbellek katmanı tüm mimarinin çekirdeğidir, dolayısıyla Nginx yapılandırması önbellek performansında büyük bir fark yaratır.
+
+### Önbellek Yolu Yapılandırması
+
+```nginx
+# Cache path configuration
+proxy_cache_path /var/cache/nginx levels=1:2 keys_zone=azure_cache:10m
+                   max_size=1g inactive=7d use_temp_path=off;
+```
+
+Parametre ayrıntıları:
+- `levels=1:2`: dosya erişim verimliliğini artırmak için iki seviyeli önbellek dizini hiyerarşisi
+- `keys_zone=azure_cache:10m`: önbellek anahtarı depolama bölgesi; Çok sayıda anahtar için 10 MB yeterlidir
+- `max_size=1g`: maksimum önbellek boyutu 1 GB'dir
+- `inactive=7d`: 7 gün boyunca erişilmediği takdirde önbelleğe alınmış dosyaları silin
+- `use_temp_path=off`: Daha iyi performans için doğrudan önbellek dizinine yazın
+
+### Katmanlı Önbellek Stratejisi
+
+Farklı dosya türleri farklı önbellek stratejilerine ihtiyaç duyar:
+
+```nginx
+# Server download service
+server {
+    listen 8080;
+
+    # Short-term cache for index.json (to allow timely updates)
+    location /index.json {
+        proxy_cache azure_cache;
+        proxy_cache_valid 200 1h;
+        proxy_cache_key "$scheme$server_port$request_uri";
+        add_header X-Cache-Status $upstream_cache_status;
+        add_header Cache-Control "public, max-age=3600";
+
+        # Reverse proxy to Azure OSS
+        proxy_pass https://${SERVER_DL_HOST}/${SERVER_DL_CONTAINER}$uri?${SERVER_DL_SAS_TOKEN};
+        proxy_ssl_server_name on;
+        proxy_ssl_protocols TLSv1.2 TLSv1.3;
+    }
+
+    # Long-term cache for static files such as installation packages
+    location / {
+        proxy_cache azure_cache;
+        proxy_cache_valid 200 7d;
+        proxy_cache_key "$scheme$server_port$request_uri";
+        add_header X-Cache-Status $upstream_cache_status;
+        add_header Cache-Control "public, max-age=604800";
+
+        proxy_pass https://${SERVER_DL_HOST}/${SERVER_DL_CONTAINER}$uri?${SERVER_DL_SAS_TOKEN};
+        proxy_ssl_server_name on;
+        proxy_ssl_protocols TLSv1.2 TLSv1.3;
+    }
+}
+```
+
+**Neden bu şekilde tasarlandı?**
+
+`index.json` sürüm kontrol dosyasıdır, bu nedenle derhal güncellenmesi gerekir. 1 saatlik önbellek penceresi sayesinde kullanıcılar yeni bir sürümü yayınlandıktan en fazla bir saat sonra tespit edebilir.
+
+Kurulum paketleri gibi statik dosyalar nadiren değişir, bu nedenle bunların 7 gün boyunca önbelleğe alınması, kaynak erişimini büyük ölçüde azaltır. Bir güncelleme gerektiğinde önbelleği manuel olarak temizleyebilirsiniz.
+
+**`X-Cache-Status` yanıt başlığı**:
+
+Bu başlık, önbellek isabet davranışını incelemenize yardımcı olur:
+- `HIT`: önbellek isabeti
+- `MISS`: önbellek kaybı, kaynaktan getirildi
+- `EXPIRED`: önbellek süresi doldu, kaynaktan tekrar getirildi
+- `BYPASS`: önbellek atlandı
+
+Nasıl kontrol edilir:
+```bash
+curl -I https://server.dl.hagicode.com/app.zip
+```
+
+## Maliyet Analizi
+
+Aylık 1 TB indirme trafiğinin olduğunu varsayalım. Matematiğini yapalım:
+
+| Seçenek | Trafik Maliyeti | Sunucu Maliyeti | Toplam |
+|------|----------|------------|------|
+| Doğrudan Azure OSS | 500 CNY hakkında | CNY 0 | 500 CNY |
+| Bulut sunucusu + OSS (%80 önbellek isabet oranı) | CNY 100 + CNY 80 | CNY 60 | CNY 240 |
+| Ticari CDN | CNY 300-500 | CNY 0 | CNY 300-500 |
+
+**Sonuç**: Önbellek katmanı eklemek, dağıtım maliyetini yaklaşık %50 oranında azaltabilir.
+
+Bu tahminde %80 önbellek isabet oranı varsayılmaktadır. Uygulamada dosyalar sık ​​sık değişmiyorsa isabet oranı daha da yüksek olabilir.
+
+## Dağıtım Uygulaması
+
+### Ortam Hazırlığı
+
+İlk olarak ortam değişkenlerini yapılandırın:
+
+```bash
+cd /path/to/hagicode_aliyun_deployment/docker
+cp .env.example .env
+vi .env  # Fill in the Azure OSS SAS URL and Lark Webhook URL
+```
+
+**Önemli**: `.env` dosyası, SAS Belirteci ve Web Kancası URL'si gibi hassas bilgiler içerir. Asla sürüm kontrolüne taahhüt etmeyin.
+
+### DNS Yapılandırması
+
+Aşağıdaki DNS A kayıtlarını ekleyin:
+- `server.dl.hagicode.com` → sunucu IP'si
+- `desktop.dl.hagicode.com` → sunucu IP'si
+
+### Sunucuyu Başlat
+
+Sunucuyu otomatik olarak başlatmak için Ansible'ı kullanın:
+
+```bash
+cd /path/to/hagicode_aliyun_deployment
+ansible-playbook -i ./ansible/inventory/hosts.yml ./ansible/playbooks/init.yml
+```
+
+Bu başucu kitabı aşağıdaki görevleri otomatik olarak yerine getirir:
+- Dağıtım kullanıcısını oluşturun
+- Docker ve Docker Compose'u yükleyin
+- SSH anahtarlarını yapılandırma
+- Güvenlik duvarı kurallarını ayarlayın
+
+Bu, ana kurulum işidir ve otomasyon çok zaman kazandırır.
+
+### Hizmetleri Dağıtın
+
+```bash
+./deploy.sh
+```
+
+Dağıtım betiği aşağıdakileri yapmanıza yardımcı olur:
+- Ortam yapılandırmasını kontrol edin
+- En son kodu çekin
+- Docker kapsayıcılarını başlatın
+- Durum kontrollerini çalıştırın
+- Dağıtım bildirimleri gönder (Lark)
+
+Süreci uygun kılan tek bir komut yeterlidir.
+
+### Dağıtımı Doğrulayın
+
+```bash
+# Check container status
+docker ps
+
+# Test the download domains
+curl -I https://server.dl.hagicode.com/index.json
+curl -I https://desktop.dl.hagicode.com/index.json
+```
+
+## Operasyon İpuçları
+
+### Önbellek Yönetimi
+
+Önbelleklerin de zaman zaman bakıma ihtiyacı vardır:
+
+**Önbellek diski kullanımını kontrol edin**:
+```bash
+docker volume inspect docker_nginx-cache
+du -sh /var/lib/docker/volumes/docker_nginx-cache/_data
+```
+
+**Önbelleği manuel olarak temizleyin**:
+```bash
+./clear-cache.sh
+```
+
+Veya gerekirse manuel komutları doğrudan çalıştırın:
+```bash
+docker exec nginx sh -c "rm -rf /var/cache/nginx/*"
+docker restart nginx
+```
+
+### Kaynak Sınırları
+
+1 çekirdekli, 2 GB'lik bir sunucuda kaynak sınırı yapılandırması şu şekilde görünür:
+
+```yaml
+services:
+  traefik:
+    deploy:
+      resources:
+        limits:
+          cpus: '1.50'
+          memory: 512M
+
+  nginx:
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 256M
+```
+
+Kaynak kullanımını izlemek için ara sıra şunları çalıştırabilirsiniz:
+```bash
+docker stats
+```
+
+### SAS Token Güvenliği Uygulamaları
+
+SAS Token, Azure Blob Depolama'ya erişmek için kullanılan kimlik bilgisi olduğundan, bunun sızdırılması ciddi olabilir:
+
+- Taahhüt etmeyin `.env` sürüm kontrolüne dosya; zaten var `.gitignore`
+- Önerilen 1 yıl ile uygun bir SAS Token son kullanma tarihi belirleyin
+- SAS Token izinlerini salt okunur olarak sınırlayın
+- SAS Tokenlarını düzenli olarak döndürün
+
+### İzleme ve Uyarılar
+
+HagiCode, aşağıdaki olaylar için uyarı gönderebilen Lark/Feishu Webhook bildirimlerini entegre eder:
+- Dağıtım başarısı veya başarısızlığı
+- Önbellek temizleme durumu
+- Hizmet istisnaları
+
+Bildirimler sunucu bilgilerini, zaman damgalarını ve hata ayrıntılarını içerir ve sorun gidermeyi çok daha hızlı hale getirir.
+
+### Yüksek Kullanılabilirlik Uzantıları
+
+Artık bir sunucu yeterli olmadığında aşağıdakileri göz önünde bulundurabilirsiniz:
+
+1. **Yatay ölçeklendirme**: birden fazla düğüm dağıtın ve trafiği DNS hepsini bir kez deneme veya yük dengeleyici ile dağıtın
+2. **CDN önde**: Daha da hızlı erişim için bulut sunucularının önüne bir CDN yerleştirin
+3. **Önbellek ısınma**: Sıcak dosyaları önbelleğe önceden yüklemek için komut dosyalarını kullanın
+
+## Notlar
+
+Akılda tutulması gereken birkaç şey var:
+
+1. **SSL sertifikaları**: Let's Encrypt'in hız sınırları vardır, bu nedenle dağıtımları çok sık değiştirmeyin, aksi halde sertifika verme işlemi başarısız olabilir
+2. **Önbellek temizleme**: Önemli dosyaları güncelledikten sonra önbelleği temizlemeyi unutmayın, aksi takdirde kullanıcılar eski sürümü indirmeye devam edebilir
+3. **Günlük yönetimi**: Docker günlüklerini düzenli olarak temizleyin, aksi takdirde disk dolabilir
+4. **Yedekleme stratejisi**: gibi dosyaları yedekleyin `Traefik acme.json` ve Bunker Web yapılandırması
+5. **İzleme ve uyarılar**: Feishu bildirimlerini yapılandırarak dağıtım durumunu izleyebilir ve sorunlara hızla yanıt verebilirsiniz
+
+## Sonuç
+
+Bir bulut sunucusu artı bir Nginx önbellekleme katmanı tek ihtiyacınız olan şey. HagiCode bu çözümü oldukça düşük bir aylık maliyetle (sunucu için 60-100 CNY civarında) kullanıyor ve sonuçlar oldukça sağlam. Başlıca avantajları şunlardır:
+
+- **Öngörülebilir maliyet**: Doğrudan bulut depolamayı kullanmaktan veya ticari bir CDN için ödeme yapmaktan yaklaşık %50 daha ucuz
+- **Esnek dağıtım**: ihtiyaçlarınıza göre Traefik veya Bunker Web'i seçin
+- **Güçlü ölçeklenebilirlik**: yatay olarak ölçeklendirebilir veya gerekirse daha sonra bir CDN ekleyebilirsiniz
+- **Basit işlemler**: Kabuk komut dosyaları ve Ansible, otomatik dağıtımı kolaylaştırır
+
+Dosya dağıtımına ihtiyaç duyan küçük ekipler ve bağımsız geliştiriciler için bu kesinlikle denemeye değer pratik bir seçenektir.
+
+HagiCode bu mimariyi bir süredir üretimde istikrarlı bir şekilde çalıştırıyor ve küresel kullanıcı indirmeleri güvenilir kalıyor. Benzer bir çözüm arıyorsanız denemeye değer.
+
+## Teknoloji Yığını Özeti
+
+Özetlemek gerekirse, ilgili teknolojilerin bir özetini burada bulabilirsiniz:
+
+| Bileşen | Seçim | Amaç |
+|------|------|------|
+| Bulut sunucusu | Alibaba Bulut ECS | Temel çalışma zamanı ortamı |
+| Ters proxy | Traefik / Bunker Web | SSL sonlandırma, yönlendirme, güvenlik koruması |
+| Önbellek katmanı | Nginx | Ters proxy önbelleğe alma, Gzip sıkıştırma |
+| Dosya depolama | Azure Blob Depolama | Dosya kaynağı |
+| Konteynerizasyon | Docker Oluşturma | Hizmet orkestrasyonu |
+| Otomasyon | Yanıtlayıcı | Sunucu yapılandırma yönetimi |
+| Bildirimler | Lark/Feishu Web Kancası | Dağıtım durumu bildirimleri |
+
+## Referanslar
+
+Bu yazıda bahsedilen referans malzemeleri şunlardır:
+
+- HagiCode projesi: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- HagiCode'un web sitesi: [hagicode.com](https://hagicode.com)
+- 30 dakikalık uygulamalı demo: [www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)
+- Docker Tek tıkla kurulum oluşturun: [docs.hagicode.com/installation/docker-compose](https://docs.hagicode.com/installation/docker-compose)
+- Masaüstü hızlı kurulumu: [hagicode.com/desktop/](https://hagicode.com/desktop/)
+
+---
+
+Bu yazı size yardımcı olduysa, bu zaten onu değerli kılar:
+- Beğeni yapın ki daha çok kişi bulsun
+- GitHub'da projeye yıldız verin: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Daha fazla bilgi için resmi web sitesini ziyaret edin: [hagicode.com](https://hagicode.com)
+- 30 dakikalık uygulamalı demoyu izleyin: [www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)
+- Tek tıkla kurulumu deneyin: [docs.hagicode.com/installation/docker-compose](https://docs.hagicode.com/installation/docker-compose)
+- Masaüstü uygulamasını hızlı bir şekilde yükleyin: [hagicode.com/desktop/](https://hagicode.com/desktop/)
+- Herkese açık beta başladı; deneyebilirsiniz
+
+---
+
+Bu yazı için bu kadar. Umarım bu çözüm size yardımcı olur. Daha iyi fikirleriniz varsa paylaşmaktan çekinmeyin. İnsanlar birbirlerinden öğrendiğinde teknolojiyi geliştirmek her zaman daha kolaydır.
+
+## Telif Hakkı Uyarısı
+
+Okuduğunuz için teşekkür ederiz. Bu makaleyi faydalı bulduysanız beğenebilir, favorilerinize ekleyebilir ve paylaşabilirsiniz.
+Bu içerik yapay zeka destekli işbirliğiyle oluşturuldu ve son sürüm, yazar tarafından incelenip onaylandı.
+- Yazar: [yenibe36524](https://www.newbe.pro)
+- Orijinal bağlantı: [https://docs.hagicode.com/blog/2026-04-15-low-cost-cloud-server-download-distribution-station/](https://docs.hagicode.com/blog/2026-04-15-low-cost-cloud-server-download-distribution-station/)
+- Telif hakkı uyarısı: Aksi belirtilmediği sürece bu blogdaki tüm makaleler BY-NC-SA kapsamında lisanslıdır. Lütfen yeniden yayınlarken kaynağı belirtin.

@@ -1,0 +1,300 @@
+---
+title: Sådan implementeres automatisk genforsøg for agent-CLI'er som Claude Code og Codex
+date: 2026-04-18
+tags: [Agent CLI, Claude Code, Codex, Automatic Retry, HagiCode]
+description: "Sætningen automatisk genforsøg ligner en lille vippekontakt, men når du først har sat den ind i et rigtigt ingeniørmiljø, er det ikke noget lignende. Hej alle sammen, I"
+---
+
+## Sådan implementeres automatisk genforsøg for agent-CLI'er som Claude Code og Codex
+
+> Sætningen automatisk genforsøg ligner en lille vippekontakt, men når du først har sat den ind i et rigtigt ingeniørmiljø, er det ikke noget lignende. Hej alle sammen, jeg er HagiCode-skaberen Yu Kun. I dag vil jeg ikke bytte med tom snak. Jeg vil gerne tale om, hvordan automatisk genforsøg for Agent CLI'er såsom Claude Code og Codex rent faktisk skal udføres, så det både kan genoprette fra undtagelser og undgå at trække systemet i endeløs gentagen eksekvering.
+
+## Baggrund
+
+Hvis du også har arbejdet med AI-kodning på det seneste, er du sikkert allerede løbet ind i den slags problemer: Opgaven fejler ikke med det samme, men bryder halvvejs i udførelsen.
+
+I en almindelig HTTP-anmodning betyder det ofte bare at sende den igen, måske med en vis eksponentiel backoff. Men agent CLI'er er anderledes. Værktøjer som Claude Code og Codex udføres normalt på en streaming måde, og skubber output ud stykke for stykke. Under denne proces kan de også binde sig til en tråd, session eller genoptage token. Med andre ord er spørgsmålet ikke blot: "Mislykkedes denne anmodning eller ej?" Det bliver:
+
+- Tæller det indhold, der allerede blev udsendt, stadig med?
+- Kan den nuværende kontekst fortsætte med at køre?
+- Skal denne fejl genoprettes automatisk?
+- Hvis det skal gendannes, hvor længe skal vi så vente, før vi prøver igen, hvad skal vi sende under genforsøget, og skal vi stadig genbruge den oprindelige kontekst?
+
+Første gang mange hold bygger denne del, skriver de instinktivt den mest naive version: hvis der opstår en fejl, så prøv en gang til. Den idé er helt naturlig, men når den når et rigtigt projekt, begynder det ene problem efter det andet at dukke op.
+
+- Nogle fejl er tydeligvis midlertidige fejl, men bliver behandlet som endelige fejl
+- Nogle fejl er slet ikke værd at prøve igen, men systemet afspiller dem igen og igen
+- Forespørgsler med en tråd og anmodninger uden en tråd behandles nøjagtigt ens
+- Backoff-strategien har ingen grænser, og baggrundsanmodninger overbelaster sig selv
+
+Mens han integrerede flere Agent CLI'er, trådte HagiCode også ind i disse fælder. Især på Codex-siden var det første problem, vi afslørede, at en bestemt type genforbindelsesmeddelelse ikke blev genkendt som en terminaltilstand, der kunne prøves igen, så den gendannelsesmekanisme, vi allerede havde, fik aldrig en chance for at træde i kraft. For at sige det helt klart var det ikke, at systemet manglede automatisk genforsøg. Systemet kunne simpelthen ikke erkende, at netop denne fejl var værd at prøve igen.
+
+Så kernen i denne artikel er meget klar: **automatisk genforsøg er ikke en knap, men et lagdelt design.**
+
+## Om HagiCode
+
+Den tilgang, der deles i denne artikel, kommer fra virkelig praksis i vores [HagiCode](https://hagicode.com) projekt. Hvad HagiCode forsøger at gøre, er ikke bare at forbinde én model og kalde det en dag. Det handler om at forene streamingmeddelelser, værktøjsopkald, fejlgendannelse og sessionskontekst for flere Agent CLI'er i én eksekveringsmodel, der kan vedligeholdes på lang sigt.
+
+En af de ting, jeg holder mest af, er, hvordan man får AI-kodning til virkelig at lande i rigtigt ingeniørarbejde. Det er ikke svært at skrive en demo. Den svære del er at gøre den demo til noget, som et team virkelig er villige til at bruge i lang tid. HagiCode tager automatisk genforsøg seriøst, ikke fordi funktionen ser sofistikeret ud, men fordi hvis langvarig, streaming, genoptagelig CLI-udførelse ikke er stabil, er det, brugerne ser, ikke en intelligent assistent, men en kommandoindpakning, der afbryder forbindelsen halvvejs gennem hver anden kørsel.
+
+Hvis du vil se på projektets indgangspunkter først, er her to:
+
+- GitHub: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Officiel hjemmeside: [hagicode.com](https://hagicode.com)
+
+Tager vi det et skridt videre, er HagiCode også på Steam nu. Hvis du bruger Steam, er du velkommen til at tilføje det til din ønskeliste først:
+
+- [Steam butiksside (tilføj til ønskeliste / se detaljer)](https://store.steampowered.com/app/4625540/Hagicode/)
+
+## Hvorfor automatisk genforsøg for agent-CLI'er er sværere end almindeligt forsøg igen
+
+Dette er et meget praktisk spørgsmål, så lad os gå direkte til konklusionen: vanskeligheden ved automatisk genforsøg for Agent CLI'er er ikke "prøv igen efter et par sekunder", men "kan det stadig fortsætte i den oprindelige kontekst?"
+
+Du kan tænke på det som en lang samtale. Almindelig API-genforsøg er mere som genopkald, når telefonlinjen er optaget. Agent CLI-genforsøg ligner mere, at signalet falder, mens den anden part er halvvejs gennem en sætning, og så skal du beslutte, om du vil ringe tilbage, om du vil starte forfra, når du gør det, og om den anden part stadig husker, hvor samtalen stoppede. Det er slet ikke den samme slags tekniske problemer.
+
+Mere konkret er der fire særligt typiske vanskeligheder.
+
+### 1. Det streamer
+
+Når output allerede er sendt til brugeren, kan du ikke længere håndtere fejl, som du ville gøre med en almindelig anmodning, hvor du stille sluger det og stille forsøger igen. Det skyldes, at det tidligere indhold allerede er set. Hvis genafspilningsstrategien er forkert, kan frontend let vise duplikeret tekst og inkonsistent tilstand, og livscyklussen af ​​værktøjsopkald kan også blive sammenfiltret. Dette er ikke metafysik. Det er ingeniørarbejde.
+
+### 2. Det binder normalt til sessionskontekst
+
+Udbydere som Codex binder sig til en tråd, og implementeringer som Claude Code har også et fortsættelsesmål eller en tilsvarende kontekst, der kan genoptages. Den egentlige forudsætning for automatisk genforsøg er ikke bare, at fejlen ligner en midlertidig fejl, men også at der stadig er en bærer, der tillader denne udførelse at fortsætte.
+
+### 3. Ikke alle fejl er værd at prøve igen
+
+Netværksjitter, SSE inaktiv timeout og midlertidige upstream-fejl er normalt et forsøg værd. Men hvis det, du står over for, er autentificeringsfejl, mistet kontekst eller en udbyder, der slet ikke har mulighed for at genoptage, så er genforsøg normalt ikke retablering. Det er støjgenerering.
+
+### 4. Det har brug for grænser
+
+Ubegrænset automatisk genforsøg er næsten altid forkert. Teknologiske tendenser kan være støjende i et stykke tid, men tekniske love forbliver ofte stabile i mange år. En af dem er, at fejlgendannelse skal have grænser. Systemet skal vide, hvor mange gange det højst kan prøve igen, hvor længe det skal vente hver gang, og hvornår det skal stoppe og indrømme, at denne virkelig ikke kommer til at komme sig.
+
+På grund af disse egenskaber implementerede HagiCode i sidste ende ikke automatisk genforsøg som et par linjer `try/catch` hos en bestemt udbyder. I stedet udpakkede vi det til et delt kapacitetslag. I sidste ende skal ingeniørproblemer stadig løses med ingeniørmetoder.
+
+## HagiCodes tilgang: Træk Prøv igen ud af udbyderen
+
+HagiCodes nuværende implementering i den virkelige verden kan komprimeres til én sætning:
+
+**Det delte lag styrer genforsøgsflowet ensartet, og hver konkrete udbyder er kun ansvarlig for at besvare to spørgsmål: er denne terminaltilstand værd at prøve igen, og kan den nuværende kontekst stadig fortsætte?**
+
+Dette er ikke kompliceret, men det er kritisk. Når først ansvarsområder er adskilt på denne måde, kan Claude Code, Codex og endda andre Agent CLI'er alle genbruge det samme skelet. Modeller vil ændre sig, værktøjer vil udvikle sig, arbejdsgange vil blive opgraderet, men det tekniske grundlag forbliver der.
+
+### Lag 1: Brug en samlet koordinator til at administrere genforsøgsløkken
+
+Kerneimplementeringsfragmentet i projektet ser nogenlunde sådan ud:
+
+```csharp
+internal static class ProviderErrorAutoRetryCoordinator
+{
+    public static async IAsyncEnumerable<CliMessage> ExecuteAsync(
+        string prompt,
+        ProviderErrorAutoRetrySettings? settings,
+        Func<string, IAsyncEnumerable<CliMessage>> executeAttemptAsync,
+        Func<bool> canRetryInSameContext,
+        Func<TimeSpan, CancellationToken, Task> delayAsync,
+        Func<CliMessage, bool> isRetryableTerminalMessage,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        var normalizedSettings = ProviderErrorAutoRetrySettings.Normalize(settings);
+        var retrySchedule = normalizedSettings.Enabled
+            ? normalizedSettings.GetRetrySchedule()
+            : [];
+
+        for (var attempt = 0; ; attempt++)
+        {
+            var attemptPrompt = attempt == 0
+                ? prompt
+                : ProviderErrorAutoRetrySettings.ContinuationPrompt;
+
+            CliMessage? terminalFailure = null;
+
+            await foreach (var message in executeAttemptAsync(attemptPrompt)
+                               .WithCancellation(cancellationToken))
+            {
+                if (isRetryableTerminalMessage(message))
+                {
+                    terminalFailure = message;
+                    break;
+                }
+
+                yield return message;
+            }
+
+            if (terminalFailure is null)
+            {
+                yield break;
+            }
+
+            if (attempt >= retrySchedule.Count || !canRetryInSameContext())
+            {
+                yield return terminalFailure;
+                yield break;
+            }
+
+            await delayAsync(retrySchedule[attempt], cancellationToken);
+        }
+    }
+}
+```
+
+Hvad denne kode gør, er faktisk meget ligetil, men også meget effektivt.
+
+- Lad være med at sende mellemliggende fejl direkte igennem i starten; koordinatoren afgør, om inddrivelse stadig er mulig
+- Først når genforsøgsbudgettet er opbrugt, vender den endelige fiasko faktisk tilbage til det øverste lag
+- Fra det andet forsøg sendes den oprindelige prompt ikke længere; en fortsættelsesprompt sendes i stedet ensartet
+
+Det er derfor, jeg blev ved med at understrege tidligere, at automatisk genforsøg ikke blot er "foretag anmodningen igen." Det er ikke bare at lappe en undtagelsesgren. Det er at styre livscyklussen for en henrettelse. Det lyder måske som et produkt-manager-sprog, men i tekniske termer er det præcis, hvad det er.
+
+### Lag 2: Snapshot af politikken for genforsøg
+
+Et andet problem, der er meget let at overse, er dette: Hvem beslutter, om automatisk genforsøg er aktiveret for denne anmodning?
+
+HagiCodes svar er ikke at afhænge af en "aktuel global konfiguration", men at gøre politikken til et øjebliksbillede og lade den rejse sammen med denne anmodning. På den måde vil sessionskø, beskedvedholdenhed, eksekveringsvideresendelse og udbydertilpasning ikke miste politikken undervejs. Et vellykket løb er ikke et system. Vedvarende succes er et system.
+
+Kernestrukturen kan forenkles til dette:
+
+```csharp
+public sealed record ProviderErrorAutoRetrySnapshot
+{
+    public const string DefaultStrategy = "default";
+
+    public bool Enabled { get; init; }
+
+    public string Strategy { get; init; } = DefaultStrategy;
+
+    public static ProviderErrorAutoRetrySnapshot Normalize(bool? enabled, string? strategy)
+    {
+        return new ProviderErrorAutoRetrySnapshot
+        {
+            Enabled = enabled ?? true,
+            Strategy = string.IsNullOrWhiteSpace(strategy)
+                ? DefaultStrategy
+                : strategy.Trim()
+        };
+    }
+}
+```
+
+Derefter på udførelsessiden er det mappet til indstillingsobjektet, der faktisk forbruges af udbyderen. Værdien af denne tilgang er meget direkte:
+
+- Forretningslaget beslutter, om genforsøg skal tillades
+- Kørselstiden bestemmer, hvordan genforsøg skal udføres
+
+Hver side styrer sin egen bekymring uden at kollidere med den anden. Mange problemer er ikke umulige at løse. Deres omkostninger er simpelthen ikke blevet ekspliciteret. At omdanne politikken til et øjebliksbillede er i bund og grund en måde at tage højde for disse omkostninger på på forhånd.
+
+### Lag 3: Udbydere bestemmer kun terminaltilstand og kontekstlevedygtighed
+
+Når vi når den konkrete Claude Code eller Codex-udbyder, bliver ansvaret her faktisk meget tyndt. Du kan tænke på det som en forbedring, ikke en erstatning.
+
+Tager man Codex som et eksempel, når det kobles ind i den delte koordinator, behøver det egentlig kun at give tre ting:
+
+```csharp
+await foreach (var message in ProviderErrorAutoRetryCoordinator.ExecuteAsync(
+                   prompt,
+                   options.ProviderErrorAutoRetry,
+                   retryPrompt => ExecuteCodexAttemptAsync(...),
+                   () => !string.IsNullOrWhiteSpace(resolvedThreadId),
+                   DelayAsync,
+                   IsRetryableTerminalFailure,
+                   cancellationToken))
+{
+    yield return message;
+}
+```
+
+Du vil bemærke, at de udbyderspecifikke beslutninger i virkeligheden kun er disse to:
+
+- `IsRetryableTerminalFailure`
+- `canRetryInSameContext`
+
+Codex tjekker om tråden stadig kan fortsætte, mens Claude Code tjekker om fortsættelsesmålet stadig eksisterer. Backoff-politik, genforsøgstælling og opfølgningsprompter bør ikke genopfindes af hver udbyder separat.
+
+Når dette lag er adskilt, falder omkostningerne ved at integrere flere CLI'er i HagiCode meget. Du behøver ikke at duplikere en hel prøvetilstandsmaskine. Du behøver kun at tilslutte den pågældende udbyders grænsebetingelser. At skrive hurtigt er ikke det samme som at skrive robust. At kunne forbinde noget er ikke det samme som at forbinde det godt. At få den til at køre er heller ikke det samme som at gøre den vedligeholdelsesdygtig over tid.
+
+## En nem fejl at begå: Behandl ikke enhver fejl som en gentagelse
+
+I denne analyse er det punkt, jeg mest ønsker at fremhæve, ikke "hvordan man implementerer genforsøg", men "hvordan man undgår de forkerte genforsøg."
+
+Det oprindelige indgangspunkt i problemet var, at Codex ikke kunne genkende en genforbindelsesmeddelelse. Af intuition ville mange mennesker vælge den mindst mulige rettelse: Tilføj endnu et strengpræfiks til hvidlisten. Den idé er ikke ligefrem forkert, men den føles mere som en demo-faseløsning end en langsigtet vedligeholdelig.
+
+Fra den nuværende HagiCode-implementering har systemet allerede taget et skridt i en mere robust retning. Den stirrer ikke længere kun på én bogstavelig streng. I stedet afleverer den genoprettelige terminaltilstande til den delte koordinator ensartet. Fordelene er indlysende:
+
+- Det er mindre sandsynligt, at det fejler fuldstændigt på grund af en lille ordlydsændring i én besked
+- Testdækning kan bygges omkring terminal-state-konvolutten i stedet for en enkelt hårdkodet tekstlinje
+- Forsøgslogikken bliver mere konsistent inden for den samme udbyder
+
+Selvfølgelig skal der være en fast grænse her: at være mere generel betyder ikke at være mere eftergivende. **Hvis den aktuelle kontekst ikke kan fortsætte, så selvom fejlen ligner en midlertidig fejl, bør den ikke afspilles blindt.**
+
+Dette punkt er kritisk. Det, der virkelig får folk til at stole på et system, er ikke, at det indimellem fungerer, men at det er pålideligt det meste af tiden. Hvis et flow kun kan opretholdes af eksperter, så er der stadig langt fra reel adoption.
+
+## De tre mest værdifulde lektioner at holde i praksis
+
+På dette tidspunkt giver det mening at begynde at bringe diskussionen tilbage til implementeringspraksis. Hvis du planlægger at bygge en lignende kapacitet i dit eget projekt, er dette de tre regler, jeg på det kraftigste anbefaler at beskytte først.
+
+### 1. Genforsøgsbudgettet skal have grænser
+
+HagiCodes nuværende standard backoff-rytme er:
+
+- 10 sekunder
+- 20 sekunder
+- 60 sekunder
+
+Denne rytme passer måske ikke til ethvert system, men eksistensen af grænser skal forblive. Ellers holder automatisk genforsøg hurtigt op med at være en gendannelsesmekanisme og bliver til en hændelsesforstærker. Skynd dig ikke at give det et imponerende navn. Sørg først for, at tingen kan overleve to iterationer inde i et rigtigt team.
+
+### 2. Fortsættelsesprompten bør forenes
+
+Projektet bruger en fast fortsættelsesprompt, så senere forsøg tydeligt følger vejen til at fortsætte den nuværende kontekst i stedet for at starte en helt ny komplet anmodning. Denne evne er ikke prangende, men når du bygger et rigtigt projekt, kan du ikke undvære det. Mange ting, der ligner magi, er, når de er brudt fra hinanden, blot en poleret ingeniørproces.
+
+### 3. Både det delte bibliotek og adapterlaget har brug for spejlede tests
+
+Jeg vil især sige lidt mere om dette punkt. Mange hold vil skrive et lag af test i den delte runtime og tænker, at det nok er nok. Det er det ikke.
+
+Grunden til at jeg føler mig relativt sikker på HagiCodes implementering er, at begge lag har testdækning:
+
+- Den delte udbyder tester, om automatisk fortsættelse virkelig skete
+- Adapterlaget tester, om endelige fejl og streamingmeddelelser blev bevaret korrekt
+
+Denne gang kørte jeg også to relaterede testgrupper igen, og alle 31 testcases bestod i dem begge. Dette resultat alene beviser ikke, at designet er perfekt, men det beviser i det mindste én ting: det nuværende automatiske genforsøg er ikke et papirdesign. Det er en funktion, der er begrænset af både kode og test. Snak er billigt. Vis mig koden. Det passer perfekt her.
+
+## Resumé
+
+Hvis hele artiklen skulle komprimeres til én sætning, ville den være denne:
+
+**For agent-CLI'er såsom Claude Code og Codex bør automatisk genforsøg ikke implementeres som et lokalt trick gemt i én udbyder. Det bør bygges som en kombination af en delt koordinator, et øjebliksbillede af politikker, kontrol af kontekstlevedygtighed og spejlede tests.**
+
+Fordelene ved at gøre det på denne måde er meget praktiske:
+
+- Logikken er skrevet én gang og genbrugt på tværs af flere udbydere
+- Hvorvidt en anmodning får lov til at prøve igen, kan køre stabilt med udførelseskæden
+- Fortsæt med at køre, når konteksten eksisterer, og stop i tide, når den ikke gør det
+- Hvad frontend i sidste ende ser, er en stabil afsluttet tilstand eller mislykket tilstand, ikke en bunke af forladt mellemstøj
+
+Denne løsning blev poleret lidt efter lidt, mens HagiCode integrerede flere Agent CLI'er i virkelige scenarier. Hvem siger, at AI-assisteret programmering ikke er den nye æra af parprogrammering? Modeller hjælper dig med at komme i gang, færdiggøre kode og forgrene dig, men det, der ofte bestemmer den øvre grænse for oplevelsen, er stadig kontekst, proces og begrænsninger.
+
+Hvis denne artikel var nyttig for dig, er du også velkommen til at se på HagiCodes offentlige indgangspunkter:
+
+- GitHub: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Officiel hjemmeside: [hagicode.com](https://hagicode.com)
+- 30-minutters hands-on demo: [www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)
+- Skrivebordsinstallationsindgang: [hagicode.com/desktop/](https://hagicode.com/desktop/)
+- Steam: [Steam butiksside (tilføj til ønskeliste / se detaljer)](https://store.steampowered.com/app/4625540/Hagicode/)
+
+HagiCode er allerede på Steam nu. Dette er ikke vaporware, og jeg har lagt linket lige her. Hvis du bruger Steam, skal du gå videre og tilføje det til din ønskeliste. At klikke ind for at se selv er mere direkte end at høre mig sige ti linjer mere om det her.
+
+Det er nok om dette emne for nu. Vi vil blive ved med at mødes inde i rigtige projekter.
+
+## Referencer
+
+- HagiCode projektets hjemmeside: [https://hagicode.com](https://hagicode.com)
+- HagiCode GitHub repository: [https://github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Officiel demo video: [https://www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)
+- Installationsvejledning til skrivebordet: [https://hagicode.com/desktop/](https://hagicode.com/desktop/)
+
+## Ophavsretsmeddelelse
+
+Tak fordi du læste med. Hvis du fandt denne artikel nyttig, er du velkommen til at like, bogmærke og dele den.
+Dette indhold blev skabt med AI-assisteret samarbejde, og det endelige indhold blev gennemgået og bekræftet af forfatteren.
+- Forfatter: [newbe36524](https://www.newbe.pro)
+- Original artikel: [https://docs.hagicode.com/blog/2026-02-11-agent-cli-automatic-retry/](https://docs.hagicode.com/blog/2026-02-11-agent-cli-automatic-retry/)
+- Ophavsretsmeddelelse: Medmindre andet er angivet, er alle artikler på denne blog licenseret under BY-NC-SA. Angiv venligst kilden, når du genindsender.

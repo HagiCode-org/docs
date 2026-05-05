@@ -1,0 +1,227 @@
+---
+title: ".NET Core Dual-Database i praksis: Beste praksis for elegant kombinasjon av PostgreSQL og SQLite"
+date: 2026-02-01
+tags: [ASP.NET Core, PostgreSQL, SQLite, Database Architecture, Orleans]
+description: "NET Core Dual-Database i praksis: Beste praksis for elegant kombinasjon av PostgreSQL og SQLite: Når vi bygger moderne applikasjoner, møter vi ofte dette"
+---
+
+## .NET Core Dual-Database i praksis: La PostgreSQL og SQLite sameksistere fredelig
+
+> Når vi bygger moderne applikasjoner, står vi ofte overfor denne avveiningen: utviklingsmiljøer vil ha noe lett og praktisk, mens produksjonsmiljøer krever høy samtidighet og høy tilgjengelighet. Denne artikkelen deler hvordan du elegant støtter både PostgreSQL og SQLite i et .NET Core-prosjekt og implementerer beste praksis for "SQLite for utvikling, PostgreSQL for produksjon."
+
+
+## Bakgrunn
+
+I programvareutvikling har forskjeller mellom miljøer alltid vært et av de vanskeligste problemene for ingeniørteam. Ta **HagiCode**-plattformen vi bygger som et eksempel: det er et AI-assistert utviklingssystem basert på ASP.NET Core 10 og React, med Orleans integrert internt for distribuert statlig styring. Stabelen er moderne og ganske sofistikert.
+
+Tidlig i prosjektet møtte vi et klassisk teknisk smertepunkt: utviklere ønsket at det lokale miljøet skulle fungere ut av boksen, uten å måtte installere og konfigurere en tung PostgreSQL-database. Men i produksjonen trengte vi å håndtere skriving med høy samtidighet og komplekse JSON-spørringer, og det er akkurat der lette SQLite begynner å vise sine grenser.
+
+Hvordan kan vi beholde en enkelt kodebase samtidig som vi lar applikasjonen dra nytte av SQLites portabilitet som en desktop-app, og også utnytte PostgreSQLs kraftige ytelse som en tjeneste i bedriftsklasse? Det er kjernespørsmålet denne artikkelen utforsker.
+
+## Om HagiCode
+
+Tilnærmingen til dobbel databasetilpasning som deles i denne artikkelen kommer direkte fra vår praktiske erfaring i **HagiCode**-prosjektet. HagiCode er en neste generasjons utviklingsplattform som integrerer AI-promptadministrasjon og OpenSpec-arbeidsflyten. Det var nettopp for å balansere utviklererfaring med produksjonsstabilitet at vi kom frem til dette utprøvde arkitektoniske mønsteret.
+
+Besøk gjerne GitHub-depotet vårt for å se hele prosjektet: [HagiCode-org/side](https://github.com/HagiCode-org/site).
+
+## Kjerneemne 1: Arkitekturdesign og enhetlig abstraksjon
+
+For å støtte to databaser i .NET Core, er nøkkelideen å være avhengig av abstraksjoner i stedet for konkrete implementeringer. Vi må skille databasevalg fra forretningskode og la konfigurasjonslaget bestemme.
+
+### Designtilnærming
+
+1.  **Enhetlig grensesnitt**: All forretningslogikk bør avhenge av `DbContext` basisklasse eller tilpassede grensesnitt, i stedet for et spesifikt `PostgreSqlDbContext`.
+2.  **Konfigurasjonsdrevet**: Bruk konfigurasjonselementer i `appsettings.json` for dynamisk å bestemme hvilken databaseleverandør som skal lastes ved oppstart av applikasjonen.
+3.  **Funksjonsisolering**: Legg til tilpasningslogikk for PostgreSQL-spesifikke funksjoner, slik som JSONB, slik at applikasjonen fortsatt kan forringes elegant på SQLite.
+
+### Kodeimplementering: Dynamisk kontekstkonfigurasjon
+
+I ASP.NET Core `Program.cs`, vi bør ikke hardkode `UseNpgsql` eller `UseSqlite`. I stedet bør vi lese konfigurasjonen og bestemme oss dynamisk.
+
+Først definerer du konfigurasjonsklassen:
+
+```csharp
+public class DatabaseSettings
+{
+    public const string SectionName = "Database";
+    
+    // Database type: PostgreSQL or SQLite
+    public string DbType { get; set; } = "PostgreSQL"; 
+    
+    // Connection string
+    public string ConnectionString { get; set; } = string.Empty;
+}
+```
+
+Registrer deretter tjenesten i `Program.cs` basert på konfigurasjon:
+
+```csharp
+// Read configuration
+var databaseSettings = builder.Configuration.GetSection(DatabaseSettings.SectionName).Get<DatabaseSettings>();
+
+// Register DbContext
+builder.Services.AddDbContext<ApplicationDbContext>(options =>
+{
+    if (databaseSettings?.DbType?.ToLower() == "sqlite")
+    {
+        // SQLite configuration
+        options.UseSqlite(databaseSettings.ConnectionString);
+        
+        // Handling SQLite's concurrent write limitations
+        // Note: in production, enabling WAL mode is recommended to improve concurrency performance
+    }
+    else
+    {
+        // PostgreSQL configuration (default)
+        options.UseNpgsql(databaseSettings.ConnectionString, npgsqlOptions =>
+        {
+            // Enable JSONB support, which is very useful when handling AI conversation records
+            npgsqlOptions.UseJsonNet(); 
+        });
+        
+        // Configure connection pool retry policy
+        options.EnableRetryOnFailure(3);
+    }
+});
+```
+
+## Kjerneemne 2: Håndtering av forskjeller og migrasjonsstrategi
+
+Selv om PostgreSQL og SQLite begge støtter SQL-standarden, skiller de seg betydelig i spesifikke muligheter og oppførsel. Hvis disse forskjellene ikke håndteres forsiktig, kan du lett ende opp med den vanskelige situasjonen hvor alt fungerer lokalt, men feiler etter utplassering.
+
+### 1. Håndtering av JSON-typer
+
+I HagiCode må vi lagre en stor mengde meldinger og AI-metadata, som vanligvis involverer JSON-kolonner.
+- **PostgreSQL**: Har en innfødt `JSONB` type med utmerket søkeytelse.
+- **SQLite**: Har ikke en innebygd JSON-type (nyere versjoner inkluderer JSON1-utvidelsen, men objektkartleggingen er fortsatt forskjellig), så data lagres vanligvis som TEKST.
+
+**Løsning**:
+I EF Core-enhetskartlegging konfigurerer vi den som en konvertibel type.
+
+```csharp
+protected override void OnModelCreating(ModelBuilder modelBuilder)
+{
+    base.OnModelCreating(modelBuilder);
+
+    // Configure entity
+    modelBuilder.Entity<PromptTemplate>(entity => 
+    {
+        entity.Property(e => e.Metadata)
+              .HasColumnType("jsonb") // PG uses jsonb
+              .HasConversion(
+                  v => JsonSerializer.Serialize(v, (JsonSerializerOptions)null),
+                  v => JsonSerializer.Deserialize<Dictionary<string, object>>(v, (JsonSerializerOptions)null)
+              ); 
+    });
+}
+```
+
+Når SQLite brukes, `HasColumnType("jsonb")` kan ignoreres eller utløse en advarsel. Imidlertid fordi `HasConversion` er konfigurert, er dataene fortsatt serialisert og deserialisert riktig som strenger lagret i et TEKST-felt, noe som sikrer kompatibilitet.
+
+### 2. Separere migrasjonsstrategier
+
+Prøv aldri å få ett sett med migreringsskript til å fungere for både PostgreSQL og SQLite samtidig. Forskjeller i primærnøkkelgenereringsstrategier, indekssyntaks og andre databasedetaljer vil uunngåelig føre til feil.
+
+**Anbefalt praksis**:
+Opprettholde to migrasjonsgrener eller prosjekter. I HagiCode-utviklingsarbeidsflyten er det slik vi håndterer det:
+
+1.  **Utviklingsstadiet**: Arbeid hovedsakelig med SQLite. Bruk `Add-Migration Init_Sqlite -OutputDir Migrations/Sqlite`.
+2.  **Tilpasningsstadiet**: Etter å ha utviklet en funksjon, bytt tilkoblingsstrengen til PostgreSQL og kjør `Add-Migration Init_Postgres -OutputDir Migrations/Postgres`.
+3.  **Automasjonsskript**: Skriv et enkelt PowerShell- eller Bash-skript for å automatisk bruke riktig migrering basert på gjeldende miljøvariabel.
+
+```bash
+# Pseudocode for simple deployment logic
+if [ "$DATABASE_PROVIDER" = "PostgreSQL" ]; then
+    dotnet ef database update --project Migrations.Postgres
+else
+    dotnet ef database update --project Migrations.Sqlite
+fi
+```
+
+## Kjerneemne 3: Leksjoner fra HagiCode i produksjon
+
+Mens vi refaktorerte **HagiCode** fra en enkeltdatabasemodell til støtte for dobbel database, traff vi noen fallgruver og samlet noen viktige leksjoner som kan hjelpe deg å unngå de samme feilene.
+
+### 1. Forskjeller i samtidighet og transaksjoner
+
+PostgreSQL bruker en server-klient-arkitektur og støtter skriving med høy samtidighet med kraftige transaksjonsisolasjonsnivåer. SQLite bruker fillåsing, så skriveoperasjoner låser hele databasefilen med mindre WAL-modus er aktivert.
+
+**Anbefaling**:
+Når du skriver forretningslogikk som involverer hyppige skrivinger, slik som sanntidslagring av en brukers redigeringstilstand, må du ta hensyn til SQLites låsemodell. Da vi designet OpenSpec-samarbeidsmodulen i **HagiCode**, introduserte vi en "sammenslå før skriving"-mekanisme for å redusere frekvensen av direkte databaseskriving, slik at vi kan opprettholde god ytelse på begge databasene.
+
+### 2. Livssyklusadministrasjon av tilkoblingsstrenger
+
+Å etablere en PostgreSQL-tilkobling er relativt dyrt og avhenger av tilkoblingspooling. SQLite-tilkoblinger er veldig lette, men hvis de ikke frigjøres umiddelbart, kan fillåser føre til at senere operasjoner blir tidsavbrutt.
+
+i `Program.cs`, kan vi finjustere atferd for hver database:
+
+```csharp
+if (databaseSettings?.DbType?.ToLower() == "sqlite")
+{
+    // SQLite: keeping connections open can improve performance, but watch out for file locks
+    options.UseSqlite(connectionString, sqliteOptions =>
+    {
+        // Set command timeout
+        sqliteOptions.CommandTimeout(30);
+    });
+}
+else
+{
+    // PG: make full use of connection pooling
+    options.UseNpgsql(connectionString, npgsqlOptions =>
+    {
+        npgsqlOptions.MaxBatchSize(100);
+        npgsqlOptions.CommandTimeout(30);
+    });
+}
+```
+
+### 3. Viktigheten av testdekning
+
+Mange utviklere, inkludert noen tidlige medlemmer av teamet vårt, har en tendens til å gjøre en vanlig feil: kjører enhetstester bare i utviklingsmiljøet, som vanligvis er SQLite.
+
+I HagiCodes CI/CD-pipeline håndhevet vi et GitHub Actions-trinn for å sikre at hver pull-forespørsel kjører PostgreSQL-integrasjonstester.
+
+```yaml
+# Example snippet from .github/workflows/test.yml
+- name: Run Integration Tests (PostgreSQL)
+  run: |
+    docker-compose up -d db_postgres
+    dotnet test --filter "Category=Integration"
+```
+
+Dette hjalp oss med å fange utallige feil relatert til SQL-syntaksforskjeller og store og små bokstaver.
+
+## Konklusjon
+
+Ved å introdusere et abstraksjonslag og konfigurasjonsdrevet avhengighetsinjeksjon, implementerte vi et tospors PostgreSQL- og SQLite-oppsett i **HagiCode**-prosjektet. Dette reduserte ikke bare introduksjonsbarrieren for nye utviklere betydelig ved å fjerne behovet for å installere PostgreSQL, men ga også sterke ytelsesgarantier for produksjon.
+
+For å oppsummere hovedpunktene:
+1.  **Abstraksjon først**: Forretningskode bør ikke avhenge av konkrete databaseimplementeringer.
+2.  **Separat konfigurasjon**: Bruk forskjellig `appsettings.json` filer for utvikling og produksjon.
+3.  **Separate migreringer**: Ikke prøv å få ett migreringssett til å fungere overalt.
+4.  **Funksjonsforringelse**: Prioriter kompatibilitet i SQLite og ytelse i PostgreSQL.
+
+Dette arkitektoniske mønsteret er ikke bare egnet for HagiCode, men for ethvert .NET-prosjekt som trenger å finne en balanse mellom lettvektsutvikling og tungvektsproduksjon.
+
+---
+
+Hvis denne artikkelen hjalp deg, kan du gjerne gi oss en stjerne på GitHub, eller opplev den effektive utviklingsarbeidsflyten som **HagiCode** bringer direkte:
+- Gi oss en stjerne på GitHub: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Besøk den offisielle nettsiden for å lære mer: [hagicode.com](https://hagicode.com)
+- Se den 30-minutters praktiske demoen: [www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)
+- Installasjonsopplevelse med ett klikk: [hagicode.com/installation/docker-compose](https://hagicode.com/installation/docker-compose)
+
+Den offentlige betaen har startet. Velkommen til å installere den og prøve den!
+
+
+
+---
+
+Takk for at du leser. Hvis du fant denne artikkelen nyttig, vennligst klikk på liker-knappen nedenfor 👍 slik at flere kan oppdage den.
+
+Dette innholdet ble laget med AI-assistert samarbeid, vurdert av meg, og reflekterer mine egne synspunkter og posisjoner.
+
+- **Forfatter:** [newbe36524](https://www.newbe.pro)
+- **Artikkellenke:** [https://hagicode.com/blog/2026-02-01-dotnet-core-dual-database-postgresql-sqlite/](https://hagicode.com/blog/2026-02-01-dotnet-core-dual-database-postgresql-sqlite/)
+- **Opphavsrettserklæring:** Med mindre annet er oppgitt, er alle artikler på denne bloggen lisensiert under BY-NC-SA. Vennligst oppgi kilden når du legger ut på nytt.

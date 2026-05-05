@@ -22,14 +22,34 @@ const targetLocales = [
   { code: 'es-ES', translateCode: 'es' },
   { code: 'pt-BR', translateCode: 'pt' },
   { code: 'ru-RU', translateCode: 'ru' },
+  { code: 'it-IT', translateCode: 'it' },
+  { code: 'nl-NL', translateCode: 'nl' },
+  { code: 'pl-PL', translateCode: 'pl' },
+  { code: 'tr-TR', translateCode: 'tr' },
+  { code: 'sv-SE', translateCode: 'sv' },
+  { code: 'da-DK', translateCode: 'da' },
+  { code: 'fi-FI', translateCode: 'fi' },
+  { code: 'nb-NO', translateCode: 'no' },
+  { code: 'cs-CZ', translateCode: 'cs' },
+  { code: 'hu-HU', translateCode: 'hu' },
+  { code: 'ro-RO', translateCode: 'ro' },
+  { code: 'bg-BG', translateCode: 'bg' },
+  { code: 'el-GR', translateCode: 'el' },
+  { code: 'uk-UA', translateCode: 'uk' },
+  { code: 'vi-VN', translateCode: 'vi' },
+  { code: 'th-TH', translateCode: 'th' },
+  { code: 'id-ID', translateCode: 'id' },
+  { code: 'pt-PT', translateCode: 'pt' },
+  { code: 'es-419', translateCode: 'es' },
 ];
 const separatorTemplate = '[[[TRSEP_%ID%]]]';
 const tokenPattern = /@@TR_[0-9]+@@/gu;
 const translatableFrontmatterKeys = new Set(['title', 'description']);
 const translatablePropKeys = new Set(['title', 'description']);
-const TRANSLATION_REQUEST_DELAY_MS = 350;
-const TRANSLATION_MAX_RETRIES = 6;
-const TRANSLATION_RETRY_BASE_DELAY_MS = 1500;
+const TRANSLATION_REQUEST_DELAY_MS = 800;
+const TRANSLATION_MAX_RETRIES = 8;
+const TRANSLATION_RETRY_BASE_DELAY_MS = 3000;
+const FETCH_TIMEOUT_MS = 60_000;
 
 function sleep(milliseconds) {
   return new Promise((resolve) => {
@@ -69,7 +89,7 @@ async function collectBaselineDocs(currentDirectory, relativeDirectory = '') {
     if (entry.isDirectory()) {
       if (
         !relativeDirectory
-        && (isDocsLocaleDirectory(entry.name) || entry.name === 'blog' || entry.name === 'img')
+        && (isDocsLocaleDirectory(entry.name) || entry.name === 'img')
       ) {
         continue;
       }
@@ -349,6 +369,35 @@ function decodeGoogleTranslateResponse(payload) {
     .join('');
 }
 
+async function translateSingle(locale, translateCode, text) {
+  const url = new URL('https://translate.googleapis.com/translate_a/single');
+  url.searchParams.set('client', 'gtx');
+  url.searchParams.set('sl', 'en');
+  url.searchParams.set('tl', translateCode);
+  url.searchParams.set('dt', 't');
+  url.searchParams.set('q', text);
+
+  for (let attempt = 0; attempt <= TRANSLATION_MAX_RETRIES; attempt += 1) {
+    if (attempt > 0) {
+      const retryDelay = TRANSLATION_RETRY_BASE_DELAY_MS * (2 ** (attempt - 1));
+      await sleep(retryDelay);
+    }
+
+    const response = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+    if (response.ok) {
+      const payload = await response.json();
+      return decodeGoogleTranslateResponse(payload);
+    }
+
+    const shouldRetry = response.status === 429 || response.status >= 500;
+    if (!shouldRetry || attempt === TRANSLATION_MAX_RETRIES) {
+      throw new Error(`Translation request failed for ${locale}: ${response.status} ${response.statusText}`);
+    }
+  }
+
+  throw new Error(`Translation retries exhausted for ${locale}`);
+}
+
 async function translateBatch(locale, translateCode, texts) {
   if (texts.length === 0) {
     return [];
@@ -370,7 +419,7 @@ async function translateBatch(locale, translateCode, texts) {
       await sleep(retryDelay);
     }
 
-    response = await fetch(url);
+    response = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
     if (response.ok) {
       break;
     }
@@ -385,53 +434,56 @@ async function translateBatch(locale, translateCode, texts) {
   const translated = decodeGoogleTranslateResponse(payload);
   const parts = translated.split(`\n${separator}\n`);
   if (parts.length !== texts.length) {
-    throw new Error(`Unable to split translated payload for ${locale}`);
+    console.warn(`Split failed for ${locale} batch (${texts.length} texts → ${parts.length} parts), falling back to individual translation`);
+    const individual = [];
+    for (const text of texts) {
+      individual.push(await translateSingle(locale, translateCode, text));
+      await sleep(TRANSLATION_REQUEST_DELAY_MS);
+    }
+    return individual;
   }
 
   return parts;
 }
 
-async function resolveTranslations(registry) {
+async function resolveTranslationsForLocale(targetLocale, registry) {
   const resolved = new Map();
+  const entries = [...registry.entries.entries()].filter(([, entry]) => entry.locale === targetLocale.code);
+  const batch = [];
+  let batchLength = 0;
 
-  for (const targetLocale of targetLocales) {
-    const entries = [...registry.entries.entries()].filter(([, entry]) => entry.locale === targetLocale.code);
-    const batch = [];
-    let batchLength = 0;
-
-    async function flush() {
-      if (batch.length === 0) {
-        return;
-      }
-
-      const translatedParts = await translateBatch(
-        targetLocale.code,
-        targetLocale.translateCode,
-        batch.map((entry) => entry.text),
-      );
-
-      batch.forEach((entry, index) => {
-        resolved.set(entry.token, translatedParts[index]);
-      });
-
-      await sleep(TRANSLATION_REQUEST_DELAY_MS);
-
-      batch.length = 0;
-      batchLength = 0;
+  async function flush() {
+    if (batch.length === 0) {
+      return;
     }
 
-    for (const [token, entry] of entries) {
-      const projectedLength = batchLength + entry.text.length + 32;
-      if (batch.length >= 24 || projectedLength >= 2800) {
-        await flush();
-      }
+    const translatedParts = await translateBatch(
+      targetLocale.code,
+      targetLocale.translateCode,
+      batch.map((entry) => entry.text),
+    );
 
-      batch.push({ token, text: entry.text });
-      batchLength += entry.text.length + 32;
-    }
+    batch.forEach((entry, index) => {
+      resolved.set(entry.token, translatedParts[index]);
+    });
 
-    await flush();
+    await sleep(TRANSLATION_REQUEST_DELAY_MS);
+
+    batch.length = 0;
+    batchLength = 0;
   }
+
+  for (const [token, entry] of entries) {
+    const projectedLength = batchLength + entry.text.length + 32;
+    if (batch.length >= 24 || projectedLength >= 2800) {
+      await flush();
+    }
+
+    batch.push({ token, text: entry.text });
+    batchLength += entry.text.length + 32;
+  }
+
+  await flush();
 
   return resolved;
 }
@@ -442,10 +494,12 @@ function materializeTemplate(template, translations) {
 
 async function main() {
   const baselineDocs = await collectBaselineDocs(contentRoot);
-  const registry = createTranslationRegistry();
-  const pendingFiles = [];
+  let totalCreated = 0;
 
   for (const locale of targetLocales) {
+    const localeRegistry = createTranslationRegistry();
+    const localePendingFiles = [];
+
     for (const relativeDocPath of baselineDocs) {
       const destinationPath = path.join(contentRoot, locale.code, relativeDocPath);
       const localizedOutputPath = path.join(translationsRoot, locale.code, relativeDocPath);
@@ -455,26 +509,33 @@ async function main() {
 
       const englishSourcePath = path.join(englishRoot, relativeDocPath);
       const source = await fs.readFile(englishSourcePath, 'utf8');
-      const template = buildTranslatedTemplate(source, locale.code, registry);
-      pendingFiles.push({ locale: locale.code, relativeDocPath, destinationPath: localizedOutputPath, template });
+      const template = buildTranslatedTemplate(source, locale.code, localeRegistry);
+      localePendingFiles.push({ locale: locale.code, relativeDocPath, destinationPath: localizedOutputPath, template });
+    }
+
+    if (localePendingFiles.length === 0) {
+      console.log(`${locale.code}: no missing docs.`);
+      continue;
+    }
+
+    try {
+      const translations = await resolveTranslationsForLocale(locale, localeRegistry);
+
+      for (const file of localePendingFiles) {
+        const content = materializeTemplate(file.template, translations);
+        await fs.mkdir(path.dirname(file.destinationPath), { recursive: true });
+        await fs.writeFile(file.destinationPath, content, 'utf8');
+        console.log(`created ${file.locale}/${toPosixPath(file.relativeDocPath)}`);
+      }
+
+      console.log(`${locale.code}: created ${localePendingFiles.length} docs.`);
+      totalCreated += localePendingFiles.length;
+    } catch (error) {
+      console.error(`${locale.code}: FAILED - ${error.message}`);
     }
   }
 
-  if (pendingFiles.length === 0) {
-    console.log('No missing locale docs detected.');
-    return;
-  }
-
-  const translations = await resolveTranslations(registry);
-
-  for (const file of pendingFiles) {
-    const content = materializeTemplate(file.template, translations);
-    await fs.mkdir(path.dirname(file.destinationPath), { recursive: true });
-    await fs.writeFile(file.destinationPath, content, 'utf8');
-    console.log(`created ${file.locale}/${toPosixPath(file.relativeDocPath)}`);
-  }
-
-  console.log(`Created ${pendingFiles.length} locale docs.`);
+  console.log(`Total created: ${totalCreated} locale docs.`);
 }
 
 main().catch((error) => {
