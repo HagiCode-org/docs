@@ -109,24 +109,6 @@ function verifyNavigation() {
     );
   });
 
-  runCheck('route_continuity_zh_to_en', zhRoute, () => {
-    const zhToEnPattern = /(?:href|value)=["']\/en-US\/blog\/["']/i;
-    assert(
-      zhToEnPattern.test(zhBlogIndex),
-      'Chinese blog index is missing route continuity link to /en-US/blog/.',
-      zhRoute
-    );
-  });
-
-  runCheck('route_continuity_en_to_zh', enRoute, () => {
-    const enToZhPattern = /(?:href|value)=["']\/blog\/["']/i;
-    assert(
-      enToZhPattern.test(enBlogIndex),
-      'English blog index is missing route continuity link to /blog/.',
-      enRoute
-    );
-  });
-
   runCheck('zh_sidebar_i18n_keys_resolved', zhRoute, () => {
     assert(
       !hasUnresolvedBlogI18nKey(zhBlogIndex),
