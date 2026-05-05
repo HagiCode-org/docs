@@ -79,6 +79,19 @@ const runtime = {
         },
         "footer": {
           "blogLink": "Blog"
+        },
+        "aiDisclosure": {
+          "translation": {
+            "label": "AI превод",
+            "title": "Тази страница е преведена от оригинала на опростен китайски с помощта на AI.",
+            "description": "Проверете оригинала, ако трябва да потвърдите формулировки, технически нюанси или най-новите актуализации.",
+            "viewOriginal": "Виж оригинала на опростен китайски"
+          },
+          "author": {
+            "label": "Участие на AI",
+            "title": "AI е помогнал при писането, редактирането или прегледа на тази страница.",
+            "description": "Преценявайте внимателно важните детайли и потвърждавайте критичните решения с първични източници при нужда."
+          }
         }
       },
       "metadata": {
@@ -475,6 +488,19 @@ const runtime = {
         },
         "footer": {
           "blogLink": "Blog"
+        },
+        "aiDisclosure": {
+          "translation": {
+            "label": "AI překlad",
+            "title": "Tato stránka byla přeložena z původní zjednodušené čínštiny s pomocí AI.",
+            "description": "Pokud potřebujete ověřit formulace, technické nuance nebo nejnovější aktualizace, podívejte se na originál.",
+            "viewOriginal": "Zobrazit originál ve zjednodušené čínštině"
+          },
+          "author": {
+            "label": "Účast AI",
+            "title": "AI pomáhala s psaním, úpravami nebo revizí této stránky.",
+            "description": "Důležité detaily posuzujte pečlivě a kritická rozhodnutí podle potřeby ověřujte z primárních zdrojů."
+          }
         }
       },
       "metadata": {
@@ -871,6 +897,19 @@ const runtime = {
         },
         "footer": {
           "blogLink": "Blog"
+        },
+        "aiDisclosure": {
+          "translation": {
+            "label": "AI-oversættelse",
+            "title": "Denne side er oversat fra den forenklede kinesiske original med hjælp fra AI.",
+            "description": "Se originalen, hvis du skal bekræfte formuleringer, tekniske nuancer eller de seneste opdateringer.",
+            "viewOriginal": "Vis original på forenklet kinesisk"
+          },
+          "author": {
+            "label": "AI-medvirken",
+            "title": "AI har hjulpet med at skrive, redigere eller gennemgå denne side.",
+            "description": "Vurder vigtige detaljer omhyggeligt, og bekræft kritiske beslutninger mod primære kilder efter behov."
+          }
         }
       },
       "metadata": {
@@ -1267,6 +1306,19 @@ const runtime = {
         },
         "footer": {
           "blogLink": "Blog"
+        },
+        "aiDisclosure": {
+          "translation": {
+            "label": "KI-Übersetzung",
+            "title": "Diese Seite wurde mit KI-Unterstützung aus dem vereinfachten chinesischen Original übersetzt.",
+            "description": "Prüfen Sie das Original, wenn Sie Formulierungen, technische Feinheiten oder aktuelle Änderungen verifizieren möchten.",
+            "viewOriginal": "Vereinfachtes chinesisches Original anzeigen"
+          },
+          "author": {
+            "label": "KI-Beteiligung",
+            "title": "KI hat beim Schreiben, Bearbeiten oder Prüfen dieser Seite mitgewirkt.",
+            "description": "Prüfen Sie wichtige Details sorgfältig und gleichen Sie kritische Entscheidungen bei Bedarf mit Primärquellen ab."
+          }
         }
       },
       "metadata": {
@@ -1663,6 +1715,19 @@ const runtime = {
         },
         "footer": {
           "blogLink": "Blog"
+        },
+        "aiDisclosure": {
+          "translation": {
+            "label": "Μετάφραση AI",
+            "title": "Αυτή η σελίδα μεταφράστηκε από το πρωτότυπο στα Απλοποιημένα Κινεζικά με τη βοήθεια AI.",
+            "description": "Δείτε το πρωτότυπο αν χρειάζεται να επιβεβαιώσετε διατύπωση, τεχνικές αποχρώσεις ή τις πιο πρόσφατες ενημερώσεις.",
+            "viewOriginal": "Προβολή πρωτοτύπου στα Απλοποιημένα Κινεζικά"
+          },
+          "author": {
+            "label": "Συμμετοχή AI",
+            "title": "Η AI βοήθησε στη συγγραφή, την επιμέλεια ή τον έλεγχο αυτής της σελίδας.",
+            "description": "Ελέγχετε προσεκτικά τις σημαντικές λεπτομέρειες και επιβεβαιώνετε κρίσιμες αποφάσεις από πρωτογενείς πηγές όταν χρειάζεται."
+          }
         }
       },
       "metadata": {
@@ -2059,6 +2124,19 @@ const runtime = {
         },
         "footer": {
           "blogLink": "Blog"
+        },
+        "aiDisclosure": {
+          "translation": {
+            "label": "AI Translation",
+            "title": "This page was translated from the Simplified Chinese source with AI assistance.",
+            "description": "Check the original source if you need to verify wording, technical nuance, or the latest updates.",
+            "viewOriginal": "View Simplified Chinese original"
+          },
+          "author": {
+            "label": "AI Participation",
+            "title": "AI assisted with writing, editing, or review for this page.",
+            "description": "Evaluate important details carefully and confirm critical decisions against primary sources when needed."
+          }
         }
       },
       "metadata": {
@@ -2455,6 +2533,19 @@ const runtime = {
         },
         "footer": {
           "blogLink": "Blog"
+        },
+        "aiDisclosure": {
+          "translation": {
+            "label": "Traducción con IA",
+            "title": "Esta página fue traducida desde la versión original en chino simplificado con ayuda de IA.",
+            "description": "Consulta el original si necesitas verificar la redacción, los matices técnicos o las actualizaciones más recientes.",
+            "viewOriginal": "Ver original en chino simplificado"
+          },
+          "author": {
+            "label": "Participación de IA",
+            "title": "La IA ayudó a redactar, editar o revisar esta página.",
+            "description": "Revisa con cuidado los detalles importantes y confirma las decisiones críticas con fuentes primarias cuando haga falta."
+          }
         }
       },
       "metadata": {
@@ -2851,6 +2942,19 @@ const runtime = {
         },
         "footer": {
           "blogLink": "Blog"
+        },
+        "aiDisclosure": {
+          "translation": {
+            "label": "Traducción con IA",
+            "title": "Esta página se tradujo desde la versión original en chino simplificado con ayuda de IA.",
+            "description": "Consulta el original si necesitas verificar la redacción, los matices técnicos o las actualizaciones más recientes.",
+            "viewOriginal": "Ver original en chino simplificado"
+          },
+          "author": {
+            "label": "Participación de IA",
+            "title": "La IA ayudó a redactar, editar o revisar esta página.",
+            "description": "Evalúa con cuidado los detalles importantes y confirma las decisiones críticas con fuentes primarias cuando sea necesario."
+          }
         }
       },
       "metadata": {
@@ -3247,6 +3351,19 @@ const runtime = {
         },
         "footer": {
           "blogLink": "Blog"
+        },
+        "aiDisclosure": {
+          "translation": {
+            "label": "AI-käännös",
+            "title": "Tämä sivu on käännetty yksinkertaistetun kiinan alkuperäisversiosta tekoälyn avustuksella.",
+            "description": "Tarkista alkuperäinen versio, jos sinun täytyy varmistaa sanamuoto, tekniset vivahteet tai uusimmat päivitykset.",
+            "viewOriginal": "Näytä yksinkertaistetun kiinan alkuperäinen versio"
+          },
+          "author": {
+            "label": "AI-osallistuminen",
+            "title": "Tekoäly osallistui tämän sivun kirjoittamiseen, muokkaukseen tai tarkistukseen.",
+            "description": "Arvioi tärkeät yksityiskohdat huolellisesti ja vahvista kriittiset päätökset tarvittaessa ensisijaisista lähteistä."
+          }
         }
       },
       "metadata": {
@@ -3643,6 +3760,19 @@ const runtime = {
         },
         "footer": {
           "blogLink": "Blog"
+        },
+        "aiDisclosure": {
+          "translation": {
+            "label": "Traduction IA",
+            "title": "Cette page a été traduite depuis la version originale en chinois simplifié avec l’aide de l’IA.",
+            "description": "Consultez l’original si vous devez vérifier la formulation, les nuances techniques ou les dernières mises à jour.",
+            "viewOriginal": "Voir l’original en chinois simplifié"
+          },
+          "author": {
+            "label": "Participation de l’IA",
+            "title": "L’IA a aidé à la rédaction, à l’édition ou à la relecture de cette page.",
+            "description": "Vérifiez soigneusement les points importants et confirmez les décisions critiques à partir de sources primaires si nécessaire."
+          }
         }
       },
       "metadata": {
@@ -4039,6 +4169,19 @@ const runtime = {
         },
         "footer": {
           "blogLink": "Blog"
+        },
+        "aiDisclosure": {
+          "translation": {
+            "label": "AI-fordítás",
+            "title": "Ez az oldal az egyszerűsített kínai eredetiből készült AI segítségével.",
+            "description": "Nézze meg az eredetit, ha a megfogalmazást, a technikai árnyalatokat vagy a legfrissebb frissítéseket kell ellenőriznie.",
+            "viewOriginal": "Egyszerűsített kínai eredeti megtekintése"
+          },
+          "author": {
+            "label": "AI közreműködés",
+            "title": "Az AI közreműködött az oldal megírásában, szerkesztésében vagy felülvizsgálatában.",
+            "description": "A fontos részleteket gondosan értékelje, és szükség esetén elsődleges forrásokkal erősítse meg a kritikus döntéseket."
+          }
         }
       },
       "metadata": {
@@ -4435,6 +4578,19 @@ const runtime = {
         },
         "footer": {
           "blogLink": "Blog"
+        },
+        "aiDisclosure": {
+          "translation": {
+            "label": "Terjemahan AI",
+            "title": "Halaman ini diterjemahkan dari sumber asli bahasa Tionghoa Sederhana dengan bantuan AI.",
+            "description": "Periksa sumber asli jika Anda perlu memverifikasi pilihan kata, nuansa teknis, atau pembaruan terbaru.",
+            "viewOriginal": "Lihat versi asli bahasa Tionghoa Sederhana"
+          },
+          "author": {
+            "label": "Partisipasi AI",
+            "title": "AI membantu penulisan, penyuntingan, atau peninjauan halaman ini.",
+            "description": "Tinjau detail penting dengan cermat dan pastikan keputusan penting diverifikasi dengan sumber primer bila diperlukan."
+          }
         }
       },
       "metadata": {
@@ -4831,6 +4987,19 @@ const runtime = {
         },
         "footer": {
           "blogLink": "Blog"
+        },
+        "aiDisclosure": {
+          "translation": {
+            "label": "Traduzione IA",
+            "title": "Questa pagina è stata tradotta dall’originale in cinese semplificato con l’aiuto dell’IA.",
+            "description": "Consulta l’originale se devi verificare formulazioni, sfumature tecniche o gli aggiornamenti più recenti.",
+            "viewOriginal": "Visualizza l’originale in cinese semplificato"
+          },
+          "author": {
+            "label": "Partecipazione IA",
+            "title": "L’IA ha contribuito alla scrittura, all’editing o alla revisione di questa pagina.",
+            "description": "Valuta con attenzione i dettagli importanti e conferma le decisioni critiche con fonti primarie quando necessario."
+          }
         }
       },
       "metadata": {
@@ -5227,6 +5396,19 @@ const runtime = {
         },
         "footer": {
           "blogLink": "Blog"
+        },
+        "aiDisclosure": {
+          "translation": {
+            "label": "AI翻訳",
+            "title": "このページは簡体字中国語の原文をもとに、AI の支援で翻訳されています。",
+            "description": "表現、技術的なニュアンス、最新の更新を確認したい場合は、簡体字中国語の原文も参照してください。",
+            "viewOriginal": "簡体字中国語の原文を見る"
+          },
+          "author": {
+            "label": "AI関与",
+            "title": "このページの執筆、編集、またはレビューには AI が関与しています。",
+            "description": "重要な内容は慎重に判断し、必要に応じて一次情報で重要な決定を確認してください。"
+          }
         }
       },
       "metadata": {
@@ -5623,6 +5805,19 @@ const runtime = {
         },
         "footer": {
           "blogLink": "Blog"
+        },
+        "aiDisclosure": {
+          "translation": {
+            "label": "AI 번역",
+            "title": "이 페이지는 중국어 간체 원문을 바탕으로 AI 도움을 받아 번역되었습니다.",
+            "description": "표현, 기술적 뉘앙스, 최신 업데이트를 확인해야 한다면 중국어 간체 원문도 함께 확인하세요.",
+            "viewOriginal": "중국어 간체 원문 보기"
+          },
+          "author": {
+            "label": "AI 참여",
+            "title": "이 페이지의 작성, 편집 또는 검토에는 AI가 참여했습니다.",
+            "description": "중요한 내용은 신중하게 판단하고, 필요하면 1차 자료로 핵심 결정을 다시 확인하세요."
+          }
         }
       },
       "metadata": {
@@ -6019,6 +6214,19 @@ const runtime = {
         },
         "footer": {
           "blogLink": "Blog"
+        },
+        "aiDisclosure": {
+          "translation": {
+            "label": "AI-oversettelse",
+            "title": "Denne siden er oversatt fra den opprinnelige forenklede kinesiske versjonen med hjelp fra AI.",
+            "description": "Se originalen hvis du må bekrefte formuleringer, tekniske nyanser eller de nyeste oppdateringene.",
+            "viewOriginal": "Vis original på forenklet kinesisk"
+          },
+          "author": {
+            "label": "AI-deltakelse",
+            "title": "AI har bidratt til skriving, redigering eller gjennomgang av denne siden.",
+            "description": "Vurder viktige detaljer nøye og bekreft kritiske beslutninger mot primærkilder ved behov."
+          }
         }
       },
       "metadata": {
@@ -6415,6 +6623,19 @@ const runtime = {
         },
         "footer": {
           "blogLink": "Blog"
+        },
+        "aiDisclosure": {
+          "translation": {
+            "label": "AI-vertaling",
+            "title": "Deze pagina is met hulp van AI vertaald vanuit het oorspronkelijke Vereenvoudigd Chinees.",
+            "description": "Bekijk het origineel als u formulering, technische nuances of de meest recente updates wilt controleren.",
+            "viewOriginal": "Oorspronkelijke versie in Vereenvoudigd Chinees bekijken"
+          },
+          "author": {
+            "label": "AI-betrokkenheid",
+            "title": "AI heeft geholpen bij het schrijven, bewerken of beoordelen van deze pagina.",
+            "description": "Beoordeel belangrijke details zorgvuldig en controleer kritieke beslissingen zo nodig aan de hand van primaire bronnen."
+          }
         }
       },
       "metadata": {
@@ -6811,6 +7032,19 @@ const runtime = {
         },
         "footer": {
           "blogLink": "Blog"
+        },
+        "aiDisclosure": {
+          "translation": {
+            "label": "Tłumaczenie AI",
+            "title": "Ta strona została przetłumaczona z oryginału w uproszczonym chińskim przy użyciu AI.",
+            "description": "Sprawdź oryginał, jeśli chcesz zweryfikować sformułowania, niuanse techniczne lub najnowsze aktualizacje.",
+            "viewOriginal": "Zobacz oryginał w uproszczonym chińskim"
+          },
+          "author": {
+            "label": "Udział AI",
+            "title": "AI pomagała w pisaniu, redakcji lub przeglądzie tej strony.",
+            "description": "Uważnie oceniaj ważne szczegóły i w razie potrzeby potwierdzaj krytyczne decyzje w źródłach pierwotnych."
+          }
         }
       },
       "metadata": {
@@ -7207,6 +7441,19 @@ const runtime = {
         },
         "footer": {
           "blogLink": "Blog"
+        },
+        "aiDisclosure": {
+          "translation": {
+            "label": "Tradução por IA",
+            "title": "Esta página foi traduzida do original em chinês simplificado com ajuda de IA.",
+            "description": "Consulte o original se precisar confirmar a redação, nuances técnicas ou as atualizações mais recentes.",
+            "viewOriginal": "Ver original em chinês simplificado"
+          },
+          "author": {
+            "label": "Participação de IA",
+            "title": "A IA ajudou na escrita, edição ou revisão desta página.",
+            "description": "Avalie os detalhes importantes com cuidado e confirme decisões críticas em fontes primárias quando necessário."
+          }
         }
       },
       "metadata": {
@@ -7603,6 +7850,19 @@ const runtime = {
         },
         "footer": {
           "blogLink": "Blog"
+        },
+        "aiDisclosure": {
+          "translation": {
+            "label": "Tradução por IA",
+            "title": "Esta página foi traduzida do original em chinês simplificado com ajuda de IA.",
+            "description": "Consulte o original se precisar de confirmar a redação, nuances técnicas ou as atualizações mais recentes.",
+            "viewOriginal": "Ver original em chinês simplificado"
+          },
+          "author": {
+            "label": "Participação de IA",
+            "title": "A IA ajudou na escrita, edição ou revisão desta página.",
+            "description": "Avalie cuidadosamente os detalhes importantes e confirme decisões críticas em fontes primárias quando necessário."
+          }
         }
       },
       "metadata": {
@@ -7999,6 +8259,19 @@ const runtime = {
         },
         "footer": {
           "blogLink": "Blog"
+        },
+        "aiDisclosure": {
+          "translation": {
+            "label": "Traducere AI",
+            "title": "Această pagină a fost tradusă din originalul în chineză simplificată cu ajutorul AI.",
+            "description": "Consultați originalul dacă trebuie să verificați formulările, nuanțele tehnice sau cele mai recente actualizări.",
+            "viewOriginal": "Vezi originalul în chineză simplificată"
+          },
+          "author": {
+            "label": "Participare AI",
+            "title": "AI a ajutat la redactarea, editarea sau revizuirea acestei pagini.",
+            "description": "Evaluați cu atenție detaliile importante și confirmați deciziile critice din surse primare atunci când este necesar."
+          }
         }
       },
       "metadata": {
@@ -8395,6 +8668,19 @@ const runtime = {
         },
         "footer": {
           "blogLink": "Blog"
+        },
+        "aiDisclosure": {
+          "translation": {
+            "label": "AI-перевод",
+            "title": "Эта страница переведена с оригинала на упрощённом китайском языке с помощью ИИ.",
+            "description": "Обратитесь к оригиналу, если нужно проверить формулировки, технические нюансы или последние обновления.",
+            "viewOriginal": "Открыть оригинал на упрощённом китайском"
+          },
+          "author": {
+            "label": "Участие ИИ",
+            "title": "ИИ помогал в написании, редактировании или проверке этой страницы.",
+            "description": "Внимательно оценивайте важные детали и при необходимости сверяйте критические решения с первоисточниками."
+          }
         }
       },
       "metadata": {
@@ -8791,6 +9077,19 @@ const runtime = {
         },
         "footer": {
           "blogLink": "Blog"
+        },
+        "aiDisclosure": {
+          "translation": {
+            "label": "AI-översättning",
+            "title": "Den här sidan har översatts från originalet på förenklad kinesiska med hjälp av AI.",
+            "description": "Kontrollera originalet om du behöver bekräfta formuleringar, tekniska nyanser eller de senaste uppdateringarna.",
+            "viewOriginal": "Visa original på förenklad kinesiska"
+          },
+          "author": {
+            "label": "AI-medverkan",
+            "title": "AI har hjälpt till med att skriva, redigera eller granska den här sidan.",
+            "description": "Bedöm viktiga detaljer noggrant och bekräfta kritiska beslut mot primärkällor vid behov."
+          }
         }
       },
       "metadata": {
@@ -9187,6 +9486,19 @@ const runtime = {
         },
         "footer": {
           "blogLink": "Blog"
+        },
+        "aiDisclosure": {
+          "translation": {
+            "label": "แปลโดย AI",
+            "title": "หน้านี้แปลจากต้นฉบับภาษาจีนตัวย่อด้วยความช่วยเหลือของ AI",
+            "description": "โปรดตรวจสอบต้นฉบับหากคุณต้องการยืนยันถ้อยคำ รายละเอียดเชิงเทคนิค หรือข้อมูลอัปเดตล่าสุด",
+            "viewOriginal": "ดูต้นฉบับภาษาจีนตัวย่อ"
+          },
+          "author": {
+            "label": "การมีส่วนร่วมของ AI",
+            "title": "AI มีส่วนช่วยในการเขียน แก้ไข หรือทบทวนหน้านี้",
+            "description": "โปรดพิจารณารายละเอียดสำคัญอย่างรอบคอบ และตรวจสอบการตัดสินใจสำคัญกับแหล่งข้อมูลปฐมภูมิเมื่อจำเป็น"
+          }
         }
       },
       "metadata": {
@@ -9583,6 +9895,19 @@ const runtime = {
         },
         "footer": {
           "blogLink": "Blog"
+        },
+        "aiDisclosure": {
+          "translation": {
+            "label": "YZ çevirisi",
+            "title": "Bu sayfa, Basitleştirilmiş Çince özgün sürümden YZ desteğiyle çevrildi.",
+            "description": "İfadeleri, teknik nüansları veya en son güncellemeleri doğrulamanız gerekiyorsa özgün metni kontrol edin.",
+            "viewOriginal": "Basitleştirilmiş Çince özgünü görüntüle"
+          },
+          "author": {
+            "label": "YZ katılımı",
+            "title": "YZ bu sayfanın yazımı, düzenlenmesi veya gözden geçirilmesine yardımcı oldu.",
+            "description": "Önemli ayrıntıları dikkatle değerlendirin ve kritik kararları gerektiğinde birincil kaynaklarla doğrulayın."
+          }
         }
       },
       "metadata": {
@@ -9979,6 +10304,19 @@ const runtime = {
         },
         "footer": {
           "blogLink": "Blog"
+        },
+        "aiDisclosure": {
+          "translation": {
+            "label": "AI-переклад",
+            "title": "Цю сторінку перекладено з оригіналу спрощеною китайською мовою за допомогою AI.",
+            "description": "Перевірте оригінал, якщо потрібно уточнити формулювання, технічні нюанси або найновіші оновлення.",
+            "viewOriginal": "Переглянути оригінал спрощеною китайською"
+          },
+          "author": {
+            "label": "Участь AI",
+            "title": "AI допомагав у написанні, редагуванні або перевірці цієї сторінки.",
+            "description": "Уважно оцінюйте важливі деталі та за потреби звіряйте критичні рішення з першоджерелами."
+          }
         }
       },
       "metadata": {
@@ -10375,6 +10713,19 @@ const runtime = {
         },
         "footer": {
           "blogLink": "Blog"
+        },
+        "aiDisclosure": {
+          "translation": {
+            "label": "Bản dịch AI",
+            "title": "Trang này được dịch từ bản gốc tiếng Trung Giản thể với sự hỗ trợ của AI.",
+            "description": "Hãy xem bản gốc nếu bạn cần kiểm tra cách diễn đạt, sắc thái kỹ thuật hoặc các cập nhật mới nhất.",
+            "viewOriginal": "Xem bản gốc tiếng Trung Giản thể"
+          },
+          "author": {
+            "label": "AI tham gia",
+            "title": "AI đã hỗ trợ viết, biên tập hoặc rà soát trang này.",
+            "description": "Hãy đánh giá cẩn thận các chi tiết quan trọng và đối chiếu các quyết định quan trọng với nguồn gốc khi cần."
+          }
         }
       },
       "metadata": {
@@ -10771,6 +11122,19 @@ const runtime = {
         },
         "footer": {
           "blogLink": "博客文章"
+        },
+        "aiDisclosure": {
+          "translation": {
+            "label": "AI 翻译",
+            "title": "本页由 AI 基于简体中文原文翻译。",
+            "description": "如需核对措辞、技术细节或最新更新，请同时参考简体中文原文。",
+            "viewOriginal": "查看简体中文原文"
+          },
+          "author": {
+            "label": "AI 参与",
+            "title": "本页包含 AI 参与的撰写、编辑或审阅内容。",
+            "description": "涉及重要信息时，请结合一手资料谨慎判断，并自行核实关键决策。"
+          }
         }
       },
       "metadata": {
@@ -11167,6 +11531,19 @@ const runtime = {
         },
         "footer": {
           "blogLink": "Blog"
+        },
+        "aiDisclosure": {
+          "translation": {
+            "label": "AI 翻譯",
+            "title": "本頁由 AI 根據簡體中文原文翻譯。",
+            "description": "如需核對措辭、技術細節或最新更新，請同時參考簡體中文原文。",
+            "viewOriginal": "查看簡體中文原文"
+          },
+          "author": {
+            "label": "AI 參與",
+            "title": "本頁包含 AI 參與的撰寫、編輯或審閱內容。",
+            "description": "涉及重要資訊時，請結合第一手資料謹慎判斷，並自行核實關鍵決策。"
+          }
         }
       },
       "metadata": {
