@@ -96,6 +96,40 @@ hagi18n 只管理 docs UI 文案、博客插件 UI 标签、Starlight locale met
 
 新增或修改翻译文档时，请保持与基线文件一致的 canonical doc key，并使用 `en-US`、`ja-JP`、`zh-Hant` 这类 canonical locale 目录名。
 
+### 翻译覆盖率报表
+
+用下面这些命令可以查看哪些文档页、博客文章或语言还没有完成翻译：
+
+```bash
+npm run report:translation
+npm run report:docs-translation
+npm run report:blog-translation
+```
+
+`npm run report:translation` 会生成组合报表 `.tmp/translation-report.json`，并同时刷新 `.tmp/docs-translation-report.json` 与 `.tmp/blog-translation-report.json`。组合报表会按语言汇总中文基线文档页和博客 slug 的覆盖率，以及缺失、重复和高相似度问题。
+
+### Claude CLI 自动补翻译
+
+如果你想直接基于 zh-CN 原文，用本地 Claude CLI 自动补齐缺失翻译，可以运行：
+
+```bash
+npm run translate:missing:claude
+```
+
+默认只处理报表里仍然是 **missing** 的条目。如果还想把那些和 zh-CN 原文完全重复的翻译文件也重写一遍，可以运行：
+
+```bash
+npm run translate:missing:claude -- --include-duplicates
+```
+
+常用筛选方式：
+
+```bash
+npm run translate:missing:claude -- --surface blog --locales en-US,ja-JP --limit 5 --dry-run
+```
+
+这个流程调用本地 `claude` CLI，直接根据仓库里的 Markdown/MDX 原文进行翻译，不依赖额外的机器翻译 API。脚本会把文档翻译写到 `src/content/translations/docs/<locale>/...`；博客翻译目前按现有博客报表布局写到 `src/content/docs/<locale>/blog/...`。
+
 ## 截图分析工作流
 
 受管截图同步流程会在启动 ImgBin 之前读取 `repos/docs/.env`。

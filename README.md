@@ -96,6 +96,40 @@ hagi18n manages docs UI strings, blog plugin UI labels, Starlight locale metadat
 
 When adding or updating localized docs, keep the canonical doc key identical to the baseline file path and use canonical locale directory names such as `en-US`, `ja-JP`, or `zh-Hant`.
 
+### Translation coverage reports
+
+Use these commands to see which docs pages, blog posts, or locales are still untranslated:
+
+```bash
+npm run report:translation
+npm run report:docs-translation
+npm run report:blog-translation
+```
+
+`npm run report:translation` writes a combined summary to `.tmp/translation-report.json` and refreshes the per-surface JSON reports in `.tmp/docs-translation-report.json` and `.tmp/blog-translation-report.json`. The combined output shows per-locale coverage for baseline Chinese docs pages and blog slugs, plus missing, duplicate, and high-similarity findings.
+
+### Claude CLI translation autofill
+
+To fill missing translations directly from the zh-CN source content with the local Claude CLI, run:
+
+```bash
+npm run translate:missing:claude
+```
+
+Default behavior only creates files for entries that are still **missing** in the translation reports. To also rewrite files that are flagged as exact duplicates of the zh-CN baseline, run:
+
+```bash
+npm run translate:missing:claude -- --include-duplicates
+```
+
+Useful filters:
+
+```bash
+npm run translate:missing:claude -- --surface blog --locales en-US,ja-JP --limit 5 --dry-run
+```
+
+This workflow calls the local `claude` CLI and asks it to translate Markdown/MDX directly from the repository source files. It does not use a separate machine-translation API. The script writes docs translations to `src/content/translations/docs/<locale>/...`; blog translations currently follow the blog report layout under `src/content/docs/<locale>/blog/...`.
+
 ## Screenshot analysis workflow
 
 The managed screenshot sync flow reads `repos/docs/.env` before it launches ImgBin.
