@@ -1,0 +1,300 @@
+---
+title: So implementieren Sie automatische Wiederholungsversuche für Agent-CLIs wie Claude Code und Codex
+date: 2026-04-18
+tags: [Agent CLI, Claude Code, Codex, Automatische Wiederholung, HagiCode]
+description: "Der Begriff 'automatische Wiederholung' mag auf den ersten Blick wie ein einfacher Schalter aussehen, aber in der tatsächlichen Praxis ist es ganz anders. Hallo an alle Produzenten, ich bin Yu Kun, der Produzent von HagiCode. Heute werden wir nicht um den heißen Brei herumreden, sondern darüber sprechen"
+---
+
+## So implementieren Sie automatische Wiederholungsversuche für Agent-CLIs wie Claude Code und Codex
+
+> Der Begriff "automatische Wiederholung" mag auf den ersten Blick wie ein einfacher Schalter aussehen, aber in der tatsächlichen Praxis ist es ganz anders. Hallo an alle Produzenten, ich bin Yu Kun, der Produzent von HagiCode. Heute werden wir nicht um den heißen Brei herumreden, sondern darüber sprechen, wie automatische Wiederholungen für Agent-CLIs wie Claude Code und Codex tatsächlich implementiert werden sollten, um sowohl Ausnahmen abzufangen als auch zu verhindern, dass das System in endlose Wiederholungen gerät.
+
+## Hintergrund
+
+Wenn Sie sich kürzlich auch mit AI-Programmierung beschäftigt haben, sind Sie höchstwahrscheinlich bereits auf dieses Problem gestoßen: Aufgaben scheitern nicht sofort, sondern brechen mitten im Fluss ab.
+
+Bei normalen HTTP-Anfragen bedeutet dies oft, dass Sie die Anfrage einfach erneut senden, eventuell mit exponentiellem Backoff. Bei Agent-CLIs ist das jedoch anders. Tools wie Claude Code und Codex führen normalerweise Streaming-Ausführungen durch, bei denen die Ausgabe stückweise ausgegeben wird, und im Prozess werden thread, session oder resume-token gebunden. Mit anderen Worten: Es geht nicht darum, ob "diese Anweisung fehlgeschlagen ist", sondern:
+
+- Ob der bereits ausgegebene Inhalt noch gültig ist
+- Ob der aktuelle Kontext weitergeführt werden kann
+- Ob dieser Fehler automatisch wiederhergestellt werden sollte
+- Wenn ja, wann erneut versucht werden, was beim Versuch gesendet wird und ob der ursprüngliche Kontinue wiederverwendet werden soll
+
+Viele Teams implementieren dies beim ersten Mal auf die einfachste Weise: Wenn ein Fehler auftritt, versuchen Sie es erneut. Das ist eine sehr natürliche Idee, aber sobald sie in ein Projekt integriert wird, tauchen die Probleme eines nach dem anderen auf:
+
+- Einige Fehler, die eindeutig vorübergehende Störungen sind, werden als endgültige Fehler behandelt
+- Einige Fehler, die überhaupt keinen erneuten Versuch wert sind, werden vom System wiederholt abgespielt
+- Anfragen mit thread und ohne thread werden einheitlich behandelt
+- Backoff-Strategien ohne Grenzen, bei denen Hintergrundanfragen sich selbst überlasten
+
+HagiCode ist bei der Integration mehrerer Agent-CLIs auch in diese Fallen getappt. Insbesondere bei Codex war das anfänglich sichtbare Problem, dass eine bestimmte reconnect-Nachricht nicht als wiederholbarer Endzustand erkannt wurde, sodass der ursprüngliche Wiederherstellungsmechanismus gar nicht erst zum Einsatz kam. Kurz gesagt: Es lag nicht daran, dass das System nicht automatisch wiederholt hat, sondern daran, dass das System nicht erkannt hat, dass "dieser Versuch es wert ist, wiederholt zu werden".
+
+Der Kernpunkt dieses Artikels ist daher sehr klar: **Automatische Wiederholung ist kein Knopf, sondern ein geschichtetes Design.**
+
+## Über HagiCode
+
+Die in diesem Artikel vorgestellte Lösung stammt aus unserer echten Praxis im [HagiCode](https://hagicode.com)-Projekt. HagiCode zielt nicht darauf ab, ein einfaches Modell anzubinden, sondern die Streaming-Nachrichten, Tool-Aufrufe, Fehlerwiederherstellung und Sitzungskontexte mehrerer Agent-CLIs zu einem einheitlichen, langfristig wartbaren Ausführungsmodell zu vereinen.
+
+Eines meiner Hauptanliegen ist es, AI-Programmierung wirklich in der Ingenieurspraxis zu verankern. Einen Demo zu schreiben ist nicht schwierig, aber aus einem Demo etwas zu machen, das ein Team tatsächlich langfristig nutzen möchte, ist eine andere Geschichte. HagiCode nimmt automatische Wiederholungen ernst, nicht weil die Funktion fortschrittlich aussieht, sondern weil bei langen Ketten, Streaming und wiederaufnahmefähigen CLI-Ausführungen, wenn sie nicht stabil angebunden sind, die Benutzer keinen intelligenten Assistenten sehen, sondern einen Befehls-Wrapper, der ständig mittendrin abbricht.
+
+Wenn Sie zuerst einen Blick auf den Projekteinstieg werfen möchten, finden Sie hier zwei Einstiegspunkte:
+
+- GitHub: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Offizielle Website: [hagicode.com](https://hagicode.com)
+
+HagiCode ist mittlerweile auch bei Steam gelistet. Wenn Sie Steam nutzen, können Sie es schon einmal auf Ihre Wunschliste setzen:
+
+- [Steam-Seite (Auf die Wunschliste setzen / Details ansehen)](https://store.steampowered.com/app/4625540/Hagicode/)
+
+## Warum automatische Wiederholungen für Agent-CLIs schwieriger sind als normale Wiederholungen
+
+Diese Frage ist sehr berechtigt. Lassen Sie uns direkt zum Schluss kommen: Die Schwierigkeit bei automatischen Wiederholungen für Agent-CLIs liegt nicht darin, "ein paar Sekunden später erneut zu versuchen", sondern darin, "ob es im ursprünglichen Kontext weitergeführt werden kann".
+
+Sie können es sich wie ein langes Gespräch vorstellen. Normale API-Wiederholungen ähneln eher dem erneuten Wählen bei einer besetzten Leitung; Agent-CLI-Wiederholungen ähneln eher der Situation, in der das Gegenüber mittendrin das Signal verliert. Sie müssen zuerst beurteilen, ob Sie zurückrufen, ob Sie beim Rückruf von vorne beginnen, und ob das Gegenüber noch weiß, worüber Sie gerade gesprochen haben. Wer sagt denn, dass das ein und dasselbe ist? Das sind von Grund auf verschiedene Ingenieursprobleme.
+
+Konkret gibt es vier typische Schwierigkeiten.
+
+### 1. Es ist streaming-basiert
+
+Sobald die Ausgabe an den Benutzer gesendet wurde, können Sie den Fehler nicht mehr stillschweigend verschlucken und im Geheimen erneut versuchen, wie Sie es bei normalen Anfragen tun würden. Da der vorherige Teil bereits gesehen wurde, führt eine falsche Strategie bei erneuter Wiedergabe leicht zu doppeltem Text, verwirrtem Zustand und durcheinander geratenen Tool-Aufruf-Lebenszyklen. Das ist keine Zauberei, sondern Ingenieursarbeit.
+
+### 2. Es bindet in der Regel einen Sitzungskontext
+
+Provider wie Codex binden einen thread; Implementierungen wie Claude Code haben ein continuation target oder einen äquivalenten Fortsetzungskontext. Die Voraussetzung für eine echte automatische Wiederholung ist nicht nur, dass "dieser Fehler wie eine vorübergehende Störung aussieht", sondern auch, dass "diese Ausführung noch einen Träger für die Fortführung hat".
+
+### 3. Nicht alle Fehler sind einen erneuten Versuch wert
+
+Netzwerkschwankungen, SSE idle timeout, vorübergehende Störungen upstream - diese können meistens versucht werden. Wenn Sie jedoch auf Authentifizierungsfehler, verlorene Kontexte oder Provider ohne resume-Fähigkeit stoßen, ist erneutes Wiederholen meist keine Wiederherstellung, sondern erzeugt nur Lärm.
+
+### 4. Es braucht Grenzen
+
+Unbegrenzte automatische Wiederholungen sind fast immer falsch. Technologietrends mögen eine Zeitlang heiß sein, aber Ingenieursgesetze bleiben oft über Jahre stabil. Eines davon ist: Fehlerwiederherstellung muss Grenzen haben. Das System muss wissen, wie oft es maximal versucht, wie lang die Pausen sind und wann es aufgeben und diesmal zugeben soll, dass es wirklich nicht funktioniert.
+
+Gerade wegen dieser Merkmale hat HagiCode die automatische Wiederholung nicht als ein paar Zeilen `try/catch` in einem bestimmten Provider implementiert, sondern sie als eine gemeinsame Fähigkeit extrahiert. Am Ende müssen Ingenieursprobleme mit Ingenieursmethoden gelöst werden.
+
+## HagiCode-Ansatz: Die Wiederholung aus dem Provider herausnehmen
+
+Die aktuelle echte Implementierung von HagiCode lässt sich auf einen Satz komprimieren:
+
+**Die gemeinsame Ebene verwaltet einheitlich den Wiederholungsablauf, spezifische Provider antworten nur auf zwei Fragen: Lohnt sich dieser Endzustand für einen erneuten Versuch? Kann der aktuelle Kontext fortgesetzt werden?**
+
+Das ist nicht kompliziert, aber sehr wichtig. Denn sobald die Verantwortungen getrennt sind, können Claude Code, Codex und sogar andere Agent-CLIs dasselbe Grundgerüst wiederverwenden. Modelle werden sich ändern, Tools werden sich ändern, Workflows werden sich aktualisieren, aber die ingenieurstechnische Basis bleibt bestehen.
+
+### Erste Ebene: Einheitlicher Koordinator verwaltet die Wiederholungsschleife
+
+Der Kernimplementierungsabschnitt im Projekt sieht ungefähr so aus:
+
+```csharp
+internal static class ProviderErrorAutoRetryCoordinator
+{
+    public static async IAsyncEnumerable<CliMessage> ExecuteAsync(
+        string prompt,
+        ProviderErrorAutoRetrySettings? settings,
+        Func<string, IAsyncEnumerable<CliMessage>> executeAttemptAsync,
+        Func<bool> canRetryInSameContext,
+        Func<TimeSpan, CancellationToken, Task> delayAsync,
+        Func<CliMessage, bool> isRetryableTerminalMessage,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        var normalizedSettings = ProviderErrorAutoRetrySettings.Normalize(settings);
+        var retrySchedule = normalizedSettings.Enabled
+            ? normalizedSettings.GetRetrySchedule()
+            : [];
+
+        for (var attempt = 0; ; attempt++)
+        {
+            var attemptPrompt = attempt == 0
+                ? prompt
+                : ProviderErrorAutoRetrySettings.ContinuationPrompt;
+
+            CliMessage? terminalFailure = null;
+
+            await foreach (var message in executeAttemptAsync(attemptPrompt)
+                               .WithCancellation(cancellationToken))
+            {
+                if (isRetryableTerminalMessage(message))
+                {
+                    terminalFailure = message;
+                    break;
+                }
+
+                yield return message;
+            }
+
+            if (terminalFailure is null)
+            {
+                yield break;
+            }
+
+            if (attempt >= retrySchedule.Count || !canRetryInSameContext())
+            {
+                yield return terminalFailure;
+                yield break;
+            }
+
+            await delayAsync(retrySchedule[attempt], cancellationToken);
+        }
+    }
+}
+```
+
+Dieser Code tut etwas sehr Einfaches, aber sehr Kraftvolles.
+
+- Zwischenfehler werden nicht direkt weitergegeben, der Koordinator beurteilt zuerst, ob eine Wiederherstellung möglich ist
+- Nur wenn das Wiederholungsbudget erschöpft ist, wird der endgültige Fehler wirklich an die oberste Ebene zurückgegeben
+- Ab der zweiten Runde wird nicht mehr der ursprüngliche prompt gesendet, sondern einheitlich ein continuation prompt
+
+Deshalb habe ich vorher immer betont, dass automatische Wiederholung nicht einfach nur "noch einmal anfordern" ist. Es ergänzt keinen Ausnahmezweig, sondern verwaltet einen Ausführungslebenszyklus. Klingt ein bisschen wie ein Produktmanager, aber ingenieurstechnisch ist es tatsächlich so.
+
+### Zweite Ebene: Wiederholungsstrategie als Snapshot
+
+Ein anderes leicht zu übersehendes Problem: Wer entscheidet, ob für diese Anweisung automatische Wiederholung aktiviert ist?
+
+HagiCode Antwort: Verlassen Sie sich nicht auf eine "momentane globale Konfiguration", sondern machen Sie die Strategie zu einem Snapshot, der mit dieser Anweisung mitgeht. So gehen Sitzungswarteschlange, Nachrichtenspeicherung, Ausführungsweiterleitung und Provider-Adapter nicht verloren, sodass die Strategie nicht verloren geht. Einmal Erfolg heißt nicht System, anhaltender Erfolg heißt System.
+
+Die Kernstruktur lässt sich so vereinfachen:
+
+```csharp
+public sealed record ProviderErrorAutoRetrySnapshot
+{
+    public const string DefaultStrategy = "default";
+
+    public bool Enabled { get; init; }
+
+    public string Strategy { get; init; } = DefaultStrategy;
+
+    public static ProviderErrorAutoRetrySnapshot Normalize(bool? enabled, string? strategy)
+    {
+        return new ProviderErrorAutoRetrySnapshot
+        {
+            Enabled = enabled ?? true,
+            Strategy = string.IsNullOrWhiteSpace(strategy)
+                ? DefaultStrategy
+                : strategy.Trim()
+        };
+    }
+}
+```
+
+Dann wird auf der Ausführungsseite auf das vom Provider wirklich konsumierte Einstellungsobjekt abgebildet. Der Wert dieses Ansatzes ist sehr direkt:
+
+- Die Business-Ebene entscheidet "sollte wiederholt werden"
+- Die Laufzeit entscheidet "wie wiederholt"
+
+Beide Seiten verwalten ihren Bereich, ohne sich gegenseitig zu stören. Viele Probleme sind nicht unlösbar, nur dass der Preis nicht klar berechnet wurde. Die Strategie als Snapshot zu machen, bedeutet im Grunde, den Preis im Voraus klar zu berechnen.
+
+### Dritte Ebene: Provider führt nur Endzustands- und Kontextprüfung durch
+
+Bei konkreten Providern wie Claude Code oder Codex ist die Verantwortung hier sehr dünn. Sie können es als Verstärkung verstehen, nicht als Ersatz.
+
+Bei Codex beispielsweise muss es bei der Integration in den gemeinsamen Koordinator im Grunde nur drei Dinge bereitstellen:
+
+```csharp
+await foreach (var message in ProviderErrorAutoRetryCoordinator.ExecuteAsync(
+                   prompt,
+                   options.ProviderErrorAutoRetry,
+                   retryPrompt => ExecuteCodexAttemptAsync(...),
+                   () => !string.IsNullOrWhiteSpace(resolvedThreadId),
+                   DelayAsync,
+                   IsRetryableTerminalFailure,
+                   cancellationToken))
+{
+    yield return message;
+}
+```
+
+Sie werden feststellen, dass die eigentliche provider-spezifische Prüfung nur zwei Dinge umfasst:
+
+- `IsRetryableTerminalFailure`
+- `canRetryInSameContext`
+
+Codex prüft, ob der thread noch fortgesetzt werden kann, Claude Code prüft, ob das continuation target noch existiert. Backoff-Strategie, Wiederholungsanzahl, nachfolgender prompt - all das sollte der Provider nicht neu erfinden müssen.
+
+Sobald diese Ebene herausgelöst ist, senkt HagiCode die Kosten für die Integration weiterer CLIs erheblich. Sie müssen nicht den gesamten Wiederholungs-Zustandsautomaten kopieren, sondern nur die "Randbedingungen dieses Providers" einbinden. Schnell geschrieben bedeutet nicht stabil geschrieben; funktionierend bedeutet nicht gut angebunden; laufen kann bedeutet auch langfristig wartbar.
+
+## Ein leicht zu falsch machender Punkt: Nicht alle Fehler als wiederholbar behandeln
+
+Was ich in dieser Analyse am hervorzuheben finde, ist nicht "wie man Wiederholungen implementiert", sondern "wie man falsche Wiederholungen vermeidet".
+
+Der ursprüngliche Einstiegspunkt war, dass Codex eine reconnect-Nachricht nicht erkannt hatte. Nach Intuition würden viele die kleinste Korrektur wählen: Eine weitere Zeichenfolge zur Whitelist hinzufügen. Dieser Ansatz ist nicht falsch, eher wie eine Lösung aus der Demo-Zeit, weniger wie eine Lösung für langfristige Wartung.
+
+Aus der aktuellen HagiCode-Implementierung hat das System einen Schritt in eine stabilere Richtung gemacht. Es konzentriert sich nicht mehr auf eine bestimmte Zeichenfolge, sondern übergibt wiederherstellbare Endzustände einheitlich an den gemeinsamen Koordinator. Die Vorteile sind offensichtlich:
+
+- Es geht nicht leicht kaputt, nur weil ein kleiner Text geändert wird
+- Testabdeckung kann sich um das "Endzustand-envelope" drehen, nicht um einzelne hartkodierte Texte
+- Die Wiederholungslogik desselben Providers ist konsistenter
+
+Natürlich muss hier eine Grenze gezogen werden: Allgemeiner heißt nicht lockerer. **Wenn der aktuelle Kontext nicht fortgesetzt werden kann, sollte auch bei Fehlern, die wie vorübergehende Störungen aussehen, nicht blindlings wiederholt werden.**
+
+Das ist entscheidend. Wirklich beruhigend ist nicht, dass es gelegentlich funktioniert, sondern dass es meistens zuverlässig ist. Wenn ein Prozess nur von Experten aufrechterhalten werden kann, ist er noch weit von der Verbreitung entfernt.
+
+## Drei in der Praxis am meisten wertvolle Erfahrungen
+
+Beim Schreiben des Artikels können wir uns langsam der Praxis zuwenden. Wenn Sie ähnliche Fähigkeiten in Ihrem Projekt implementieren möchten, empfehle ich Ihnen, diese drei Punkte zuerst zu beachten.
+
+### 1. Wiederholungsbudget muss Grenzen haben
+
+HagiCode derzeit verwendet standardmäßig diesen Backoff-Rhythmus:
+
+- 10 Sekunden
+- 20 Sekunden
+- 60 Sekunden
+
+Dieser Rhythmus ist nicht unbedingt für alle Systeme geeignet, aber "Grenzen haben" muss bleiben. Sonst wird aus der automatischen Wiederholung schnell ein Verstärker für Unfälle. Machen Sie sich nicht erst große Namen, prüfen Sie zuerst, ob es im Team zwei Iterationen überleben kann.
+
+### 2. continuation prompt muss einheitlich sein
+
+Das Projekt verwendet einen festen continuation prompt, damit nachfolgende Versuche eindeutig den Pfad "aktuellen Kontext fortsetzen" nehmen, nicht eine neue vollständige Anweisung starten. Diese Fähigkeit ist nicht schick, aber in echten Projekten unverzichtbar. Viele Fähigkeiten sehen wie Magie aus, nach dem Aufschließen sind es nur polished Ingenieursprozesse.
+
+### 3. Sowohl Shared Library als auch Adapterebene benötigen Spiegeltests
+
+Diesen Punkt möchte ich betonen. Viele Teams schreiben eine Testschicht in der gemeinsamen Laufzeit und denken dann, es reicht. Das reicht nicht.
+
+Der Grund, warum mir HagiCode hier Sorgenfreiheit gibt, ist, dass beide Ebenen Tests ergänzt haben:
+
+- Shared Provider testet "wurde wirklich automatisch fortgesetzt"
+- Adapterebene testet "ob endgültige Fehler und Streaming-Nachrichten nicht beschädigt wurden"
+
+Ich habe diesmal zwei zusätzliche relevante Tests durchgeführt, alle 31 Testfälle bestanden. Dieses Ergebnis bedeutet nicht unbedingt, dass das Design perfekt ist, aber es zeigt zumindest eines: Die aktuelle automatische Wiederholung ist kein Papier-Entwurf, sondern eine durch Code und Tests gemeinsam eingeschränkte Fähigkeit. Talk is cheap. Show me the code. Passt hier gut.
+
+## Zusammenfassung
+
+Lassen Sie uns den ganzen Artikel in einem Satz komprimieren:
+
+**Automatische Wiederholungen für Agent-CLIs wie Claude Code und Codex sollten am besten nicht als lokale Tricks innerhalb eines Providers implementiert werden, sondern als Kombination aus gemeinsamem Koordinator + Strategie-Snapshot + Kontextprüfung + Spiegeltests.**
+
+Die Vorteile sind sehr konkret:
+
+- Logik wird nur einmal geschrieben, mehrere Provider können sie wiederverwenden
+- Ob eine Anweisung Wiederholungen erlaubt, kann stabil mit dem Ausführungspfad mitgehen
+- Mit Kontext weiter, ohne Kontext rechtzeitig stoppen
+- Das Frontend sieht am Ende einen stabilen Endzustand, keinen Haufen halbfertiger Zwischenlärm
+
+Diese Lösung wurde von HagiCode bei der tatsächlichen Integration mehrerer Agent-CLIs schrittweise polished. Wer sagt denn, dass AI-unterstützte Programmierung nicht die neue Pair-Programmierung ist? Modelle helfen beim Starten, Vervollständigen, Divergieren, aber was das Erlebnis wirklich bestimmt, sind oft Kontext, Prozess und Constraints.
+
+Wenn Ihnen dieser Artikel hilft, schauen Sie sich auch gerne die öffentlichen Einstiege von HagiCode an:
+
+- GitHub: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Offizielle Website: [hagicode.com](https://hagicode.com)
+- 30 Minuten praktische Demo: [www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)
+- Desktop-Installationsseite: [hagicode.com/desktop/](https://hagicode.com/desktop/)
+- Steam: [Steam-Seite (Auf die Wunschliste setzen / Details ansehen)](https://store.steampowered.com/app/4625540/Hagicode/)
+
+HagiCode ist jetzt bei Steam gelistet, das ist keine leere Versprechung, der Link ist hier. Freunde mit Steam können es schon einmal auf die Wunschliste setzen, selbst hineinklicken und sich umsehen, ist direkter als wenn ich hier zehn Sätze sage.
+
+Lassen Sie es hierbei bewenden, den Rest sehen wir in echten Projekten weiter.
+
+## Referenzen
+
+- HagiCode-Projektseite: [https://hagicode.com](https://hagicode.com)
+- HagiCode-GitHub-Repository: [https://github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Offizielles Demo-Video: [https://www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)
+- Desktop-Installationsanleitung: [https://hagicode.com/desktop/](https://hagicode.com/desktop/)
+
+## Urheberrechtshinweis
+
+Danke fürs Lesen, wenn Sie diesen Artikel nützlich finden, sind Likes, Speichern und Teilen willkommen.
+Dieser Inhalt wurde mit KI-Unterstützung erstellt, der endgültige Inhalt wurde vom Autor geprüft und bestätigt.
+- Artikelautor: [newbe36524](https://www.newbe.pro)
+- Original-Link: [https://docs.hagicode.com/blog/2026-02-11-agent-cli-automatic-retry/](https://docs.hagicode.com/blog/2026-02-11-agent-cli-automatic-retry/)
+- Urheberrechtshinweis: Alle Artikel in diesem Blog, sofern nicht anders angegeben, werden unter der BY-NC-SA-Lizenz vereinbart. Bitte geben Sie die Quelle an!

@@ -1,0 +1,423 @@
+---
+title: HagiCode Skill System Technical Analysis: Building a Scalable AI Skill Management Platform
+date: 2026-03-24
+tags: [HagiCode, Skill, AI, Orleans, TanStack, Technical Architecture]
+description: "This article provides an in-depth analysis of the architecture design and implementation of the Skill management system in the HagiCode project, covering technical implementation details of four core features: local global management, market search, intelligent recommendations, and trusted provider management."
+---
+
+## HagiCode Skill System Technical Analysis: Building a Scalable AI Skill Management Platform
+
+> This article provides an in-depth analysis of the architecture design and implementation of the Skill management system in the HagiCode project, covering technical implementation details of four core features: local global management, market search, intelligent recommendations, and trusted provider management.
+
+## Background
+
+In the field of AI coding assistants, how to expand the capabilities of AI has always been a core challenge. While Claude Code's code assistance capabilities are quite strong, different development teams and different tech stacks often require professional capabilities for specific scenarios—such as handling Docker deployments, database optimization, frontend component generation, and so on. In such cases, the Skill system becomes particularly important.
+
+The HagiCode project also faced similar challenges during development: how to enable Claude Code to "learn" new professional skills like a human, while maintaining good user experience and engineering maintainability? After all, this problem is both difficult and simple. Around this problem, we designed and implemented a complete Skill management system.
+
+This article will detail the technical architecture and core implementation of this system, suitable for developers interested in AI extensibility and command-line tool integration. Perhaps it will be useful to you, perhaps not, but it's written out nonetheless.
+
+## About HagiCode
+
+The solution shared in this article comes from our practical experience in the [HagiCode](https://hagicode.com) project. HagiCode is an open-source AI coding assistant project aimed at helping development teams improve R&D efficiency. The project's tech stack covers ASP.NET Core, Orleans distributed framework, TanStack Start + React frontend, and the Skill management subsystem introduced in this article.
+
+The project's GitHub repository is [HagiCode-org/site](https://github.com/HagiCode-org/site). If you find the technical solution introduced in this article valuable, feel free to give it a Star. After all, more stars make for a better mood.
+
+## System Architecture Overview
+
+The Skill system adopts a front-end and back-end separation architecture design, to be honest, nothing particularly special.
+
+**The frontend part** uses TanStack Start + React to build the user interface, managing state through Redux Toolkit. Four main features correspond to four Tab components: Local Skills, Market Gallery, Smart Recommendations, and Trusted Providers. This design is, after all, for the sake of user experience.
+
+**The backend part** is based on ASP.NET Core + ABP Framework, using Orleans Grain to implement distributed state management. The online API client encapsulates the `IOnlineApiClient` interface for communicating with remote skill directory services.
+
+The overall design principle is "separation of command execution and business logic," using the adapter pattern to shield the details of npm/npx command execution in independent modules. After all, who wants to see command-line code scattered all over the place?
+
+## Core Feature 1: Local Global Management
+
+Local global management is the most basic functional module, responsible for listing installed skills and supporting uninstall operations. Nothing too complex, just doing things well.
+
+### Technical Solution
+
+The implementation is located in `LocalSkillsTab.tsx` and `LocalSkillCommandAdapter.cs`. The core idea is to wrap the `npx skills` command, parse its JSON output, and convert it to internal data structures. Simple in theory, simple in practice.
+
+```csharp
+public async Task<IReadOnlyList<LocalSkillInventoryResponseDto>> GetLocalSkillsAsync(
+    CancellationToken cancellationToken = default)
+{
+    var result = await _commandAdapter.ListGlobalSkillsAsync(cancellationToken);
+    return result.Skills.Select(skill => new LocalSkillInventoryResponseDto
+    {
+        Name = skill.Name,
+        Version = skill.Version,
+        Source = skill.Source,
+        InstalledPath = skill.InstalledPath,
+        Description = skill.Description
+    }).ToList();
+}
+```
+
+The data flow is very clear: frontend initiates request → SkillGalleryAppService receives → LocalSkillCommandAdapter executes npx command → parses JSON result → returns DTO object. One link after another, nothing much to say.
+
+Uninstalling a skill uses the `npx skills remove -g <skillName> -y` command, and the system automatically handles dependencies and cleanup. Installation metadata is stored in `managed-install.json` in the skill directory, recording installation time, source version, and other information for future updates and auditing. After all, some things are worth recording.
+
+### Installation Process Details
+
+Skill installation involves the coordination of multiple steps, how should I put it, not too complex actually:
+
+```csharp
+public async Task<SkillInstallResultDto> InstallAsync(
+    SkillInstallRequestDto request,
+    CancellationToken cancellationToken = default)
+{
+    // 1. Normalize installation reference
+    var normalized = _referenceNormalizer.Normalize(
+        request.SkillId,
+        request.Source,
+        request.SkillSlug,
+        request.Version);
+
+    // 2. Check prerequisites
+    await _prerequisiteChecker.CheckAsync(cancellationToken);
+
+    // 3. Acquire installation lock
+    using var installLock = await _lockProvider.AcquireAsync(normalized.SkillId);
+
+    // 4. Execute installation command
+    var result = await _installCommandRunner.ExecuteAsync(
+        new SkillInstallCommandExecutionRequest
+        {
+            Command = $"npx skills add {normalized.FullReference} -g -y",
+            Timeout = TimeSpan.FromMinutes(4)
+        },
+        cancellationToken);
+
+    // 5. Persist installation metadata
+    await _metadataStore.WriteAsync(normalized.SkillPath, request);
+
+    return new SkillInstallResultDto { Success = result.Success };
+}
+```
+
+Several key design patterns are used here: the **Reference Normalizer** is responsible for converting various input formats (such as `tanweai/pua`, `@opencode/docker-skill`) into a unified internal representation; the **Installation Lock Mechanism** ensures that only one installation operation for the same skill is in progress at a time; **Streaming Output** pushes installation progress to the frontend in real-time through Server-Sent Events, so users can see real-time logs similar to a terminal.
+
+These design patterns, when it comes down to it, are just to make things simpler.
+
+## Core Feature 2: Market Search
+
+Market search allows users to discover and install skills from the community. After all, one person's abilities are limited, but the wisdom of the crowd is infinite.
+
+### Technical Solution
+
+The search functionality relies on the online API `https://api.hagicode.com/v1/skills/search`. To improve response speed, the system implements a caching mechanism. Caching, like memory, means once something is remembered, there's no need to work hard to think about it next time.
+
+```csharp
+private async Task<IReadOnlyList<SkillGallerySkillDto>> SearchCatalogAsync(
+    string query,
+    CancellationToken cancellationToken,
+    IReadOnlySet<string>? allowedSources = null)
+{
+    var cacheKey = $"skill_search:{query}:{string.Join(",", allowedSources ?? Array.Empty<string>())}";
+
+    if (_memoryCache.TryGetValue(cacheKey, out var cached))
+        return (IReadOnlyList<SkillGallerySkillDto>)cached!;
+
+    var response = await _onlineApiClient.SearchAsync(
+        new SearchSkillsRequest
+        {
+            Query = query,
+            Limit = _options.LimitPerQuery,
+        },
+        cancellationToken);
+
+    var results = response.Skills
+        .Where(skill => allowedSources is null || allowedSources.Contains(skill.Source))
+        .Select(skill => new SkillGallerySkillDto { ... })
+        .ToList();
+
+    _memoryCache.Set(cacheKey, results, TimeSpan.FromMinutes(10));
+    return results;
+}
+```
+
+Search results support filtering by trusted sources, showing only skill sources trusted by users. Predefined seed queries are used to initialize the catalog, such as "popular", "recent", etc., so users can see recommended popular skills when they first open it. After all, first impressions are important.
+
+## Core Feature 3: Smart Recommendations
+
+Smart recommendations is the most complex feature in the system, capable of automatically recommending the most suitable skills based on the user's current project situation. Complex as it is, it's still worth implementing.
+
+### Recommendation Process
+
+The entire recommendation process is divided into five stages:
+
+```
+1. Build project context
+   ↓
+2. AI generates search queries
+   ↓
+3. Parallel search online catalog
+   ↓
+4. AI ranks candidates
+   ↓
+5. Return recommendation list
+```
+
+First, the system analyzes the project's tech stack, programming languages, domain structure, and other features to build a "project profile." This profile, like a person's resume, records all the features.
+
+Then, use AI Grain to generate targeted search queries. The design here is actually quite interesting—instead of directly asking the AI "what skills do you recommend," it first thinks about "what search terms can find relevant skills." After all, sometimes how you ask the question is more important than the answer itself:
+
+```csharp
+var queryGeneration = await aiGrain.GenerateSkillRecommendationQueriesAsync(
+    projectContext,      // Project context
+    locale,              // User language preference
+    maxQueries,           // Maximum number of queries
+    effectiveSearchHero); // AI model selection
+```
+
+Next, execute these search queries in parallel to get a list of candidate skills. Parallel processing, when it comes down to it, is also to save time.
+
+Finally, use another AI Grain to rank the candidate skills. This step comprehensively considers factors such as the skill's relevance to the project, trusted status, user historical preferences, etc:
+
+```csharp
+var ranking = await aiGrain.RankSkillRecommendationsAsync(
+    projectContext,
+    candidates,
+    installedSkillNames,
+    locale,
+    maxRecommendations,
+    effectiveRankingHero);
+
+response.Items = MergeRecommendations(projectContext, candidates, ranking, maxRecommendations);
+```
+
+### Fallback Mechanism
+
+AI models may respond slowly or be temporarily unavailable. After all, even the best systems can fail. For this reason, the system designs a deterministic fallback mechanism: when AI services are unavailable, rule-based heuristic algorithms are used to generate recommendations, such as inferring possibly needed skills based on dependencies in package.json.
+
+This fallback mechanism, when you get down to it, just leaves a way out for the system.
+
+## Core Feature 4: Trusted Provider Management
+
+Trusted provider management allows users to control which skill sources are trusted. After all, trust is something you need to control yourself.
+
+### Matching Rules
+
+Trusted providers support two matching rules: **exact match** (exact) and **prefix match** (prefix).
+
+```csharp
+public static TrustedSkillProviderResolutionSnapshot Resolve(
+    TrustedSkillProviderSnapshot snapshot,
+    string source)
+{
+    var normalizedSource = Normalize(source);
+
+    foreach (var entry in snapshot.Entries.OrderBy(e => e.SortOrder))
+    {
+        if (!entry.IsEnabled) continue;
+
+        foreach (var rule in entry.MatchRules)
+        {
+            bool isMatch = rule.MatchType switch
+            {
+                TrustedSkillProviderMatchRuleType.Exact
+                    => string.Equals(normalizedSource, Normalize(rule.Value),
+                        StringComparison.OrdinalIgnoreCase),
+                TrustedSkillProviderMatchRuleType.Prefix
+                    => normalizedSource.StartsWith(Normalize(rule.Value) + "/",
+                        StringComparison.OrdinalIgnoreCase),
+                _ => false
+            };
+
+            if (isMatch)
+                return new TrustedSkillProviderResolutionSnapshot
+                {
+                    IsTrustedSource = true,
+                    ProviderId = entry.ProviderId,
+                    DisplayName = entry.DisplayName
+                };
+        }
+    }
+
+    return new TrustedSkillProviderResolutionSnapshot { IsTrustedSource = false };
+}
+```
+
+Predefined trusted providers include well-known organizations and projects such as Vercel, Azure, anthropics, Microsoft, browser-use, etc. Custom providers can be added through configuration files, specifying provider ID, display name, badge label, matching rules, etc. After all, the world is so big, it's impossible for only a few to be trusted.
+
+### Persistence Implementation
+
+Trusted configuration uses Orleans Grain for persistent storage:
+
+```csharp
+public class TrustedSkillProviderGrain : Grain<TrustedSkillProviderState>,
+    ITrustedSkillProviderGrain
+{
+    public async Task UpdateConfigurationAsync(TrustedSkillProviderSnapshot snapshot)
+    {
+        State.Snapshot = snapshot;
+        await WriteStateAsync();
+    }
+
+    public Task<TrustedSkillProviderSnapshot> GetConfigurationAsync()
+    {
+        return Task.FromResult(State.Snapshot);
+    }
+}
+```
+
+The advantage of this approach is that configuration changes are automatically synchronized to all nodes without manually refreshing caches. After all, automation, when it comes down to it, is also to let people worry less.
+
+## Key Technical Design
+
+### Command Execution Adapter Pattern
+
+The Skill system needs to execute various npx commands. If this logic is scattered everywhere, the code becomes difficult to maintain. Therefore, we designed an adapter interface. Design patterns, when it comes down to it, are just to make code more maintainable:
+
+```csharp
+public interface ISkillInstallCommandRunner
+{
+    Task<SkillInstallCommandExecutionResult> ExecuteAsync(
+        SkillInstallCommandExecutionRequest request,
+        CancellationToken cancellationToken = default);
+}
+```
+
+Different commands have different executor implementations, all implementing the same interface for easy testing and replacement.
+
+### SSE Streaming Output
+
+Installation progress is pushed to the frontend in real-time through Server-Sent Events:
+
+```csharp
+public async Task InstallWithProgressAsync(
+    SkillInstallRequestDto request,
+    IServerStreamWriter<SkillInstallProgressEventDto> stream,
+    CancellationToken cancellationToken)
+{
+    var process = new Process
+    {
+        StartInfo = new ProcessStartInfo
+        {
+            FileName = "npx",
+            Arguments = $"skills add {request.FullReference} -g -y",
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false
+        }
+    };
+
+    process.OutputDataReceived += async (sender, e) =>
+    {
+        await stream.WriteAsync(new SkillInstallProgressEventDto
+        {
+            EventType = "output",
+            Data = e.Data ?? string.Empty
+        });
+    };
+
+    process.Start();
+    process.BeginOutputReadLine();
+    await process.WaitForExitAsync(cancellationToken);
+}
+```
+
+Users can see real-time output similar to a terminal on the frontend, with a very intuitive experience. After all, real-time feedback gives peace of mind.
+
+## Practice Guide
+
+### Installing Community Skills
+
+Taking installing the `pua` skill as an example (this is a popular community skill):
+
+1. Open the Skills drawer, switch to the "Skill Gallery" tab
+2. Enter "pua" to search
+3. Click on search results to view skill details
+4. Click the "Install" button to install
+5. Switch to the "Local Skills" tab to confirm successful installation
+
+The installation command is `npx skills add tanweai/pua -g -y`, and the system automatically handles all the details. Actually, there aren't that many steps, just take them one by one.
+
+### Adding Custom Trusted Sources
+
+If your team has its own skill repository, you can add it as a trusted source:
+
+```yaml
+providerId: "my-team"
+displayName: "My Team Skills"
+badgeLabel: "MyTeam"
+isEnabled: true
+sortOrder: 100
+matchRules:
+  - matchType: "prefix"
+    value: "my-team/"
+  - matchType: "exact"
+    value: "my-team/special-skill"
+```
+
+This way, all skills from your team will display the trusted badge, and users can install with more confidence. After all, things with labels always make people feel more at ease.
+
+### Skill Development Basics
+
+Creating custom skills requires following this structure:
+
+```
+my-skill/
+├── SKILL.md          # Skill metadata (YAML front matter)
+├── index.ts          # Skill entry point
+├── agents/           # Supported agent configurations
+└── references/       # Reference resources
+```
+
+Example of `SKILL.md` format:
+
+```yaml
+---
+name: my-skill
+description: A brief description of what this skill does
+---
+
+# My Skill
+
+Detailed documentation...
+```
+
+## Notes
+
+1. **Network requirements**: Skill search and installation require access to `api.hagicode.com` and npm registry
+2. **Node.js version**: Node.js 18 or higher is recommended
+3. **Permission requirements**: Global npm installation permissions are required
+4. **Concurrency control**: Only one installation or uninstall operation can be executed for the same skill at the same time
+5. **Timeout settings**: The default timeout for installation operations is 4 minutes, complex scenarios may require adjustment
+
+These notes, when it comes down to it, are just to make things go smoothly.
+
+## Summary
+
+This article introduced the complete implementation of the Skill management system in the HagiCode project. Through technical means such as front-end and back-end separation architecture, adapter pattern, and Orleans distributed state management, this system achieves:
+
+- **Local global management**: Providing a unified skill management interface by wrapping npx skills commands
+- **Market search**: Quickly discovering community skills using online APIs and caching mechanisms
+- **Smart recommendations**: Combining AI capabilities to recommend the most suitable skills based on project context
+- **Trusted management**: A flexible configuration system that lets users control trust boundaries
+
+This design approach is not only applicable to Skill management, but also has reference value for any scenario that needs to integrate command-line tools and balance local storage with online services.
+
+If this article helps you, feel free to give a Star on GitHub: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site). You can also visit the official website to learn more: [hagicode.com](https://hagicode.com).
+
+Perhaps you'll also think this system design is okay, perhaps you won't. But that's all, after all, the code is written, some people will use it, and some people won't...
+
+## References
+
+- HagiCode project address: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- HagiCode official website: [hagicode.com](https://hagicode.com)
+- Claude Code official skills documentation: [docs.anthropic.com](https://docs.anthropic.com)
+- Orleans framework documentation: [dotnet.github.io/orleans](https://dotnet.github.io/orleans)
+- TanStack Start: [tanstack.com/start](https://tanstack.com/start)
+
+## Copyright Notice
+
+Thank you for reading. If you find this article useful, feel free to like, bookmark, and share to support.
+This content uses AI-assisted collaboration, with final content reviewed and confirmed by the author.
+- Article author: [newbe36524](https://www.newbe.pro)
+- Original link: [https://docs.hagicode.com/blog/2026-03-24-hagicode-skill-system-technical-analysis/](https://docs.hagicode.com/blog/2026-03-24-hagicode-skill-system-technical-analysis/)
+- Copyright statement: Unless otherwise stated, all articles in this blog are licensed under the BY-NC-SA license. Please indicate the source for reprinting!

@@ -1,0 +1,552 @@
+---
+title: HagiCode Desktop Hybrid Distribution Architecture Analysis: Accelerating Large File Downloads with P2P
+date: 2026-03-27
+tags: [HagiCode, Desktop, P2P, BitTorrent, WebSeed, Hybrid Distribution, Technical Architecture]
+description: "HagiCode Desktop Hybrid Distribution Architecture Analysis: Accelerating Large File Downloads with P2P: Actually, I've been holding back this article for a long time before writing it. I don't know if it's written well. After all, with technical articles, it's easy to write them, but it's"
+---
+
+## HagiCode Desktop Hybrid Distribution Architecture Analysis: Accelerating Large File Downloads with P2P
+
+> Actually, I've been holding back this article for a long time before writing it. I don't know if it's written well. After all, with technical articles, it's easy to write them, but writing them with flavor is hard. But then I thought, forget it, I'm not some great writer anyway. Without divine inspiration, I'll just write this rough piece.
+
+## Background
+
+Teams doing desktop application development will, sooner or later, encounter a headache-inducing problem: how to distribute large files?
+
+This matter is really quite helpless. Traditional HTTP/HTTPS direct link downloads, when file sizes are small and user numbers are few, can actually hold up—just like feelings in younger days, simple and pure, without much turbulence. But time is cruel. As projects continue to develop, installation packages get larger and larger: Desktop-side ZIP packages, portable packages, web deployment archives... problems gradually emerge:
+
+- **Download speed limited by origin bandwidth**: Even with high single-server bandwidth, it can't withstand everyone downloading simultaneously. What's this like? It's like you like someone, but her heart is only so big—it's already filled with others. No matter how hard you try, you can't squeeze in.
+- **Resume capability basically zero**: If an HTTP download breaks, you have to start from scratch, wasting not just time but bandwidth. Why should beauty care about sunny or cloudy days? Unfortunately, the heavens don't follow our wishes.
+- **Origin server under severe pressure**: All traffic surges toward the central server, bandwidth costs skyrocket, and scalability becomes a problem. This is probably the so-called helplessness of centralization—everything pressed on one point, sooner or later it will collapse.
+
+The HagiCode Desktop project is no exception. When designing our distribution system, we pondered: could we create a hybrid distribution solution without changing the existing `index.json` control plane? One that can leverage the distributed nature of P2P networks to accelerate downloads, while retaining HTTP fallback to ensure availability in restricted environments like enterprise networks.
+
+The changes brought by this decision might be bigger than you imagine—don't worry, I'll explain in detail below. After all, some things need to be said out loud to be understood.
+
+## About HagiCode
+
+The solution shared in this article comes from our practical experience in the [HagiCode](https://hagicode.com) project. HagiCode is an open-source AI code assistant project dedicated to helping development teams improve R&D efficiency. The project covers multiple subsystems including frontend, backend, desktop launcher, documentation, build, and server deployment.
+
+The Desktop-side hybrid distribution architecture is a solution that HagiCode refined through trial and error during actual operation. Some might ask, what's the point of writing this? Actually, there's no particular point, just that if this solution has value, it shows we have some insights into engineering practice—so HagiCode itself is worth paying attention to.
+
+The project's GitHub address is [HagiCode-org/site](https://github.com/HagiCode-org/site). If you're interested, feel free to star it first. After all, beautiful things deserve to be collected.
+
+## Core Design Philosophy: P2P First, HTTP Fallback
+
+To put it simply, the core philosophy of hybrid distribution is one sentence: **P2P first, HTTP fallback**.
+
+The key to this solution lies in the word "hybrid." It's not simply throwing BitTorrent in and being done with it, but making the two download methods work together, complementing each other:
+
+- **P2P network** provides distributed acceleration—the more people downloading, the more nodes, the faster the speed. What's this like? It's like you and I were both that "her" from our younger days—light in our hearts, and the whole world feels bright.
+- **WebSeed/HTTP fallback** ensures availability, enabling normal downloads even in corporate firewalls and intranet environments. After all, there are some places you can't just enter as you please.
+- **Control plane remains simple**, without changing the core logic of `index.json`, just adding optional metadata fields. What's wrong with simple? After doing complex things for so long, being simple once in a while is actually quite nice.
+
+What's the benefit of doing this? Users experience "faster downloads," while the technical team doesn't need to pay too much for P2P complexity—after all, the BT protocol itself is already quite mature, and we're too lazy to reinvent the wheel.
+
+## Architecture Design
+
+### Layered Architecture Overview
+
+First, let's look at the overall architecture diagram to give you a macro impression:
+
+```
+┌─────────────────────────────────────┐
+│     Renderer (UI Layer)             │
+├─────────────────────────────────────┤
+│     IPC/Preload (Bridge Layer)      │
+├─────────────────────────────────────┤
+│   VersionManager (Version Mgmt)     │
+├─────────────────────────────────────┤
+│ HybridDownloadCoordinator (Coord)   │
+│  ├── DistributionPolicyEvaluator   │
+│  ├── DownloadEngineAdapter         │
+│  ├── CacheRetentionManager         │
+│  └── SHA256 Verifier               │
+├─────────────────────────────────────┤
+│   WebTorrent (Download Engine)      │
+└─────────────────────────────────────┘
+```
+
+From this diagram, you can see the entire system is designed in layers. Why divide it so finely? Mainly for **testability and replaceability**. Actually, people are like this too—when things are clearly divided and each does their job, the world becomes simple.
+
+- **UI Layer** responsible for displaying download progress, sharing acceleration toggle—this is the facade
+- **Coordination Layer** is the core, containing policy evaluation, engine adaptation, cache management, integrity verification—this is the kernel
+- **Engine Layer** encapsulates specific download implementations, currently using WebTorrent—this is the tool
+
+The engine layer is abstracted as a `DownloadEngineAdapter` interface. If we want to switch to another BT engine in the future, or run a sidecar process, it won't be difficult. After all, no one wants to hang themselves on a single tree—this is true in the code world, and in life too.
+
+### Control Plane and Data Plane Separation
+
+HagiCode Desktop maintains `index.json` as the single control plane—this design is crucial. The control plane is responsible for version discovery, channel selection, centralized policy, while the data plane is where files are actually downloaded.
+
+The new fields in `index.json` are optional:
+
+```json
+{
+  "asset": {
+    "torrentUrl": "https://cdn.example.com/app.torrent",
+    "infoHash": "abc123...",
+    "webSeeds": [
+      "https://cdn.example.com/app.zip",
+      "https://backup.example.com/app.zip"
+    ],
+    "sha256": "def456...",
+    "directUrl": "https://cdn.example.com/app.zip"
+  }
+}
+```
+
+These fields are all optional—if missing, it falls back to traditional HTTP download mode. The benefit of this design is **backward compatibility**—old version clients are completely unaffected. After all, the world changes, but some things can't change—once changed, there's no going back.
+
+### Policy-Driven Decision Making
+
+Not all files are worth distributing via P2P. Actually, most things in this world are like this—not everything needs to be fought for. Some things just aren't suitable—take a step back and the sea and sky will widen.
+
+DistributionPolicyEvaluator is responsible for evaluating policies—only files meeting the following conditions will enable hybrid downloading:
+
+1. **Source type must be HTTP index**: Direct GitHub downloads or local folder sources don't go through this system. After all, not all roads are suitable for P2P.
+2. **File size must be ≥ 100MB**: For small files, P2P overhead isn't worth it. Relationships are the same—some things are too small to warrant such effort.
+3. **Must have complete hybrid metadata**: torrentUrl, webSeeds, sha256 are all indispensable. Missing one won't work—that's the rule.
+4. **Limited to latest desktop packages and web deployment packages only**: Historical versions can use traditional methods. Newcomers smile, old ones cry—why bother?
+
+```typescript
+class DistributionPolicyEvaluator {
+  evaluate(version: Version, settings: SharingAccelerationSettings): HybridDownloadPolicy {
+    // Check source type
+    if (version.sourceType !== 'http-index') {
+      return { useHybrid: false, reason: 'not-http-index' };
+    }
+
+    // Check metadata completeness
+    if (!version.hybrid) {
+      return { useHybrid: false, reason: 'not-eligible' };
+    }
+
+    // Check if enabled
+    if (!settings.enabled) {
+      return { useHybrid: false, reason: 'shared-disabled' };
+    }
+
+    // Check asset type (only latest desktop/web packages)
+    if (!version.hybrid.isLatestDesktopAsset && !version.hybrid.isLatestWebAsset) {
+      return { useHybrid: false, reason: 'latest-only' };
+    }
+
+    return { useHybrid: true, reason: 'shared-enabled' };
+  }
+}
+```
+
+The benefit of doing this is **predictable system behavior**. Whether developers or users, everyone can clearly know which files will go through P2P and which won't. After all, when expectations are well managed, hearts remain steady.
+
+## Core Implementation
+
+### Type Definition System
+
+First, let's look at the type definitions—this is the foundation of the entire system. Actually, type definitions are like characterizing things—once defined, the path ahead becomes clear.
+
+```typescript
+// Hybrid distribution metadata
+interface HybridDistributionMetadata {
+  torrentUrl?: string;      // Torrent file URL
+  infoHash?: string;        // InfoHash
+  webSeeds: string[];       // WebSeed list
+  sha256?: string;          // File hash
+  directUrl?: string;       // HTTP direct link (for fallback)
+  eligible: boolean;        // Whether eligible for hybrid distribution
+  thresholdBytes: number;   // Threshold (bytes)
+  assetKind: VersionAssetKind;
+  isLatestDesktopAsset: boolean;
+  isLatestWebAsset: boolean;
+}
+
+// Sharing acceleration settings
+interface SharingAccelerationSettings {
+  enabled: boolean;           // Master switch
+  uploadLimitMbps: number;    // Upload rate limit
+  cacheLimitGb: number;       // Cache limit
+  retentionDays: number;      // Retention days
+  hybridThresholdMb: number;  // Hybrid distribution threshold
+  onboardingChoiceRecorded: boolean;
+}
+
+// Download progress
+interface VersionDownloadProgress {
+  current: number;
+  total: number;
+  percentage: number;
+  stage: VersionInstallStage;  // queued, downloading, backfilling, verifying, extracting, completed, error
+  mode: VersionDownloadMode;   // http-direct, shared-acceleration, source-fallback
+  peers?: number;              // Number of connected peers
+  p2pBytes?: number;          // Bytes obtained via P2P
+  fallbackBytes?: number;      // Bytes obtained via fallback
+  verified?: boolean;          // Whether verified
+}
+```
+
+With type definitions clear, the subsequent implementation follows naturally. Perhaps this is what they call "well begun is half done"—although that's a bit cliché.
+
+### Core Coordinator
+
+HybridDownloadCoordinator is the orchestrator of the entire download process, coordinating policy evaluation, engine execution, SHA256 verification, and cache management. It sounds complex, but the core logic is only a few steps—much like life—seemingly complex, but when you peel back the layers, it's actually quite simple.
+
+```typescript
+class HybridDownloadCoordinator {
+  async download(
+    version: Version,
+    cachePath: string,
+    packageSource: PackageSource,
+    onProgress?: DownloadProgressCallback,
+  ): Promise<HybridDownloadResult> {
+    // 1. Evaluate policy: whether to use hybrid download
+    const policy = this.policyEvaluator.evaluate(version, settings);
+
+    // 2. Execute download
+    if (policy.useHybrid) {
+      await this.engine.download(version, cachePath, settings, onProgress);
+    } else {
+      await packageSource.downloadPackage(version, cachePath, onProgress);
+    }
+
+    // 3. SHA256 verification (hard threshold)
+    const verified = await this.verify(version, cachePath, onProgress);
+    if (!verified) {
+      await this.cacheRetentionManager.discard(version.id, cachePath);
+      throw new Error(`sha256 verification failed for ${version.id}`);
+    }
+
+    // 4. Mark as trusted cache, begin controlled seeding
+    await this.cacheRetentionManager.markTrusted({
+      versionId: version.id,
+      cachePath,
+      cacheSize,
+    }, settings);
+
+    return { cachePath, policy, verified };
+  }
+}
+```
+
+Here's a key point: **SHA256 verification is a hard threshold**. Downloaded files must pass verification before entering the installation process. If verification fails, the cache is discarded, ensuring there's no "downloaded wrong file causing installation problems" scenario.
+
+What's this like? It's like trust—once betrayed, it's hard to rebuild. So from the start, set the threshold properly.
+
+### Download Engine Abstraction
+
+DownloadEngineAdapter is an abstract interface defining the methods engines must implement:
+
+```typescript
+interface DownloadEngineAdapter {
+  download(
+    version: Version,
+    destinationPath: string,
+    settings: SharingAccelerationSettings,
+    onProgress?: (progress: VersionDownloadProgress) => void,
+  ): Promise<void>;
+
+  stopAll(): Promise<void>;
+}
+```
+
+The V1 implementation is based on WebTorrent, encapsulated in InProcessTorrentEngineAdapter:
+
+```typescript
+class InProcessTorrentEngineAdapter implements DownloadEngineAdapter {
+  async download(...) {
+    const client = this.getClient(settings);  // Apply upload rate limit
+    const torrent = client.add(torrentId, {
+      path: path.dirname(destinationPath),
+      destroyStoreOnDestroy: false,
+      maxWebConns: 8,
+    });
+
+    // Add WebSeed
+    torrent.on('ready', () => {
+      for (const seed of hybrid.webSeeds) {
+        torrent.addWebSeed(seed);
+      }
+      if (hybrid.directUrl) {
+        torrent.addWebSeed(hybrid.directUrl);
+      }
+    });
+
+    // Progress reporting - distinguish P2P and fallback
+    torrent.on('download', () => {
+      const hasP2PPeer = torrent.wires.some(w => w.type !== 'webSeed');
+      const mode = hasP2PPeer ? 'shared-acceleration' : 'source-fallback';
+      // ... report progress
+    });
+  }
+}
+```
+
+The pluggable engine design makes future optimizations simple. For example, V2 can run the engine in a helper process, avoiding the risk of main process crashes. After all, no one wants one bad apple to spoil the bunch—this is true in the code world, and in life too.
+
+### Mode Differentiation in Progress Reporting
+
+At the UI layer, what users care most about is "am I downloading via P2P or HTTP fallback right now?" InProcessTorrentEngineAdapter determines this by checking the type of `torrent.wires`:
+
+```typescript
+const hasP2PPeer = torrent.wires.some((wire) => wire.type !== 'webSeed');
+const hasFallbackWire = torrent.wires.some((wire) => wire.type === 'webSeed');
+
+const mode = hasP2PPeer ? 'shared-acceleration'
+         : hasFallbackWire ? 'source-fallback'
+         : 'shared-acceleration';
+
+const stage = hasP2PPeer ? 'downloading'
+           : hasFallbackWire ? 'backfilling'
+           : 'downloading';
+```
+
+This logic looks simple, but it's key to user experience. Users can clearly see whether they're currently "sharing acceleration" or "fallback backfilling"—they know what's happening. Actually, this is true between people too—be transparent, and everyone feels at ease.
+
+### SHA256 Streaming Verification
+
+Integrity verification uses Node.js's crypto module for streaming hash calculation, avoiding loading the entire file into memory:
+
+```typescript
+private async computeSha256(filePath: string): Promise<string> {
+  const hash = createHash('sha256');
+  await new Promise<void>((resolve, reject) => {
+    const stream = fs.createReadStream(filePath);
+    stream.on('data', (chunk) => hash.update(chunk));
+    stream.on('error', reject);
+    stream.on('end', resolve);
+  });
+  return hash.digest('hex').toLowerCase();
+}
+```
+
+This implementation is particularly friendly for large files. Think about it—if you download a 2GB installation package and then need to read the entire file into memory for verification, how terrifying would the memory usage be? Streaming processing solves this problem perfectly.
+
+Isn't this like relationships? Some things don't need to be possessed all at once—taking it bit by bit is actually better.
+
+## Data Flow
+
+The complete data flow looks like this:
+
+```
+┌────────────────────────────────────────────────────────────────────┐
+│                    User clicks install large file version           │
+└────────────────────────────────────────────────────────────────────┘
+                                 │
+                                 ▼
+┌────────────────────────────────────────────────────────────────────┐
+│                    VersionManager calls coordinator                 │
+│                    HybridDownloadCoordinator.download()             │
+└────────────────────────────────────────────────────────────────────┘
+                                 │
+                                 ▼
+┌────────────────────────────────────────────────────────────────────┐
+│                    DistributionPolicyEvaluator.evaluate()           │
+│                    Check: source, metadata, toggle, asset type      │
+└────────────────────────────────────────────────────────────────────┘
+                                 │
+                    ┌───────────┴───────────┐
+                    │ useHybrid?            │
+                    └───────────┬───────────┘
+                        Yes │         │ No
+                           ▼         ▼
+              ┌──────────────────┐  ┌─────────────────────┐
+              │ P2P + WebSeed    │  │ HTTP direct link    │
+              │ Hybrid download  │  │ (compatibility path)│
+              └──────────────────┘  └─────────────────────┘
+                        │
+                        ▼
+              ┌──────────────────┐
+              │ SHA256 verify    │
+              │ (hard threshold) │
+              └────────┬─────────┘
+                       │
+              ┌────────┴─────────┐
+              │ Pass?           │
+              └────────┬─────────┘
+                  Yes │    │ No
+                    ▼    ▼
+          ┌────────────┐ ┌────────────────┐
+          │ Extract    │ │ Discard cache  │
+          │ install +  │ │ + report error │
+          │ controlled │ └────────────────┘
+          │ seeding    │
+          └────────────┘
+```
+
+The entire process is very clear, with each step having clear responsibilities. If something goes wrong, you can quickly locate which step has the problem. After all, the thing to fear is confusion—once confused, things become difficult to handle.
+
+## Product Packaging
+
+No matter how good the technical solution, if user experience is poor, it's all for naught. HagiCode Desktop has done a lot of work on product packaging. After all, technology is what's inside, product is the appearance—if the appearance doesn't look good, no one wants to look at the bones no matter how good they are.
+
+### Hiding BT Terminology
+
+Most users don't understand what BitTorrent is, what InfoHash is. So at the product level, we use the term "sharing acceleration":
+
+- The feature is called "sharing acceleration," not P2P download
+- Settings call it "upload rate limit," not seeding
+- Progress displays "fallback backfilling," not WebSeed fallback
+
+This way, the cognitive burden of terminology is reduced. Actually, speaking is an art too—speak simply, and everyone is more relaxed.
+
+### First-Time Wizard Enabled by Default
+
+When new users use the desktop app for the first time, they see a wizard page, with one page introducing the sharing acceleration feature:
+
+> To speed up downloads, we will share partially downloaded files with other users during your download. This process is completely optional, and you can disable it at any time in settings.
+
+It's enabled by default, but provides a clear way to opt out. If enterprise users don't need it, they can disable it in the wizard. After all, the choice is in the user's hands—no one likes being forced.
+
+### User-Controlled Parameters
+
+The settings page provides three adjustable parameters:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| Upload rate limit | 2 MB/s | Prevent using too much upstream bandwidth |
+| Cache limit | 10 GB | Control disk space usage |
+| Retention days | 7 days | Automatically clear cache after this time |
+
+These parameters all have reasonable defaults—regular users don't need to change them, while advanced users can adjust according to their network environment. After all, tastes vary—giving some freedom is always good.
+
+## Key Design Decisions
+
+Looking back at the entire solution, there are several key decisions worth mentioning:
+
+### Engine in Main Process (V1)
+
+Why not start with a sidecar/helper process? The reason is simple: **quick to launch**. The main process solution has a short development cycle and is easy to debug—get the feature running first, then consider stability optimization.
+
+Of course, this decision comes at a cost: engine crashes will affect the main process. So we mitigate this through adapter boundaries and timeout controls. At the same time, we've reserved a migration path—V2 can easily migrate to a separate process.
+
+Isn't this like us when we were young? Get on the bus first, worry about the rest later. After all, sometimes thinking too much prevents you from taking that first step.
+
+### SHA256 as Integrity Verification
+
+Instead of MD5 or CRC32, we use SHA256 because it's more secure. The collision cost of MD5 and CRC32 is too low—if someone maliciously constructs a fake installation package, the consequences would be unimaginable. Although SHA256's computational overhead is larger, security is worth the cost.
+
+Trust—hard to build, collapses in an instant. So when you can choose security, don't skimp on that cost.
+
+### Enabled Only for HTTP Index
+
+GitHub downloads, local folder sources, and other scenarios don't go through hybrid distribution. This isn't a technical limitation, but to **avoid complexity**. The BT protocol has little value in private networks anyway, and would increase unnecessary code complexity.
+
+Some circles shouldn't be forced. It's that simple.
+
+## Practice Points
+
+### Settings Normalization
+
+In SharingAccelerationSettingsStore, all values need boundary checking and normalization:
+
+```typescript
+private normalize(settings: SharingAccelerationSettings): SharingAccelerationSettings {
+  return {
+    enabled: Boolean(settings.enabled),
+    uploadLimitMbps: this.clampNumber(settings.uploadLimitMbps, 1, 200, DEFAULT_SETTINGS.uploadLimitMbps),
+    cacheLimitGb: this.clampNumber(settings.cacheLimitGb, 1, 500, DEFAULT_SETTINGS.cacheLimitGb),
+    retentionDays: this.clampNumber(settings.retentionDays, 1, 90, DEFAULT_SETTINGS.retentionDays),
+    hybridThresholdMb: DEFAULT_SETTINGS.hybridThresholdMb,  // Fixed value, not user-changeable
+    onboardingChoiceRecorded: Boolean(settings.onboardingChoiceRecorded),
+  };
+}
+
+private clampNumber(value: number, min: number, max: number, fallback: number): number {
+  if (!Number.isFinite(value)) {
+    return fallback;
+  }
+  return Math.min(max, Math.max(min, Math.round(value)));
+}
+```
+
+This prevents users from manually editing the config file and causing anomalous values. After all, you never know what strange numbers users might input, and I don't want to see that config screenshot either, but there's no choice.
+
+### Cache LRU Cleanup
+
+The CacheRetentionManager.prune() method is responsible for cleaning expired and over-limit caches. The cleanup strategy is LRU (Least Recently Used):
+
+```typescript
+const records = [...this.listRecords()]
+  .sort((left, right) =>
+    new Date(left.lastUsedAt).getTime() - new Date(right.lastUsedAt).getTime()
+  );
+
+// When clearing over limit, start deleting from least recently used
+while (totalBytes > maxBytes && retainedEntries.length > 0) {
+  const evicted = records.find((record) => retainedEntries.includes(record.versionId));
+  retainedEntries.splice(retainedEntries.indexOf(evicted.versionId), 1);
+  removedEntries.push(evicted.versionId);
+  totalBytes -= evicted.cacheSize;
+  await fs.rm(evicted.cachePath, { force: true });
+}
+```
+
+This logic ensures disk space is used reasonably while preserving historical versions users might still need. After all, some things, though not commonly used, feel regrettable if lost—people are nostalgic after all.
+
+### Immediate Seeding Stop Implementation
+
+When users disable the sharing acceleration toggle, seeding and the torrent client should stop immediately:
+
+```typescript
+async disableSharingAcceleration(): Promise<void> {
+  this.settingsStore.updateSettings({ enabled: false });
+  await this.cacheRetentionManager.stopAllSeeding();  // Stop seeding
+  await this.engine.stopAll();  // Destroy torrent client
+}
+```
+
+When users disable the feature, it shouldn't occupy any P2P resources—this is basic product etiquette. Since there's no love anymore, let go cleanly—don't drag things out.
+
+## Risks and Trade-offs
+
+There's no perfect solution in this world, and hybrid distribution is no exception. Here are the main trade-offs:
+
+**Weaker crash isolation than sidecar**: V1 uses an in-main-process engine—engine crashes affect the main process. This is mitigated through adapter boundaries and timeout controls, but it's not a fundamental solution. V2 has a helper process migration path planned. After all, new drivers on the road have to pay some tuition.
+
+**Resource consumption from default enabled**: Default 2 MB/s upload, 10 GB cache, 7-day retention—this has some resource consumption on user machines. User expectations are managed through wizard explanations and settings transparency. After all, there's no free lunch in this world—gains come with losses.
+
+**Enterprise network compatibility**: WebSeed/HTTPS automatic fallback ensures availability in enterprise networks, but P2P acceleration effectiveness is reduced. This is a design trade-off, prioritizing availability. After all, some things are more important than speed—like stability.
+
+**Metadata backward compatibility**: All new fields are optional—when missing, it falls back to HTTP mode. Old version clients are completely unaffected, with a smooth upgrade path. After all, no one wants an explosion every time they upgrade—that's too exciting.
+
+## Summary
+
+This article has analyzed in detail the hybrid distribution architecture of the HagiCode Desktop project. Summarizing, there are several key points:
+
+1. **Architectural layering**: Control plane and data plane separated, engine abstracted as pluggable interface, facilitating testing and extension. After all, clear division of labor leads to higher efficiency.
+
+2. **Policy-driven**: Not all files go through P2P—only large files meeting conditions enable hybrid distribution. After all, forced melons aren't sweet—suitability is most important.
+
+3. **Integrity verification**: SHA256 as a hard threshold, streaming calculation avoids memory issues. After all, trust is hard to build—cherish it while using it.
+
+4. **Product packaging**: Hiding BT terminology, using "sharing acceleration" semantics, first-time wizard enabled by default. After all, speaking is an art—keep it simple and everyone is more relaxed.
+
+5. **User control**: Providing adjustable parameters like upload rate limit, cache limit, retention days. After all, the choice is in the user's hands—no one likes being forced.
+
+This solution has been implemented in the HagiCode Desktop project. How's the actual effect? Welcome to install and provide feedback. After all, theory is theory, practice is the only standard for testing truth.
+
+## References
+
+- HagiCode Desktop GitHub: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- HagiCode project official site: [hagicode.com](https://hagicode.com)
+- WebTorrent official documentation: [webtorrent.io](https://webtorrent.io)
+- BitTorrent protocol specification: [bittorrent.org](https://www.bittorrent.org/beps/bep_0019.html)
+- WebSeed extension specification: [bittorrent.org/beps/bep_0017.html](https://www.bittorrent.org/beps/bep_0017.html)
+
+---
+
+If this article helped you:
+
+- Come to GitHub and give us a Star: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Visit the official site to learn more: [hagicode.com](https://hagicode.com)
+- Desktop quick install: [hagicode.com/desktop/](https://hagicode.com/desktop/)
+- Public beta has started, welcome to install and experience
+
+Perhaps we're all just ordinary people struggling along the tech road—but so what? Ordinary people have ordinary people's persistence. After all, "bamboo has no mouth, yet still grows joint by joint"—people need some pursuit too...
+
+## Copyright Notice
+
+Thank you for reading. If you found this article useful, welcome to like, bookmark, and share to support.
+This content was created with AI assistance, with the final content reviewed and confirmed by the author.
+- Article author: [newbe36524](https://www.newbe.pro)
+- Original link: [https://docs.hagicode.com/blog/2026-03-27-hagicode-desktop-p2p-acceleration-architecture/](https://docs.hagicode.com/blog/2026-03-27-hagicode-desktop-p2p-acceleration-architecture/)
+- Copyright statement: Unless otherwise stated, all articles in this blog are licensed under BY-NC-SA. Please indicate the source for reprinting!

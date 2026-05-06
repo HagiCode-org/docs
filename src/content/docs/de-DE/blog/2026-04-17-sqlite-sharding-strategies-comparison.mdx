@@ -1,0 +1,375 @@
+---
+title: SQLite-Sharding in der Praxis: Tiefer Vergleich von drei Sharding-Strategien
+date: 2026-04-17
+tags: [SQLite, Sharding, Leistungsoptimierung, Architekturdesign, HagiCode]
+description: "Wenn SQLite mit einer einzigen Datei auf Concurrent-Engpässe stößt, wie können wir das Problem lösen? Dieser Artikel stellt drei SQLite-Sharding-Lösungen aus dem HagiCode-Projekt in verschiedenen Szenarien vor und hilft Ihnen zu verstehen, wie Sie die passende Sharding-Strategie wählen."
+---
+
+## SQLite-Sharding in der Praxis: Tiefer Vergleich von drei Sharding-Strategien
+
+> Wenn SQLite mit einer einzigen Datei auf Concurrent-Engpässe stößt, wie können wir das Problem lösen? Dieser Artikel stellt drei SQLite-Sharding-Lösungen aus dem HagiCode-Projekt in verschiedenen Szenarien vor und hilft Ihnen zu verstehen, wie Sie die passende Sharding-Strategie wählen.
+
+Hallo an alle Produzenten, ich bin Yu Kun, der Produzent von HagiCode.
+
+## Hintergrund
+
+Beim Aufbau von Hochleistungsanwendungen stößt eine SQLite-Einzeldateidatenbank auf sehr reale Probleme. Sobald die Benutzerzahl und die Datenmenge steigen, treten diese Zustände in Reihe auf:
+
+- Schreiboperationen beginnen zu warten, die Antwortzeit wird spürbar länger
+- Die Abfrageleistung sinkt mit dem Datenwachstum
+- Bei Multithread-Zugriff treten häufig "database is locked"-Fehler auf
+
+Viele reagieren intuitiv: Sollen wir direkt zu PostgreSQL oder MySQL migrieren? Diese Operation löst zwar das Problem, aber die Bereitstellungskomplexität steigt drastisch an. Gibt es eine leichtgewichtigere Lösung?
+
+Die Antwort ist: Sharding. Am Ende müssen Ingenieurprobleme mit Ingenieurmethoden gelöst werden. Durch Verteilen der Daten auf mehrere SQLite-Dateien können die Concurrent-Fähigkeit und die Abfrageleistung erheblich verbessert werden, während die Leichtgewichtigkeit von SQLite erhalten bleibt.
+
+## Über HagiCode
+
+Die in diesem Artikel vorgestellten Lösungen stammen aus unserer Praxis im [HagiCode](https://hagicode.com)-Projekt. Als ein KI-Codierungsassistent-Projekt muss HagiCode eine große Menge an Konversationsnachrichten, Zustandspersistierung und Ereignisverlaufsaufzeichnungen verarbeiten. Genau bei der Lösung dieser praktischen Probleme haben wir drei Sharding-Lösungen für verschiedene Szenarien zusammengefasst.
+
+Wer gut arbeiten will, muss erst seine Werkzeuge schärfen, aber wie diese "Werkzeuge" eingesetzt werden, hängt von der konkreten "Arbeit" ab.
+
+Unser Code-Repository befindet sich unter [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site). Interessierte Freunde sind herzlich eingeladen, tiefer einzusteigen.
+
+## Überblick über drei Sharding-Lösungen
+
+Nach der Analyse des HagiCode-Coderepositories haben wir drei SQLite-Sharding-Lösungen für verschiedene Geschäftsszenarien gefunden:
+
+1. **Session Message Sharding-Speicher**: KI-Konversationsnachrichtenspeicher, gekennzeichnet durch hochfrequente Schreibvorgänge, Session-basierte isolierte Abfragen
+2. **Orleans Grain Sharding-Speicher**: Verteiltes Framework-Zustandspersistierung, gekennzeichnet durch Knoten-übergreifenden Zugriff, benötigt deterministisches Routing
+3. **Hero History Sharding-Speicher**: Gamifiziertes System-Historischenereignisaufzeichnung, gekennzeichnet durch Event Sourcing, benötigt Migrationskompatibilität
+
+Obwohl die Geschäftsszenarien unterschiedlich sind, folgen alle drei denselben Kerndesignprinzipien:
+
+- **Deterministisches Routing**: Direkte Berechnung des Shard aus der Geschäfts-ID, keine Metadatentabelle erforderlich
+- **Transparenter Zugriff**: Die obere Schicht operates über eine einheitliche Schnittstelle, nimmt das Sharding nicht wahr
+- **Unabhängiger Speicher**: Jedes Shard ist eine völlig unabhängige SQLite-Datei
+- **Concurrent-Optimierung**: WAL-Modus + busy_timeout reduziert Lock-Wettbewerb
+
+Viele fragen: Warum nicht eine universelle Sharding-Lösung entwickeln? Diese Frage ist sehr berechtigt, wir kommen direkt zum Schluss: In der Ingenieurwesen gibt es keine Allzwecklösung, nur die am besten passende Lösung für das aktuelle Geschäftsszenario. Als Nächstes vergleichen wir die spezifischen Implementierungen dieser drei Lösungen im Detail.
+
+## Vergleich der Sharding-Strategien
+
+### Anzahl und Namensregeln der Shards
+
+| Aspekt | Session Message | Orleans Grain | Hero History |
+|------|----------------|---------------|--------------|
+| **Shard-Anzahl** | 256 (16²) | 100 | 10 |
+| **Namensregeln** | 16-er System (00-ff) | 10-er System (00-99) | 10-er System (0-9) |
+| **Speicherverzeichnis** | `DataDir/messages/` | `DataDir/orleans/grains/` | `DataDir/hero-history/` |
+| **Dateinamensmuster** | `{shard}.db` | `grains-{shard}.db` | `{shard}.db` |
+
+Warum unterscheid sich die Shard-Anzahl so stark? Das hängt von den Geschäftsmerkmalen ab. Mit anderen Worten, Modelle werden sich ändern, Workflows werden aktualisiert, aber die ingenieurtechnische Basis bleibt immer dort: Sie müssen zuerst verstehen, welches Problem Sie lösen wollen.
+
+- **Session Message** verwendet 256 Shards, da Konversationsnachrichten am häufigsten geschrieben werden und mehr Shards benötigt werden, um die Last zu verteilen
+- **Orleans Grain** verwendet 100 Shards, balanciert Concurrent-Leistung und Verwaltungskomplexität
+- **Hero History** verwendet nur 10 Shards, da historische Ereignisse weniger häufig geschrieben werden und Migrationskosten berücksichtigt werden müssen
+
+### Unterschiede im Routing-Algorithmus
+
+Der Routing-Algorithmus ist der Kern der Sharding-Lösung und bestimmt, wie Daten auf die verschiedenen Shards verteilt werden. Die drei Lösungen verwenden verschiedene Routing-Strategien:
+
+```csharp
+// Session Message: GUID letzte zwei Ziffern 16-er System
+var normalized = Guid.Parse(sessionId.Value).ToString("N").ToLowerInvariant();
+return normalized[^2..];  // letzte zwei 16-er System-Zeichen
+
+// Orleans Grain: Ziffern extrahieren, letzte zwei Ziffern Modulo
+var digits = ExtractDigits(grainId);  // alle Ziffern extrahieren
+var lastTwoDigits = (digits[^2] * 10) + digits[^1];
+return lastTwoDigits % shardCount;
+
+// Hero History: letztes Zeichen ASCII-Wert Modulo
+return heroId[^1] % 10;
+```
+
+**Design-Ansatz-Analyse**:
+
+- **Session Message** ID ist ein GUID, nach Konvertierung in 16-er System werden die letzten zwei Ziffern genommen, um eine gleichmäßige Verteilung auf 256 Shards zu erhalten
+- **Orleans Grain** ID-Format ist nicht einheitlich, kann Buchstaben und Ziffern enthalten, daher werden alle Ziffern extrahiert und dann Modulo genommen
+- **Hero History** ID ist ein String, direkt der ASCII-Wert des letzten Zeichens Modulo, einfach aber die Verteilung kann ungleichmäßig sein
+
+**Schlüsselfakt**: Unabhängig vom Algorithmus muss sichergestellt werden, dass dieselbe ID immer auf denselben Shard abgebildet wird. Dies ist die grundlegendste Anforderung in verteilten Systemen, sonst führt es zu Dateninkonsistenz. Am Ende, wenn das Routing instabil ist, sind alle Bemühungen null.
+
+### Unterschiede in der Initialisierungsstrategie
+
+| Aspekt | Session Message | Orleans Grain | Hero History |
+|------|----------------|---------------|--------------|
+| **Initialisierungszeitpunkt** | Bedarfsgesteuertes Lazy-Loading | Vollständige parallele Initialisierung beim Start | Bedarfsgesteuertes Lazy-Loading |
+| **Concurrent-Steuerung** | `Lazy<Task>` verhindert doppelte Initialisierung | `Parallel.ForEachAsync` | `Lazy<Task>` verhindert doppelte Initialisierung |
+
+**Warum wählt Orleans Grain vollständige Initialisierung beim Start?**
+
+Da Orleans ein verteiltes Framework ist, kann Grain auf jeden Knoten geplant werden. Wenn zur Laufzeit erst festgestellt wird, dass die Shard-Datei nicht existiert, führt dies zum Scheitern der Anfrage. Die vollständige Initialisierung beim Start verlängert zwar die Startzeit, aber stellt die Laufzeitstabilität sicher. Zum Laufen zu bringen ist nur der Anfang, es zu pflegen ist die eigentliche Fähigkeit.
+
+**Vorteile des Lazy-Loading**:
+
+Für Session Message und Hero History kann Lazy-Loading die Startzeit reduzieren. Die Datei und das Schema werden nur dann erstellt und initialisiert, wenn wirklich auf einen bestimmten Shard zugegriffen werden muss. Die Verwendung von `Lazy<Task>` kann Race-Conditions bei gleichzeitiger Initialisierung verhindern. Dieses Design sieht einfach aus, kann aber in echten Projekten viele unnötige Probleme ersparen.
+
+### Schema-Design-Merkmale
+
+Die Schema-Designs der drei Lösungen spiegeln ihre jeweiligen Geschäftsmerkmale wider:
+
+**Session Message**:
+- Unterstützt Event Sourcing-Muster (Ereignistabelle + Snapshot-Tabelle)
+- Enthält Nachrichteninhaltsblock-Untertabelle (MessageContentBlocks)
+- Verfügt über Komprimierungs- und Komprimierungsmarkierungsfelder, unterstützt nachfolgende Optimierungen
+
+**Orleans Grain**:
+- Minimalstes Design: Einzeltabelle GrainState
+- JSON-Serialisierungsspeicherzustand
+- ETag optimistische Concurrent-Steuerung
+
+**Hero History**:
+- Zeitleistenabfrageoptimierung Index
+- DedupeKey eindeutige Einschränkung verhindert Duplikate
+- Unterstützt mehrere Ereignistypen und Zustände
+
+Aus diesen Designs可以看出, dass Schema-Design eng an die Geschäftsanforderungen angepasst sein sollte, nicht nach Universalität streben sollte. Das einfache Design von Orleans Grain liegt daran, dass es nur serialisierte Zustände speichern muss, keine komplexen Abfragefähigkeiten benötigt. Das ist keine Hexerei, es ist Ingenieurwesen. Beeilen Sie sich nicht, Namen zu groß zu machen, schauen Sie zuerst, ob dieses Ding zwei Iterationen im Team überleben kann.
+
+### Vergleich der Concurrent-Konfiguration
+
+Alle drei Lösungen verwenden dieselbe SQLite-Concurrent-Optimierungskonfiguration:
+
+```sql
+PRAGMA journal_mode=WAL;      -- Write-Ahead-Logging-Modus
+PRAGMA synchronous=NORMAL;     -- Reduziert Persistierungsaufwand
+PRAGMA busy_timeout=5000;      -- 5-Sekunden-Busy-Wait
+PRAGMA foreign_keys=ON;        -- Fremdschlüsseleinschränkungen
+```
+
+**Vorteile des WAL-Modus**:
+
+Der traditionelle Rollback-Journal-Modus erzeugt bei Schreibvorgängen Lock-Wettbewerb, während der WAL-Modus gleichzeitiges Lesen und Schreiben ermöglicht. Dies kann die Leistung in Szenarien mit großen Datenmengen erheblich verbessern. Viele kennen diese Konfiguration nicht, aber sie ist wichtiger, als Sie denken.
+
+**Abwägung bei synchronous=NORMAL**:
+
+Auf FULL gesetzt, kann die höchste Sicherheit gewährleistet werden, aber die Leistung wird erheblich reduziert. Der NORMAL-Modus balanciert zwischen Sicherheit und Leistung und ist für die meisten Anwendungen die richtige Wahl. Diese Konfiguration muss nicht zu lange überlegt werden, NORMAL reicht aus.
+
+## Wie wählt man die Sharding-Strategie
+
+Basierend auf der Analyse der drei HagiCode-Lösungen können wir die folgende Entscheidungsmatrix zusammenfassen:
+
+```
+Hoher Durchsatz-Szenario → Mehr Shards (wie Message mit 256)
+Einfache Wartbarkeit    → Weniger Shards (wie Hero History mit 10)
+Hauptsächlich numerische ID → Modulo-Algorithmus (Orleans Grain)
+Hauptsächlich GUID       → 16-er System-Suffix (Session Message)
+String-ID                → ASCII-Modulo (Hero History)
+```
+
+**Erfahrungswerte für die Shard-Anzahl**:
+
+- Zu wenige (< 10): Begrenzte Concurrent-Verbesserung, Sharding macht wenig Sinn
+- Zu viele (> 1000): Komplexe Dateiverwaltung, hoher Verbindungspool-Aufwand
+- Erfahrungswert: 10-100 Shards passen für die meisten Szenarien
+- Extrem hohe Concurrent-Szenarien: Kann 256 Shards in Betracht ziehen
+
+Das ist, wenn Sie nur die Demo ansehen, leicht aufregend; aber sobald Sie in die Produktionsumgebung gehen, muss die Rechnung Stück für Stück klar gestellt werden. Viele Probleme können nicht getan werden, nur die Kosten wurden nicht klar berechnet.
+
+## Praxis-Leitfaden
+
+### Standard-Sharding-Router implementieren
+
+```csharp
+public interface IShardResolver<TId>
+{
+    string ResolveShardKey(TId id);
+}
+
+// 16-er System-Sharding (geeignet für GUID)
+public class HexSuffixShardResolver : IShardResolver<string>
+{
+    private readonly int _suffixLength;
+
+    public HexSuffixShardResolver(int suffixLength = 2)
+    {
+        _suffixLength = suffixLength;
+    }
+
+    public string ResolveShardKey(string id)
+    {
+        var normalized = id.Replace("-", "").ToLowerInvariant();
+        return normalized[^_suffixLength..];
+    }
+}
+
+// Numerisches Modulo-Sharding (geeignet für reine numerische IDs)
+public class NumericModuloShardResolver : IShardResolver<long>
+{
+    private readonly int _shardCount;
+
+    public NumericModuloShardResolver(int shardCount)
+    {
+        _shardCount = shardCount;
+    }
+
+    public string ResolveShardKey(long id)
+    {
+        return (id % _shardCount).ToString("D2");
+    }
+}
+```
+
+### Einheitliches Verbindungsfactory-Muster
+
+```csharp
+public class ShardedConnectionFactory<TOptions>
+{
+    private readonly ConcurrentDictionary<string, Lazy<Task>> _initializationTasks = new();
+    private readonly TOptions _options;
+    private readonly IShardSchemaInitializer _initializer;
+
+    public ShardedConnectionFactory(
+        TOptions options,
+        IShardSchemaInitializer initializer)
+    {
+        _options = options;
+        _initializer = initializer;
+    }
+
+    public async Task<TDbContext> CreateAsync(string shardKey, CancellationToken ct)
+    {
+        var connectionString = BuildConnectionString(shardKey);
+
+        // Lazy<Task> verwenden, um gleichzeitige Initialisierung zu verhindern
+        var initTask = _initializationTasks.GetOrAdd(
+            connectionString,
+            _ => new Lazy<Task>(() => InitializeShardAsync(connectionString, ct))
+        );
+
+        await initTask.Value;
+        return CreateDbContext(connectionString);
+    }
+
+    private async Task InitializeShardAsync(string connectionString, CancellationToken ct)
+    {
+        await _initializer.InitializeAsync(connectionString, ct);
+    }
+
+    private string BuildConnectionString(string shardKey)
+    {
+        var shardPath = Path.Combine(_options.BaseDirectory, $"{shardKey}.db");
+        return $"Data Source={shardPath}";
+    }
+
+    private TDbContext CreateDbContext(string connectionString)
+    {
+        // DbContext basierend auf dem spezifischen ORM erstellen
+        return Activator.CreateInstance(typeof(TDbContext), connectionString) as TDbContext;
+    }
+}
+```
+
+### Best Practices für Schema-Initialisierung
+
+```csharp
+public class SqliteShardInitializer : IShardSchemaInitializer
+{
+    public async Task InitializeAsync(string connectionString, CancellationToken ct)
+    {
+        await using var connection = new SqliteConnection(connectionString);
+        await connection.OpenAsync(ct);
+
+        // Concurrent-Optimierungskonfiguration
+        await connection.ExecuteAsync("""
+            PRAGMA journal_mode=WAL;
+            PRAGMA synchronous=NORMAL;
+            PRAGMA busy_timeout=5000;
+            PRAGMA foreign_keys=ON;
+        """);
+
+        // Tabellenstruktur erstellen
+        await connection.ExecuteAsync("""
+            CREATE TABLE IF NOT EXISTS Entities (
+                Id TEXT PRIMARY KEY,
+                CreatedAt TEXT NOT NULL,
+                UpdatedAt TEXT NOT NULL,
+                Data TEXT NOT NULL,
+                ETag TEXT
+            );
+        """);
+
+        // Index erstellen
+        await connection.ExecuteAsync("""
+            CREATE INDEX IF NOT EXISTS IX_Entities_CreatedAt
+            ON Entities(CreatedAt DESC);
+
+            CREATE INDEX IF NOT EXISTS IX_Entities_UpdatedAt
+            ON Entities(UpdatedAt DESC);
+        """);
+    }
+}
+```
+
+### Wichtige Hinweise
+
+**1. Routing-Stabilität**
+
+Der Routing-Algorithmus muss sicherstellen, dass dieselbe ID immer auf denselben Shard abgebildet wird. Vermeiden Sie die Verwendung von zufälligen oder zeitabhängigen Berechnungen, und führen Sie keine veränderlichen Parameter in den Algorithmus ein.
+
+**2. Shard-Anzahl wählen**
+
+Die Shard-Anzahl sollte in der Designphase bestimmt werden, späte Änderungen sind sehr schwierig. Zu berücksichtigen:
+- Aktuelle und zukünftige Concurrent-Menge
+- Verwaltungskosten pro Shard
+- Komplexität der Datenmigration
+
+**3. Migrationsüberlegungen**
+
+Die Hero History-Lösung zeigt den vollständigen Migrationspfad:
+
+1. Neue Sharding-Speicherinfrastruktur erstellen
+2. Migrationsdienst implementieren, um Hauptdatenbankdaten in Shards zu kopieren
+3. Abfragekompatibilität nach Migration verifizieren
+4. Lese-/Schreibpfade zu Shards wechseln
+5. Hauptdatenbank-Alttabellen bereinigen
+
+Bei der Entwicklung von Sharding-Lösungen müssen zukünftige Migrationsanforderungen berücksichtigt werden. Talk is cheap. Show me the code, aber nur Code reicht nicht, Sie brauchen auch einen vollständigen Migrationspfad. Einmaliger Erfolg heißt noch kein System, anhaltender Erfolg heißt System.
+
+**4. Monitoring & Betrieb**
+
+- Überwachen Sie die Größenverteilung der Shards, um Datenschieflagen rechtzeitig zu erkennen
+- Richten Sie Alarme ein, um Shard-Hotspots zu erkennen, vermeiden Sie, dass ein einzelner Shard zum Engpass wird
+- Überprüfen Sie regelmäßig die WAL-Dateigröße, um zu verhindern, dass zu viel Speicherplatz belegt wird
+- Richten Sie einen Shard-Gesundheitscheck-Mechanismus ein
+
+**5. Testabdeckung**
+
+- Grenzbedingungen testen (leere ID, Sonderzeichen, überlange ID)
+- Routing-Determinismus verifizieren, sicherstellen, dass dieselbe ID immer auf denselben Shard abgebildet wird
+- Gleichzeitige Schreib-Stresstests, verifizieren, dass Lock-Wettbewerb effektiv gelindert wird
+- Migrationstests, sicherstellen, dass Datenintegrität und Konsistenz gewährleistet sind
+
+## Zusammenfassung
+
+Durch den Vergleich von drei SQLite-Sharding-Lösungen im HagiCode-Projekt können wir sehen:
+
+1. **Es gibt keine Allzwecklösung**: Verschiedene Geschäftsszenarien benötigen verschiedene Sharding-Strategien
+2. **Kernprinzipien sind universell**: Deterministisches Routing, transparenter Zugriff, unabhängiger Speicher, Concurrent-Optimierung
+3. **Design muss zukunftorientiert sein**: Migrationspfade und Betriebskosten berücksichtigen
+
+Wenn Ihr Projekt SQLite verwendet und anfängt, Concurrent-Engpässe zu erleben, hoffe ich, dass dieser Artikel Ihnen einige Ideen geben kann. Sie müssen nicht eilig zu schwergewichtigen Datenbanken migrieren, manchmal kann eine passende Sharding-Lösung das Problem lösen.
+
+Natürlich ist Sharding keine Silberkugel. Bevor Sie eine Sharding-Lösung wählen, stellen Sie sicher:
+- Sie haben die Einzeltabellenabfrageleistung optimiert
+- Sie haben geeignete Indizes verwendet
+- Sie haben den WAL-Modus aktiviert
+
+Nur wenn diese Optimierungen alle abgeschlossen sind und immer noch Leistungsengpässe bestehen, sollten Sie Sharding in Betracht ziehen. Einfache Dinge gut zu machen, ist an sich eine Fähigkeit.
+
+Viele Worte sind besser durch Taten als durch Worte bewiesen, nun lassen wir die Ingenieurergebnisse selbst sprechen.
+
+## Referenzen
+
+- HagiCode-Projekt-Repository: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- SQLite WAL-Modus-Dokumentation: [sqlite.org/wal.html](https://www.sqlite.org/wal.html)
+- Orleans verteiltes Framework: [dotnet.github.io/orleans](https://dotnet.github.io/orleans/)
+
+## Urheberrechtshinweis
+
+Danke fürs Lesen. Wenn Sie diesen Artikel nützlich finden, willkommen Liken, Speichern und Teilen zur Unterstützung.
+Dieser Inhalt wird mit KI-unterstützter Zusammenarbeit erstellt, der endgültige Inhalt wird vom Autor überprüft und bestätigt.
+- Artikelautor: [newbe36524](https://www.newbe.pro)
+- Original-Link: [https://docs.hagicode.com/blog/2026-04-17-sqlite-sharding-strategies-comparison/](https://docs.hagicode.com/blog/2026-04-17-sqlite-sharding-strategies-comparison/)
+- Urheberrechtserklärung: Alle Artikel in diesem Blog, sofern nicht anders angegeben, sind unter der BY-NC-SA-Lizenzvereinbarung lizenziert. Bitte geben Sie die Quelle an!

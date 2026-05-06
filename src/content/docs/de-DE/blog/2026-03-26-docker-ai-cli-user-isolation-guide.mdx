@@ -1,0 +1,258 @@
+---
+title: AI CLI-Tools in Docker-Containern ausführen: Praktischer Leitfaden zur Benutzerisolierung und persistenten Volumes
+date: 2026-03-26
+tags: [Docker, AI CLI, HagiCode, Benutzerisolierung, persistente Volumes, Container-Deployment, Claude Code, Codex]
+description: "Die Integration von AI-Programmierertools wie Claude Code, Codex und OpenCode in containerisierten Umgebungen klingt einfach, birgt aber einige Tücken. Dieser Artikel analysiert detailliert, wie das HagiCode-Projekt bei Docker-Deployment"
+---
+
+## AI CLI-Tools in Docker-Containern ausführen: Praktischer Leitfaden zur Benutzerisolierung und persistenten Volumes
+
+> Die Integration von AI-Programmierertools wie Claude Code, Codex und OpenCode in containerisierten Umgebungen klingt einfach, birgt aber einige Tücken. Dieser Artikel analysiert detailliert, wie das HagiCode-Projekt bei Docker-Deployment die Herausforderungen bei Benutzerberechtigungen, Konfigurationspersistenz, Versionsverwaltung und mehr bewältigt, und hilft Ihnen, Fallstricke zu vermeiden.
+
+## Hintergrund
+
+Als wir beschlossen, AI-Programmier-CLI-Tools in Docker-Containern auszuführen, war die intuitivste Idee vielleicht: "Container laufen doch als root, also installieren wir einfach alles, fertig?" Aber diese scheinbar einfache Idee birgt einige Kernprobleme, die gelöst werden müssen.
+
+Zuerst ist die **Sicherheitsbeschränkung das erste Hindernis**. Nehmen wir das Claude CLI als Beispiel – es verbietet explizit die Ausführung als root-Benutzer, dies ist eine obligatorische Sicherheitsüberprüfung, bei der root direkt die Ablehnung beim Start auslöst. Sie könnten denken: "Ich wechsle einfach mit dem `USER`-Befehl den Benutzer?" So einfach ist das nicht, zwischen Nicht-root-Benutzern im Container und Benutzerberechtigungen auf dem Host gibt es immer noch Mapping-Probleme. Schließlich ist in dieser Welt nichts so einfach.
+
+Zweitens ist die **Statuspersistenz die zweite Falle**. Claude Code benötigt Login, Codex hat seine eigene Konfiguration, OpenCode hat auch Cache-Verzeichnisse. Wenn bei jedem Container-Neustart alles neu konfiguriert werden muss, ist diese "Automatisierung" sinnlos. Wir müssen diese Konfigurationen über die Container-Lebensdauer hinaus persistent halten. Konfigurationen sind wie Erinnerungen – wenn sie einfach verschwinden, ist das ziemlich frustrierend.
+
+Das dritte Problem ist die **Berechtigungskonsistenz**. Kann ein Prozess im Container auf Konfigurationsdateien zugreifen, die vom Host-Benutzer erstellt wurden? Nicht übereinstimmende UID/GID führt zu Dateiberechtigungsfehlern, dies ist in der Praxis sehr häufig. Dieses Problem ist auch ziemlich frustrierend, aber es gibt keinen Ausweg.
+
+Diese Probleme scheinen unabhängig, sind aber tatsächlich miteinander verknüpft. Das HagiCode-Projekt hat im Entwicklungsprozess nach und nach eine machbare Lösung gefunden, und im Folgenden werde ich die technischen Details und die gemachten Erfahrungen teilen.
+
+## Über HagiCode
+
+Die in diesem Artikel vorgestellte Lösung stammt aus unserer Praxis im [HagiCode](https://hagicode.com) Projekt. HagiCode ist eine Open-Source-KI-unterstützte Programmierplattform, die mehrere gängige KI-Codesassistenten integriert, einschließlich Claude Code, Codex, OpenCode und mehr. Als ein Projekt, das plattformübergreifende, hochverfügbare Bereitstellung erfordert, muss HagiCode die verschiedenen Herausforderungen der Containerisierung bewältigen.
+
+Wenn Sie finden, dass die in diesem Artikel vorgestellte technische Lösung wertvoll ist, zeigt das, dass HagiCode in der Ingenieurpraxis wirklich etwas zu bieten hat – dann lohnt sich ein Blick auf die [HagiCode-Website](https://hagicode.com) und das [GitHub-Repository](https://github.com/HagiCode-org/site). Schließlich verdienen gute Dinge, geteilt zu werden, nicht wahr?
+
+## Warum nicht einfach root verwenden?
+
+Hier gibt es ein häufiges Missverständnis: Docker-Container laufen standardmäßig als root, also installieren wir einfach die Tools als root. Mit diesem Gedanken gibt Ihnen das Claude CLI ungnädig eine Lektion.
+
+```bash
+# Claude CLI direkt als root ausführen? Geht nicht
+docker run --rm -it --user root myimage claude
+# Ausgabe: Error: This command cannot be run as root user
+```
+
+Dies ist eine harte Sicherheitsbeschränkung des Claude CLI. Der Grund ist einfach: Diese CLI-Tools lesen und schreiben sensible Benutzerkonfigurationen, einschließlich API-Token, lokale Caches und führen möglicherweise vom Benutzer geschriebene Skripte aus. Diese Tools mit root-Berechtigungen auszuführen, birgt zu große potenzielle Risiken. Schließlich, bei Sicherheit kann man nicht vorsichtig genug sein.
+
+Also stellt sich die Frage: Wie kann man sowohl den Sicherheitsanforderungen der CLI als auch der Flexibilität des Container-Managements gerecht werden? Wir müssen unsere Denkweise ändern – **nicht zur Laufzeit den Benutzer wechseln, sondern bereits während der Image-Build-Phase einen dedizierten Benutzer erstellen**. Manchmal, wenn man das Problem aus einem anderen Blickwinkel betrachtet, taucht die Lösung natürlicherweise auf.
+
+## Dedizierten Benutzer erstellen: Mehr als nur ein Name
+
+Sie könnten denken: "Ich füge einfach eine `USER`-Anweisung im Dockerfile hinzu?" Das ist tatsächlich die einfachste Lösung, aber nicht robust genug. Einfache Dinge sind oft nicht elegant, oder?
+
+### Statische Erstellung vs. dynamisches Mapping
+
+HagiCodes Ansatz ist es, einen `hagicode`-Benutzer mit UID 1000 zu erstellen, diese UID entspricht normalerweise dem Standardbenutzer der meisten Hosts:
+
+```dockerfile
+RUN groupadd -o -g 1000 hagicode && \
+    useradd -o -u 1000 -g 1000 -s /bin/bash -m hagicode && \
+    mkdir -p /home/hagicode/.claude && \
+    chown -R hagicode:hagicode /home/hagicode
+```
+
+Dies löst jedoch nur das Problem des im Image integrierten Benutzers. Was ist, wenn der Host-Benutzer UID 1001 ist? Beim Container-Start muss ein dynamisches Mapping unterstützt werden.
+
+Die entscheidende Logik in docker-entrypoint.sh:
+
+```bash
+if [ -n "$PUID" ] && [ -n "$PGID" ]; then
+    if ! id hagicode >/dev/null 2>&1; then
+        groupadd -g "$PGID" hagicode
+        useradd -u "$PUID" -g "$PGID" -s /bin/bash -m hagicode
+    fi
+fi
+```
+
+Der Vorteil dieses Designs ist: **Bei der Image-Erstellung wird die standardmäßige UID 1000 verwendet, zur Laufzeit kann sie durch die Umgebungsvariablen PUID/PGID dynamisch angepasst werden**. Unabhängig von der UID des Host-Benutzers gibt es keine Probleme mit dem Eigentum der Konfigurationsdateien. Dieses Design ist auch ziemlich natürlich – schließlich muss man zwischen Flexibilität und Standardwerten ein Gleichgewicht finden.
+
+## Designphilosophie der persistenten Volumes
+
+Jedes AI CLI-Tool hat sein bevorzugtes Konfigurationsverzeichnis, das eins-zu-eins zugeordnet werden muss:
+
+| CLI-Tool | Pfad im Container | Benannter Volume |
+|---------|-------------------|------------------|
+| Claude | `/home/hagicode/.claude` | `claude-data` |
+| Codex | `/home/hagicode/.codex` | `codex-data` |
+| OpenCode | `/home/hagicode/.config/opencode` | `opencode-config-data` |
+
+Warum benannte Volumes statt Bind Mounts? Drei Gründe:
+
+1. **Vereinfachte Verwaltung**: Benannte Volumes werden von Docker automatisch verwaltet, kein manuelles Erstellen von Host-Verzeichnissen erforderlich
+2. **Berechtigungsisolierung**: Der ursprüngliche Inhalt des Volumes wird vom Benutzer im Container erstellt, avoiding Host-Berechtigungskonflikte
+3. **Unabhängige Migration**: Volumes können unabhängig vom Container existieren, beim Upgrade des Images gehen keine Daten verloren
+
+docker-compose-builder-web generiert automatisch die entsprechenden Volume-Konfigurationen:
+
+```yaml
+volumes:
+  claude-data:
+  codex-data:
+  opencode-config-data:
+
+services:
+  hagicode:
+    volumes:
+      - claude-data:/home/hagicode/.claude
+      - codex-data:/home/hagicode/.codex
+      - opencode-config-data:/home/hagicode/.config/opencode
+    user: "${PUID:-1000}:${PGID:-1000}"
+```
+
+Beachten Sie das Feld `user`: Durch Umgebungsvariablen werden PUID/PGID injiziert, um sicherzustellen, dass der Container-Prozess mit einer Identität läuft, die dem Host-Benutzer entspricht. Dieses Detail ist ziemlich wichtig – wenn Berechtigungsprobleme auftreten, ist die Fehlersuche wirklich frustrierend.
+
+## Versionsverwaltung: Gebackene Versionen und Laufzeit-Overrides
+
+Die feste Version von Docker-Images ist entscheidend für Reproduzierbarkeit. In der tatsächlichen Entwicklung müssen wir jedoch oft neue Versionen testen oder dringend einen Bug beheben. Wenn wir jedes Mal das Image neu bauen müssen, ist die Effizienz zu niedrig.
+
+HagiCodes Strategie ist **feste Version als Standardwert, Laufzeit-Override als Erweiterungsmöglichkeit**. Dies ist auch eine Art Kompromiss in der Ingenieurpraxis – zwischen Stabilität und Flexibilität muss immer eine Wahl getroffen werden.
+
+Feste Version in Dockerfile.template:
+
+```dockerfile
+USER hagicode
+WORKDIR /home/hagicode
+
+# npm globalen Installationspfad konfigurieren
+RUN mkdir -p /home/hagicode/.npm-global && \
+    npm config set prefix '/home/hagicode/.npm-global'
+
+# CLI-Tools installieren (feste Versionen verwenden)
+RUN npm install -g @anthropic-ai/claude-code@2.1.71 && \
+    npm install -g @openai/codex@0.112.0 && \
+    npm install -g opencode-ai@1.2.25 && \
+    npm cache clean --force
+```
+
+Laufzeit-Override-Unterstützung in docker-entrypoint.sh:
+
+```bash
+install_cli_override_if_needed() {
+    local package_name="$2"
+    local override_version="$5"
+
+    if [ -n "$override_version" ]; then
+        gosu hagicode npm install -g "${package_name}@${override_version}"
+    fi
+}
+
+# Verwendungsbeispiel
+install_cli_override_if_needed "" "@anthropic-ai/claude-code" "" "" "${CLAUDE_CODE_CLI_VERSION}"
+```
+
+So können neue Versionen durch Umgebungsvariablen getestet werden, ohne das Image neu zu bauen:
+
+```bash
+docker run -e CLAUDE_CODE_CLI_VERSION=2.2.0 myimage
+```
+
+Dieses Design ist auch ziemlich praktisch – schließlich möchte niemand bei jedem Test neuer Funktionen das Image neu bauen.
+
+## Automatische Konfigurationsinjektion
+
+Neben der manuellen Konfiguration von CLI-Tools gibt es einige Szenarien, in denen Konfigurationen automatisch injiziert werden müssen. Das typischste Beispiel sind API-Token.
+
+```bash
+if [ -n "$ANTHROPIC_AUTH_TOKEN" ]; then
+    mkdir -p /home/hagicode/.claude
+    cat > /home/hagicode/.claude/settings.json <<EOF
+{
+  "env": {
+    "ANTHROPIC_AUTH_TOKEN": "${ANTHROPIC_AUTH_TOKEN}"
+  }
+}
+EOF
+    chown -R hagicode:hagicode /home/hagicode/.claude
+fi
+```
+
+Hier müssen zwei Punkte beachtet werden: **Sensible Informationen werden über Umgebungsvariablen übergeben, nicht fest im Image codiert**; Das Eigentum der Konfigurationsdatei muss korrekt gesetzt sein, sonst kann das CLI-Tool nicht lesen. Das ist ziemlich grundlegend, aber viele machen es falsch.
+
+## Best Practices und Fallstricke
+
+### Berechtigungsnichtübereinstimmung
+
+Dies ist die häufigste Falle. Die UID des Host-Benutzers ist 1001, im Container 1000, die erstellten Dateien können nicht gegenseitig zugegriffen werden.
+
+```bash
+# Richtige Vorgehensweise: Container an Host-Benutzer anpassen
+docker run \
+    -e PUID=$(id -u) \
+    -e PGID=$(id -g) \
+    myimage
+```
+
+Dieses Problem ist ziemlich häufig, aber beim ersten Mal ist es ziemlich frustrierend.
+
+### Konfiguration geht nach Container-Neustart verloren
+
+Wenn Sie feststellen, dass Sie sich nach jedem Neustart erneut anmelden müssen, überprüfen Sie, ob Sie vergessen haben, persistente Volumes einzuhängen:
+
+```yaml
+volumes:
+  - claude-data:/home/hagicode/.claude
+```
+
+Wenn Konfigurationen, die Sie mühsam eingerichtet haben, einfach verschwinden – das Gefühl, wie soll man es sagen, ist ziemlich entmutigend.
+
+### Richtige Vorgehensweise für Version-Upgrades
+
+Führen Sie nicht direkt `npm install -g` im laufenden Container aus. Die richtige Vorgehensweise ist:
+
+1. Umgebungsvariable setzen, um Override-Installation auszulösen
+2. Oder Image neu bauen
+
+```bash
+# Methode 1: Laufzeit-Override
+docker run -e CLAUDE_CODE_CLI_VERSION=2.2.0 myimage
+
+# Methode 2: Neu bauen
+docker build -t myimage:v2 .
+```
+
+Alle Wege führen nach Rom, manche sind nur etwas einfacher, manche etwas kurviger.
+
+### Sicherheits-Härtungs-Checkliste
+
+- API-Token über Umgebungsvariablen übergeben, nicht in Image schreiben
+- Konfigurationsdateien mit 600 Berechtigungen
+- Anwendung immer als Nicht-root-Benutzer ausführen
+- CLI-Versionen regelmäßig aktualisieren, Sicherheitslücken schließen
+
+Sicherheit ist zwar wichtig, aber wie viele setzen es wirklich gut um?
+
+## Erweiterung um neue CLI-Tools
+
+Wenn Sie in Zukunft neue CLI-Tools unterstützen möchten, benötigen Sie nur drei Schritte:
+
+1. **Dockerfile.template**: Installationsschritte hinzufügen
+2. **docker-entrypoint.sh**: Versions-Override-Logik hinzufügen
+3. **docker-compose-builder-web**: Persistente Volume-Mappings hinzufügen
+
+Das templatbasierte Design macht Erweiterungen einfach, ohne die Kernlogik ändern zu müssen. Dies ist auch ein bisschen Erfahrung von jemandem, der schon einmal durch die Hölle gegangen ist.
+
+## Zusammenfassung
+
+Die Ausführung von AI CLI-Tools in Docker-Containern stellt Kernherausforderungen in drei Dimensionen dar: **Benutzerberechtigungen, Konfigurationspersistenz, Versionsverwaltung**. Das HagiCode-Projekt hat durch eine Kombination aus dedizierten Benutzern, isolierten benannten Volumes und Umgebungsvariablen-Overrides eine sichere und flexible Deployment-Architektur erreicht.
+
+Wichtige Designpunkte:
+
+- **Benutzerisolierung**: Dedizierten Benutzer bereits während der Image-Build-Phase erstellen, Laufzeit-Unterstützung für PUID/PGID dynamisches Mapping
+- **Persistenzstrategie**: Jedes CLI-Tool entspricht einem unabhängigen benannten Volume, Container-Neustart wirkt sich nicht auf Konfiguration aus
+- **Versionsflexibilität**: Feste Standardwerte gewährleisten Reproduzierbarkeit, Laufzeit-Overrides bieten Testmöglichkeiten
+- **Automatische Konfiguration**: Unterstützung für automatische Injektion sensibler Konfigurationen durch Umgebungsvariablen
+
+Diese Lösung läuft im HagiCode-Projekt seit einiger Zeit stabil und hoffentlich gibt sie Entwicklern mit ähnlichen Anforderungen einige Anregungen. Eigentlich ist es auch nicht so komplex, nur ein bisschen Ingenieurpraxis.
+
+## Urheberrechtshinweis
+
+Vielen Dank für das Lesen, wenn Sie diesen Artikel nützlich finden, sind Likes, Lesezeichen und Teilen willkommen.
+Dieser Inhalt wurde mit künstlicher Intelligenz unterstützt erstellt, der endgültige Inhalt wurde vom Autor überprüft und bestätigt.
+- Autor: [newbe36524](https://www.newbe.pro)
+- Original-Link: [https://docs.hagicode.com/blog/2026-03-26-docker-ai-cli-user-isolation-guide/](https://docs.hagicode.com/blog/2026-03-26-docker-ai-cli-user-isolation-guide/)
+- Copyright-Hinweis: Alle Blog-Artikel werden, sofern nicht anders angegeben, unter der BY-NC-SA-Lizenz vereinbart. Bitte geben Sie die Quelle an!

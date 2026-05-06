@@ -1,0 +1,300 @@
+---
+title: How to Implement Automatic Retry for Agent CLIs like Claude Code and Codex
+date: 2026-04-18
+tags: [Agent CLI, Claude Code, Codex, Automatic Retry, HagiCode]
+description: "Automatic retry may look like a simple switch, but in real engineering, it's a completely different story. Hello producers, I'm Yu Kun, producer of HagiCode. Today we won't talk about empty words, let's talk about how"
+---
+
+## How to Implement Automatic Retry for Agent CLIs like Claude Code and Codex
+
+> Automatic retry may look like a simple switch, but in real engineering, it's a completely different story. Hello producers, I'm Yu Kun, producer of HagiCode. Today we won't talk about empty words, let's talk about how automatic retry for Agent CLIs like Claude Code and Codex should actually be implemented to both handle exceptions properly without leading the system into endless repetitive execution.
+
+## Background
+
+If you've also been working on AI programming recently, you've likely encountered this type of problem: tasks don't fail right from the start, but break halfway through.
+
+In ordinary HTTP requests, this is often just a matter of resending, perhaps with exponential backoff added. But Agent CLI is different. Tools like Claude Code and Codex typically execute in a streaming fashion, pushing output segment by segment, while binding threads, sessions, or resume tokens during the process. In other words, it's not a question of "did this request fail," but rather:
+
+- Is the content already output still valid
+- Can the current context continue running
+- Should this failure be automatically recovered
+- If recovering, how long to wait before retry, what to send during retry, whether to reuse the original context
+
+Many teams doing this for the first time will subconsciously write the simplest version: just retry once on error. You're absolutely right, this idea is very natural, but once it gets into the project, problems emerge one after another.
+
+- Some errors that are clearly temporary failures are treated as final failures
+- Some errors that aren't worth retrying at all are repeatedly replayed by the system
+- Requests with threads and requests without threads are treated uniformly in one go
+- Backoff strategy has no boundaries, background requests overload themselves
+
+HagiCode also stepped on these mines while integrating multiple Agent CLIs. Especially on the Codex side, the problem initially exposed was that certain reconnect messages weren't recognized as retryable terminal states, so existing recovery mechanisms never had a chance to take effect. Basically, it's not that the system doesn't have automatic retry, but that the system didn't recognize "this is worth retrying."
+
+So the core point this article wants to make is very clear: **Automatic retry is not a button, but a layered design.**
+
+## About HagiCode
+
+The solution shared in this article comes from our real practice in the [HagiCode](https://hagicode.com) project. What HagiCode does isn't just connecting a single model and calling it done, but unifying the streaming messages, tool calls, failure recovery, and session contexts of multiple Agent CLIs into an executable model that can be maintained long-term.
+
+One of the things I care most about is how to truly make AI programming land in real engineering scenarios. Writing demos isn't hard; what's hard is turning demos into something teams are willing to use long-term. HagiCode takes automatic retry seriously not because this feature looks advanced, but because if long-chain, streaming, resumable CLI execution isn't handled stably, what users see isn't an intelligent assistant, but a command wrapper that drops connection halfway through.
+
+If you want to check out the project entry points first, here are two:
+
+- GitHub: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Official site: [hagicode.com](https://hagicode.com)
+
+Going one step further, HagiCode is now also on Steam. Friends with Steam can add it to their wishlist first:
+
+- [Steam Store Page (Add to Wishlist / View Details)](https://store.steampowered.com/app/4625540/Hagicode/)
+
+## Why Agent CLI Automatic Retry is Harder Than Ordinary Retry
+
+This question is very practical, so let's go straight to the conclusion: the difficulty with Agent CLI automatic retry isn't "wait a few seconds and try again," but "can we still continue in the original context."
+
+You can think of it as a long conversation. Ordinary API retry is more like a busy line where you dial again; while Agent CLI retry is more like the signal cutting off halfway through the other person's speech, you have to first judge whether to call back, whether to start from the beginning after calling back, and whether the other person still remembers where the conversation left off. Who says these are the same thing? They're fundamentally not the same engineering problem.
+
+Specifically, there are four typical difficulties.
+
+### 1. It's Streaming
+
+Once output has already been sent to users, you can't quietly swallow the failure and silently retry like handling ordinary requests. Because that earlier content has already been seen, if the strategy is wrong during replay, the frontend will easily see duplicate text, scrambled states, and tool call lifecycles will also get messed up together. This isn't magic, it's engineering.
+
+### 2. It Usually Binds Session Context
+
+Providers like Codex bind threads, while Claude Code-like implementations also have continuation targets or equivalent resumable contexts. The real prerequisite for automatic retry isn't just "this error looks like a temporary failure," but also "does this execution still have a carrier to continue."
+
+### 3. Not All Errors Are Worth Retrying
+
+Network jitter, SSE idle timeout, upstream temporary failures—these can usually be tried. But if you encounter authentication failure, context already lost, or the provider simply has no resume capability, continuing to retry is mostly not recovery, but creating noise.
+
+### 4. It Needs Boundaries
+
+Infinite automatic retry is almost always wrong. Technology trends can be lively for a while, but engineering patterns tend to remain stable for many years, and one of them is: failure recovery must have boundaries. The system must know the maximum number of attempts, how long to wait between each, and when to stop and admit this time really didn't work.
+
+Precisely because of these characteristics, HagiCode didn't write automatic retry as a few lines of `try/catch` in some provider, but instead extracted it as a shared capability. After all, engineering problems need to return to engineering methods to be solved.
+
+## HagiCode's Approach: Extract Retry from Provider
+
+HagiCode's current real implementation can be compressed into one sentence:
+
+**Shared layer uniformly manages the retry process, specific Provider only needs to answer two questions: Is this terminal state worth retrying? Can the current context still continue?**
+
+This isn't complicated, but it's very key. Because once responsibilities are separated, Claude Code, Codex, and even other Agent CLIs can all reuse the same skeleton. Models will speak, tools will change, workflows will upgrade, but the engineering foundation will always be there.
+
+### First Layer: Use Unified Coordinator to Manage Retry Loop
+
+The core implementation snippet in the project looks roughly like this:
+
+```csharp
+internal static class ProviderErrorAutoRetryCoordinator
+{
+    public static async IAsyncEnumerable<CliMessage> ExecuteAsync(
+        string prompt,
+        ProviderErrorAutoRetrySettings? settings,
+        Func<string, IAsyncEnumerable<CliMessage>> executeAttemptAsync,
+        Func<bool> canRetryInSameContext,
+        Func<TimeSpan, CancellationToken, Task> delayAsync,
+        Func<CliMessage, bool> isRetryableTerminalMessage,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        var normalizedSettings = ProviderErrorAutoRetrySettings.Normalize(settings);
+        var retrySchedule = normalizedSettings.Enabled
+            ? normalizedSettings.GetRetrySchedule()
+            : [];
+
+        for (var attempt = 0; ; attempt++)
+        {
+            var attemptPrompt = attempt == 0
+                ? prompt
+                : ProviderErrorAutoRetrySettings.ContinuationPrompt;
+
+            CliMessage? terminalFailure = null;
+
+            await foreach (var message in executeAttemptAsync(attemptPrompt)
+                               .WithCancellation(cancellationToken))
+            {
+                if (isRetryableTerminalMessage(message))
+                {
+                    terminalFailure = message;
+                    break;
+                }
+
+                yield return message;
+            }
+
+            if (terminalFailure is null)
+            {
+                yield break;
+            }
+
+            if (attempt >= retrySchedule.Count || !canRetryInSameContext())
+            {
+                yield return terminalFailure;
+                yield break;
+            }
+
+            await delayAsync(retrySchedule[attempt], cancellationToken);
+        }
+    }
+}
+```
+
+What this code does is actually very simple, but very powerful.
+
+- Intermediate failures don't get passed through directly, the coordinator first judges whether recovery is possible
+- Only when retry budget is exhausted does final failure truly return to the upper layer
+- Starting from the second round, the original prompt is no longer sent, instead a unified continuation prompt is sent
+
+This is also why I kept emphasizing earlier that automatic retry isn't simply "request again." It's not patching an exception branch, but managing an execution lifecycle. Sounds a bit like a product manager, but that's how it really is in engineering.
+
+### Second Layer: Snapshot Retry Strategy
+
+Another easily overlooked problem is: who decides whether to enable automatic retry for this request?
+
+HagiCode's answer is, don't rely on some "current global configuration," but make the strategy a snapshot that travels with this request. This way, session queuing, message persistence, execution forwarding, provider adaptation—none of these will lose the strategy. One success doesn't make a system, sustained success makes a system.
+
+The core structure can be simplified to this:
+
+```csharp
+public sealed record ProviderErrorAutoRetrySnapshot
+{
+    public const string DefaultStrategy = "default";
+
+    public bool Enabled { get; init; }
+
+    public string Strategy { get; init; } = DefaultStrategy;
+
+    public static ProviderErrorAutoRetrySnapshot Normalize(bool? enabled, string? strategy)
+    {
+        return new ProviderErrorAutoRetrySnapshot
+        {
+            Enabled = enabled ?? true,
+            Strategy = string.IsNullOrWhiteSpace(strategy)
+                ? DefaultStrategy
+                : strategy.Trim()
+        };
+    }
+}
+```
+
+Then on the execution side, it maps to the settings object actually consumed by the provider. The value of this approach is very direct:
+
+- Business layer decides "whether to retry"
+- Runtime decides "how to retry"
+
+Each side manages its own concern without fighting each other. Many problems aren't impossible to do, just didn't calculate the cost clearly. Snapshotting the strategy is essentially calculating the cost clearly in advance.
+
+### Third Layer: Provider Only Does Terminal State Determination and Context Determination
+
+When it comes to specific Claude Code or Codex providers, the responsibilities here are actually quite thin. You can understand it as enhancement, don't mistake it for replacement.
+
+Taking Codex as an example, when it finally integrates with the shared coordinator, it essentially only needs to provide three things:
+
+```csharp
+await foreach (var message in ProviderErrorAutoRetryCoordinator.ExecuteAsync(
+                   prompt,
+                   options.ProviderErrorAutoRetry,
+                   retryPrompt => ExecuteCodexAttemptAsync(...),
+                   () => !string.IsNullOrWhiteSpace(resolvedThreadId),
+                   DelayAsync,
+                   IsRetryableTerminalFailure,
+                   cancellationToken))
+{
+    yield return message;
+}
+```
+
+You'll find that what really belongs to the Provider's own judgment is only two:
+
+- `IsRetryableTerminalFailure`
+- `canRetryInSameContext`
+
+Codex looks at whether the thread can still continue, Claude Code looks at whether the continuation target still exists. Backoff strategy, retry count, subsequent prompts—none of these should be reinvented by the Provider itself.
+
+After this layer is extracted, the cost for HagiCode to integrate more CLIs becomes much lower. You don't need to copy an entire retry state machine, just connect "this provider's boundary conditions." Writing fast doesn't mean writing stable; handling doesn't mean handling well; being able to run doesn't mean it can be maintained long-term.
+
+## A Point That's Easy to Get Wrong: Don't Treat All Errors as Retryable
+
+In this analysis, what I think is most worth pulling out separately to discuss isn't "how to implement retry," but "how to avoid incorrect retry."
+
+The initial problem entry point was that Codex didn't recognize a reconnect message. By intuition, many people would choose a minimal fix: add another string prefix to the whitelist. This approach isn't wrong per se, it just feels more like a solution from the Demo period, not a solution for long-term maintenance.
+
+From HagiCode's current implementation, the system has already taken a step toward a more stable direction. It no longer stares at a single literal string, but instead uniformly hands recoverable terminal states to the shared coordinator for handling. The benefits of this are obvious:
+
+- Not easily completely broken by small changes to some wording
+- Test coverage can revolve around "terminal state envelope" rather than single hardcoded text
+- Retry logic for the same provider will be more consistent
+
+Of course, a boundary needs to be established here: more general doesn't mean more loose. **As long as the current context cannot continue, even if the error looks very similar to a temporary failure, blind replay shouldn't happen.**
+
+This is very key. What's truly reassuring isn't that it occasionally works once, but that it's reliable most of the time. If a process can only be maintained by experts, it's still far from widespread adoption.
+
+## Three Experiences Most Worth Keeping in Practice
+
+The article is about here, we can start wrapping up at the practice layer. If you're preparing to implement similar capabilities in your own project, what I most recommend is to first hold these three lines.
+
+### 1. Retry Budget Must Have Boundaries
+
+HagiCode's current default backoff rhythm is:
+
+- 10 seconds
+- 20 seconds
+- 60 seconds
+
+This rhythm may not suit all systems, but "having boundaries" must be preserved. Otherwise, automatic retry will quickly change from a recovery mechanism to an accident amplifier. Don't rush to make the name too big, first see if this thing can survive two iterations in the team.
+
+### 2. Continuation Prompt Should Be Unified
+
+The project uses a fixed continuation prompt, making subsequent attempts clearly follow the "continue current context" path, rather than initiating a new round of complete requests. This capability isn't flashy, but you can't do without it when really doing projects. Many capabilities look like magic, but when broken down, they're just a polished engineering process.
+
+### 3. Both Shared Library and Adapter Layer Need Mirror Tests
+
+I really want to say more about this point. Many teams will write a layer of tests in the shared runtime, then think it's good enough. Actually, it's not enough.
+
+What makes me quite confident about HagiCode is because both layers have tests added:
+
+- Shared Provider tests "whether automatic resumption really occurred"
+- Adapter layer tests "whether final errors and streaming messages were properly organized"
+
+I also additionally ran two groups of related tests this time, with all 31 test cases passing. This result itself doesn't prove the design is perfect, but it can at least explain one thing: the current automatic retry isn't a paper solution, but a capability constrained together by code and tests. Talk is cheap. Show me the code. Put here, it fits perfectly.
+
+## Summary
+
+If the entire article is compressed into one sentence, it's:
+
+**Automatic retry for Agent CLIs like Claude Code and Codex is best not implemented as some local trick within a specific Provider, but as a combination of shared coordinator + strategy snapshot + context determination + mirror testing.**
+
+The benefits brought by doing this are actually very tangible:
+
+- Logic written once, can be reused by multiple Providers
+- Whether a request allows retry can stably follow the execution chain
+- Continue running when there's context, stop in time when there's no context
+- Frontend finally sees a stable completion state or failure state, not a bunch of half-abandoned intermediate noise
+
+This solution was gradually polished by HagiCode in the process of actually integrating multiple Agent CLIs. Who says AI-assisted programming isn't the new era's pair programming? Models help you start, complete, diverge, but what truly decides the upper limit of experience is often still context, process, and constraints.
+
+If this article helps you, you're also welcome to conveniently check out HagiCode's public entry points:
+
+- GitHub: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Official site: [hagicode.com](https://hagicode.com)
+- 30-minute practical demo: [www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)
+- Desktop installation entry: [hagicode.com/desktop/](https://hagicode.com/desktop/)
+- Steam: [Steam Store Page (Add to Wishlist / View Details)](https://store.steampowered.com/app/4625540/Hagicode/)
+
+HagiCode is now on Steam, this isn't vaporware, I've put the link here for you. Friends with Steam can add a wishlist first, click in to see for yourself, that's more direct than me saying ten sentences here.
+
+Let's stop here for this matter, the rest we'll continue to see in real projects.
+
+## References
+
+- HagiCode project homepage: [https://hagicode.com](https://hagicode.com)
+- HagiCode GitHub repository: [https://github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Official demo video: [https://www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)
+- Desktop installation instructions: [https://hagicode.com/desktop/](https://hagicode.com/desktop/)
+
+## Copyright Notice
+
+Thank you for reading. If you find this article useful, welcome to like, bookmark, and share for support.
+This content uses AI-assisted collaboration, final content is reviewed and confirmed by the author.
+- Article author: [newbe36524](https://www.newbe.pro)
+- Original link: [https://docs.hagicode.com/blog/2026-02-11-agent-cli-automatic-retry/](https://docs.hagicode.com/blog/2026-02-11-agent-cli-automatic-retry/)
+- Copyright notice: Unless otherwise stated, all articles in this blog are licensed under BY-NC-SA. Please indicate the source for reposting!
