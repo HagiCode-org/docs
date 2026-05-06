@@ -342,6 +342,10 @@ function incrementLocaleIssue(localeIssues, localeCode, key) {
   entry[key] += 1;
 }
 
+function compareByLocale(left, right) {
+  return left.locale.localeCompare(right.locale);
+}
+
 export async function generateDocsTranslationReport(options = {}) {
   const rootDirectory = path.resolve(options.contentRoot ?? defaultContentRoot);
   const translationRoot = path.resolve(options.translationRoot ?? defaultTranslationRoot);
@@ -426,6 +430,9 @@ export async function generateDocsTranslationReport(options = {}) {
         incrementLocaleIssue(localeIssues, locale.code, 'similarDocCount');
       }
     }
+
+    duplicateComparisons.sort(compareByLocale);
+    similarComparisons.sort(compareByLocale);
 
     entries.push({
       docKey: baselineDoc.docKey,

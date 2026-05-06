@@ -139,14 +139,27 @@ test('reports highly similar docs against zh-CN baseline and writes a JSON repor
 
 test('covers the full configured locale set including zh-CN baseline', async () => {
   const expectedLocales = [
-    'zh-CN', 'zh-Hant', 'en-US', 'ja-JP', 'ko-KR',
-    'de-DE', 'fr-FR', 'es-ES', 'pt-BR', 'ru-RU',
+    'zh-CN', 'en-US', 'zh-Hant', 'fr-FR', 'it-IT',
+    'de-DE', 'es-ES', 'bg-BG', 'cs-CZ', 'da-DK',
+    'nl-NL', 'fi-FI', 'el-GR', 'hu-HU', 'id-ID',
+    'ja-JP', 'ko-KR', 'nb-NO', 'pl-PL', 'pt-BR',
+    'pt-PT', 'ro-RO', 'ru-RU', 'es-419', 'sv-SE',
+    'th-TH', 'tr-TR', 'uk-UA', 'vi-VN',
   ];
   const actualCodes = REQUIRED_DOCS_LOCALES.map((locale) => locale.code);
   assert.deepEqual(actualCodes, expectedLocales);
 
-  const contentDirectories = REQUIRED_DOCS_LOCALES.filter((locale) => locale.contentDirectory).map((locale) => locale.contentDirectory);
-  const expectedDirectories = ['zh-Hant', 'en-US', 'ja-JP', 'ko-KR', 'de-DE', 'fr-FR', 'es-ES', 'pt-BR', 'ru-RU'];
+  const contentDirectories = REQUIRED_DOCS_LOCALES
+    .filter((locale) => locale.contentDirectory)
+    .map((locale) => locale.contentDirectory);
+  const expectedDirectories = [
+    'en-US', 'zh-Hant', 'fr-FR', 'it-IT', 'de-DE',
+    'es-ES', 'bg-BG', 'cs-CZ', 'da-DK', 'nl-NL',
+    'fi-FI', 'el-GR', 'hu-HU', 'id-ID', 'ja-JP',
+    'ko-KR', 'nb-NO', 'pl-PL', 'pt-BR', 'pt-PT',
+    'ro-RO', 'ru-RU', 'es-419', 'sv-SE', 'th-TH',
+    'tr-TR', 'uk-UA', 'vi-VN',
+  ];
   assert.deepEqual(contentDirectories, expectedDirectories);
 });
 
