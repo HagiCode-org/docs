@@ -1,0 +1,480 @@
+---
+title: 如何使用 GitHub Actions 构建多平台的 code-server 与 OmniRoute
+date: 2026-05-07
+tags: [omniroute]
+---
+
+## 如何使用 GitHub Actions 构建多平台的 code-server 与 OmniRoute
+
+> 面对需要在 Linux、macOS 和 Windows 三个平台构建并统一发布的需求，我们设计了一套基于 GitHub Actions 的多平台 CI/CD 流水线。其实这事儿说难也不难，只是踩坑的时候确实挺让人头秃的。本文分享这套流水线的设计思路和实现细节——当然，也有我们踩过的那些坑。
+
+## 背景
+
+[code-server](https://github.com/coder/code-server) 是一个将 VS Code 运行在浏览器中的开源项目，允许开发者通过远程服务器上的 Web IDE 进行开发。随着 HagiCode 桌面端将 code-server 作为内置运行时，我们需要在不同操作系统（Linux、macOS、Windows）上构建、验证并分发 code-server 的定制版本。
+
+这事儿本来应该挺简单的，只是......生活哪有那么容易呢？
+
+与此同时，[OmniRoute](https://github.com/diegosouzapw/OmniRoute) 作为多模型路由服务，也需要与 code-server 共享同一套构建和发布流水线。两个软件包虽然构建方式不同，但最终需要汇聚到同一个 GitHub Release 中发布。就像两条原本不相交的线，最终还是要在某个点相遇——这就是所谓的宿命吧。
+
+这带来了几个工程挑战：
+
+1. **跨平台构建差异**：Linux、macOS、Windows 三个平台的构建工具链完全不同（Linux 使用 quilt + bash，macOS 使用 Homebrew，Windows 需要 MSYS2）——每个平台都有自己的脾气
+2. **构建产物验证**：构建完成后需要自动验证产物能否正常启动——毕竟谁也不想发布一个根本跑不了的东西
+3. **统一版本管理**：两个包需要共享同一个版本号和发布标签——就像两个人要共用一个名字，总得有个说法
+4. **并行构建与串行发布**：构建可以并行，但发布需要协调一致——这里容易出错，而且错了就是真的错了
+
+## 关于 HagiCode
+
+本文分享的方案来自 [HagiCode](https://hagicode.com) 项目中的实践经验。HagiCode 是一个 AI 代码助手项目，在其桌面端产品中集成了 code-server 作为内置运行时，因此需要解决多平台构建和发布的工程问题。这事儿，说白了就是为了把产品做出来，仅此而已。
+
+### 上游构建流水线的局限
+
+code-server 上游项目自带的 CI/CD 流水线（`build.yaml`）只构建 `linux-x64` 平台，其发布流程（`publish.yaml`）仅针对 npm、AUR 和 Docker 等渠道。它不支持：
+
+- macOS 和 Windows 的原生构建——可能是觉得这两个平台不够重要吧
+- 多平台矩阵并行构建——或许上游团队的人比较少
+- 统一的产物验证机制——反正发布出去让用户自己试就好了
+
+这也没什么，毕竟每个项目都有自己的优先级。只是我们刚好需要这些功能，那就自己来吧。
+
+### 设计决策
+
+基于上述分析，HagiCode 在 `repos/vendered` 中设计了独立的构建流水线，核心决策如下：
+
+**1. 复用共享的版本管理与发布工具链**
+
+版本号采用 UTC 日期格式 `YYYY.MMDD.RRRR`，其中 `RRRR` 是 GitHub Actions 运行号的零填充序列。这确保了版本的单调递增和可追溯性——毕竟时间是不会倒流的，就像有些事情一旦发生了就无法改变：
+
+```javascript
+// scripts/versioning.mjs
+export function formatDateVersion({ date = new Date(), revision }) {
+  const year = normalizedDate.getUTCFullYear()
+  const month = String(normalizedDate.getUTCMonth() + 1).padStart(2, "0")
+  const day = String(normalizedDate.getUTCDate()).padStart(2, "0")
+  return `${year}.${month}${day}.${normalizedRevision}`
+}
+```
+
+例如 2026-05-05 的第一次构建会生成版本 `2026.0505.0001` 和标签 `v2026.0505.0001`。
+
+其实这个版本号格式也没什么特别的，只是刚好够用罢了。
+
+**2. 包级隔离的构建脚本**
+
+每个包（code-server、omniroute）在 `packages/<name>/scripts/` 下维护自己的构建和验证逻辑，共享的发布工具（`scripts/versioning.mjs`、`scripts/github-release.mjs`、`scripts/publication.mjs`）保持包无关性。各自管好各自的事，互不干扰——这大概就是所谓的"井水不犯河水"吧。
+
+**3. 统一的元数据契约**
+
+所有包产出标准化的 `metadata.json`，包含 `schemaVersion`、`packageId`、`version`、`platform`、`arch`、`sourceRevision` 和 `artifacts[]` 字段，确保下游消费方无需感知包的差异。有了统一的格式，大家都能省点心。
+
+## 解决
+
+### Workflow 整体架构
+
+整个流水线定义在 `repos/vendered/.github/workflows/code-server-artifacts.yaml` 中，包含以下阶段：
+
+```
+prepare_release → build (matrix) → verify (matrix) → publish_github_release
+```
+
+流程说简单也简单，说复杂也复杂——关键看你怎么看。
+
+### 触发条件
+
+```yaml
+on:
+  workflow_dispatch:          # 手动触发
+  schedule:
+    - cron: "23 3 * * *"     # 每日定时构建
+  push:
+    branches: [main]          # 主分支推送触发
+    paths:                    # 仅在相关文件变更时触发
+      - ".github/workflows/code-server-artifacts.yaml"
+      - ".gitmodules"
+      - "scripts/**"
+      - "packages/code-server/**"
+      - "packages/omniroute/**"
+```
+
+每日定时构建设在了凌晨 3:23——也没什么特别的原因，只是随便选了个时间罢了。或许选这个时间的人当时也没想太多。
+
+### 阶段一：版本准备
+
+```yaml
+jobs:
+  prepare_release:
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - id: version
+        run: node ./scripts/versioning.mjs >> "$GITHUB_OUTPUT"
+```
+
+此阶段生成统一的版本号和 Git 标签，后续所有构建和发布步骤共享这两个值。一个好的开始，至少为后续工作省了不少麻烦。
+
+### 阶段二：多平台矩阵构建
+
+构建阶段使用 `strategy.matrix` 在不同平台上并行执行：
+
+#### code-server 构建矩阵
+
+```yaml
+build_code_server:
+  needs: prepare_release
+  strategy:
+    fail-fast: false
+    matrix:
+      include:
+        - name: code-server Linux
+          runner: ubuntu-22.04
+          artifact_name: code-server-linux
+        - name: code-server macOS
+          runner: macos-latest
+          artifact_name: code-server-macos
+        - name: code-server Windows
+          runner: windows-latest
+          artifact_name: code-server-windows
+```
+
+关键设计：`fail-fast: false` 确保某个平台失败不会取消其他平台的构建。毕竟一个平台挂了不代表所有平台都有问题，没必要大家一起陪葬。
+
+#### omniroute 构建矩阵
+
+```yaml
+build_omniroute:
+  needs: prepare_release
+  strategy:
+    fail-fast: false
+    matrix:
+      include:
+        - name: omniroute Linux x64
+          runner: ubuntu-22.04
+          platform: linux
+          arch: amd64
+        - name: omniroute macOS x64
+          runner: macos-15-intel
+          platform: macos
+          arch: amd64
+        - name: omniroute macOS arm64
+          runner: macos-14
+          platform: macos
+          arch: arm64
+        - name: omniroute Windows x64
+          runner: windows-latest
+          platform: windows
+          arch: amd64
+```
+
+OmniRoute 的矩阵更丰富，包含 macOS 的 Intel 和 ARM 两个架构。注意 macOS ARM 使用 `macos-14` runner（Apple Silicon），Intel 使用 `macos-15-intel`。这个世界就是这样，总有些东西是分阵营的——就像 Intel 和 ARM，永远都不会和解。
+
+### 阶段三：平台特定前置条件
+
+每个平台需要不同的工具链，Workflow 通过条件步骤处理：
+
+#### Linux
+
+```yaml
+- name: Install Linux prerequisites
+  if: runner.os == 'Linux'
+  run: sudo apt-get update && sudo apt-get install -y jq rsync quilt libkrb5-dev
+```
+
+#### macOS
+
+```yaml
+- name: Install macOS prerequisites
+  if: runner.os == 'macOS'
+  run: brew install jq rsync quilt python-setuptools
+```
+
+#### Windows（MSYS2）
+
+Windows 最复杂，需要 MSYS2 来提供类 Unix 工具链——这也是没办法的事，毕竟 Windows 的设计哲学和 Unix 系统完全不同：
+
+```yaml
+- name: Setup MSYS2
+  if: runner.os == 'Windows'
+  uses: msys2/setup-msys2@v2
+  with:
+    msystem: MSYS
+    path-type: inherit
+    update: true
+    install: >-
+      diffutils jq patch quilt rsync unzip zip
+
+- name: Configure Windows shell paths
+  if: runner.os == 'Windows'
+  shell: pwsh
+  run: |
+    Add-Content -Path $env:GITHUB_ENV -Value 'NPM_CONFIG_SCRIPT_SHELL=/usr/bin/bash'
+    Add-Content -Path $env:GITHUB_ENV -Value ("MSYS2_CMD={0}\\setup-msys2\\msys2.cmd" -f $env:RUNNER_TEMP)
+```
+
+其实这些配置也没那么复杂，只是第一次遇到的时候确实会让人有点懵。
+
+### 阶段四：构建产物验证
+
+每个平台构建完成后，验证步骤会下载产物、解压并实际启动来验证可用性。毕竟我们不想发布一个根本跑不了的东西——那样太丢人了：
+
+```yaml
+verify_code_server:
+  needs: build_code_server
+  strategy:
+    fail-fast: false
+    matrix:
+      include:
+        - name: code-server Linux
+          runner: ubuntu-22.04
+          bash_path: bash
+        - name: code-server Windows
+          runner: windows-latest
+          bash_path: C:\msys64\usr\bin\bash.exe
+```
+
+验证脚本（`verify-startup.mjs`）会：
+
+1. 解压构建产物
+2. 在随机可用端口启动 code-server
+3. 轮询 `/healthz` 端点等待服务就绪
+4. 确认服务响应 200 后关闭进程
+
+```javascript
+async function waitForHealth(port) {
+  const deadline = Date.now() + 60_000
+  while (Date.now() < deadline) {
+    const response = await requestHealth(port)
+    if (response.statusCode === 200) return
+    await new Promise((resolve) => setTimeout(resolve, 1000))
+  }
+  throw new Error(`Timed out waiting for code-server to become healthy`)
+}
+```
+
+等健康检查的时候总会让人有点焦虑——就像在等一个永远不会回消息的人。只是这次服务终究会启动，而有些人可能永远不会回应你。
+
+### 阶段五：统一发布
+
+所有构建和验证完成后，发布阶段将产物收集并创建 GitHub Release：
+
+```yaml
+publish_github_release:
+  needs:
+    - prepare_release
+    - build_code_server
+    - build_omniroute
+    - verify_code_server
+    - verify_omniroute
+  if: >-
+    ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+        github.event_name == 'workflow_dispatch' }}
+  concurrency:
+    group: ${{ format('vendered-github-release-{0}', needs.prepare_release.outputs.tag) }}
+    cancel-in-progress: false
+```
+
+关键点：
+
+- **并发控制**：使用 `concurrency` 确保同一标签的发布不会并行执行——避免重复发布总归是好的
+- **条件发布**：只在 `main` 分支推送或手动触发时发布，定时构建只执行构建和验证
+- **产物汇总**：使用 `download-artifact` 的 `pattern` 参数批量下载 code-server 和 omniroute 的所有平台产物
+
+## 实践
+
+### 跨平台构建脚本的编写要点
+
+构建脚本（`build-artifacts.mjs`）需要处理平台差异，以下是要点：
+
+**1. 平台检测与归一化**
+
+```javascript
+function normalizePlatform(value) {
+  switch (String(value).toLowerCase()) {
+    case "darwin":
+    case "macos":
+      return "macos"
+    case "win32":
+    case "windows":
+    case "windows_nt":
+      return "windows"
+    default:
+      return "linux"
+  }
+}
+```
+
+不同系统对同一平台的称呼都不一样——就像同一个人在不同场合会有不同的名字，但终究还是同一个人。
+
+**2. Windows 上的 Shell 兼容**
+
+在 Windows 上，`npm run` 会调用 `cmd.exe`，但 code-server 的构建脚本依赖 bash。解决方案是设置 `NPM_CONFIG_SCRIPT_SHELL` 环境变量并使用 MSYS2。这也是没办法的事，毕竟 Windows 和 Unix 的设计理念完全不同：
+
+```javascript
+function withCodeServerEnv(env) {
+  const scriptShell = platform === "windows"
+    ? "/usr/bin/bash"
+    : env.BASH_PATH || "bash"
+  return {
+    ...env,
+    NPM_CONFIG_SCRIPT_SHELL: platform === "windows" ? scriptShell : env.NPM_CONFIG_SCRIPT_SHELL,
+  }
+}
+```
+
+**3. 产物打包**
+
+不同平台使用不同的归档格式（Linux/macOS 使用 `.tar.gz`，Windows 使用 `.zip`）——每个平台都有自己的偏好，就像每个人都有自己的生活习惯：
+
+```javascript
+if (platform === "windows") {
+  await run("powershell.exe", [
+    "-NoLogo", "-NoProfile", "-Command",
+    `Compress-Archive -Path '${releaseDir}' -DestinationPath '${archivePath}' -Force`,
+  ])
+} else {
+  await run("tar", ["-czf", archivePath, "-C", codeServerRoot, path.basename(releaseDir)])
+}
+```
+
+**4. 补丁管理**
+
+code-server 的定制化通过 `patches/` 目录下的 quilt 补丁实现。Linux 直接使用 quilt，macOS 通过 Homebrew 安装 quilt，Windows 需要使用 MSYS2 中的 quilt 或退回到 `patch` 命令（这块挺麻烦的）：
+
+```javascript
+// Windows 上使用 patch 命令替代 quilt
+async function applyPatchesWithPatch(env) {
+  const series = await readFile(path.join(codeServerRoot, "patches", "series"), "utf8")
+  const patchFiles = series.split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(line => line && !line.startsWith("#"))
+
+  for (const patchFile of patchFiles) {
+    await runMsys2(`patch -p1 --forward -i "patches/${patchFile}"`, { cwd: codeServerRoot, env })
+  }
+}
+```
+
+Windows 这块确实折腾了不少时间——没办法，谁让 Windows 的设计理念和其他系统不一样呢。
+
+### 版本号设计考量
+
+HagiCode 采用 `YYYY.MMDD.RRRR` 格式而非上游语义化版本，原因如下：
+
+- **确定性**：每次构建的版本号由日期和运行号唯一确定
+- **单调递增**：日期前缀保证自然排序即为时间顺序
+- **来源可追溯**：从版本号即可推断构建时间和 CI 运行序号
+
+其实这也没什么的，只是刚好够用罢了。语义化版本那种东西，说起来很好听，只是实际用起来挺麻烦的。
+
+### 注意事项
+
+1. **Submodule 递归检出**：构建时必须使用 `submodules: recursive`，确保 code-server 和 omniroute 的上游代码完整拉取（这个地方容易忘）
+2. **Node 版本匹配**：code-server 构建使用上游 `.node-version` 文件指定的 Node 版本，omniroute 使用 Node 24
+3. **Windows Home 目录**：OmniRoute 在 Windows CI 上需要手动创建 `$HOME` 目录结构，避免构建脚本访问不存在的路径——Windows 的目录结构和其他系统不太一样
+4. **验证超时**：code-server 启动验证设置了 60 秒超时，需根据实际启动速度调整
+5. **产物瘦身**：构建完成后删除内嵌的 Node 二进制（`slimRelease`），因为下游会使用自己的 Node 运行时
+6. **发布幂等性**：`github-release.mjs` 支持更新已有的 Release（先删除旧 Asset 再上传新的），确保重试安全
+
+这些东西都是踩坑踩出来的经验——当然，踩坑的时候确实挺让人头秃的。
+
+### 完整的 CI/CD 流程图
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     触发源                                        │
+│  push to main / workflow_dispatch / cron(23 3 * * *)            │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  prepare_release                                                 │
+│  生成版本号: 2026.0506.0001, 标签: v2026.0506.0001              │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │
+              ┌────────────┼────────────┐
+              ▼            ▼            ▼
+┌──────────────┐ ┌──────────────┐ ┌──────────────┐
+│ code-server  │ │ code-server  │ │ code-server  │
+│ Linux        │ │ macOS        │ │ Windows      │
+│ ubuntu-22.04 │ │ macos-latest │ │win-latest    │
+└──────┬───────┘ └──────┬───────┘ └──────┬───────┘
+       │                │                │
+       ▼                ▼                ▼
+┌──────────────┐ ┌──────────────┐ ┌──────────────┐
+│ verify       │ │ verify       │ │ verify       │
+│ Linux        │ │ macOS        │ │ Windows      │
+│ 启动+healthz │ │ 启动+healthz │ │ 启动+healthz │
+└──────┬───────┘ └──────┬───────┘ └──────┬───────┘
+       │                │                │
+       └────────────────┼────────────────┘
+                        │
+       ┌────────────────┼────────────────┐
+       ▼                ▼                ▼
+┌──────────────┐ ┌──────────────┐ ┌──────────────┐
+│ omniroute    │ │ omniroute    │ │ omniroute    │ ...
+│ linux-amd64  │ │ macos-amd64  │ │ macos-arm64  │
+└──────┬───────┘ └──────┬───────┘ └──────┬───────┘
+       │                │                │
+       └────────────────┼────────────────┘
+                        │
+                        ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  publish_github_release                                          │
+│  下载所有产物 → 创建/更新 GitHub Release → 上传归档文件          │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+这流程图看起来挺复杂的，只是分解来看其实也没那么难。很多事情都是这样，看着吓人，做起来也就那么回事。
+
+### 关键配置参考
+
+```yaml
+# 构建环境变量
+env:
+  CI: true
+  GITHUB_TOKEN: ${{ github.token }}
+  ELECTRON_SKIP_BINARY_DOWNLOAD: 1    # 跳过 Electron 下载
+  PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1  # 跳过 Playwright 浏览器下载
+  npm_config_build_from_source: true   # 从源码构建原生模块
+  VERSION: ${{ needs.prepare_release.outputs.version }}
+```
+
+这些环境变量对构建速度和正确性至关重要：跳过不必要的二进制下载可以显著减少构建时间，`build_from_source` 确保原生模块在目标平台上正确编译。
+
+通过这套流水线，HagiCode 实现了 code-server 和 OmniRoute 在三个操作系统上的自动化构建、验证和发布，将原本需要手动操作的多平台发布流程变成了完全自动化的 CI/CD 过程。这也算是把一件麻烦事变得不那么麻烦了。
+
+## 总结
+
+设计多平台 CI/CD 流水线的关键在于：
+
+- **版本号集中管理**：在流水线开始时生成统一的版本号，所有下游步骤共享
+- **构建与发布分离**：使用 `fail-fast: false` 确保某个平台失败不影响其他平台，发布阶段才汇总所有产物
+- **平台隔离构建脚本**：每个包维护自己的构建逻辑，共享工具链保持包无关
+- **产物自动化验证**：构建后立即验证可用性，避免发布后才发现问题
+
+这套方案不仅适用于 code-server 和 OmniRoute，也能为其他需要多平台构建的项目提供参考。本文分享的构建系统，正是我们在开发 HagiCode 过程中实际踩坑、实际优化出来的方案。如果你觉得这套方案有价值，说明我们的工程实力还不错——那么 HagiCode 本身也值得关注一下。
+
+毕竟，能把这种麻烦事做成自动化的人，大概也不会太差吧。
+
+## 参考资料
+
+- [HagiCode 项目地址](https://github.com/HagiCode-org/site)
+- [HagiCode 官网](https://hagicode.com)
+- [code-server 上游仓库](https://github.com/coder/code-server)
+- [OmniRoute 项目](https://github.com/diegosouzapw/OmniRoute)
+- [GitHub Actions 文档](https://docs.github.com/en/actions)
+
+---
+
+如果本文对你有帮助：
+- 来 GitHub 给个 Star：[github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- 访问官网了解更多：[hagicode.com](https://hagicode.com)
+- 观看正式版演示视频：[www.bilibili.com/video/BV1z4oWB3EpY/](https://www.bilibili.com/video/BV1z4oWB3EpY/)
+- 一键安装体验：[docs.hagicode.com/installation/docker-compose](https://docs.hagicode.com/installation/docker-compose)
+- Desktop 桌面端快速安装：[hagicode.com/desktop/](https://hagicode.com/desktop/)
+- 公测已开始，欢迎安装体验

@@ -1,0 +1,450 @@
+---
+title: 如何用 Copilot CLI 统一对接 GPT、Claude 等多种 AI 模型
+date: 2026-05-06
+tags: [AI, GPT, Claude, Copilot CLI, Orleans, Grain]
+---
+
+## 如何用 Copilot CLI 统一对接 GPT、Claude 等多种 AI 模型
+
+> 在 AI 应用开发中，如何用统一的接口对接 GPT、Claude 等多种模型？本文分享基于 Orleans Grain 架构的 AI 提供商系统设计，以及 GitHub Copilot CLI 的集成实践经验。
+
+## 背景
+
+在现代 AI 应用开发中，对接最新的 GPT 模型是许多开发者的核心需求。GitHub Copilot CLI 是一个功能强大的工具，它不仅支持 OpenAI 的 GPT 系列模型（如 GPT-4、GPT-5），还支持 Claude 等其他主流 AI 模型。通过 Copilot CLI，开发者可以使用统一的命令行界面调用不同的 AI 模型，而无需为每个模型单独实现复杂的集成逻辑。
+
+其实这也算是个老生常谈的问题了。每个模型都要写一遍调用逻辑，说多了都是泪。毕竟代码写多了谁都会烦，与其重复造轮子，不如找个统一的接口把所有事情都搞定。Copilot CLI 就是这样一种存在——你只管调用，剩下的交给它。
+
+**核心价值**：
+- 统一的 CLI 接口访问多种 AI 模型
+- 支持会话管理和上下文保持
+- 内置工具调用能力（文件操作、Git 操作等）
+- 支持流式响应和实时输出
+
+## 关于 HagiCode
+
+本文分享的方案来自我们在 [HagiCode](https://hagicode.com) 项目中的实践经验。HagiCode 是一个 AI 代码助手项目，在开发过程中我们遇到了需要同时支持多种 AI 模型的挑战——有些用户习惯用 GPT-4，有些偏好 Claude，还有些想尝试最新的 GPT-5。如果为每个模型单独实现一套调用逻辑，代码会变得难以维护。通过 Copilot CLI 的统一接口，我们成功解决了这个多模型支持的痛点。
+
+说白了，也就是用户口味多样，众口难调罢了。有人喜欢 GPT，有人偏爱 Claude，还有人非要用最新的 GPT-5。我们也只是想让每个人都能用上自己喜欢的模型，毕竟开心最重要。
+
+## 系统架构设计
+
+我们通过 Orleans Grain 架构实现了一个可扩展的 AI 提供商系统，整体架构如下：
+
+```
+┌─────────────────┐
+│  前端/客户端     │
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────────────────────┐
+│  IGitHubCopilotGrain (接口层)   │
+│  - ExecuteCommandStreamAsync    │
+│  - RunEditAsync                 │
+│  - CancelAsync                  │
+└────────┬────────────────────────┘
+         │
+         ▼
+┌─────────────────────────────────┐
+│  GitHubCopilotGrain (实现层)    │
+│  - 状态管理                      │
+│  - 会话绑定                      │
+│  - 响应映射                      │
+└────────┬────────────────────────┘
+         │
+         ▼
+┌─────────────────────────────────┐
+│  CopilotAIProvider (提供商层)   │
+│  - 配置解析                      │
+│  - 权限管理                      │
+│  - 流式处理                      │
+└────────┬────────────────────────┘
+         │
+         ▼
+┌─────────────────────────────────┐
+│  HagiCode.Libs (共享运行时)     │
+│  - Copilot CLI 进程管理          │
+│  - 消息协议解析                  │
+│  - 会话保持                      │
+└─────────────────────────────────┘
+```
+
+这个架构的优势在于**分层清晰、职责单一**。接口层定义了统一的 AI 服务契约，实现层处理 Orleans 的分布式状态管理，提供商层封装 Copilot CLI 的交互细节，底层运行时负责与 CLI 进程通信。
+
+说白了，就是把事情分清楚，谁该干什么就干什么，别乱搅和。毕竟代码这东西，一旦乱了套，后面想改都难。
+
+## 核心组件分析
+
+### 1. GitHubCopilotGrain：分布式 AI 服务接口
+
+作为 Orleans Grain 的实现，`GitHubCopilotGrain` 提供了分布式的 AI 服务能力：
+
+```csharp
+public interface IGitHubCopilotGrain : IGrainWithStringKey
+{
+    /// <summary>
+    /// 执行命令并流式返回响应
+    /// </summary>
+    Task<IAsyncEnumerable<GitHubCopilotResponse>> ExecuteCommandStreamAsync(
+        string command,
+        string? heroId = null,
+        CancellationToken token = default,
+        string? executionMessageId = null,
+        string? systemMessage = null,
+        Dictionary<string, string>? requestSettings = null);
+
+    /// <summary>
+    /// 执行编辑操作
+    /// </summary>
+    Task<IAsyncEnumerable<GitHubCopilotResponse>> RunEditAsync(
+        string editCommand,
+        string? heroId = null,
+        CancellationToken token = default);
+
+    /// <summary>
+    /// 取消当前执行
+    /// </summary>
+    Task CancelAsync(string heroId);
+}
+```
+
+**关键设计点**：
+- 使用 `IAsyncEnumerable` 支持流式响应，避免长时间等待
+- 通过 `heroId` 实现会话级别的状态隔离
+- 支持传入 `requestSettings` 动态配置模型参数
+
+### 2. CopilotAIProvider：核心提供商实现
+
+`CopilotAIProvider` 是整个方案的核心，封装了与 Copilot CLI 的所有交互逻辑：
+
+```csharp
+public class CopilotAIProvider : IAIProvider, IVersionedAIProvider
+{
+    private readonly CopilotOptions _options;
+    private readonly ICopilotProcessExecutor _executor;
+
+    public async IAsyncEnumerable<AIStreamingChunk> SendMessageAsync(
+        AIRequest request,
+        string? embeddedCommandPrompt = null,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        // 构建执行选项
+        var options = new CopilotOptions
+        {
+            Model = request.Model ?? _options.Model,
+            SessionId = request.Options?.Settings?.GetValueOrDefault("copilotSessionId"),
+            Timeout = _options.Timeout,
+            PermissionMode = request.OperationType == AIOperationType.Edit
+                ? CopilotPermissionMode.BypassPermissions
+                : CopilotPermissionMode.Default
+        };
+
+        // 执行命令并流式处理响应
+        await foreach (var message in _executor.ExecuteAsync(
+            options, request.Prompt, cancellationToken))
+        {
+            yield return BuildChunk(message);
+        }
+    }
+}
+```
+
+**核心特性**：
+- **自动重试机制**：处理临时性网络问题和 CLI 进程异常
+- **推理内容追踪**：捕获模型的推理过程（reasoning 字段）
+- **多种消息类型处理**：支持 assistant、tool.started、tool.completed 等消息
+- **权限模式切换**：编辑操作自动使用 bypassPermissions，普通查询使用 default
+
+### 3. CopilotOptions：灵活配置系统
+
+配置类支持丰富的选项设置：
+
+```csharp
+public class CopilotOptions
+{
+    /// <summary>
+    /// 指定使用的模型，如 "gpt-4"、"gpt-5"、"claude-opus-4.5"
+    /// </summary>
+    public string Model { get; set; } = "gpt-4";
+
+    /// <summary>
+    /// Copilot CLI 可执行文件路径
+    /// </summary>
+    public string ExecutablePath { get; set; } = "copilot";
+
+    /// <summary>
+    /// 会话超时时间
+    /// </summary>
+    public TimeSpan Timeout { get; set; } = TimeSpan.FromSeconds(1800);
+
+    /// <summary>
+    /// 认证方式
+    /// </summary>
+    public CopilotAuthSource AuthSource { get; set; } = CopilotAuthSource.LoggedInUser;
+
+    /// <summary>
+    /// 权限模式
+    /// </summary>
+    public CopilotPermissionMode PermissionMode { get; set; } = CopilotPermissionMode.Default;
+
+    /// <summary>
+    /// 会话 ID，用于保持上下文
+    /// </summary>
+    public string? SessionId { get; set; }
+
+    /// <summary>
+    /// 工具权限配置
+    /// </summary>
+    public CopilotToolPermissions? Permissions { get; set; }
+}
+```
+
+配置这东西，讲究的就是一个够用就好。毕竟谁愿意写一堆永远用不上的配置呢？能覆盖大部分场景就够了。
+
+## 配置指南
+
+### 1. 基础配置
+
+在 `appsettings.json` 中添加 Copilot 提供商配置：
+
+```json
+{
+  "AI": {
+    "Providers": {
+      "Providers": {
+        "GitHubCopilot": {
+          "Enabled": true,
+          "ExecutablePath": "copilot",
+          "Model": "gpt-5",
+          "Timeout": 1800,
+          "IdleTimeout": 300,
+          "UseLoggedInUser": true,
+          "NoAskUser": true,
+          "PermissionMode": "default",
+          "Permissions": {
+            "AllowAllTools": false,
+            "AllowAllPaths": false,
+            "AllowedTools": ["Read", "Bash(git:*)", "Bash(cat:*)"],
+            "DeniedTools": []
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+### 2. 模型选择
+
+系统支持以下模型（通过 Copilot CLI 的 `--model` 参数指定）：
+
+| 模型 | 说明 | 推荐场景 |
+|------|------|----------|
+| gpt-4 / gpt-4-turbo | OpenAI 第四代模型 | 通用任务，性价比高 |
+| gpt-5 | OpenAI 最新第五代模型 | 复杂推理，需要最佳效果 |
+| claude-sonnet-4.5 | Anthropic Sonnet 4.5 | 平衡性能和成本 |
+| claude-opus-4.5 | Anthropic Opus 4.5 | 高精度任务 |
+
+在 HagiCode 的实践中，我们默认使用 GPT-4 作为日常模型，对于复杂任务（如大型重构）会切换到 GPT-5，而 Claude 模型则作为备选方案提供给偏好 Anthropic 的用户。
+
+### 3. 注册服务
+
+在 DI 容器中注册相关服务：
+
+```csharp
+// 注册 Copilot AI 提供商
+services.AddSingleton<IAIProvider, CopilotAIProvider>();
+
+// 注册 Orleans Grain
+services.AddSingleton<IGitHubCopilotGrain, GitHubCopilotGrain>();
+
+// 注册进程执行器
+services.AddSingleton<ICopilotProcessExecutor, CopilotProcessExecutor>();
+```
+
+其实也就这几行代码，也没什么特别的。只是该注册的都注册上，免得到时候用的时候找不到。
+
+## 实践示例
+
+### 1. 基础调用
+
+```csharp
+// 获取 Grain
+var grain = grainFactory.GetGrain<IGitHubCopilotGrain>("session-123");
+
+// 执行命令
+await foreach (var response in grain.ExecuteCommandStreamAsync(
+    "分析当前目录的代码结构并生成文档",
+    heroId: null,
+    token: cancellationToken))
+{
+    switch (response.Type)
+    {
+        case ExecutorResponseType.Text:
+            Console.Write(response.Content);
+            break;
+        case ExecutorResponseType.ToolCall:
+            Console.WriteLine($"[工具调用] {response.ToolName}");
+            break;
+        case ExecutorResponseType.Completion:
+            Console.WriteLine($"\n[完成] Token使用: {response.PromptTokens}+{response.CompletionTokens}");
+            break;
+    }
+}
+```
+
+### 2. 带上下文的会话
+
+```csharp
+var requestSettings = new Dictionary<string, string>
+{
+    { "model", "gpt-5" },
+    { "temperature", "0.7" },
+    { "maxTokens", "4096" },
+    { "copilotSessionId", "existing-session-123" }  // 保持会话上下文
+};
+
+await foreach (var response in grain.ExecuteCommandStreamAsync(
+    "基于刚才的分析，生成对应的单元测试",
+    requestSettings: requestSettings,
+    token: cancellationToken))
+{
+    // 处理响应
+}
+```
+
+### 3. 编辑模式调用
+
+```csharp
+await foreach (var response in grain.RunEditAsync(
+    "将所有 PascalCase 命名转换为 camelCase",
+    heroId: "hero-001",
+    token: cancellationToken))
+{
+    if (response.Type == ExecutorResponseType.FileEdit)
+    {
+        Console.WriteLine($"[编辑] {response.FilePath}: {response.EditCount} 处修改");
+    }
+}
+```
+
+## 最佳实践
+
+### 会话保持
+
+使用 `copilotSessionId` 参数可以跨请求保持上下文，这在需要多轮对话的场景非常有用。例如：
+
+```csharp
+// 第一轮：建立上下文
+var settings1 = new Dictionary<string, string> { { "copilotSessionId", "session-001" } };
+await grain.ExecuteCommandStreamAsync("这是一个 C# 项目，使用 .NET 8", requestSettings: settings1);
+
+// 第二轮：基于上下文提问
+var settings2 = new Dictionary<string, string> { { "copilotSessionId", "session-001" } };
+await grain.ExecuteCommandStreamAsync("推荐适合的项目结构", requestSettings: settings2);
+```
+
+毕竟 AI 也不是万能的，没有上下文它怎么知道你在说什么？就像聊天一样，得有来有回才能聊得下去。
+
+### 权限控制
+
+根据操作类型选择合适的权限模式：
+
+- **查询操作**：使用 `default` 模式，让 AI 只能读取文件和执行安全的 Git 命令
+- **编辑操作**：使用 `bypassPermissions` 模式，允许 AI 修改文件
+
+```csharp
+var permissionMode = operationType == AIOperationType.Edit
+    ? CopilotPermissionMode.BypassPermissions
+    : CopilotPermissionMode.Default;
+```
+
+### 工具白名单
+
+通过 `AllowedTools` 配置控制 AI 可执行的操作：
+
+```json
+{
+  "Permissions": {
+    "AllowAllTools": false,
+    "AllowedTools": [
+      "Read",
+      "Bash(git:*)",
+      "Bash(cat:*)",
+      "Glob"
+    ]
+  }
+}
+```
+
+在 HagiCode 中，我们严格限制了 AI 的操作权限，只允许读取文件和执行 Git 命令，确保系统安全性。
+
+毕竟安全这东西，再怎么小心都不为过。谁知道 AI 会不会一时兴起把你整个项目都删了？
+
+### 超时处理
+
+默认超时设置为 30 分钟，对于涉及大量文件的操作（如全量代码分析），可能需要调整：
+
+```csharp
+var options = new CopilotOptions
+{
+    Timeout = TimeSpan.FromMinutes(60)  // 扩展到 60 分钟
+};
+```
+
+## 常见问题
+
+### Q：如何切换不同的 AI 模型？
+
+A：通过 `Model` 配置项或 `requestSettings` 指定：
+
+```csharp
+var settings = new Dictionary<string, string> { { "model", "claude-opus-4.5" } };
+```
+
+其实也就改个参数的事，没什么复杂的。
+
+### Q：会话上下文能保持多久？
+
+A：取决于 Copilot CLI 的实现，通常在会话空闲超时（默认 5 分钟）后会被清理。可以通过 `IdleTimeout` 配置调整。
+
+### Q：如何处理 CLI 进程崩溃？
+
+A：`CopilotAIProvider` 内置了自动重试机制，会捕获进程异常并重新启动 CLI。如果连续失败次数过多，会抛出 `AIProviderException`。
+
+程序崩溃这事儿，谁也避免不了。只能尽量做好容错，万一真挂了，重启就是了。
+
+### Q：支持自定义工具吗？
+
+A：Copilot CLI 支持的工具是预定义的，但可以通过 `AllowedTools` 配置控制哪些工具可用。自定义工具需要等待 Copilot CLI 的后续更新。
+
+## 总结
+
+通过 Copilot CLI 统一对接多种 AI 模型，我们解决了 HagiCode 开发中的多模型支持难题。这套方案的核心优势在于：
+
+1. **统一接口**：一套代码支持 GPT、Claude 等多种模型
+2. **会话管理**：自动处理上下文保持和会话隔离
+3. **工具集成**：内置文件操作、Git 操作等常用工具
+4. **流式响应**：实时返回 AI 输出，提升用户体验
+5. **安全可控**：细粒度的权限控制和工具白名单
+
+如果你的项目也需要支持多种 AI 模型，或者正在寻找一个成熟的 CLI 工具集成方案，不妨试试 Copilot CLI。这套架构在 HagiCode 中经过充分验证，能够支撑生产环境的复杂需求。
+
+毕竟谁愿意为每个模型写一套调用代码呢？有一套统一的方案，大家都省心。
+
+## 参考资料
+
+- [GitHub Copilot CLI 官方文档](https://docs.github.com/en/copilot)
+- [Orleans 分布式框架](https://www.microsoft.com/en-us/research/project/orleans/)
+- [HagiCode 项目地址](https://github.com/HagiCode-org/site)
+- [HagiCode 官网](https://hagicode.com)
+- [HagiCode 安装指南](https://docs.hagicode.com/installation/docker-compose)
+- [HagiCode Desktop 快速安装](https://hagicode.com/desktop/)
+
+如果本文对你有帮助：
+- 来 GitHub 给个 Star：[github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- 访问官网了解更多：[hagicode.com](https://hagicode.com)
+- 观看正式版演示视频：[www.bilibili.com/video/BV1z4oWB3EpY/](https://www.bilibili.com/video/BV1z4oWB3EpY/)
+- 一键安装体验：[docs.hagicode.com/installation/docker-compose](https://docs.hagicode.com/installation/docker-compose)
+- Desktop 桌面端快速安装：[hagicode.com/desktop/](https://hagicode.com/desktop/)
+- 公测已开始，欢迎安装体验
+
