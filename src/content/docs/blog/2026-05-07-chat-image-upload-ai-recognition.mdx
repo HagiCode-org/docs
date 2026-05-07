@@ -1,0 +1,284 @@
+---
+title: 在聊天中实现图片上传与 AI 识别：从设计到落地的完整方案
+date: 2026-05-07
+tags: [AI, 图片上传, 多模态, 系统设计, HagiCode]
+---
+
+## 在聊天中实现图片上传与 AI 识别：从设计到落地的完整方案
+
+> 在 AI 交互系统中，如何让用户上传图片并让 AI 直接识别？其实这个问题我也纠结了很久，好在 HagiCode 的实践中摸索出了一些门道。今天就聊聊这套图片上传与识别方案，从自定义协议设计到文件系统存储，再到前后端分离预览，也算是个完整的技术笔记了。
+
+## 背景
+
+在这个 AI 聊天盛行的时代，视觉信息其实是用户表达意图的重要载体。只是呢，传统聊天系统大多只支持纯文本输入，这就导致用户没法把视觉上下文直接传递给 AI 分析，多少有点遗憾。
+
+HagiCode 在开发过程中也遇到了类似的困境：用户无法在聊天或主意见创建时上传图片，AI 无法访问用户本地的视觉信息，缺少图片从输入、存储、渲染到 AI 上下文传递的完整闭环。
+
+其实这些问题也没什么大不了的，只是需要一点时间和耐心去解决罢了。我们设计并实现了一套完整的图片上传与识别流程，让 Claude 等 AI 能够直接识别和分析用户上传的截图。接下来我会慢慢细说这个方案的实现细节。
+
+## 关于 HagiCode
+
+本文分享的方案来自我们在 [HagiCode](https://hagicode.com) 项目中的实践经验。HagiCode 是一个开源的 AI 代码助手项目，采用基于 OpenSpec 的工作流设计，致力于提供更智能的代码编写体验。
+
+## 分析
+
+### 技术挑战
+
+在开始实现之前，我们还是得先理清楚面临的主要挑战，毕竟磨刀不误砍柴工嘛。
+
+**跨模块协作**：图片上传涉及前端 UI、上传服务、后端 API、文件存储、消息持久化和 AI 执行映射等多个模块。每个模块都有自己的职责和接口，需要设计一个协调一致的整体方案。
+
+**存储策略选择**：图片应该存储在数据库还是文件系统？如果选择文件系统，目录结构如何设计？如何与现有的 OpenSpec 工作流集成？这些都需要仔细权衡。
+
+**引用协议设计**：需要一种标准的图片引用方式，既能被前端渲染显示，又能被 AI 执行链路正确解析。直接使用文件路径？HTTP URL？还是设计专门的协议？
+
+**AI 能力兼容**：不同 AI 执行器对多模态的支持程度不同。有些执行器原生支持图片输入，有些只能处理文本。如何设计统一的适配层，确保所有执行器都能正确处理图片信息？
+
+### 设计决策
+
+经过充分的讨论和权衡，我们做出了以下关键设计决策。
+
+**决策 1：文件系统存储**
+
+我们选择将图片存储在文件系统而非数据库中。目录结构设计如下：
+
+```
+<系统根目录>/images/<sessionId>/
+├── <timestamp>-<uuid>.jpg
+└── <timestamp>-<uuid>.png
+```
+
+理由其实也挺明确的：简化实现，避免数据库膨胀，文件可以直接被 AI 读取。而且图片文件本质上就不适合放在数据库里，文件系统才是更自然的选择。这就像把书放在书架上，而不是塞进笔记本里，一个道理罢了。
+
+**决策 2：自定义协议 `hagiimag://`**
+
+为了避免与 HTTP URL 冲突，同时让引用语义更清晰，我们设计了一个自定义图片引用协议：
+
+```
+hagiimag://session-abc123/20260301-143022-a1b2c3d4
+```
+
+这个协议的格式是 `hagiimag://<sessionId>/<imageId>`，语义清晰，便于解析和路由。看到这个格式，开发者立刻就能明白这是一个图片引用，而不是普通的 URL。这种设计上的小心思，有时候还是挺有用的。
+
+**决策 3：前端预览与 AI 访问分离**
+
+在实现过程中，我们发现前端和 AI 对图片的访问需求不同：前端需要通过 HTTP API 进行预览，而 AI 需要直接读取本地文件路径。因此我们设计了分离的访问方式：
+
+- 前端使用 `/api/Images/{sessionId}/{imageId}/content` 进行预览
+- AI 使用服务端解析的本地文件路径
+
+这样既保证了安全性（不暴露服务器路径），又兼顾了可用性（浏览器可直接访问）。毕竟安全性和可用性这两件事，总是需要平衡的。
+
+**决策 4：立即上传策略**
+
+另一个关键决策是上传时机。我们选择用户选择或粘贴图片时立即触发上传，发送消息时只引用已经上传成功的图片。
+
+这样做的好处是错误处理前置，避免消息发送 API 变复杂，保持 JSON 契约的简洁性。用户在发送前就能知道图片是否上传成功，体验也更好。这种"未雨绸缪"的设计思路，或许在很多时候都适用。
+
+## 解决
+
+### 架构设计
+
+基于上述决策，我们设计了如下整体架构：
+
+```
+前端层
+├── ConversationInputArea  ◄─────── useImageAttachmentManager
+│       │                             │
+│       ├── 文件选择                  ├── 附件状态管理
+│       ├── 剪贴板粘贴                ├── 上传/重试/删除
+│       └── 附件预览                  └── 图片引用生成
+│
+服务层
+├── ImageUploadService
+│       ├── uploadImage()      ◄─────── ImagesController
+│       ├── deleteImage()                 │
+│       ├── parseHagiImageUrl()  ◄─────── 解析协议链接
+│       └── buildPreviewUrl()              │
+│
+后端层
+├── ImagesController           ◄─────── ImagesDomainService
+│       │                                  │
+│       ├── POST /upload                  ├── 文件验证
+│       ├── GET /{sessionId}/{imageId}    ├── 图片保存
+│       ├── DELETE                        ├── 图片压缩
+│       └── GET /content                  └── 引用解析
+│
+AI 执行层
+├── ImageContentBlock          ◄─────── StructuredMessageDomainService
+│       │                                  │
+│       ├── 多模态执行器                  ├── 图片块解析
+│       └── 文本执行器降级                └── 路径提示生成
+```
+
+这个架构清晰地展示了从前端到 AI 的完整数据流。每一层都有明确的职责，通过标准接口进行交互。其实好的架构就是这样，各司其职，互不干扰，沟通顺畅。
+
+### 关键流程
+
+**图片上传流程**：
+
+1. 用户通过文件选择或剪贴板粘贴选择图片
+2. 前端验证文件类型和大小（支持 JPEG/PNG/WEBP/GIF，单文件 10MB）
+3. 调用上传 API，图片保存到 `/images/{sessionId}/` 目录
+4. API 返回 `hagiimag://` 引用和预览 URL
+5. 前端在附件条中显示预览缩略图，用户可以在发送前预览
+
+**AI 识别流程**：
+
+1. 用户发送包含图片引用的消息
+2. 后端解析 `hagiimag://` 协议链接，提取 sessionId 和 imageId
+3. 将图片引用映射为 `ImageContentBlock`
+4. 根据执行器能力选择处理方式：
+   - 多模态执行器：传递结构化图片输入
+   - 文本执行器：降级为图片路径提示
+
+这样就完成了一个完整的闭环：用户上传图片 → AI 识别图片 → AI 返回分析结果。这种流程上的顺畅，往往能给用户带来更好的体验。
+
+## 实践
+
+### 前端实现
+
+在前端，我们提供了一个专门的 Hook 来管理图片附件状态：
+
+```typescript
+import { useImageAttachmentManager } from '@/hooks/useImageAttachmentManager';
+
+function ChatInput() {
+  const {
+    attachments,
+    uploadedImages,
+    hasBlockingAttachments,
+    isUploading,
+    selectFiles,
+    removeAttachment,
+    clearAttachments,
+  } = useImageAttachmentManager({
+    ownerId: sessionId,
+    mapUploadedImage: (response) => response,
+    uploadOptions: { compress: false },
+  });
+
+  const handleFileSelect = (files: File[]) => {
+    selectFiles(files);
+  };
+
+  const handlePaste = (e: ClipboardEvent) => {
+    const files = Array.from(e.clipboardData?.files || [])
+      .filter(f => f.type.startsWith('image/'));
+    if (files.length > 0) {
+      handleFileSelect(files);
+    }
+  };
+
+  return (
+    <div>
+      {/* 附件条 */}
+      {attachments.map(att => (
+        <AttachmentItem
+          key={att.localId}
+          file={att.file}
+          status={att.status}
+          onRemove={() => removeAttachment(att.localId)}
+        />
+      ))}
+
+      {/* 输入框 */}
+      <textarea onPaste={handlePaste} />
+
+      {/* 上传按钮 */}
+      <button onClick={() => fileInputRef.current?.click()}>
+        上传图片
+      </button>
+    </div>
+  );
+}
+```
+
+这个 Hook 封装了所有附件管理的逻辑，包括上传状态跟踪、失败重试、附件删除等。使用起来非常简单，只需要调用几个方法就能完成整个流程。其实好的 API 设计就是这样，简单易用，又不失灵活性。
+
+**解析自定义协议**：
+
+```typescript
+// 从自定义协议中提取 sessionId 和 imageId
+const parsed = parseHagiImageUrl("hagiimag://session-abc123/20260301-143022-uuid");
+// 返回: { sessionId: "session-abc123", imageId: "20260301-143022-uuid" }
+
+// 构建预览 URL
+const previewUrl = buildPreviewUrl(parsed.sessionId, parsed.imageId);
+// 返回: "/api/Images/session-abc123/20260301-143022-uuid/content"
+```
+
+通过这两个工具函数，前端可以轻松地在 `hagiimag://` 协议和 HTTP URL 之间进行转换。这种转换逻辑封装好了，使用起来就方便多了。
+
+### 后端实现
+
+后端使用 ASP.NET Core 实现，核心是 `ImagesController` 和 `ImagesDomainService`：
+
+```csharp
+[HttpPost("upload")]
+[RequestSizeLimit(50 * 1024 * 1024)]
+public async Task<ActionResult<ImageUploadResponseDto>> Upload(
+    [FromForm] UploadImageFormRequest input)
+{
+    // 1. 验证请求
+    if (file == null || file.Length == 0)
+        throw new UserFriendlyException("No file provided");
+
+    // 2. 验证文件类型和大小
+    var (isValid, errorMessage) = _imagesDomainService.ValidateImage(
+        file.FileName, file.ContentType, file.Length);
+    if (!isValid)
+        throw new UserFriendlyException(errorMessage);
+
+    // 3. 保存到文件系统
+    await using var stream = file.OpenReadStream();
+    var result = await _imagesDomainService.UploadImageAsync(
+        stream,
+        sessionId,
+        file.FileName,
+        file.ContentType,
+        CurrentUserId,
+        compress: input.Compress);
+
+    // 4. 返回结果
+    return Ok(result);
+}
+```
+
+这个实现遵循了典型的 Web API 开发模式：验证、处理、返回。需要注意的是，我们设置了 50MB 的请求大小限制，防止恶意的大文件上传。毕竟在网络世界里，小心一点总是没错的。
+
+### 注意事项
+
+在实现过程中，有一些细节需要特别注意：
+
+**权限校验**：图片访问必须验证用户身份，确保只能访问自己会话的图片。这是一个基本的安全要求，不能省略。安全这东西，不怕一万就怕万一。
+
+**路径安全**：严格验证 `sessionId` 和 `imageId`，防止路径遍历攻击。比如要拒绝包含 `../` 的路径，防止用户访问系统中的任意文件。这种边界条件处理好了，系统才能更稳健。
+
+**文件清理**：会话删除时需同步清理关联图片，避免孤儿文件堆积。长期运行后，这些文件可能会占用大量磁盘空间。及时清理，也是一种好的习惯。
+
+**压缩策略**：对于截图类文件名（如 `screenshot.png`），自动启用压缩以节省空间。这个策略可以根据实际需求调整。存储空间嘛，能省一点是一点。
+
+**降级处理**：不支持多模态的执行器必须收到图片路径提示，不能静默丢弃图片信息。这一点很重要，否则用户会以为 AI 忽略了他的图片。用户体验这种事，细节决定成败。
+
+**状态管理**：上传中的附件会阻止消息发送，失败附件允许重试或删除。这个设计保证了用户体验的连贯性。状态管理清晰了，用户就不会感到困惑。
+
+## 总结
+
+通过这套完整的图片上传与识别方案，HagiCode 实现了从用户输入到 AI 识别的完整闭环。整个方案的核心亮点包括：
+
+- 自定义 `hagiimag://` 协议实现了图片引用的标准化
+- 文件系统存储简化了实现并提高了性能
+- 前端预览与 AI 访问分离兼顾了安全性和可用性
+- 立即上传策略优化了用户体验
+- 多模态与文本降级的兼容设计确保了灵活性
+
+这个方案在 HagiCode 中运行稳定，用户反馈良好。如果你也在实现类似的功能，希望这些经验对你有帮助。
+
+其实技术方案这东西，没有绝对的对错，只有适合不适合罢了。找到适合自己项目的路，才是最重要的。
+
+## 参考资料
+
+- HagiCode GitHub: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- HagiCode 官网: [hagicode.com](https://hagicode.com)
+- OpenSpec 工作流文档: [docs.hagicode.com](https://docs.hagicode.com)
