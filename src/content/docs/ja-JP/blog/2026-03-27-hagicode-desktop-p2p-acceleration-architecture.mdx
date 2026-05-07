@@ -1,0 +1,550 @@
+---
+title: HagiCode Desktop ハイブリッド配信アーキテクチャ解説：P2P で大ファイルダウンロードを加速する方法
+date: 2026-03-27
+tags: [HagiCode, Desktop, P2P, BitTorrent, WebSeed, ハイブリッド配信, 技術アーキテクチャ]
+description: "HagiCode Desktop ハイブリッド配信アーキテクチャ解説：P2P で大ファイルダウンロードを加速する方法：実はこの記事は長い間胸に秘めていてやっと書き出せたもので、書き上がっているかどうかも分かりません。技術記事なんてものは、書くのは簡単ですが、書き"
+---
+
+## HagiCode Desktop ハイブリッド配信アーキテクチャ解説：P2P で大ファイルダウンロードを加速する方法
+
+> 実はこの記事は長い間胸に秘めていてやっと書き出せたもので、書き上がっているかどうかも分かりません。技術記事なんてものは、書くのは簡単ですが、味わい深く書くのは難しいものです。でもまあいいか、大文豪でもないし、神がかり的な筆致もないので、この拙い文章を書き上げただけです。
+
+## 背景
+
+デスクトップアプリ開発のチームは、早かれ遅かれ頭を悩ませる問題に直面します：大きなファイルをどう配信するか？
+
+これは言われてみれば仕方のないことです。従来の HTTP/HTTPS 直リンクダウンロードは、ファイルサイズが小さく、ユーザー数も少ない段階ではなんとか持ちこたえられます——若い頃の恋のように、シンプルで純粋で、波乱もありません。しかし、時間というものは無慈悲で、プロジェクトの発展に伴い、インストールパッケージはどんどん大きくなります：Desktop 版 ZIP パッケージ、ポータブルパッケージ、Web 配布アーカイブ……問題が徐々に浮き彫りになってきます：
+
+- **ダウンロード速度がオリジンサーバーの帯域幅に制限される**：単一のサーバーでどれだけ帯域幅を高くしても、みんなが同時にダウンロードすれば耐えられません。これはどういうことでしょう？ あなたが誰かを好きになっても、その人の心はそれだけの大きさしかなく、すでに他人で埋め尽くされていて、どれだけ努力しても入り込めないようなものです。
+- **レジューム機能がほぼゼロ**：HTTP ダウンロードが中断されたら、最初からやり直しになるだけです。時間の無駄だけでなく、帯域幅の無駄でもあります。美しさが晴れや陰りを気にする必要があればいいのに、でも天は思うようにはなりません。
+- **オリジンサーバーの負荷が深刻**：すべてのトラフィックが中央サーバーに殺到し、帯域幅コストが上昇し、スケーラビリティも問題になります。いわゆる中央集権の無力さ——すべてを一箇所に押し付ければ、遅かれ早かれ崩壊するものです。
+
+HagiCode Desktop プロジェクトも例外ではありません。私たちは配信システムを設計する際、既存の `index.json` コントロールプレーンを変更せずに、ハイブリッド配信ソリューションを構築できないかと考えました。P2P ネットワークの分散特性を活用してダウンロードを加速しつつ、HTTP フォールバックを保持して、企業ネットワークのような制限された環境でも可用性を確保するのです。
+
+この決定による変化は、あなたが想像している以上に大きなものになるかもしれません——急がないで、これから詳しく説明します。何事も、言葉にして初めて理解されるものがあります。
+
+## HagiCode について
+
+この記事で共有するソリューションは、[HagiCode](https://hagicode.com) プロジェクトでの実践経験から来ています。HagiCode はオープンソースの AI コードアシスタントプロジェクトで、開発チームの生産性向上に取り組んでいます。プロジェクトは、フロントエンド、バックエンド、デスクトップ版ランチャー、ドキュメント、ビルド、サーバー展開など、複数のサブシステムを含みます。
+
+デスクトップ版のハイブリッド配信アーキテクチャは、HagiCode が実際の運営で試行錯誤し、最適化したソリューションです。これらを書くことに何の意味があるのかと問う人もいるかもしれません。実のところ、何の意味もありません。ただ、このソリューションに価値があるなら、私たちのエンジニアリング実践には多少の心得があるということです——なら HagiCode 自体も注目に値するでしょう、というだけのことです。
+
+プロジェクトの GitHub アドレスは [HagiCode-org/site](https://github.com/HagiCode-org/site) です。興味があれば、まずは Star を付けて收藏しておきましょう。美しいものは、收藏される価値があります。
+
+## コア設計思想：P2P 優先、HTTP フォールバック
+
+要するに、ハイブリッド配信の核心思想は一言で言えば、**P2P 優先、HTTP フォールバック**です。
+
+このソリューションの鍵は「ハイブリッド」の二文字にあります。単に BitTorrent を放り込めばいいわけではなく、二つのダウンロード方式を協調させて、互いの長所を活かす必要があります：
+
+- **P2P ネットワーク**は分散加速を提供し、ダウンロードする人が多ければ多いほど、ノードが増え、速度が上がります。これはどういうことでしょう？ あなたも私も、かつて少年時代のあの人だったように、心に光があれば、世界全体が明るくなると感じるようなものです。
+- **WebSeed/HTTP フォールバック**は可用性を保障し、企業ファイアウォール、イントラネット環境でも正常にダウンロードできます。毕竟有些地方，不是你想进就能进的。
+- **コントロールプレーンはシンプルに保ち**、`index.json` のコアロジックは変更せず、オプションのメタデータフィールドを追加するだけです。シンプルに何が悪いのでしょう？ 複雑なことをやりすぎて、たまにシンプルにするのも、悪くありません。
+
+这样做的好处是啥呢？用户体验到的是「下载更快」，而技术团队不需要为 P2P 的复杂性买单太多——毕竟 BT 协议本身就已经很成熟了，我们也懒得重复造轮子。
+
+## アーキテクチャ設計
+
+### レイヤードアーキテクチャ概要
+
+まず全体アーキテクチャ図を示して、マクロな印象を持ってもらいましょう：
+
+```
+┌─────────────────────────────────────┐
+│     Renderer (UI 層)                │
+├─────────────────────────────────────┤
+│     IPC/Preload (ブリッジ層)        │
+├─────────────────────────────────────┤
+│   VersionManager (バージョン管理)    │
+├─────────────────────────────────────┤
+│ HybridDownloadCoordinator (調整層)  │
+│  ├── DistributionPolicyEvaluator   │
+│  ├── DownloadEngineAdapter         │
+│  ├── CacheRetentionManager         │
+│  └── SHA256 Verifier               │
+├─────────────────────────────────────┤
+│   WebTorrent (ダウンロードエンジン)  │
+└─────────────────────────────────────┘
+```
+
+这张图可以看出，整个系统是分层设计的。为什么要分这么细呢？主要是为了**可测试性和可替换性**。其实做人也是这个道理——把事情分清楚，各司其职，世界也就简单了。
+
+- **UI 層**はダウンロード進捗、共有加速スイッチの表示を担当——これは顔
+- **調整層**はコアで、戦略評価、エンジンアダプター、キャッシュ管理、完全性検証を含む——これは内核
+- **エンジン層**は具体的なダウンロード実装をカプセル化し、現在は WebTorrent を使用——これは道具
+
+エンジン層は `DownloadEngineAdapter` インターフェースとして抽象化されており、将来的に別の BT エンジンに交換したり、sidecar プロセスを導入したりするのも容易です。毕竟谁也不想在一棵树上吊死，代码世界也是如此。
+
+### 制御プレーンとデータプレーンの分離
+
+HagiCode Desktop は `index.json` を唯一の制御プレーンとして保持しており、この設計は非常に重要です。制御プレーンはバージョン発見、チャンネル選択、中央集権型戦略を担当し、データプレーンこそが実際にファイルをダウンロードする場所です。
+
+`index.json` に追加されるフィールドはオプションです：
+
+```json
+{
+  "asset": {
+    "torrentUrl": "https://cdn.example.com/app.torrent",
+    "infoHash": "abc123...",
+    "webSeeds": [
+      "https://cdn.example.com/app.zip",
+      "https://backup.example.com/app.zip"
+    ],
+    "sha256": "def456...",
+    "directUrl": "https://cdn.example.com/app.zip"
+  }
+}
+```
+
+这些字段都是可选的，缺失了就回退到传统的 HTTP 下载模式。这样设计的好处是**向后兼容**，老版本的客户端完全不受影响。毕竟世界在变，可有些东西不能变——变了就回不去了。
+
+### 戦略駆動型意思決定
+
+すべてのファイルが P2P 配信に値するわけではありません。其实这世间的事大抵如此——不是什么都要争一把，有些东西，不适合就是不适合，退一步海阔天空。
+
+DistributionPolicyEvaluator は戦略を評価し、以下の条件を満たすファイルのみハイブリッドダウンロードを有効にします：
+
+1. **ソースタイプは HTTP index でなければならない**：GitHub 直接ダウンロードやローカルフォルダーソースは、このルート通りません。毕竟不是所有的路都适合 P2P。
+2. **ファイルサイズは ≥ 100MB でなければならない**：小ファイルに P2P を使うとオーバーヘッドが見合いません。感情也是如此，有些事情太小了，不值得大费周章。
+3. **完全なハイブリッドメタデータを持っている必要がある**：torrentUrl、webSeeds、sha256 は不可欠。缺一样都不行，这就是规矩。
+4. **最新の desktop パッケージと web 配布パッケージに限定**：履歴バージョンは従来方式で構いません。新人笑，旧人哭，何必呢？
+
+```typescript
+class DistributionPolicyEvaluator {
+  evaluate(version: Version, settings: SharingAccelerationSettings): HybridDownloadPolicy {
+    // ソースタイプをチェック
+    if (version.sourceType !== 'http-index') {
+      return { useHybrid: false, reason: 'not-http-index' };
+    }
+
+    // メタデータ完全性をチェック
+    if (!version.hybrid) {
+      return { useHybrid: false, reason: 'not-eligible' };
+    }
+
+    // 有効かどうかをチェック
+    if (!settings.enabled) {
+      return { useHybrid: false, reason: 'shared-disabled' };
+    }
+
+    // アセットタイプをチェック（最新 desktop/web パッケージのみ）
+    if (!version.hybrid.isLatestDesktopAsset && !version.hybrid.isLatestWebAsset) {
+      return { useHybrid: false, reason: 'latest-only' };
+    }
+
+    return { useHybrid: true, reason: 'shared-enabled' };
+  }
+}
+```
+
+这样做的好处是，**系统行为可预测**。不管是开发者还是用户，都能清楚地知道哪些文件会走 P2P、哪些不会。毕竟预期管理好了，人心也就稳了。
+
+## コア実装
+
+### 型定義体系
+
+まず型定義を見てみましょう、これはシステム全体の基礎です。其实类型定义这东西，就像给事物定性——一旦定好了，后面的路就好走了。
+
+```typescript
+// ハイブリッド配信メタデータ
+interface HybridDistributionMetadata {
+  torrentUrl?: string;      // トレントファイル URL
+  infoHash?: string;        // InfoHash
+  webSeeds: string[];       // WebSeed リスト
+  sha256?: string;          // ファイルハッシュ
+  directUrl?: string;       // HTTP 直リンク（フォールバック用）
+  eligible: boolean;        // ハイブリッド配信条件に合致するか
+  thresholdBytes: number;   // 閾値（バイト）
+  assetKind: VersionAssetKind;
+  isLatestDesktopAsset: boolean;
+  isLatestWebAsset: boolean;
+}
+
+// 共有加速設定
+interface SharingAccelerationSettings {
+  enabled: boolean;           // 総スイッチ
+  uploadLimitMbps: number;    // アップロード速度制限
+  cacheLimitGb: number;       // キャッシュ上限
+  retentionDays: number;      // 保存日数
+  hybridThresholdMb: number;  // ハイブリッド配信閾値
+  onboardingChoiceRecorded: boolean;
+}
+
+// ダウンロード進捗
+interface VersionDownloadProgress {
+  current: number;
+  total: number;
+  percentage: number;
+  stage: VersionInstallStage;  // queued, downloading, backfilling, verifying, extracting, completed, error
+  mode: VersionDownloadMode;   // http-direct, shared-acceleration, source-fallback
+  peers?: number;              // 接続ノード数
+  p2pBytes?: number;          // P2P 取得バイト数
+  fallbackBytes?: number;      // フォールバック取得バイト数
+  verified?: boolean;          // 検証済みか
+}
+```
+
+型定義が明確になれば、後の実装は順当に進みます。或许这就是所谓的「好的开始是成功的一半」吧，虽然这话俗了点。
+
+### コアコーディネーター
+
+HybridDownloadCoordinator はダウンロードプロセス全体のオーケストレーターで、戦略評価、エンジン実行、SHA256 検証、キャッシュ管理を調整します。说起来挺复杂的，但其实核心逻辑也就那么几步，像极了人生——看似纷繁复杂，抽丝剥茧之后，不过尔尔。
+
+```typescript
+class HybridDownloadCoordinator {
+  async download(
+    version: Version,
+    cachePath: string,
+    packageSource: PackageSource,
+    onProgress?: DownloadProgressCallback,
+  ): Promise<HybridDownloadResult> {
+    // 1. 戦略評価：ハイブリッドダウンロードを使用するか
+    const policy = this.policyEvaluator.evaluate(version, settings);
+
+    // 2. ダウンロード実行
+    if (policy.useHybrid) {
+      await this.engine.download(version, cachePath, settings, onProgress);
+    } else {
+      await packageSource.downloadPackage(version, cachePath, onProgress);
+    }
+
+    // 3. SHA256 検証（ハードル）
+    const verified = await this.verify(version, cachePath, onProgress);
+    if (!verified) {
+      await this.cacheRetentionManager.discard(version.id, cachePath);
+      throw new Error(`sha256 verification failed for ${version.id}`);
+    }
+
+    // 4. 信頼できるキャッシュとしてマークし、制御されたシーディングを開始
+    await this.cacheRetentionManager.markTrusted({
+      versionId: version.id,
+      cachePath,
+      cacheSize,
+    }, settings);
+
+    return { cachePath, policy, verified };
+  }
+}
+```
+
+这里有一个关键点：**SHA256 校验是硬门槛**。下载的文件必须校验通过，才能进入安装流程。校验失败就丢弃缓存，保证不会出现「下载了错误文件导致安装出问题」的情况。
+
+这像什么呢？就像信任这件事——一旦被辜负，再想重建就难了。所以从一开始，就把门槛立好。
+
+### ダウンロードエンジン抽象
+
+DownloadEngineAdapter は抽象インターフェースで、エンジンが実装しなければならないメソッドを定義します：
+
+```typescript
+interface DownloadEngineAdapter {
+  download(
+    version: Version,
+    destinationPath: string,
+    settings: SharingAccelerationSettings,
+    onProgress?: (progress: VersionDownloadProgress) => void,
+  ): Promise<void>;
+
+  stopAll(): Promise<void>;
+}
+```
+
+V1 実装は WebTorrent に基づき、InProcessTorrentEngineAdapter でカプセル化されています：
+
+```typescript
+class InProcessTorrentEngineAdapter implements DownloadEngineAdapter {
+  async download(...) {
+    const client = this.getClient(settings);  // アップロード速度制限を適用
+    const torrent = client.add(torrentId, {
+      path: path.dirname(destinationPath),
+      destroyStoreOnDestroy: false,
+      maxWebConns: 8,
+    });
+
+    // WebSeed を追加
+    torrent.on('ready', () => {
+      for (const seed of hybrid.webSeeds) {
+        torrent.addWebSeed(seed);
+      }
+      if (hybrid.directUrl) {
+        torrent.addWebSeed(hybrid.directUrl);
+      }
+    });
+
+    // 進捗報告 - P2P とフォールバックを区別
+    torrent.on('download', () => {
+      const hasP2PPeer = torrent.wires.some(w => w.type !== 'webSeed');
+      const mode = hasP2PPeer ? 'shared-acceleration' : 'source-fallback';
+      // ... 進捗を報告
+    });
+  }
+}
+```
+
+エンジンのプラガブルな設計により、将来の最適化が簡単になります。例えば V2 ではエンジンを helper プロセスで動かし、メインプロセスのクラッシュリスクを回避できます。毕竟谁也不想一颗老鼠屎坏了一锅粥，代码世界如此，人生亦然。
+
+### 進捗報告のモード区別
+
+UI 層では、ユーザーが最も気にするのは「今は P2P ダウンロードか HTTP フォールバックか」です。InProcessTorrentEngineAdapter は `torrent.wires` のタイプをチェックして判断します：
+
+```typescript
+const hasP2PPeer = torrent.wires.some((wire) => wire.type !== 'webSeed');
+const hasFallbackWire = torrent.wires.some((wire) => wire.type === 'webSeed');
+
+const mode = hasP2PPeer ? 'shared-acceleration'
+         : hasFallbackWire ? 'source-fallback'
+         : 'shared-acceleration';
+
+const stage = hasP2PPeer ? 'downloading'
+           : hasFallbackWire ? 'backfilling'
+           : 'downloading';
+```
+
+这个逻辑看起来简单，但它是用户体验的关键。用户能清楚地看到当前是「共享加速」还是「回源补块」，心里有底。其实人和人之间也是如此——透明一点，大家都安心。
+
+### SHA256 ストリーム検証
+
+完全性検証は Node.js の crypto モジュールを使用し、ストリーミングハッシュ計算を行い、ファイル全体をメモリに読み込むことを回避します：
+
+```typescript
+private async computeSha256(filePath: string): Promise<string> {
+  const hash = createHash('sha256');
+  await new Promise<void>((resolve, reject) => {
+    const stream = fs.createReadStream(filePath);
+    stream.on('data', (chunk) => hash.update(chunk));
+    stream.on('error', reject);
+    stream.on('end', resolve);
+  });
+  return hash.digest('hex').toLowerCase();
+}
+```
+
+この実装は大きなファイルに特に優しいです。考えてみてください、2GB のインストールパッ�ージをダウンロードして、ファイル全体をメモリに読み込んで検証したら、メモリ消費はどれほど恐ろしいことになるでしょうか？ ストリーミング処理ならこの問題を完璧に解決できます。
+
+这像不像感情？有些东西，不必一次性全部拥有，一点一点来，反而更好。
+
+## データフロー
+
+完全なデータフローは以下の通りです：
+
+```
+┌────────────────────────────────────────────────────────────────────┐
+│                        用户点击安装大文件版本                        │
+└────────────────────────────────────────────────────────────────────┘
+                                 │
+                                 ▼
+┌────────────────────────────────────────────────────────────────────┐
+│                    VersionManager 调用协调器                         │
+│                    HybridDownloadCoordinator.download()             │
+└────────────────────────────────────────────────────────────────────┘
+                                 │
+                                 ▼
+┌────────────────────────────────────────────────────────────────────┐
+│                    DistributionPolicyEvaluator.evaluate()           │
+│                    检查：来源、元数据、开关、资产类型                 │
+└────────────────────────────────────────────────────────────────────┘
+                                 │
+                    ┌───────────┴───────────┐
+                    │ useHybrid?            │
+                    └───────────┬───────────┘
+                        是 │         │ 否
+                           ▼         ▼
+              ┌──────────────────┐  ┌─────────────────────┐
+              │ P2P + WebSeed    │  │ HTTP 直链下载       │
+              │ 混合下载         │  │ (兼容路径)          │
+              └──────────────────┘  └─────────────────────┘
+                        │
+                        ▼
+              ┌──────────────────┐
+              │ SHA256 校验      │
+              │ (硬门槛)         │
+              └────────┬─────────┘
+                       │
+              ┌────────┴─────────┐
+              │ 通过?            │
+              └────────┬─────────┘
+                   是 │    │ 否
+                     ▼    ▼
+          ┌────────────┐ ┌────────────────┐
+          │ 解压安装   │ │ 丢弃缓存+报错  │
+          │ +受控做种  │ └────────────────┘
+          └────────────┘
+```
+
+整个流程非常清晰，每个步骤都有明确的职责。出了什么问题，也能快速定位是哪个环节出了问题。毕竟事情就怕糊涂，糊涂了就难办了。
+
+## 製品化パッケージング
+
+技術ソリューションがどんなに良くても、ユーザー体験が良くなければ意味がありません。HagiCode Desktop は製品化に多くの取り組みを行っています。毕竟技术是骨子里的事，产品是皮囊，皮囊不好看，骨头再好也没人愿意多看一眼。
+
+### BT 用語を隠す
+
+大多数用户不懂什么是 BitTorrent、什么是 InfoHash。所以产品层面用了「共享加速」这个语义：
+
+- 機能は「共有加速」、P2P ダウンロードとは言わない
+- 設定項目は「アップロード速度制限」、シーディングとは言わない
+- 進捗表示は「フォールバック補完」、WebSeed フォールバックとは言わない
+
+这样一来，术语的认知负担就小了。其实说话也是一门艺术，说得简单点，大家都轻松。
+
+### 初回ウィザードでデフォルト有効化
+
+新用户第一次使用桌面端，会看到一个向导页面，其中有一页介绍共享加速功能：
+
+> 为了加快下载速度，我们会在您下载时与其他用户共享已下载的部分文件。这个过程是完全可选的，您随时可以在设置中关闭。
+
+デフォルトで有効になっていますが、明確な無効化の入り口を提供します。エンタープライズユーザーで必要なければ、ウィザードで無効にできます。毕竟选择权在用户手里，没人喜欢被强迫。
+
+### ユーザーが制御可能なパラメーター
+
+設定ページでは3つの調整可能なパラメーターを提供します：
+
+| パラメーター | デフォルト値 | 説明 |
+|------|--------|------|
+| アップロード速度制限 | 2 MB/s | アップロード帯域幅の過度な使用を防止 |
+| キャッシュ上限 | 10 GB | ディスク容量の使用を制御 |
+| 保存日数 | 7 日 | この期間を過ぎるとキャッシュを自動クリア |
+
+これらのパラメーターには合理的なデフォルト値があり、一般ユーザーは変更する必要がなく、上級ユーザーは自分のネットワーク環境に応じて調整できます。毕竟众口难调，给点自由度总是好的。
+
+## 重要な設計決定
+
+ソリューション全体を振り返ると、いくつかの重要な決定が説明に値します：
+
+### エンジンをメインプロセス内に配置（V1）
+
+最初から sidecar/helper プロセスを導入しなかったのは、理由が簡単です：**迅速なリリース**。メインプロセス内ソリューションは開発サイクルが短く、デバッグも便利で、まず機能を動かしてから安定性の最適化を考えます。
+
+もちろん、この決定には代償があります：エンジンのクラッシュはメインプロセスに影響します。そのため、アダプター境界とタイムアウト制御によってこの問題を緩和しています。同時に移行パスを予約し、V2 は独立プロセスに容易に移行できます。
+
+这像不像年轻时的我们？先上车再说，后面的事情后面再想办法。毕竟有些时候，想太多反而迈不开步子。
+
+### SHA256 を完全性検証として使用
+
+MD5 や CRC32 ではなく SHA256 を使用するのは、SHA256 の方がより安全だからです。MD5 と CRC32 の衝突コストは低すぎます。もし悪意のある偽のインストールパッ�ージが構築されたら、深刻な事態になります。SHA256 の計算コストはいくらか大きいですが、セキュリティにはこの代償を支払う価値があります。
+
+信任这东西，建立起来难，崩塌起来却是一瞬间的事。所以在能选安全的时候，就别省那点成本。
+
+### HTTP index にのみ有効化
+
+GitHub ダウンロード、ローカルフォルダーソースなどのシナリオでは、ハイブリッド配信を使用しません。これは技術的な制限ではなく、**複雑化の回避**です。BT プロトコルはプライベートネットワークでは元々価値が低く、不必要なコード複雑さも増します。
+
+有些圈子，不必强融。道理就是这么简单。
+
+## 実践の要点
+
+### 設定の正規化
+
+SharingAccelerationSettingsStore では、すべての数値に対して境界チェックと正規化を行います：
+
+```typescript
+private normalize(settings: SharingAccelerationSettings): SharingAccelerationSettings {
+  return {
+    enabled: Boolean(settings.enabled),
+    uploadLimitMbps: this.clampNumber(settings.uploadLimitMbps, 1, 200, DEFAULT_SETTINGS.uploadLimitMbps),
+    cacheLimitGb: this.clampNumber(settings.cacheLimitGb, 1, 500, DEFAULT_SETTINGS.cacheLimitGb),
+    retentionDays: this.clampNumber(settings.retentionDays, 1, 90, DEFAULT_SETTINGS.retentionDays),
+    hybridThresholdMb: DEFAULT_SETTINGS.hybridThresholdMb,  // 固定値、ユーザー変更不可
+    onboardingChoiceRecorded: Boolean(settings.onboardingChoiceRecorded),
+  };
+}
+
+private clampNumber(value: number, min: number, max: number, fallback: number): number {
+  if (!Number.isFinite(value)) {
+    return fallback;
+  }
+  return Math.min(max, Math.max(min, Math.round(value)));
+}
+```
+
+这样可以防止用户手动改配置文件导致异常值。毕竟你永远不知道用户会输入什么奇怪的数字，我也不想看见那张配置的截图，可是没辙。
+
+### キャッシュ LRU クリーンアップ
+
+CacheRetentionManager.prune() メソッドは、期限切れと超過したキャッシュのクリーンアップを担当します。クリーンアップ戦略は LRU（最近最少使用）です：
+
+```typescript
+const records = [...this.listRecords()]
+  .sort((left, right) =>
+    new Date(left.lastUsedAt).getTime() - new Date(right.lastUsedAt).getTime()
+  );
+
+// 上限超過時、最も長く使用されていないものから削除
+while (totalBytes > maxBytes && retainedEntries.length > 0) {
+  const evicted = records.find((record) => retainedEntries.includes(record.versionId));
+  retainedEntries.splice(retainedEntries.indexOf(evicted.versionId), 1);
+  removedEntries.push(evicted.versionId);
+  totalBytes -= evicted.cacheSize;
+  await fs.rm(evicted.cachePath, { force: true });
+}
+```
+
+这个逻辑确保磁盘空间被合理使用，同时保留用户可能还需要的历史版本。毕竟有些东西虽然不常用，但丢了又觉得可惜，人嘛，都是念旧的。
+
+### 即時シーディング停止の実装
+
+ユーザーが共有加速スイッチをオフにした際、即座にシーディングを停止し、torrent クライアントを破棄する必要があります：
+
+```typescript
+async disableSharingAcceleration(): Promise<void> {
+  this.settingsStore.updateSettings({ enabled: false });
+  await this.cacheRetentionManager.stopAllSeeding();  // シーディングを停止
+  await this.engine.stopAll();  // torrent クライアントを破棄
+}
+```
+
+ユーザーが機能をオフにしたら、P2P リソースを消費し続けてはいけません、これは基本的な製品礼儀です。既然不爱了，那就痛快放手，别拖泥带水。
+
+## リスクとトレードオフ
+
+完璧なソリューションはこの世になく、ハイブリッド配信も例外ではありません。主なトレードオフは以下の通りです：
+
+**クラッシュ分離が sidecar より弱い**：V1 はメインプロセス内エンジンを使用し、エンジンのクラッシュはメインプロセスに影響します。これはアダプター境界とタイムアウト制御で緩和されますが、根本的な解決策ではありません。V2 では helper プロセスへの移行パスを計画しています。毕竟新手上路，总得交点学费。
+
+**デフォルト有効化によるリソース消費**：デフォルト 2 MB/s アップロード、10 GB キャッシュ、7 日保存は、ユーザーのマシンに対してある程度のリソースを消費します。ウィザードでの説明と設定の透明性でユーザーの期待を管理します。毕竟天下没有免费的午餐，有所得必有所舍。
+
+**エンタープライズネットワーク互換性**：WebSeed/HTTPS 自動フォールバックはエンタープライズネットワークでの可用性を保障しますが、P2P 加速効果は低下します。これは設計上のトレードオフで、可用性を優先します。毕竟有些事情，比快更重要，比如稳定。
+
+**メタデータの後方互換性**：すべての新フィールドはオプションで、欠落時は HTTP モードにフォールバックします。古いバージョンのクライアントは完全に影響を受けず、アップグレードパスはスムーズです。毕竟谁也不想升级一次就炸一次，那也太刺激了点。
+
+## まとめ
+
+本文详细解析了 HagiCode Desktop 项目的混合分发架构，总结下来有以下几个关键点：
+
+1. **アーキテクチャのレイヤー化**：制御プレーンとデータプレーンを分離し、エンジンをプラガブルなインターフェースとして抽象化し、テストと拡張を容易にします。毕竟分工明确，效率才高。
+
+2. **戦略駆動**：すべてのファイルが P2P を通るわけではなく、条件を満たす大きなファイルのみハイブリッド配信を有効にします。毕竟强扭的瓜不甜，合适最重要。
+
+3. **完全性検証**：SHA256 をハードルとし、ストリーミング計算でメモリ問題を回避します。毕竟信任建立不易，且用且珍惜。
+
+4. **製品化パッケージング**：BT 用語を隠し、「共有加速」セマンティクスを使用し、初回ウィザードでデフォルト有効化します。毕竟说话也是艺术，简单点大家都轻松。
+
+5. **ユーザーが制御可能**：アップロード速度制限、キャッシュ上限、保存日数など、調整可能なパラメーターを提供します。毕竟选择权在用户手里，谁也不喜欢被强迫。
+
+这套方案已经在 HagiCode Desktop 项目中落地实施，实际效果如何，欢迎大家安装体验后反馈。毕竟理论归理论，实践才是检验真理的唯一标准。
+
+## 参考資料
+
+- HagiCode Desktop GitHub：[github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- HagiCode プロジェクト公式サイト：[hagicode.com](https://hagicode.com)
+- WebTorrent 公式ドキュメント：[webtorrent.io](https://webtorrent.io)
+- BitTorrent プロトコル仕様：[bittorrent.org](https://www.bittorrent.org/beps/bep_0019.html)
+- WebSeed 拡張仕様：[bittorrent.org/beps/bep_0017.html](https://www.bittorrent.org/beps/bep_0017.html)
+
+---
+
+如果本文对你有帮助：
+
+- GitHub で Star をください：[github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- 公式サイトにアクセスして詳細をご確認ください：[hagicode.com](https://hagicode.com)
+- Desktop デスクトップ版のクイックインストール：[hagicode.com/desktop/](https://hagicode.com/desktop/)
+- 公ベータテストが開始されました。ぜひインストールして体験してください
+
+或许我们都是在技术路上摸爬滚打的普通人罢了，可那又怎样呢？普通人也有普通人的坚持。毕竟「竹子本来没有嘴，可也还在拔节生长」，人总得有点追求才是......
+
+## 著作権について
+
+阅读いただきありがとうございます。この記事がお役に立てれば、いいね・保存・シェアでご支持をお願いいたします。
+本コンテンツは人工知能による協力を通じて作成され、最終内容は著者によって審査・確認されています。
+- 本文の著者: [newbe36524](https://www.newbe.pro)
+- 原文リンク: [https://docs.hagicode.com/blog/2026-03-27-hagicode-desktop-p2p-acceleration-architecture/](https://docs.hagicode.com/blog/2026-03-27-hagicode-desktop-p2p-acceleration-architecture/)
+- 著作権宣言: 本ブログのすべての記事は特別な断りがない限り、BY-NC-SA ライセンス契約を採用しています。転載する場合は出典を明記してください！

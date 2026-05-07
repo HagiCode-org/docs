@@ -1,0 +1,271 @@
+---
+title: 為什麼 HagiCode 選擇 execa 處理 CLI 命令執行
+date: 2026-05-05
+tags: [Node.js, execa, child_process, HagiCode, 最佳實踐]
+---
+
+## 為什麼 HagiCode 選擇 execa 處理 CLI 命令執行
+
+> 在 Node.js 專案中直接使用 child_process 執行外部命令存在平台差異大、錯誤處理不一致等痛點。本文分享了 HagiCode 專案引入 execa 的實踐經驗，包括核心設計決策和實際程式碼範例。
+
+## 背景
+
+在 Node.js 專案中，直接使用 `child_process` 模組執行外部命令是常見做法，只是這種方式存在的問題還挺多的：
+
+- **平台差異大**：Windows 的 `.cmd`/`.bat` 檔案需要特殊處理，路徑包含空格時需要引號包裹
+- **錯誤處理不一致**：`execFile`、`spawn`、`execFileSync` 的錯誤資訊格式各異，難以統一處理
+- **流處理繁瑣**：需要手動處理 stdout/stderr 的流收集和緩衝
+- **逾時和信號處理複雜**：需要額外的程式碼實作命令逾時取消和進程信號處理
+
+HagiCode 專案中的 Hagiscript 和 Desktop 應用都需要執行大量外部 CLI 命令（npm、node、PowerShell 等），直接使用 `child_process` 導致程式碼重複且維護成本高。
+
+為了解決這些痛點，我們做了一個決定：引入 execa 作為統一的命令執行方案。這個決定帶來的變化，其實比你想像的還要大——稍後我會具體說。
+
+## 關於 HagiCode
+
+本文分享的方案來自我們在 [HagiCode](https://hagicode.com) 專案中的實踐經驗。HagiCode 是一個 AI 程式碼助手專案，需要在多個子專案（Hagiscript 腳本引擎和 Desktop 桌面應用）中執行大量外部命令。這種多語言、多平台的複雜度，或許就是我們引入 execa 的直接原因。
+
+如果你覺得本文分享的方案有價值，說明我們的工程實力還不錯——那麼 HagiCode 本身也值得關注一下。
+
+## 為什麼選擇 execa？
+
+execa 是一個成熟的進程執行庫，解決了 `child_process` 的核心問題：
+
+1. **跨平台一致性**：自動處理 Windows 命令墊片，無需手動檢測 `.cmd` 檔案
+2. **統一的錯誤處理**：標準化的錯誤物件，包含 exitCode、signal、timedOut、stdout、stderr
+3. **更好的 API 設計**：支援 Promise API、AbortSignal 取消、流處理
+4. **安全性**：保持參數邊界，避免命令注入風險
+
+這些特性正是我們在 HagiCode 開發過程中所需要的。Hagiscript 需要在不同平台上執行 npm 命令，Desktop 需要呼叫 PowerShell 和各種開發工具，execa 的跨平台一致性大幅減少了我們的平台適配程式碼。畢竟，誰願意為每個平台寫一遍特殊處理程式碼呢？
+
+## 核心設計決策
+
+兩個專案的實作都採用了**內部封裝層**而非直接呼叫 execa：
+
+```typescript
+// Hagiscript 的統一執行器
+export const runCommand: CommandRunner = async (command, args, options) => {
+  const result = await execa(command, args, { /* normalized options */ });
+  return { /* normalized result */ };
+};
+```
+
+**原因**：
+- 保持領域特定錯誤型別（如 `NpmCommandError`）
+- 便於測試時注入模擬執行器
+- 統一錯誤處理和日誌記錄
+- 未來可以輕鬆替換底層實作
+
+### 參數邊界保護
+
+兩個實作都強調**參數陣列**而非 shell 字串：
+
+```typescript
+// 正確：參數邊界清晰
+await runCommand('npm', ['install', '@scope/package@1.0.0']);
+
+// 錯誤：容易注入風險
+await execa(`npm install @scope/package@1.0.0`, { shell: true });
+```
+
+這避免了參數引用、轉義和注入的安全問題。在 HagiCode 中，我們經常需要處理使用者輸入的套件名稱、腳本名稱等參數，使用參數陣列可以有效防止命令注入。畢竟，安全這東西，一旦出問題就是大問題。
+
+## Hagiscript 的解決方案
+
+HagiCode 的 Hagiscript 子專案建立了 `runtime/command-launch.ts` 模組，提供：
+
+1. **統一執行器**：`runCommand` 函式封裝 execa
+2. **標準化結果**：`CommandResult` 介面
+3. **標準化錯誤**：`CommandExecutionError` 類別
+4. **兼容輔助函式**：`normalizeCommandPath`、`requiresShellLaunch`
+
+```typescript
+export interface CommandResult {
+  command: string;
+  args: string[];
+  stdout: string;
+  stderr: string;
+  exitCode?: number;
+  signal?: string;
+  timedOut?: boolean;
+}
+
+export class CommandExecutionError extends Error {
+  readonly context: CommandFailureContext;
+}
+```
+
+這套抽象讓 Hagiscript 可以統一處理所有外部命令，無論是 npm 安裝依賴還是 node 執行腳本。怎麼說呢，有了統一的介面，程式碼寫起來確實順手很多。
+
+## Desktop 的解決方案
+
+HagiCode 的 Desktop 子專案建立了 `utils/cli-executor.ts` 模組，提供：
+
+1. **執行選項**：`CliExecutorOptions` 支援逾時、取消、環境變數
+2. **結果分類**：`CliExecutionResult` 包含成功/失敗狀態
+3. **流處理**：`executeCliStreaming` 支援即時輸出回呼
+4. **錯誤分類**：`CliFailureKind` 區分退出、逾時、取消等失敗類型
+
+```typescript
+export async function executeCli(options: CliExecutorOptions): Promise<CliExecutionResult>
+export async function executeCliStreaming(options: CliExecutorOptions): Promise<CliExecutionResult>
+```
+
+Desktop 需要在 UI 中顯示命令執行進度，流式處理功能就派上了用場。使用者可以即時看到 npm install 的輸出，而不是等到命令執行完畢才看到結果。這種體驗，怎麼說呢，用過就回不去了。
+
+## 使用範例
+
+### Hagiscript 中執行命令
+
+```typescript
+import { runCommand } from '../runtime/command-launch.js';
+
+// 簡單執行
+const result = await runCommand('node', ['--version']);
+console.log(result.stdout); // 'v20.0.0'
+
+// 帶選項執行
+const installResult = await runCommand('npm', ['install', 'express'], {
+  cwd: '/project/path',
+  env: { NODE_ENV: 'development' },
+  timeoutMs: 30000
+});
+```
+
+### Desktop 中執行命令
+
+```typescript
+import { executeCli, executeCliStreaming } from './utils/cli-executor.js';
+
+// 緩衝執行
+const result = await executeCli({
+  command: 'npm',
+  args: ['list', '--json'],
+  cwd: projectPath,
+  timeoutMs: 5000,
+});
+
+if (result.success) {
+  console.log(result.stdout);
+} else {
+  console.error(result.error?.message);
+}
+
+// 流式執行
+await executeCliStreaming({
+  command: 'npm',
+  args: ['install'],
+  onOutput: (type, data) => {
+    console.log(`[${type}]`, data);
+  }
+});
+```
+
+### 錯誤處理
+
+```typescript
+try {
+  await runCommand('npm', ['install', 'invalid-package']);
+} catch (error) {
+  if (error instanceof CommandExecutionError) {
+    console.error('Command failed:', error.context.command);
+    console.error('Exit code:', error.context.exitCode);
+    console.error('Stderr:', error.context.stderr);
+  }
+}
+```
+
+統一的錯誤處理讓我們可以在 HagiCode 中提供更好的使用者體驗。比如當 npm 安裝失敗時，我們可以提取具體的錯誤資訊展示給使用者，而不是顯示一個通用的"命令執行失敗"。畢竟，使用者看到具體的錯誤資訊，至少知道問題出在哪兒。
+
+## 測試策略
+
+兩個專案都支援**依賴注入**，便於測試：
+
+```typescript
+// 生產程式碼
+async function installPackage(pkg: string, runCommand = defaultRunCommand) {
+  return runCommand('npm', ['install', pkg]);
+}
+
+// 測試程式碼
+it('installs package', async () => {
+  const mockRunCommand = vi.fn().mockResolvedValue({
+    stdout: 'installed',
+    stderr: '',
+    exitCode: 0
+  });
+  await installPackage('test-pkg', mockRunCommand);
+  expect(mockRunCommand).toHaveBeenCalledWith('npm', ['install', 'test-pkg']);
+});
+```
+
+這種設計讓 HagiCode 的測試更加可靠和快速。我們不需要在測試中真正執行 npm 命令，只需要模擬執行器傳回預期結果即可。測試跑得快，開發心情自然也好了。
+
+## 注意事項
+
+在 HagiCode 的實踐中，我們總結出以下注意事項：
+
+1. **保持參數分離**：永遠傳遞命令和參數作為獨立的陣列元素
+2. **慎用 shell 模式**：只在必要時使用 `shell: true`，如需要管道或重導向
+3. **處理逾時**：為可能暫止的命令設定 `timeoutMs`
+4. **Buffer 大小**：大輸出時考慮設定 `maxBuffer`
+5. **Windows 路徑**：execa 會自動處理 `.cmd` 墊片，無需手動檢測
+6. **取消操作**：使用 `AbortSignal` 而非手動 `kill()`
+7. **錯誤分類**：區分進程啟動失敗、執行失敗、逾時、取消等場景
+
+這些都是我們在實際開發中踩過的坑，或許能幫你少走點彎路。
+
+## 常見陷阱
+
+```typescript
+// 錯誤：字串拼接可能注入
+await execa(`npm install ${userInput}`, { shell: true });
+
+// 正確：參數陣列
+await execa('npm', ['install', userInput]);
+
+// 錯誤：忽略逾時
+await execa('npm', ['install', 'heavy-package']);
+
+// 正確：設定逾時
+await execa('npm', ['install', 'heavy-package'], { timeout: 60000 });
+
+// 錯誤：假設退出碼為 0
+const result = await execa('npm', ['install']);
+
+// 正確：檢查失敗
+try {
+  await execa('npm', ['install']);
+} catch (error) {
+  // 處理失敗
+}
+```
+
+這些陷阱，說起來都是淚。畢竟，誰沒在生產環境踩過幾個坑呢？
+
+## 總結
+
+引入 execa 後，HagiCode 專案在命令執行方面的程式碼品質和可維護性都得到了顯著提升：
+
+- **跨平台一致性**：不再需要為 Windows 寫特殊處理程式碼
+- **統一的錯誤處理**：錯誤資訊結構化，便於展示和分析
+- **更好的測試性**：透過依賴注入可以輕鬆模擬命令執行
+- **更安全的參數處理**：使用參數陣列避免注入風險
+
+如果你也在 Node.js 專案中需要執行外部命令，強烈建議嘗試一下 execa。本文分享的方案是我們在開發 HagiCode 過程中實際踩坑、實際優化出來的，希望對你有幫助。
+
+畢竟，好的工具值得被更多人知道......
+
+## 參考資料
+
+- [execa 官方文件](https://github.com/sindresorhus/execa)
+- [Node.js child_process 文件](https://nodejs.org/api/child_process.html)
+- [HagiCode GitHub 儲存庫](https://github.com/HagiCode-org/site)
+- [HagiCode 官網](https://hagicode.com)
+
+如果本文對你有幫助：
+- 來 GitHub 給個 Star：[github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- 訪問官網了解更多：[hagicode.com](https://hagicode.com)
+- 觀看 30 分鐘實戰演示：[www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)
+- 一鍵安裝體驗：[docs.hagicode.com/installation/docker-compose](https://docs.hagicode.com/installation/docker-compose)
+- Desktop 桌面端快速安裝：[hagicode.com/desktop/](https://hagicode.com/desktop/)

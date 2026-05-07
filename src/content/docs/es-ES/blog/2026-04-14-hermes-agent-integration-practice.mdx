@@ -1,0 +1,419 @@
+---
+title: Práctica de integración de Hermes Agent: del protocolo a producción
+date: 2026-04-14
+tags: [Hermes, ACP, Agent, Integration, Orleans]
+description: "Compartimos la práctica completa de HagiCode al integrar Hermes Agent, incluyendo adaptación del protocolo ACP, gestión de pools de sesiones, sincronización de contratos frontend-backend y otras experiencias clave."
+---
+
+## Práctica de integración de Hermes Agent: del protocolo a producción
+
+> Compartimos la práctica completa de HagiCode al integrar Hermes Agent, incluyendo adaptación del protocolo ACP, gestión de pools de sesiones, sincronización de contratos frontend-backend y otras experiencias clave.
+
+## Antecedentes
+
+En el proceso de construcción de la plataforma de codificación asistida por IA HagiCode, el equipo necesitaba integrar un framework de Agent que pudiera ejecutarse localmente y escalarse a la nube. Después de investigar, Hermes Agent de Nous Research fue seleccionado como el motor subyacente para el Agent integral.
+
+En realidad, la elección de tecnología no es tan difícil ni tan simple como parece. Después de todo, hay bastantes frameworks de Agent competentes en el mercado, pero el protocolo ACP y el sistema de herramientas de Hermes realmente tienen algo, lo que se ajusta perfectamente al escenario de requisitos de HagiCode de "querer todo a la vez" —desarrollo local, colaboración en equipo y escalado en la nube. Pero para integrar Hermes realmente en un sistema de producción, hay que resolver una serie de problemas de ingeniería, esto no es algo para tomarse a la ligera.
+
+El stack tecnológico de HagiCode se basa en Orleans para construir sistemas distribuidos, y el frontend usa React + TypeScript. La integración de Hermes requiere mantener la unidad de la arquitectura existente mientras se convierte a Hermes en un ejecutor de "primera clase" en paralelo con ClaudeCode, OpenCode, etc. Suena fácil, pero hacerlo... bueno, ya se sabe.
+
+Este artículo comparte nuestra experiencia práctica al integrar Hermes Agent en el proyecto HagiCode, con la esperanza de proporcionar una referencia para equipos que enfrentan necesidades similares. Después de todo, no hay razón para que otros vuelvan a tropezar en los mismos huecos que ya pisamos.
+
+## Sobre HagiCode
+
+La solución que compartimos en este artículo proviene de nuestra experiencia práctica en el proyecto [HagiCode](https://hagicode.com). HagiCode es una plataforma de asistencia de codificación impulsada por IA que soporta el acceso y gestión unificados de múltiples AI Providers. Durante el proceso de integración de Hermes Agent, diseñamos una capa de abstracción de Provider universal, permitiendo que nuevos tipos de Agent se integren sin problemas en el sistema existente.
+
+Si estás interesado en HagiCode, visita [GitHub](https://github.com/HagiCode-org/site) para más información. Cuanta más gente lo vea, más fuerza habrá, eso es todo.
+
+## Diseño arquitectónico
+
+### Enfoque de diseño en capas
+
+La integración de Hermes de HagiCode adopta una arquitectura en capas clara, donde cada capa tiene sus propias responsabilidades:
+
+**Capa central del backend**
+- `HermesCliProvider`: Implementa la interfaz `IAIProvider`, sirviendo como entrada unificada del AI Provider
+- `HermesPlatformConfiguration`: Gestiona la ruta del ejecutable de Hermes, parámetros, autenticación y otras configuraciones
+- `ICliProvider<HermesOptions>`: Abstracción CLI de bajo nivel proporcionada por HagiCode.Libs, maneja el ciclo de vida de subprocesos
+
+**Capa de transporte**
+- `StdioAcpTransport`: Se comunica con el subproceso ACP de Hermes a través de entrada/salida estándar
+- Métodos del protocolo ACP: `initialize`, `authenticate`, `session/new`, `session/prompt`
+
+**Capa de runtime**
+- `HermesGrain`: Implementación de Orleans Grain, maneja la ejecución distribuida de sesiones
+- `CliAcpSessionPool`: Pool de sesiones, reutiliza subprocesos ACP, evitando el costo de inicio frecuente
+
+**Capa frontend**
+- `ExecutorAvatar`: Identificación visual e iconos de Hermes
+- `executorTypeAdapter`: Lógica de mapeo de tipos de Provider
+- Transmisión de mensajes en tiempo real de SignalR: mantiene la consistencia de la identidad de Hermes en el flujo de mensajes
+
+Este diseño en capas permite que cada capa evolucione independientemente. Por ejemplo, si en el futuro se necesita agregar un nuevo método de transporte (como WebSocket), solo se necesita modificar la capa de transporte. Después de todo, ¿quién querría revolver todo el sistema solo por cambiar un método de transporte? Qué agotador.
+
+### Abstracción de interfaz unificada
+
+Todos los AI Providers implementan la interfaz `IAIProvider`, que es el diseño central de la arquitectura de HagiCode:
+
+```csharp
+public interface IAIProvider
+{
+    string Name { get; }
+    ProviderCapabilities Capabilities { get; }
+
+    IAsyncEnumerable<AIStreamingChunk> StreamAsync(
+        AIRequest request,
+        CancellationToken cancellationToken = default);
+
+    Task<AIResponse> ExecuteAsync(
+        AIRequest request,
+        CancellationToken cancellationToken = default);
+}
+```
+
+`HermesCliProvider` implementa esta interfaz, estando en igualdad de condiciones con `ClaudeCodeProvider`, `OpenCodeProvider`, etc. Los beneficios que este diseño trae:
+
+1. **Reemplazabilidad**: Cambiar de Provider no afecta la lógica de negocio de la capa superior
+2. **Testabilidad**: Se pueden crear Mocks de Provider fácilmente para pruebas unitarias
+3. **Escalabilidad**: Agregar nuevos Provider solo requiere implementar la interfaz
+
+Al final del día, las interfaces son como las reglas. Con reglas, todos pueden coexistir en armonía, desplegando sus fortalezas sin interferir entre sí. ¿No es eso una especie de belleza?
+
+## Implementación central
+
+### Implementación de la capa Provider
+
+`HermesCliProvider` es el núcleo de toda la integración, es responsable de coordinar los diversos componentes para completar una llamada AI:
+
+```csharp
+public sealed class HermesCliProvider : IAIProvider, IVersionedAIProvider
+{
+    private readonly ICliProvider<LibsHermesOptions> _provider;
+    private readonly ConcurrentDictionary<string, string> _sessionBindings;
+
+    public ProviderCapabilities Capabilities { get; } = new()
+    {
+        SupportsStreaming = true,
+        SupportsTools = true,
+        SupportsSystemMessages = true,
+        SupportsArtifacts = false
+    };
+
+    public async IAsyncEnumerable<AIStreamingChunk> StreamAsync(
+        AIRequest request,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        // 1. Resolver clave de enlace de sesión
+        var bindingKey = ResolveBindingKey(request.CessionId);
+
+        // 2. Obtener o crear sesión de Hermes a través del pool de sesiones
+        var options = new HermesOptions
+        {
+            ExecutablePath = _platformConfiguration.ExecutablePath,
+            Arguments = _platformConfiguration.Arguments,
+            SessionId = _sessionBindings.TryGetValue(bindingKey, out var sessionId) ? sessionId : null,
+            WorkingDirectory = request.WorkingDirectory,
+            Model = request.Model
+        };
+
+        // 3. Ejecutar y recopilar respuestas en streaming
+        await foreach (var message in _provider.ExecuteAsync(options, request.Prompt, cancellationToken))
+        {
+            // 4. Mapear mensajes ACP a AIStreamingChunk
+            if (_responseMapper.TryConvertToStreamingChunk(message, out var chunk))
+            {
+                yield return chunk;
+            }
+        }
+    }
+}
+```
+
+Aquí hay varios puntos de diseño clave:
+
+1. **Enlace de sesión**: A través de `CessionId` se vinculan múltiples solicitudes al mismo subproceso de Hermes, logrando continuidad de contexto en conversaciones de múltiples vueltas
+2. **Mapeo de respuesta**: Convierte el formato de mensaje ACP de Hermes al formato unificado `AIStreamingChunk`
+3. **Procesamiento en streaming**: Usa `IAsyncEnumerable` para soportar verdaderas respuestas en streaming
+
+En realidad, el enlace de sesión es como las relaciones entre personas. Una vez establecida la conexión, las comunicaciones posteriores tienen contexto, sin necesidad de empezar desde cero cada vez. Solo hay que mantener bien esta relación, si no, se corta y ya está.
+
+### Adaptación del protocolo ACP
+
+Hermes usa el protocolo ACP (Agent Communication Protocol), diferente de las API HTTP tradicionales. ACP es un protocolo basado en entrada/salida estándar, con varias características:
+
+1. **Marcador de inicio**: El proceso de Hermes genera el marcador `//ready` después de iniciarse
+2. **Autenticación dinámica**: El método de autenticación no es fijo, requiere negociación a través del protocolo
+3. **Reutilización de sesión**: Reutiliza sesiones establecidas a través de `SessionId`
+4. **Respuesta dispersa**: La respuesta completa puede estar dispersa en múltiples notificaciones `session/update`
+
+HagiCode maneja estas características a través de `StdioAcpTransport`:
+
+```csharp
+public class StdioAcpTransport
+{
+    public async Task InitializeAsync(CancellationToken cancellationToken)
+    {
+        // Esperar marcador //ready
+        var readyLine = await _outputReader.ReadLineAsync(cancellationToken);
+        if (readyLine != "//ready")
+        {
+            throw new InvalidOperationException("Hermes did not send ready signal");
+        }
+
+        // Enviar solicitud initialize
+        await SendRequestAsync(new
+        {
+            jsonrpc = "2.0",
+            id = 1,
+            method = "initialize",
+            @params = new
+            {
+                protocolVersion = "2024-11-05",
+                capabilities = new { },
+                clientInfo = new { name = "HagiCode", version = "1.0.0" }
+            }
+        }, cancellationToken);
+    }
+}
+```
+
+Los protocolos son como la química entre personas. Con química, la comunicación fluye mucho mejor. Solo que establecer química lleva tiempo, la adaptación, nadie se escapa.
+
+### Gestión del pool de sesiones
+
+El costo de iniciar subprocesos de Hermes frecuentemente es alto, por lo tanto implementamos un mecanismo de pool de sesiones:
+
+```csharp
+services.AddSingleton(static _ =>
+{
+    var registry = new CliProviderPoolConfigurationRegistry();
+    registry.Register("hermes", new CliPoolSettings
+    {
+        MaxActiveSessions = 50,
+        IdleTimeout = TimeSpan.FromMinutes(10)
+    });
+    return registry;
+});
+```
+
+Parámetros clave del pool de sesiones:
+- `MaxActiveSessions`: Controla el límite de concurrencia, evita agotamiento de recursos
+- `IdleTimeout`: Tiempo de espera de inactividad, equilibra el costo de inicio y el uso de memoria
+
+En la práctica descubrimos:
+1. Configurar el tiempo de espera de inactividad muy corto causa reinicios frecuentes, configurarlo muy largo ocupa memoria
+2. El límite de concurrencia necesita ajustarse según la carga real, demasiado grande puede causar bloqueos del sistema
+3. Necesitas monitorear el uso del pool de sesiones para ajustar parámetros oportunamente
+
+Es como muchas elecciones en la vida, demasiado agresivo fácilmente causa problemas, demasiado conservador pierdes oportunidades. Buscar el punto de equilibrio, eso es todo.
+
+## Integración frontend
+
+### Mapeo de tipos
+
+El frontend necesita identificar correctamente el Hermes Provider y mostrar los elementos visuales correspondientes:
+
+```typescript
+// executorTypeAdapter.ts
+export const resolveExecutorVisualTypeFromProviderType = (
+  providerType: PCode_Models_AIProviderType | null | undefined
+): ExecutorVisualType => {
+  switch (providerType) {
+    case PCode_Models_AIProviderType.HERMES_CLI:
+      return 'Hermes';
+    default:
+      return 'Unknown';
+  }
+};
+```
+
+### Presentación visual
+
+Hermes tiene iconos exclusivos e identificación de color:
+
+```typescript
+// ExecutorAvatar.tsx
+const renderExecutorGlyph = (executorType: ExecutorVisualType, iconSize: number) => {
+  switch (executorType) {
+    case 'Hermes':
+      return (
+        <svg viewBox="0 0 24 24" fill="none" className="h-4 w-4">
+          <rect x="4" y="4" width="16" height="16" rx="4" fill="currentColor" opacity="0.16" />
+          <path d="M8 7v10M16 7v10M8 12h8" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+        </svg>
+      );
+    default:
+      return <DefaultAvatar />;
+  }
+};
+```
+
+Después de todo, las cosas hermosas también merecen una presentación hermosa. Solo que para que esta belleza sea vista, depende del esfuerzo de los compañeros de frontend.
+
+### Sincronización de contratos
+
+Frontend y backend mantienen la consistencia de contratos a través de la generación de OpenAPI. El backend define el enumerado `AIProviderType`:
+
+```csharp
+public enum AIProviderType
+{
+    Unknown,
+    ClaudeCode,
+    OpenCode,
+    HermesCli  // Nuevo
+}
+```
+
+El frontend genera los tipos TypeScript correspondientes a través de OpenAPI, asegurando que los valores del enumerado sean consistentes. Esta es la clave para evitar que el frontend muestre "Unknown".
+
+Los contratos son como las promesas. Lo que se acuerda debe cumplirse, si no aparecerá esa situación embarazosa de "Unknown".
+
+## Gestión de configuración
+
+La configuración de Hermes se gestiona a través de `appsettings.json`:
+
+```json
+{
+  "Providers": {
+    "HermesCli": {
+      "ExecutablePath": "hermes",
+      "Arguments": "acp",
+      "StartupTimeoutMs": 10000,
+      "ClientName": "HagiCode",
+      "Authentication": {
+        "PreferredMethodId": "api-key",
+        "MethodInfo": {
+          "api-key": "your-api-key-here"
+        }
+      },
+      "SessionDefaults": {
+        "Model": "claude-sonnet-4-20250514",
+        "ModeId": "default"
+      }
+    }
+  }
+}
+```
+
+Este diseño impulsado por configuración aporta flexibilidad:
+- Se puede sobrescribir la ruta del ejecutable, facilitando desarrollo y pruebas
+- Se pueden personalizar los parámetros de inicio, adaptándose a diferentes versiones de Hermes
+- Se puede configurar la información de autenticación, soportando múltiples métodos de autenticación
+
+La configuración es como las preguntas de opción múltiple de la vida. Con suficientes opciones, siempre puedes encontrar la que te conviene. Solo que a veces hay demasiadas opciones, lo que también puede causar dificultad para elegir.
+
+## Experiencia práctica
+
+### Verificación de salud
+
+Implementar un Provider confiable necesita verificación de salud completa:
+
+```csharp
+public async Task<ProviderTestResult> PingAsync(CancellationToken cancellationToken = default)
+{
+    var response = await ExecuteAsync(new AIRequest
+    {
+        Prompt = "Reply with exactly PONG.",
+        CessionId = null,
+        AllowedTools = Array.Empty<string>(),
+        WorkingDirectory = ResolveWorkingDirectory(null)
+    }, cancellationToken);
+
+    var success = string.Equals(response.Content.Trim(), "PONG", StringComparison.OrdinalIgnoreCase);
+    return new ProviderTestResult
+    {
+        ProviderName = Name,
+        Success = success,
+        ResponseTimeMs = stopwatch.ElapsedMilliseconds,
+        ErrorMessage = success ? null : $"Unexpected Hermes ping response: '{response.Content}'."
+    };
+}
+```
+
+Las verificaciones de salud necesitan atención:
+1. Usar casos de prueba simples, evitar escenarios complejos
+2. Establecer un tiempo de espera razonable
+3. Registrar el tiempo de respuesta, facilitando el análisis de rendimiento
+
+Al igual que las personas necesitan chequeos médicos, los sistemas también necesitan verificaciones de salud. Detectar y tratar temprano, evitando problemas mayores más adelante.
+
+### Herramientas de verificación
+
+HagiCode proporciona una consola dedicada para verificar la integración de Hermes:
+
+```bash
+# Verificación básica
+HagiCode.Libs.Hermes.Console --test-provider
+
+# Suite completa (incluye análisis de repositorio)
+HagiCode.Libs.Hermes.Console --test-provider-full --repo .
+
+# Ejecutable personalizado
+HagiCode.Libs.Hermes.Console --test-provider-full --executable /path/to/hermes
+```
+
+Esta herramienta es muy útil durante el desarrollo, puede verificar rápidamente si la integración es correcta. Después de todo, ¿quién quiere acordarse de probar solo cuando descubren problemas?
+
+### Manejo de problemas comunes
+
+**Fallo de autenticación**
+- Verifica que `Authentication.PreferredMethodId` coincida con los métodos de autenticación realmente soportados por Hermes
+- Confirma que el formato de la información de autenticación sea correcto (API Key, Bearer Token, etc.)
+
+**Tiempo de espera de sesión**
+- Aumenta el valor de `StartupTimeoutMs`
+- Verifica la accesibilidad del servidor MCP
+- Revisa el uso de recursos del sistema
+
+**Respuesta incompleta**
+- Asegura la agregación correcta de notificaciones `session/update` y el resultado final
+- Verifica la lógica de cancelación del procesamiento en streaming
+- Valida que el manejo de errores sea completo
+
+**Frontend muestra Unknown**
+- Confirma que la generación de OpenAPI incluye el valor enumerado `HermesCli`
+- Verifica que el mapeo de tipos sea correcto
+- Limpia el caché del navegador y regenera los tipos
+
+Los problemas, siempre los habrá. Solo que cuando encuentres problemas, entremos en pánico, busca la causa lentamente, siempre se puede resolver. Después de todo, hay más soluciones que problemas.
+
+### Sugerencias de optimización de rendimiento
+
+1. **Usar pool de sesiones**: Reutiliza subprocesos ACP, reduce el costo de inicio
+2. **Establecer tiempos de espera razonables**: Equilibra memoria y costo de inicio
+3. **Reutilizar ID de sesión**: Tareas por lotes usan el mismo `CessionId`
+4. **Configurar MCP bajo demanda**: Evita llamadas a herramientas innecesarias
+
+El rendimiento es como la eficiencia en la vida. Haciéndolo bien, el doble de resultado con la mitad del esfuerzo; haciéndolo mal, el doble de esfuerzo para la mitad del resultado. Solo que encontrar ese punto "correcto" requiere experiencia y suerte.
+
+## Conclusión
+
+Integrar Hermes Agent en un sistema de producción requiere considerar problemas en múltiples niveles:
+
+1. **Nivel arquitectónico**: Diseñar una interfaz de Provider unificada, implementar una arquitectura de componentes reemplazable
+2. **Nivel de protocolo**: Manejar correctamente las particularidades del protocolo ACP, como marcadores de inicio, autenticación dinámica, etc.
+3. **Nivel de rendimiento**: Reutilizar recursos a través del pool de sesiones, equilibrar el costo de inicio y el uso de memoria
+4. **Nivel frontend**: Asegurar la sincronización de contratos, proporcionar una experiencia visual consistente
+
+La práctica de HagiCode demuestra que a través de un buen diseño en capas y configuración impulsada, los sistemas de Agent complejos pueden integrarse sin problemas en arquitecturas existentes.
+
+En realidad, estos principios suenan bastante simples, pero cuando realmente los haces, siempre encontrarás varios problemas. Pero no importa, los problemas resueltos son experiencia, los no resueltos son lecciones, todo tiene valor.
+
+Las cosas o personas hermosas no necesitan ser poseídas, siempre que sigan siendo hermosas, basta con admirar su belleza. Lo mismo ocurre con la tecnología, siempre que pueda hacer el sistema mejor, qué framework o protocolo usar, en realidad no es tan importante......
+
+## Referencias
+
+- [Dirección del proyecto HagiCode](https://github.com/HagiCode-org/site)
+- [Sitio oficial de HagiCode](https://hagicode.com)
+- [Documentación de Hermes Agent](https://hermes.nousresearch.com/)
+- [Especificación del protocolo ACP](https://github.com/NousResearch/Hermes/blob/main/docs/acp.md)
+- [Guía de instalación de HagiCode](https://docs.hagicode.com/installation/docker-compose)
+- [HagiCode Desktop](https://hagicode.com/desktop/)
+
+## Nota de copyright
+
+Gracias por leer, si encuentra útil este artículo, bienvenido a darle me gusta, guardar y compartir apoyo.
+Este contenido utiliza colaboración asistida por inteligencia artificial, el contenido final es revisado y confirmado por el autor.
+- Autor del artículo: [newbe36524](https://www.newbe.pro)
+- Enlace original: [https://docs.hagicode.com/blog/2026-04-14-hermes-agent-integration-practice/](https://docs.hagicode.com/blog/2026-04-14-hermes-agent-integration-practice/)
+- Declaración de copyright: Excepto declaración especial, todos los artículos de este blog adoptan el acuerdo de licencia BY-NC-SA. Indique la fuente al reimpresiar.

@@ -1,0 +1,328 @@
+---
+title: "HagiCode における StreamJsonRpc の深い統合と実践"
+date: 2026-01-28
+truncate: true
+englishSlug: "streamjsonrpc-integration-in-hagicode"
+tags: [StreamJsonRpc, JSON-RPC, "C#", TypeScript, 通信アーキテクチャ]
+description: "本文では、HagiCode（旧 PCode）プロジェクトが Microsoft の StreamJsonRpc 通信ライブラリを正常に統合し、既存のカスタム JSON-RPC 実装を置き換え、統合プロセスにおける技術的な課題とアーキテクチャ上の問題を解決した方法について詳しく説明します"
+---
+
+## HagiCode における StreamJsonRpc の深い統合と実践
+
+> 本文では、HagiCode（旧 PCode）プロジェクトが Microsoft の StreamJsonRpc 通信ライブラリを正常に統合し、既存のカスタム JSON-RPC 実装を置き換え、統合プロセスにおける技術的な課題とアーキテクチャ上の問題を解決した方法について詳しく説明します。
+
+## 背景
+
+StreamJsonRpc は、.NET と TypeScript 用のマイクロソフト公式が保守する JSON-RPC 通信ライブラリであり、強力な型安全性、自動プロキシ生成、成熟した例外処理機構で知られています。HagiCode プロジェクトでは、ACP (Agent Communication Protocol) を通じて外部 AI ツール（iflow CLI、OpenCode CLI など）と通信し、初期のカスタム JSON-RPC 実装による保守コストと潜在的なバグを排除するために、StreamJsonRpc の統合が決定されました。しかし、統合プロセスにおいて、ストリーミング JSON-RPC 特有の課題、特にプロキシターゲットのバインドとジェネリックパラメータの識別において問題に直面しました。
+
+これらの課題を解決するために、私たちは大胆な決断を下しました：ビルドシステム全体をゼロから再構築することです。この決断による変化は、皆さんが想像しているよりもはるかに大きなものです——後ほど詳しく説明します。
+
+## HagiCode について
+
+> まず、本文の「主役プロジェクト」について紹介します
+
+開発中にこれらの悩みに遭遇したことがある場合：
+- 複数のプロジェクト、複数の技術スタック、ビルドスクリプトの保守コストが高い
+- CI/CD パイプラインの設定が煩雑で、変更するたびにドキュメントを確認する必要がある
+- クロスプラットフォーム互換性の問題が絶えず発生する
+- AI にコード作成を手伝ってほしいが、既存のツールが十分にインテリジェントではない
+
+それなら、私たちが開発している HagiCode に興味を持つかもしれません。
+
+**HagiCode とは何ですか？**
+- AI 駆動のコードインテリジェントアシスタント
+- 複数の言語、クロスプラットフォームのコード生成と最適化をサポート
+- ゲーム化メカニズムを内蔵し、コーディングを退屈なものにしない
+
+**ここで言及する理由は？**
+本文で共有する StreamJsonRpc 統合ソリューションは、HagiCode の開発プロセスで実践し、まとめたものです。このエンジニアリングソリューションに価値を感じてくれたなら、私たちの技術的センスは悪くないということです——では、HagiCode 自体も注目に値するでしょう。
+
+**詳しく知りたいですか？**
+- GitHub: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)（Star をお願いします）
+- 公式サイト: [hagicode.com](https://hagicode.com)
+- ビデオデモ: [www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)（30 分の実戦デモ）
+- インストールガイド: [hagicode.com/installation/docker-compose](https://hagicode.com/installation/docker-compose)
+- ベータテスト開始：今すぐインストールしてベータテストにご参加ください
+
+## 分析
+
+現在、プロジェクトは ACP プロトコル統合の重要な段階にあり、以下のいくつかの技術的な課題とアーキテクチャ上の問題に直面しています：
+
+### 1. カスタム実装の制限
+既存の JSON-RPC 実装は `src/HagiCode.ClaudeHelper/AcpImp/` にあり、`JsonRpcEndpoint` や `ClientSideConnection` などのコンポーネントが含まれています。このカスタムコードの保守コストは高く、成熟したライブラリの高度な機能（進捗レポート、キャンセルサポートなど）が不足しています。
+
+### 2. StreamJsonRpc 統合の障害
+既存の `CallbackProxyTarget` パターンを StreamJsonRpc に移行しようとした際、`_rpc.AddLocalRpcTarget(target)` メソッドがプロキシモードで作成されたターゲットを認識できないことが判明しました。具体的には、StreamJsonRpc がジェネリック型 `T` のプロパティを自動的に RPC メソッドパラメータに分割できないため、サーバー側がクライアントから開始されたメソッド呼び出しを正しく処理できません。
+
+### 3. アーキテクチャの階層化の混乱
+既存の `ClientSideConnection` は、トランスポート層（WebSocket/Stdio）、プロトコル層（JSON-RPC）、ビジネス層（ACP Agent インターフェース）が混合しており、責任が明確でなく、`AcpAgentCallbackRpcAdapter` メソッドバインディングが欠落している問題があります。
+
+### 4. ログの欠如
+WebSocket トランスポート層には元の JSON コンテンツのログ出力が不足しており、RPC 通信の問題をデバッグする際、シリアル化の問題なのかネットワークの問題なのかを特定するのが困難です。
+
+## 解決策
+
+上記の問題に対して、アーキテクチャの再構築、ライブラリの統合、デバッグの強化の 3 つの次元から最適化を行う、以下の体系的なソリューションを採用しました：
+
+### 1. StreamJsonRpc への全面的移行
+
+#### 古いコードの削除
+`JsonRpcEndpoint.cs`、`AgentSideConnection.cs`、および関連するカスタムシリアル化コンバーター（`JsonRpcMessageJsonConverter` など）を削除します。
+
+#### 公式ライブラリの統合
+`StreamJsonRpc` NuGet パッケージを導入し、その `JsonRpc` クラスを利用してコア通信ロジックを処理します。
+
+#### トランスポート層の抽象化
+`IAcpTransport` インターフェースを定義し、`WebSocket` と `Stdio` の 2 つのトランスポートモードを統一的に処理し、プロトコル層とトランスポート層の分離を確実にします。
+
+```csharp
+// IAcpTransport インターフェース定義
+public interface IAcpTransport
+{
+    Task SendAsync(string message, CancellationToken cancellationToken = default);
+    Task<string> ReceiveAsync(CancellationToken cancellationToken = default);
+    Task CloseAsync(CancellationToken cancellationToken = default);
+}
+
+// WebSocket トランスポート実装
+public class WebSocketTransport : IAcpTransport
+{
+    private readonly WebSocket _webSocket;
+
+    public WebSocketTransport(WebSocket webSocket)
+    {
+        _webSocket = webSocket;
+    }
+
+    // 送信メソッドと受信メソッドの実装
+    // ...
+}
+
+// Stdio トランスポート実装
+public class StdioTransport : IAcpTransport
+{
+    private readonly StreamReader _reader;
+    private readonly StreamWriter _writer;
+
+    public StdioTransport(StreamReader reader, StreamWriter writer)
+    {
+        _reader = reader;
+        _writer = writer;
+    }
+
+    // 送信メソッドと受信メソッドの実装
+    // ...
+}
+```
+
+### 2. プロキシターゲット識別問題の修正
+
+#### `CallbackProxyTarget` の分析
+既存の動的プロキシ生成ロジックを確認し、StreamJsonRpc が認識できない根本原因を特定します（通常、プロキシオブジェクトが実際のメソッドシグネチャを公開していない、または StreamJsonRpc がサポートしないパラメータ型を使用しているためです）。
+
+#### パラメータ渡しの再構築
+ジェネリックプロパティを明確な RPC メソッドパラメータに分割します。動的プロパティに依存するのではなく、具体的な Request/Response DTO（データ転送オブジェクト）を定義し、StreamJsonRpc がリフレクションを通じてメソッドシグネチャを正しく識別できるようにします。
+
+```csharp
+// 元のジェネリックプロパティ方式
+public class CallbackProxyTarget<T>
+{
+    public Func<T, Task> Callback { get; set; }
+}
+
+// 再構築後の具体的メソッド方式
+public class ReadTextFileRequest
+{
+    public string FilePath { get; set; }
+}
+
+public class ReadTextFileResponse
+{
+    public string Content { get; set; }
+}
+
+public interface IAcpAgentCallback
+{
+    Task<ReadTextFileResponse> ReadTextFileAsync(ReadTextFileRequest request);
+    // その他のメソッド...
+}
+```
+
+#### `AddLocalRpcTarget` の代わりに `Attach` を使用
+一部の複雑なシナリオでは、`JsonRpc` オブジェクトを手動でプロキシし、`RpcConnection` を処理する方が、ターゲットを直接追加するよりも柔軟な場合があります。
+
+### 3. メソッドバインディングとログ強化の実装
+
+#### `AcpAgentCallbackRpcAdapter` の実装
+このコンポーネントが StreamJsonRpc のプロキシインターフェースを明示的に実装し、ACP プロトコルで定義されたメソッド（`ReadTextFileAsync` など）を StreamJsonRpc のコールバックハンドラーにマッピングするようにします。
+
+#### ログ記録の統合
+WebSocket または Stdio のメッセージ処理パイプラインで、JSON-RPC リクエストとレスポンスの元のテキストをインターセプトして記録します。フォーマットエラーの調査を容易にするために、解析前とシリアル化後に `ILogger` を使用して元のペイロードを出力します。
+
+```csharp
+// ログ強化されたトランスポートラッパー
+public class LoggingAcpTransport : IAcpTransport
+{
+    private readonly IAcpTransport _innerTransport;
+    private readonly ILogger<LoggingAcpTransport> _logger;
+
+    public LoggingAcpTransport(IAcpTransport innerTransport, ILogger<LoggingAcpTransport> logger)
+    {
+        _innerTransport = innerTransport;
+        _logger = logger;
+    }
+
+    public async Task SendAsync(string message, CancellationToken cancellationToken = default)
+    {
+        _logger.LogTrace("Sending message: {Message}", message);
+        await _innerTransport.SendAsync(message, cancellationToken);
+    }
+
+    public async Task<string> ReceiveAsync(CancellationToken cancellationToken = default)
+    {
+        var message = await _innerTransport.ReceiveAsync(cancellationToken);
+        _logger.LogTrace("Received message: {Message}", message);
+        return message;
+    }
+
+    public async Task CloseAsync(CancellationToken cancellationToken = default)
+    {
+        _logger.LogDebug("Closing connection");
+        await _innerTransport.CloseAsync(cancellationToken);
+    }
+}
+```
+
+### 4. アーキテクチャの階層化の再構築
+
+#### トランスポート層 (`AcpRpcClient`)
+StreamJsonRpc 接続をカプセル化し、`InvokeAsync` と接続ライフサイクルの管理を担当します。
+
+```csharp
+public class AcpRpcClient : IDisposable
+{
+    private readonly JsonRpc _rpc;
+    private readonly IAcpTransport _transport;
+
+    public AcpRpcClient(IAcpTransport transport)
+    {
+        _transport = transport;
+        _rpc = new JsonRpc(new StreamRpcTransport(transport));
+        _rpc.StartListening();
+    }
+
+    public async Task<TResponse> InvokeAsync<TResponse>(string methodName, object parameters)
+    {
+        return await _rpc.InvokeAsync<TResponse>(methodName, parameters);
+    }
+
+    public void Dispose()
+    {
+        _rpc.Dispose();
+        _transport.Dispose();
+    }
+
+    // StreamRpcTransport は IAcpTransport の StreamJsonRpc アダプターです
+    private class StreamRpcTransport : IDuplexPipe
+    {
+        // IDuplexPipe インターフェースの実装
+        // ...
+    }
+}
+```
+
+#### プロトコル層 (`IAcpAgentClient` / `IAcpAgentCallback`)
+クライアントからエージェント、およびエージェントからクライアントへの明確なインターフェースを定義し、`Func<IAcpAgent, IAcpClient>` のような循環依存ファクトリパターンを削除し、依存性注入または直接コールバック登録を使用するように変更します。
+
+## 実践
+
+StreamJsonRpc のベストプラクティスとプロジェクト経験に基づき、実装プロセスにおける重要な提案を以下に示します：
+
+### 1. 動的オブジェクトより強い型付き DTO
+StreamJsonRpc の核心的な利点は強い型付けにあります。パラメータを渡すために `dynamic` や `JObject` を使用しないでください。各 RPC メソッドに対して明確な C# POCO クラスをパラメータとして定義する必要があります。これにより、プロキシターゲット識別問題が解決されるだけでなく、コンパイル時に型エラーを発見できます。
+
+例：`CallbackProxyTarget` のジェネリックプロパティを `ReadTextFileRequest` や `WriteTextFileRequest` などの具体的なクラスに置き換えます。
+
+### 2. メソッド名の明示的な宣言
+`[JsonRpcMethod]` 属性を使用して RPC メソッド名を明示的に指定し、デフォルトのメソッド名マッピングに依存しないでください。これにより、命名スタイルの違い（PascalCase vs camelCase など）による呼び出し失敗を防ぐことができます。
+
+```csharp
+public interface IAcpAgentCallback
+{
+    [JsonRpcMethod("readTextFile")]
+    Task<ReadTextFileResponse> ReadTextFileAsync(ReadTextFileRequest request);
+    
+    [JsonRpcMethod("writeTextFile")]
+    Task WriteTextFileAsync(WriteTextFileRequest request);
+}
+```
+
+### 3. 接続状態コールバックの活用
+StreamJsonRpc は `JsonRpc.ConnectionLost` イベントを提供しています。このイベントを必ず監視し、プロセスの予期しない終了やネットワーク切断を処理してください。これは、Orleans の Grain 失効検出のみに依存するよりも迅速です。
+
+```csharp
+_rpc.ConnectionLost += (sender, e) =>
+{
+    _logger.LogError("RPC connection lost: {Reason}", e.ToString());
+    // 再接続ロジックまたはユーザーへの通知を処理
+};
+```
+
+### 4. ログの階層的な記録
+- **Trace レベル**：完全な JSON Request/Response の元のテキストを記録します。
+- **Debug レベル**：メソッド呼び出しスタックとパラメータの概要を記録します。
+- **注意**：ログに機密の Authorization Token や大容量ファイルコンテンツの Base64 エンコーディングが含まれないようにしてください。
+
+### 5. ストリーミング転送の特殊性の処理
+StreamJsonRpc は `IAsyncEnumerable` をネイティブにサポートしています。ACP のストリーミング Prompt レスポンスを実装する際、カスタムのページネーションロジックではなく、直接 `IAsyncEnumerable` を使用する必要があります。これにより、ストリーミング処理のコード量が大幅に簡素化されます。
+
+```csharp
+public interface IAcpAgentCallback
+{
+    [JsonRpcMethod("streamText")]
+    IAsyncEnumerable<string> StreamTextAsync(StreamTextRequest request);
+}
+```
+
+### 6. アダプターパターン (Adapter Pattern)
+`ACPSession` と `ClientSideConnection` の分離を維持します。`ACPSession` は Orleans の状態管理とビジネスロジック（メッセージのキューイングなど）に集中し、継承ではなくコンポジションを通じて StreamJsonRpc 接続オブジェクトを使用する必要があります。
+
+## まとめ
+
+StreamJsonRpc の全面的な統合により、HagiCode プロジェクトは、元のカスタム実装の保守コストが高い、機能の制限、アーキテクチャの階層化の混乱などの問題を正常に解決しました。主な改善点は以下の通りです：
+
+1. 強い型付き DTO を使用して動的プロパティを置き換え、コードの保守性と信頼性を向上させました
+2. トランスポート層の抽象化とプロトコル層の分離を実現し、アーキテクチャの明確性を向上させました
+3. ログ記録機能を強化し、通信問題の調査を容易にしました
+4. ストリーミング転送サポートを導入し、ストリーミング処理の実装を簡素化しました
+
+これらの改善により、HagiCode はより安定した効率的な通信基盤を提供し、外部 AI ツールとのより良い相互作用を可能にし、将来の機能拡張のための強固な基盤を築きました。
+
+## 参考資料
+
+- StreamJsonRpc 公式ドキュメント：[https://learn.microsoft.com/en-us/dotnet/api/microsoft.visualstudio.threading.streamjsonrpc](https://learn.microsoft.com/en-us/dotnet/api/microsoft.visualstudio.threading.streamjsonrpc)
+- ACP (Agent Communication Protocol) 仕様：[https://github.com/microsoft/agentcommunicationprotocol](https://github.com/microsoft/agentcommunicationprotocol)
+- HagiCode プロジェクト：[https://github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Orleans 公式ドキュメント：[https://learn.microsoft.com/en-us/dotnet/orleans](https://learn.microsoft.com/en-us/dotnet/orleans)
+
+---
+
+本文がお役に立てた場合：
+- いいねを押して更多人に見てもらいましょう
+- GitHub に Star をください：[github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- 公式サイトにアクセスして詳細をご確認ください：[hagicode.com](https://hagicode.com)
+- 30 分の実戦デモをご覧ください：[www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)
+- ワンクリックでインストールして体験してください：[hagicode.com/installation/docker-compose](https://hagicode.com/installation/docker-compose)
+- ベータテストが開始されました。インストールして体験してください
+
+
+
+---
+
+お読みいただきありがとうございます。本文が役に立ったと思ったら、下のいいねボタン👍をクリックして、更多人に本文を見てもらいましょう。
+
+本内容は人工知能による支援の下で作成され、著者が審査を行い、著者の見解と立場に合致しています。
+
+- **本文著者:** [newbe36524](https://www.newbe.pro)
+- **本文リンク:** [https://hagicode.com/blog/2026/01/28/streamjsonrpc-integration-in-hagicode](https://hagicode.com/blog/2026/01/28/streamjsonrpc-integration-in-hagicode)
+- **著作権声明:** 本ブログのすべての記事は特別な声明を除き、BY-NC-SA ライセンス契約を採用しています。転載する場合は出典を明記してください！

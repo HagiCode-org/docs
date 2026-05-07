@@ -1,0 +1,550 @@
+---
+title: HagiCode Desktop 混合分發架構解析：如何用 P2P 加速大文件下載
+date: 2026-03-27
+tags: [HagiCode, Desktop, P2P, BitTorrent, WebSeed, 混合分發, 技術架構]
+description: "HagiCode Desktop 混合分發架構解析：如何用 P2P 加速大文件下載：其實這篇文章憋了很久才寫出來，也不知道寫得好不好，畢竟技術文章這東西，寫出來容易，寫"
+---
+
+## HagiCode Desktop 混合分發架構解析：如何用 P2P 加速大文件下載
+
+> 其實這篇文章憋了很久才寫出來，也不知道寫得好不好，畢竟技術文章這東西，寫出來容易，寫得有味道難。不過想想算了，反正也不是什麼大文豪，無神來筆，寫盡此粗文罷了。
+
+## 背景
+
+做桌面應用開發的團隊，或早或晚都會遇到一個讓人頭疼的問題：大文件怎麼分發？
+
+這事兒說起來也是無奈。傳統的 HTTP/HTTPS 直鏈下載，在文件體積小、用戶量不多的時候，其實也還能 hold 住——就像年少時的感情，簡單純粹，沒什麼波瀾。可是啊，時光這東西最是無情，隨著項目不斷發展，安裝包越來越大：Desktop 端 ZIP 包、便攜式包（portable package）、Web 部署歸檔……問題就慢慢浮現出來了：
+
+- **下載速度受限於源站帶寬**：單一服務器帶寬再高，也架不住大家同時下載。這就像什麼呢？就像你喜歡一個人，可她的心就那麼大，早就住滿了別人，你再怎麼努力，也擠不進去。
+- **斷點續傳能力基本為零**：HTTP 下載要是斷了，就得從頭來過，浪費時間不說，還浪費帶寬。美又何必在乎天晴陰呢？可惜天不遂人願。
+- **源站承壓嚴重**：所有流量都湧向中心服務器，帶寬成本蹭蹭往上漲，擴展性也成了問題。這大概就是所謂的中心化的無奈吧——什麼都壓在一個點上，遲早要崩。
+
+HagiCode Desktop 項目也不例外。咱在設計分發系統的時候，就琢磨著：能不能在不改變現有 `index.json` 控制面的前提下，搞一套混合分發方案？既能利用 P2P 網絡的分佈式特性加速下載，又能保留 HTTP 回源兜底，確保企業網絡這種受限環境下的可用性。
+
+這個決定帶來的變化，可能比你想象的還要大——別急，下面我會細細道來。畢竟有些事情，說出來才能被理解。
+
+## 關於 HagiCode
+
+本文分享的方案來自我們在 [HagiCode](https://hagicode.com) 項目中的實踐經驗。HagiCode 是一個開源的 AI 代碼助手項目，致力於幫助開發團隊提升研發效率。項目涵蓋了前端、後端、桌面端啟動器、文檔、構建和服務器部署等多個子系統。
+
+Desktop 端的混合分發架構，正是 HagiCode 在實際運營中踩坑、優化出來的方案。或許有人會問，寫這些有什麼意義呢？其實也沒什麼意義，只是覺得如果這套方案有價值，說明我們在工程實踐上還是有點心得的——那麼 HagiCode 本身也值得關注一下罷了。
+
+項目的 GitHub 地址是 [HagiCode-org/site](https://github.com/HagiCode-org/site)，有興趣的可以先點個 Star 收藏起來。畢竟美好的東西，值得被收藏。
+
+## 核心設計思想：P2P 優先，HTTP 回源
+
+說白了，混合分發的核心思想就一句話：**P2P 優先、HTTP 回源**。
+
+這方案的關鍵在於「混合」二字。不是簡單地把 BitTorrent 扔上來就完事了，而是要讓兩種下載方式協同工作、取長補短：
+
+- **P2P 網絡**提供分佈式加速，下載的人越多，節點越多，速度越快。這就像什麼呢？就像你我都曾是少年時的那個ta，心中有光，便覺得世界都會亮起來。
+- **WebSeed/HTTP 回源**保障可用性，企業防火牆、內網環境也能正常下載。畢竟有些地方，不是你想進就能進的。
+- **控制面保持簡單**，不用改 `index.json` 的核心邏輯，只是增加可選的元數據字段。簡單有什麼不好呢？複雜的事情做多了，偶爾簡單一下，也挺好的。
+
+這樣做的好處是啥呢？用戶體驗到的是「下載更快」，而技術團隊不需要為 P2P 的複雜性買單太多——畢竟 BT 協議本來就已經很成熟了，我們也懶得重複造輪子。
+
+## 架構設計
+
+### 分層架構概覽
+
+先上一張整體架構圖，讓大家有個宏觀印象：
+
+```
+┌─────────────────────────────────────┐
+│     Renderer (UI 層)                │
+├─────────────────────────────────────┤
+│     IPC/Preload (橋接層)            │
+├─────────────────────────────────────┤
+│   VersionManager (版本管理)         │
+├─────────────────────────────────────┤
+│ HybridDownloadCoordinator (協調層)  │
+│  ├── DistributionPolicyEvaluator   │
+│  ├── DownloadEngineAdapter         │
+│  ├── CacheRetentionManager         │
+│  └── SHA256 Verifier               │
+├─────────────────────────────────────┤
+│   WebTorrent (下載引擎)             │
+└─────────────────────────────────────┘
+```
+
+從這張圖可以看出，整個系統是分層設計的。為什麼要分這麼細呢？主要是為了**可測試性和可替換性**。其實做人也是這個道理——把事情分清楚，各司其職，世界也就簡單了。
+
+- **UI 層**負責展示下載進度、共享加速開關——這是門面
+- **協調層**是核心，包含策略評估、引擎適配、緩存管理、完整性校驗——這是內核
+- **引擎層**封裝具體的下載實現，目前用的是 WebTorrent——這是工具
+
+引擎層抽象成 `DownloadEngineAdapter` 接口，以後要是想換成別的 BT 引擎，或者搞個 sidecar 進程，跑起來也不費勁。畢竟誰也不想在一棵樹上吊死，代碼世界也是如此。
+
+### 控制面與數據面分離
+
+HagiCode Desktop 保持 `index.json` 作為唯一的控制面，這個設計非常關鍵。控制面負責版本發現、渠道選擇、中心化策略，而數據面才是真正下載文件的地方。
+
+`index.json` 新增的字段是可選的：
+
+```json
+{
+  "asset": {
+    "torrentUrl": "https://cdn.example.com/app.torrent",
+    "infoHash": "abc123...",
+    "webSeeds": [
+      "https://cdn.example.com/app.zip",
+      "https://backup.example.com/app.zip"
+    ],
+    "sha256": "def456...",
+    "directUrl": "https://cdn.example.com/app.zip"
+  }
+}
+```
+
+這些字段都是可選的，缺失了就回退到傳統的 HTTP 下載模式。這樣設計的好處是**向後兼容**，老版本的客戶端完全不受影響。畢竟世界在變，可有些東西不能變——變了就回不去了。
+
+### 策略驅動決策
+
+不是所有文件都值得用 P2P 分發。其實這世間的事大抵如此——不是什麼都要爭一把，有些東西，不適合就是不適合，退一步海闊天空。
+
+DistributionPolicyEvaluator 負責評估策略，只有滿足以下條件的文件才會啟用混合下載：
+
+1. **來源類型必須是 HTTP index**：GitHub 直接下載或本地文件夾源，不走這套。畢竟不是所有的路都適合 P2P。
+2. **文件大小必須 ≥ 100MB**：小文件用 P2P 的開銷反而得不償失。感情也是如此，有些事情太小了，不值得大費周章。
+3. **必須具備完整的混合元數據**：torrentUrl、webSeeds、sha256 缺一不可。缺一樣都不行，這就是規矩。
+4. **僅限 latest desktop 包和 web 部署包**：歷史版本用傳統方式就行。新人笑，舊人哭，何必呢？
+
+```typescript
+class DistributionPolicyEvaluator {
+  evaluate(version: Version, settings: SharingAccelerationSettings): HybridDownloadPolicy {
+    // 檢查來源類型
+    if (version.sourceType !== 'http-index') {
+      return { useHybrid: false, reason: 'not-http-index' };
+    }
+
+    // 檢查元數據完整性
+    if (!version.hybrid) {
+      return { useHybrid: false, reason: 'not-eligible' };
+    }
+
+    // 檢查是否啟用
+    if (!settings.enabled) {
+      return { useHybrid: false, reason: 'shared-disabled' };
+    }
+
+    // 檢查資產類型（僅 latest desktop/web 包）
+    if (!version.hybrid.isLatestDesktopAsset && !version.hybrid.isLatestWebAsset) {
+      return { useHybrid: false, reason: 'latest-only' };
+    }
+
+    return { useHybrid: true, reason: 'shared-enabled' };
+  }
+}
+```
+
+這樣做的好處是，**系統行為可預測**。不管是開發者還是用戶，都能清楚地知道哪些文件會走 P2P、哪些不會。畢竟預期管理好了，人心也就穩了。
+
+## 核心實現
+
+### 類型定義體系
+
+先來看看類型定義，這是整個系統的基礎。其實類型定義這東西，就像給事物定性——一旦定好了，後面的路就好走了。
+
+```typescript
+// 混合分發元數據
+interface HybridDistributionMetadata {
+  torrentUrl?: string;      // 種子文件 URL
+  infoHash?: string;        // InfoHash
+  webSeeds: string[];       // WebSeed 列表
+  sha256?: string;          // 文件哈希
+  directUrl?: string;       // HTTP 直鏈（回源用）
+  eligible: boolean;        // 是否符合混合分發條件
+  thresholdBytes: number;   // 閾值（字節）
+  assetKind: VersionAssetKind;
+  isLatestDesktopAsset: boolean;
+  isLatestWebAsset: boolean;
+}
+
+// 共享加速設置
+interface SharingAccelerationSettings {
+  enabled: boolean;           // 總開關
+  uploadLimitMbps: number;    // 上傳限速
+  cacheLimitGb: number;       // 緩存上限
+  retentionDays: number;      // 保留天數
+  hybridThresholdMb: number;  // 混合分發閾值
+  onboardingChoiceRecorded: boolean;
+}
+
+// 下載進度
+interface VersionDownloadProgress {
+  current: number;
+  total: number;
+  percentage: number;
+  stage: VersionInstallStage;  // queued, downloading, backfilling, verifying, extracting, completed, error
+  mode: VersionDownloadMode;   // http-direct, shared-acceleration, source-fallback
+  peers?: number;              // 連接的節點數
+  p2pBytes?: number;          // P2P 獲取字節數
+  fallbackBytes?: number;      // 回源獲取字節數
+  verified?: boolean;          // 是否已校驗
+}
+```
+
+類型定義清楚了，後面的實現就順理成章了。或許這就是所謂的「好的開始是成功的一半」吧，雖然這話俗了點。
+
+### 核心協調器
+
+HybridDownloadCoordinator 是整個下載流程的編排者，它協調策略評估、引擎執行、SHA256 校驗和緩存管理。說起來挺複雜的，但其實核心邏輯也就那麼幾步，像極了人生——看似紛繁複雜，抽絲剝繭之後，不過爾爾。
+
+```typescript
+class HybridDownloadCoordinator {
+  async download(
+    version: Version,
+    cachePath: string,
+    packageSource: PackageSource,
+    onProgress?: DownloadProgressCallback,
+  ): Promise<HybridDownloadResult> {
+    // 1. 評估策略：是否使用混合下載
+    const policy = this.policyEvaluator.evaluate(version, settings);
+
+    // 2. 執行下載
+    if (policy.useHybrid) {
+      await this.engine.download(version, cachePath, settings, onProgress);
+    } else {
+      await packageSource.downloadPackage(version, cachePath, onProgress);
+    }
+
+    // 3. SHA256 校驗（硬門檻）
+    const verified = await this.verify(version, cachePath, onProgress);
+    if (!verified) {
+      await this.cacheRetentionManager.discard(version.id, cachePath);
+      throw new Error(`sha256 verification failed for ${version.id}`);
+    }
+
+    // 4. 標記為可信緩存，開始受控做種
+    await this.cacheRetentionManager.markTrusted({
+      versionId: version.id,
+      cachePath,
+      cacheSize,
+    }, settings);
+
+    return { cachePath, policy, verified };
+  }
+}
+```
+
+這裡有一個關鍵點：**SHA256 校驗是硬門檻**。下載的文件必須校驗通過，才能進入安裝流程。校驗失敗就丟棄緩存，保證不會出現「下載了錯誤文件導致安裝出問題」的情況。
+
+這像什麼呢？就像信任這件事——一旦被辜負，再想重建就難了。所以從一開始，就把門檻立好。
+
+### 下載引擎抽象
+
+DownloadEngineAdapter 是一個抽象接口，定義了引擎必須實現的方法：
+
+```typescript
+interface DownloadEngineAdapter {
+  download(
+    version: Version,
+    destinationPath: string,
+    settings: SharingAccelerationSettings,
+    onProgress?: (progress: VersionDownloadProgress) => void,
+  ): Promise<void>;
+
+  stopAll(): Promise<void>;
+}
+```
+
+V1 實現基於 WebTorrent，封裝在 InProcessTorrentEngineAdapter 中：
+
+```typescript
+class InProcessTorrentEngineAdapter implements DownloadEngineAdapter {
+  async download(...) {
+    const client = this.getClient(settings);  // 應用上傳限速
+    const torrent = client.add(torrentId, {
+      path: path.dirname(destinationPath),
+      destroyStoreOnDestroy: false,
+      maxWebConns: 8,
+    });
+
+    // 添加 WebSeed
+    torrent.on('ready', () => {
+      for (const seed of hybrid.webSeeds) {
+        torrent.addWebSeed(seed);
+      }
+      if (hybrid.directUrl) {
+        torrent.addWebSeed(hybrid.directUrl);
+      }
+    });
+
+    // 進度報告 - 區分 P2P 和回源
+    torrent.on('download', () => {
+      const hasP2PPeer = torrent.wires.some(w => w.type !== 'webSeed');
+      const mode = hasP2PPeer ? 'shared-acceleration' : 'source-fallback';
+      // ... 報告進度
+    });
+  }
+}
+```
+
+引擎可插拔的設計，讓未來的優化變得簡單。比如 V2 可以把引擎跑在 helper process 裡，避免主進程崩潰的風險。畢竟誰也不想把一顆老鼠屎壞了一鍋粥，代碼世界如此，人生亦然。
+
+### 進度報告的模式區分
+
+在 UI 層，用戶最關心的是「我現在是 P2P 下載還是 HTTP 回源」？InProcessTorrentEngineAdapter 通過檢查 `torrent.wires` 的類型來判斷：
+
+```typescript
+const hasP2PPeer = torrent.wires.some((wire) => wire.type !== 'webSeed');
+const hasFallbackWire = torrent.wires.some((wire) => wire.type === 'webSeed');
+
+const mode = hasP2PPeer ? 'shared-acceleration'
+         : hasFallbackWire ? 'source-fallback'
+         : 'shared-acceleration';
+
+const stage = hasP2PPeer ? 'downloading'
+           : hasFallbackWire ? 'backfilling'
+           : 'downloading';
+```
+
+這個邏輯看起來簡單，但它是用戶體驗的關鍵。用戶能清楚地看到當前是「共享加速」還是「回源補塊」，心裡有底。其實人和人之間也是如此——透明一點，大家都安心。
+
+### SHA256 流式校驗
+
+完整性校驗使用 Node.js 的 crypto 模塊，進行流式哈希計算，避免把整個文件加載到內存：
+
+```typescript
+private async computeSha256(filePath: string): Promise<string> {
+  const hash = createHash('sha256');
+  await new Promise<void>((resolve, reject) => {
+    const stream = fs.createReadStream(filePath);
+    stream.on('data', (chunk) => hash.update(chunk));
+    stream.on('error', reject);
+    stream.on('end', resolve);
+  });
+  return hash.digest('hex').toLowerCase();
+}
+```
+
+這個實現對大文件特別友好。想想看，要是下載了一個 2GB 的安裝包，然後要把整個文件讀入內存校驗，那內存佔用得多恐怖？流式處理就能完美解決這個問題。
+
+這像不像感情？有些東西，不必一次性全部擁有，一點一點來，反而更好。
+
+## 數據流
+
+完整的數據流是這樣的：
+
+```
+┌────────────────────────────────────────────────────────────────────┐
+│                        用戶點擊安裝大文件版本                        │
+└────────────────────────────────────────────────────────────────────┘
+                                 │
+                                 ▼
+┌────────────────────────────────────────────────────────────────────┐
+│                    VersionManager 調用協調器                         │
+│                    HybridDownloadCoordinator.download()             │
+└────────────────────────────────────────────────────────────────────┘
+                                 │
+                                 ▼
+┌────────────────────────────────────────────────────────────────────┐
+│                    DistributionPolicyEvaluator.evaluate()           │
+│                    檢查：來源、元數據、開關、資產類型                 │
+└────────────────────────────────────────────────────────────────────┘
+                                 │
+                    ┌───────────┴───────────┐
+                    │ useHybrid?            │
+                    └───────────┬───────────┘
+                        是 │         │ 否
+                           ▼         ▼
+              ┌──────────────────┐  ┌─────────────────────┐
+              │ P2P + WebSeed    │  │ HTTP 直鏈下載       │
+              │ 混合下載         │  │ (兼容路徑)          │
+              └──────────────────┘  └─────────────────────┘
+                        │
+                        ▼
+              ┌──────────────────┐
+              │ SHA256 校驗      │
+              │ (硬門檻)         │
+              └────────┬─────────┘
+                       │
+              ┌────────┴─────────┐
+              │ 通過?            │
+              └────────┬─────────┘
+                   是 │    │ 否
+                     ▼    ▼
+          ┌────────────┐ ┌────────────────┐
+          │ 解壓安裝   │ │ 丟棄緩存+報錯  │
+          │ +受控做種  │ └────────────────┘
+          └────────────┘
+```
+
+整個流程非常清晰，每個步驟都有明確的職責。出了什麼問題，也能快速定位是哪個環節出了問題。畢竟事情就怕糊塗，糊塗了就難辦了。
+
+## 產品化包裝
+
+技術方案再好，如果用戶體驗不好，那也是白搭。HagiCode Desktop 在產品化上做了不少工作。畢竟技術是骨子裡的事，產品是皮囊，皮囊不好看，骨頭再好也沒人願意多看一眼。
+
+### 隱藏 BT 術語
+
+大多數用戶不懂什麼是 BitTorrent、什麼是 InfoHash。所以產品層面用了「共享加速」這個語義：
+
+- 功能叫「共享加速」，不叫 P2P 下載
+- 設置項叫「上傳限速」，不說做種
+- 進度顯示「回源補塊」，不說 WebSeed 回退
+
+這樣一來，術語的認知負擔就小了。其實說話也是一門藝術，說得簡單點，大家都輕鬆。
+
+### 首次向導默認開啟
+
+新用戶第一次使用桌面端，會看到一個向導頁面，其中有一頁介紹共享加速功能：
+
+> 為了加快下載速度，我們會在您下載時與其他用戶共享已下載的部分文件。這個過程是完全可選的，您隨時可以在設置中關閉。
+
+默認是開啟的，但提供明確的取消入口。企業用戶如果不需要，大可以在向導裡關掉。畢竟選擇權在用戶手裡，沒人喜歡被強迫。
+
+### 用戶可控的參數
+
+設置頁面提供三個可調整的參數：
+
+| 參數 | 默認值 | 說明 |
+|------|--------|------|
+| 上傳限速 | 2 MB/s | 防止佔用過多上行帶寬 |
+| 緩存上限 | 10 GB | 控制磁盤空間佔用 |
+| 保留天數 | 7 天 | 超過這個時間自動清理緩存 |
+
+這些參數都有合理的默認值，普通用戶不用改，高級用戶可以根據自己的網絡環境調整。畢竟眾口難調，給點自由度總是好的。
+
+## 關鍵設計決策
+
+回顧整個方案，有幾個關鍵決策值得說一說：
+
+### 引擎放在主進程內（V1）
+
+為什麼不一開始就搞 sidecar/helper process？原因很簡單：**快速上線**。主進程內方案開發週期短、調試方便，先把功能跑起來，再考慮穩定性優化。
+
+當然，這個決策是有代價的：引擎崩潰會影響主進程。所以通過適配器邊界和超時控制來緩解這個問題。同時預留了遷移路徑，V2 可以輕鬆遷移到獨立進程。
+
+這像不像年輕時的我們？先上車再說，後面的事情後面再想辦法。畢竟有些時候，想太多反而邁不開步子。
+
+### SHA256 作為完整性校驗
+
+不用 MD5 或 CRC32，而用 SHA256，是因為 SHA256 更安全。MD5 和 CRC32 的碰撞成本太低了，萬一有人惡意構造假的安裝包，後果不堪設想。SHA256 的計算開銷雖然大一些，但安全性值得這個代價。
+
+信任這東西，建立起來難，崩塌起來卻是一瞬間的事。所以在能選安全的時候，就別省那點成本。
+
+### 僅對 HTTP index 啟用
+
+GitHub 下載、本地文件夾源等場景，不走混合分發。這不是技術限制，而是**避免複雜化**。BT 協議在私有網絡裡的價值本來就不大，而且會增加不必要的代碼複雜度。
+
+有些圈子，不必強融。道理就是這麼簡單。
+
+## 實踐要點
+
+### 設置規范化
+
+在 SharingAccelerationSettingsStore 中，所有數值都要做邊界檢查和規范化：
+
+```typescript
+private normalize(settings: SharingAccelerationSettings): SharingAccelerationSettings {
+  return {
+    enabled: Boolean(settings.enabled),
+    uploadLimitMbps: this.clampNumber(settings.uploadLimitMbps, 1, 200, DEFAULT_SETTINGS.uploadLimitMbps),
+    cacheLimitGb: this.clampNumber(settings.cacheLimitGb, 1, 500, DEFAULT_SETTINGS.cacheLimitGb),
+    retentionDays: this.clampNumber(settings.retentionDays, 1, 90, DEFAULT_SETTINGS.retentionDays),
+    hybridThresholdMb: DEFAULT_SETTINGS.hybridThresholdMb,  // 固定值，不讓用戶改
+    onboardingChoiceRecorded: Boolean(settings.onboardingChoiceRecorded),
+  };
+}
+
+private clampNumber(value: number, min: number, max: number, fallback: number): number {
+  if (!Number.isFinite(value)) {
+    return fallback;
+  }
+  return Math.min(max, Math.max(min, Math.round(value)));
+}
+```
+
+這樣可以防止用戶手動改配置文件導致異常值。畢竟你永遠不知道用戶會輸入什麼奇怪的數字，我也不想看見那張配置的截圖，可是沒轍。
+
+### 緩存 LRU 清理
+
+CacheRetentionManager.prune() 方法負責清理過期和超限的緩存。清理策略是 LRU（最近最少使用）：
+
+```typescript
+const records = [...this.listRecords()]
+  .sort((left, right) =>
+    new Date(left.lastUsedAt).getTime() - new Date(right.lastUsedAt).getTime()
+  );
+
+// 清理超限時，從最久未使用的開始刪除
+while (totalBytes > maxBytes && retainedEntries.length > 0) {
+  const evicted = records.find((record) => retainedEntries.includes(record.versionId));
+  retainedEntries.splice(retainedEntries.indexOf(evicted.versionId), 1);
+  removedEntries.push(evicted.versionId);
+  totalBytes -= evicted.cacheSize;
+  await fs.rm(evicted.cachePath, { force: true });
+}
+```
+
+這個邏輯確保磁盤空間被合理使用，同時保留用戶可能還需要的歷史版本。畢竟有些東西雖然不常用，但丟了又覺得可惜，人嘛，都是念舊的。
+
+### 立即停種的實現
+
+用戶關閉共享加速開關時，需要立即停止做種和銷毀 torrent 客戶端：
+
+```typescript
+async disableSharingAcceleration(): Promise<void> {
+  this.settingsStore.updateSettings({ enabled: false });
+  await this.cacheRetentionManager.stopAllSeeding();  // 停止做種
+  await this.engine.stopAll();  // 銷毀 torrent 客戶端
+}
+```
+
+用戶關掉功能，就不應該再佔用任何 P2P 資源，這是基本的產品禮儀。既然不愛了，那就痛快放手，別拖泥帶水。
+
+## 風險與權衡
+
+世上沒有完美的方案，混合分發也不例外。以下是主要的權衡點：
+
+**崩潰隔離弱於 sidecar**：V1 使用主進程內引擎，引擎崩潰會影響主進程。這通過適配器邊界和超時控制來緩解，但不是根本解決方案。V2 規劃了 helper process 遷移路徑。畢竟新手上路，總得交點學費。
+
+**默認開啟帶來資源佔用**：默認 2 MB/s 上傳、10 GB 緩存、7 天保留，對用戶機器有一定資源消耗。通過向導說明和設置透明度來管理用戶預期。畢竟天下沒有免費的午餐，有所得必有所舍。
+
+**企業網絡兼容性**：WebSeed/HTTPS 自動回退保障了企業網絡下的可用性，但 P2P 加速效果會打折扣。這是設計上的取捨，優先保障可用性。畢竟有些事情，比快更重要，比如穩定。
+
+**元數據向後兼容**：所有新字段都是可選的，缺失時回退到 HTTP 模式。老版本客戶端完全不受影響，升級路徑平滑。畢竟誰也不想升級一次就炸一次，那也太刺激了點。
+
+## 總結
+
+本文詳細解析了 HagiCode Desktop 項目的混合分發架構，總結下來有以下幾個關鍵點：
+
+1. **架構分層**：控制面與數據面分離，引擎抽象為可插拔接口，便於測試和擴展。畢竟分工明確，效率才高。
+
+2. **策略驅動**：不是所有文件都走 P2P，僅對滿足條件的大文件啟用混合分發。畢竟強扭的瓜不甜，合適最重要。
+
+3. **完整性校驗**：SHA256 作為硬門檻，流式計算避免內存問題。畢竟信任建立不易，且用且珍惜。
+
+4. **產品化包裝**：隱藏 BT 術語，使用「共享加速」語義，首向默認開啟。畢竟說話也是藝術，簡單點大家都輕鬆。
+
+5. **用戶可控**：提供上傳限速、緩存上限、保留天數等可調整參數。畢竟選擇權在用戶手裡，誰也不喜歡被強迫。
+
+這套方案已經在 HagiCode Desktop 項目中落地實施，實際效果如何，歡迎大家安裝體驗後反饋。畢竟理論歸理論，實踐才是檢驗真理的唯一標準。
+
+## 參考資料
+
+- HagiCode Desktop GitHub：[github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- HagiCode 項目官網：[hagicode.com](https://hagicode.com)
+- WebTorrent 官方文檔：[webtorrent.io](https://webtorrent.io)
+- BitTorrent 協議規范：[bittorrent.org](https://www.bittorrent.org/beps/bep_0019.html)
+- WebSeed 擴展規范：[bittorrent.org/beps/bep_0017.html](https://www.bittorrent.org/beps/bep_0017.html)
+
+---
+
+如果本文對你有幫助：
+
+- 來 GitHub 給個 Star：[github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- 訪問官網了解更多：[hagicode.com](https://hagicode.com)
+- Desktop 桌面端快速安裝：[hagicode.com/desktop/](https://hagicode.com/desktop/)
+- 公測已開始，歡迎安裝體驗
+
+或許我們都是在技術路上摸爬滾打的普通人罷了，可那又怎樣呢？普通人也有普通人的堅持。畢竟「竹子本來沒有嘴，可也還在拔節生長」，人總得有點追求才是......
+
+## 版權說明
+
+感謝您的閱讀,如果您覺得本文有用,歡迎點讚、收藏和分享支持。
+本內容採用人工智能協作,最終內容由作者審核並確認。
+- 本文作者: [newbe36524](https://www.newbe.pro)
+- 原文鏈接: [https://docs.hagicode.com/blog/2026-03-27-hagicode-desktop-p2p-acceleration-architecture/](https://docs.hagicode.com/blog/2026-03-27-hagicode-desktop-p2p-acceleration-architecture/)
+- 版權聲明: 本博客所有文章除特別聲明外,均採用 BY-NC-SA 許可協議。轉載請註明出處!

@@ -1,0 +1,383 @@
+---
+title: "GitHub Actions + image-syncer による Docker Hub から Azure ACR への自動イメージ同期方法"
+date: 2026-01-25
+truncate: true
+englishSlug: "how-to-sync-docker-hub-to-azure-acr-with-github"
+tags: [Docker Hub, Azure ACR, GitHub Actions, イメージ同期, DevOps]
+description: "この記事では、GitHub Actions と image-syncer ツールを使用して、Docker Hub イメージを Azure Container Registr"
+---
+
+## Docker Hub から Azure ACR への自動イメージ同期の実装
+
+> この記事では、GitHub Actions と image-syncer ツールを使用して、Docker Hub イメージを Azure Container Registry に自動同期する方法を紹介します。これにより、中国国内および一部の Azure リージョンにおける Docker Hub アクセスの速度問題を解決し、イメージの可用性と Azure 環境でのデプロイ効率を向上させます。
+
+## 背景/はじめに
+
+HagiCode プロジェクトは Docker イメージをコアランタイムコンポーネントとして使用しており、主要なイメージは Docker Hub でホストされています。プロジェクトの発展と Azure 環境でのデプロイニーズの増加に伴い、以下の課題に直面しました：
+- イメージプル速度が遅く、Docker Hub へのアクセスが中国国内および一部の Azure リージョンで制限されている
+- 単一のイメージソースへの依存により単一障害点のリスクがある
+- Azure 環境では Azure Container Registry を使用することで、より良いネットワークパフォーマンスと統合体験が得られる
+
+これらの問題を解決するため、Docker Hub のイメージを定期的に Azure ACR に同期する自動メカニズムを確立し、ユーザーが Azure 環境でより高速なイメージプルと高い可用性を得られるようにする必要がありました。
+
+## HagiCode について
+
+私たちは HagiCode を開発しています—AI によるコードインテリジェントアシスタントで、開発体験をよりスマートに、より便利に、より楽しくします。
+
+スマート—AI がアイデアからコードまで全行程を支援し、コーディング効率を数倍に向上させます。便利—マルチスレッド並列操作によりリソースを最大限に活用し、開発フローをスムーズにします。楽しい—ゲーミフィケーションメカニズムと実績システムで、コーディングを退屈なものから達成感のあるものにします。
+
+プロジェクトは急速にイテレーション中です。技術執筆、ナレッジ管理、または AI アシスト開発に興味がある場合は、GitHub でぜひチェックしてください。
+
+## 技術ソリューションの比較
+
+ソリューションの策定時に、複数の技術アプローチを比較しました：
+
+### 1. image-syncer（最終選択）
+- 増分同期：変更されたイメージレイヤーのみを同期し、ネットワーク転送を大幅に削減
+- レジューム機能：ネットワーク中断後から同期を再開可能
+- 並列制御：並列スレッド数の設定に対応し、大容量イメージの同期効率を向上
+- エラーハンドリング：失敗時の再試行メカニズムを内蔵（デフォルト 3 回）
+- 軽量デプロイ：単一のバイナリファイルで依存関係なし
+- マルチレジストリ対応：Docker Hub、Azure ACR、Harbor などに対応
+
+### 2. Docker CLI
+- 増分同期非対応：毎回完全なイメージコンテンツをプルする必要がある
+- 効率が低い：ネットワーク転送量が多く、時間がかかる
+- 簡単に使用可能：慣れ親しんだ docker pull/push コマンドを使用
+
+### 3. Azure CLI
+- 複雑度が高い：Azure CLI 認証の設定が必要
+- 機能制限：az acr import 機能は比較的単一
+- ネイティブ統合：Azure サービスとの統合が良好
+
+## アーキテクチャ設計の決定
+
+### 決定 1：同期頻度を毎日 UTC 00:00 に設定
+- イメージの鮮度とリソース消費のバランスを取る
+- ビジネスピーク時間を避け、他の操作への影響を軽減
+- Docker Hub イメージは通常毎日のビルド後に更新される
+
+### 決定 2：すべてのイメージタグを同期
+- Docker Hub との完全な一貫性を維持
+- ユーザーに柔軟なバージョン選択を提供
+- 複雑なタグフィルタリングルールを回避し、同期ロジックを簡素化
+
+### 決定 3：GitHub Secrets を使用して認証情報を保存
+- GitHub Actions のネイティブサポートで安全性が高い
+- 設定が簡単で、管理と保守が容易
+- リポジトリレベルのアクセス制御に対応
+
+## リスク評価と緩和
+
+### リスク 1：Azure ACR 認証情報の漏洩
+- GitHub Secrets による暗号化保存
+- ACR パスワードの定期ローテーション
+- ACR ユーザー権限をプッシュのみに制限
+- ACR アクセスログの監視
+
+### リスク 2：同期失敗によるイメージ不整合
+- image-syncer 内蔵の増分同期メカニズム
+- 自動失敗時再試行（デフォルト 3 回）
+- 詳細なエラーログと失敗通知
+- レジューム機能
+
+### リスク 3：リソース消費過多
+- 増分同期によりネットワーク転送を削減
+- 設定可能な並列スレッド数（現在は 10 に設定）
+- 同期するイメージの数とサイズを監視
+- ピーク時間外での同期実行
+
+## コアソリューション
+
+GitHub Actions + image-syncer の自動化ソリューションを採用し、Docker Hub から Azure ACR へのイメージ同期を実現します。
+
+## 実装手順
+
+### 1. 準備段階
+- Azure Portal で Azure Container Registry を作成または確認
+- ACR アクセスキーの作成（ユーザー名とパスワード）
+- Docker Hub イメージリポジトリのアクセス権限を確認
+
+### 2. GitHub Secrets の設定
+GitHub リポジトリ設定で以下の Secrets を追加：
+- AZURE_ACR_USERNAME: Azure ACR ユーザー名
+- AZURE_ACR_PASSWORD: Azure ACR パスワード
+
+### 3. GitHub Actions ワークフローの作成
+.github/workflows/sync-docker-acr.yml でワークフローを設定：
+- 定時トリガー：毎日 UTC 00:00
+- 手動トリガー：workflow_dispatch に対応
+- 追加トリガー：publish ブランチプッシュ時トリガー（高速同期用）
+
+### 4. ワークフロー実行フロー
+
+| 順序 | 参加者 | アクション | 説明 |
+| --- | --- | --- | --- |
+| 1 | GitHub Actions | ワークフローをトリガー | 定時、手動、または `publish` ブランチプッシュによりトリガー |
+| 2 | GitHub Actions → image-syncer | 同期ツールをダウンロードして実行 | 実際の同期段階に進む |
+| 3 | image-syncer → Docker Hub | イメージ manifest とタグリストを取得 | ソースリポジトリのメタデータを読み取り |
+| 4 | image-syncer → Azure ACR | ターゲットリポジトリの既存イメージ情報を取得 | ターゲット側の現在の状態を判断 |
+| 5 | image-syncer | ソースとターゲットの差異を比較 | 同步が必要なイメージレイヤーを識別 |
+| 6 | image-syncer → Docker Hub | 変更されたイメージレイヤーをプル | 更新が必要なコンテンツのみを転送 |
+| 7 | image-syncer → Azure ACR | 変更されたイメージレイヤーをプッシュ | 増分同期を完了 |
+| 8 | image-syncer → GitHub Actions | 同步統計情報を返却 | 結果、差異、エラー情報を含む |
+| 9 | GitHub Actions | ログを記録して artifact をアップロード | 事後監査とトラブルシューティングに活用 |
+
+## GitHub Actions ワークフローの実装
+
+実際に稼働しているワークフロー設定（.github/workflows/sync-docker-acr.yml）は以下の通りです：
+
+```yaml
+name: Sync Docker Image to Azure ACR
+
+on:
+  schedule:
+    - cron: "0 0 * * *" # 每天 UTC 00:00
+  workflow_dispatch: # 手動トリガー
+  push:
+    branches: [publish]
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download image-syncer
+        run: |
+          # image-syncer バイナリファイルをダウンロード
+          wget https://github.com/AliyunContainerService/image-syncer/releases/download/v1.5.5/image-syncer-v1.5.5-linux-amd64.tar.gz
+          tar -zxvf image-syncer-v1.5.5-linux-amd64.tar.gz
+          chmod +x image-syncer
+
+      - name: Create auth config
+        run: |
+          # 認証設定ファイルを生成 (YAML 形式)
+          cat > auth.yaml <<EOF
+          hagicode.azurecr.io:
+            username: "${{ secrets.AZURE_ACR_USERNAME }}"
+            password: "${{ secrets.AZURE_ACR_PASSWORD }}"
+          EOF
+
+      - name: Create images config
+        run: |
+          # イメージ同期設定ファイルを生成 (YAML 形式)
+          cat > images.yaml <<EOF
+          docker.io/newbe36524/hagicode: hagicode.azurecr.io/hagicode
+          EOF
+
+      - name: Run image-syncer
+        run: |
+          # 同步を実行 (新版の --auth および --images パラメータを使用)
+          ./image-syncer --auth=./auth.yaml --images=./images.yaml --proc=10 --retries=3
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sync-logs
+          path: image-syncer-*.log
+          retention-days: 7
+```
+
+## 設定説明
+
+### 1. トリガー条件
+- 定時トリガー：cron: "0 0 * * *" - 毎日 UTC 00:00 に実行
+- 手動トリガー：workflow_dispatch - GitHub UI での手動実行を許可
+- プッシュトリガー：push: branches: [publish] - パブリッシュブランチプッシュ時にトリガー（高速同期用）
+
+### 2. 認証設定 (auth.yaml)
+```yaml
+hagicode.azurecr.io:
+  username: "${{ secrets.AZURE_ACR_USERNAME }}"
+  password: "${{ secrets.AZURE_ACR_PASSWORD }}"
+```
+
+### 3. イメージ同期設定 (images.yaml)
+```yaml
+docker.io/newbe36524/hagicode: hagicode.azurecr.io/hagicode
+```
+この設定は、docker.io/newbe36524/hagicode のすべてのタグを hagicode.azurecr.io/hagicode に同期することを意味します
+
+### 4. image-syncer パラメータ
+- --auth=./auth.yaml: 認証設定ファイルのパス
+- --images=./images.yaml: イメージ同期設定ファイルのパス
+- --proc=10: 並列スレッド数を 10 に設定
+- --retries=3: 失敗時 3 回再試行
+
+## GitHub Secrets 設定チェックリスト
+
+GitHub リポジトリの Settings → Secrets and variables → Actions で設定：
+
+| Secret 名 | 説明 | 例値 | 取得方法 |
+|------------|------|--------|---------|
+| AZURE_ACR_USERNAME | Azure ACR ユーザー名 | hagicode | Azure Portal → ACR → Access keys |
+| AZURE_ACR_PASSWORD | Azure ACR パスワード | xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx | Azure Portal → ACR → Access keys → Password |
+
+## 使用方法
+
+### 1. 手動同期のトリガー
+1. GitHub リポジトリの Actions タブにアクセス
+2. Sync Docker Image to Azure ACR ワークフローを選択
+3. Run workflow ボタンをクリック
+4. ブランチを選択し、Run workflow をクリックして確認
+
+### 2. 同期ログの確認
+1. Actions ページで具体的なワークフロー実行レコードをクリック
+2. 各ステップの実行ログを確認
+3. ページ下部の Artifacts エリアで sync-logs ファイルをダウンロード
+
+### 3. 同期結果の検証
+```bash
+# Azure ACR にログイン
+az acr login --name hagicode
+
+# イメージとタグを一覧表示
+az acr repository show-tags --name hagicode --repository hagicode --output table
+```
+
+## 注意事項とベストプラクティス
+
+### 1. セキュリティ推奨事項
+- Azure ACR パスワードを定期的にローテーション（推奨 90 日ごと）
+- 専用の ACR サービスアカウントを使用し、権限をプッシュのみに制限
+- ACR のアクセスログを監視し、異常アクセスを迅速に発見
+- ログに認証情報を出力しない
+- 認証情報をコードリポジトリにコミットしない
+
+### 2. パフォーマンス最適化
+- --proc パラメータの調整：ネットワーク帯域に応じて並列数を調整（推奨 5-20）
+- 同期時間の監視：同期時間が長すぎる場合、並列数の削減を検討
+- 定期的なログ清理：適切な retention-days を設定（現在は 7 日）
+
+### 3. トラブルシューティング
+
+#### 問題 1：認証失敗
+```
+Error: failed to authenticate to hagicode.azurecr.io
+```
+解決策：
+1. GitHub Secrets が正しく設定されているか確認
+2. Azure ACR パスワードの有効期限が切れていないか確認
+3. ACR サービスアカウントの権限が正しいか確認
+
+#### 問題 2：ネットワークタイムアウト
+```
+Error: timeout waiting for response
+```
+解決策：
+1. ネットワーク接続を確認
+2. 並列スレッド数を削減（--proc パラメータ）
+3. ネットワーク復旧後にワークフローを再トリガー
+
+#### 問題 3：イメージ同期が不完全
+```
+Warning: some tags failed to sync
+```
+解決策：
+1. 同期ログを確認し、失敗したタグを特定
+2. 手動でワークフローをトリガーして再同期
+3. Docker Hub ソースイメージが正常か確認
+
+### 4. 監視とアラート
+- Actions ページを定期的にチェックし、ワークフロー実行状態を確認
+- GitHub 通知を設定し、ワークフロー失敗通知を迅速に取得
+- Azure ACR のストレージ使用状況を監視
+- 定期的にイメージタグの一貫性を検証
+
+## よくある質問と解決策
+
+### Q1: すべてのタグではなく特定のタグのみを同期するには？
+
+images.yaml 設定ファイルを変更：
+```yaml
+# latest と v1.0 タグのみを同期
+docker.io/newbe36524/hagicode:latest: hagicode.azurecr.io/hagicode:latest
+docker.io/newbe36524/hagicode:v1.0: hagicode.azurecr.io/hagicode:v1.0
+```
+
+### Q2: 複数のイメージリポジトリを同期するには？
+
+images.yaml に複数行の設定を追加：
+```yaml
+docker.io/newbe36524/hagicode: hagicode.azurecr.io/hagicode
+docker.io/newbe36524/another-image: hagicode.azurecr.io/another-image
+```
+
+### Q3: 同期失敗後に再試行するには？
+- 自動再試行：image-syncer 内蔵の再試行メカニズム（デフォルト 3 回）
+- 手動再試行：GitHub Actions ページで Re-run all jobs をクリック
+
+### Q4: 同期の詳細な進捗を確認するには？
+- Actions ページでリアルタイムログを確認
+- sync-logs artifact をダウンロードして完全なログファイルを確認
+- ログファイルには各タグの同期状態と転送速度が含まれる
+
+### Q5: 同期にどのくらい時間がかかりますか？
+- 初回全量同期：イメージサイズによりますが、通常 10-30 分
+- 増分同期：イメージの変更が小さい場合、通常 2-5 分
+- 時間はネットワーク帯域、イメージサイズ、並列設定に依存します
+
+## 機能拡張の提案
+
+### 1. 同期通知の追加
+ワークフローに通知ステップを追加：
+```yaml
+- name: Notify on success
+  if: success()
+  run: |
+    echo "Docker images synced successfully to Azure ACR"
+```
+
+### 2. イメージタグフィルタリングの実装
+ワークフローにタグフィルタリングロジックを追加：
+```yaml
+- name: Filter tags
+  run: |
+    # v で始まるタグのみを同期
+    echo "docker.io/newbe36524/hagicode:v* : hagicode.azurecr.io/hagicode:v*" > images.yaml
+```
+
+### 3. 同期統計レポートの追加
+```yaml
+- name: Generate report
+  if: always()
+  run: |
+    echo "## Sync Report" >> $GITHUB_STEP_SUMMARY
+    echo "- Total tags: $(grep -c 'synced' image-syncer-*.log)" >> $GITHUB_STEP_SUMMARY
+    echo "- Sync time: ${{ steps.sync.outputs.duration }}" >> $GITHUB_STEP_SUMMARY
+```
+
+## まとめ
+
+この記事で紹介した方法により、Docker Hub から Azure ACR への自動イメージ同期に成功しました。このソリューションは、GitHub Actions の定時トリガーと手動トリガー機能を活用し、image-syncer の増分同期とエラーハンドリングメカニズムと組み合わせることで、イメージの適時同期と一貫性を確保します。
+
+また、セキュリティベストプラクティス、パフォーマンス最適化、トラブルシューティングなどについても議論し、ユーザーがこの同期メカニズムをより適切に管理・保守できるようにしました。この記事が、Azure 環境で Docker イメージをデプロイする必要のある開発者にとって価値ある参考情報となれば幸いです。
+
+## 参考資料
+- [HagiCode プロジェクト GitHub リポジトリ](https://github.com/HagiCode-org/site)
+- [image-syncer 公式ドキュメント](https://github.com/AliyunContainerService/image-syncer)
+- [Azure Container Registry 公式ドキュメント](https://learn.microsoft.com/ja-jp/azure/container-registry/)
+- [GitHub Actions 公式ドキュメント](https://docs.github.com/ja/actions)
+
+---
+
+## インタラクションガイド
+
+お読みいただきありがとうございます。この記事が役に立ったと思ったら、下のいいねボタン👍をクリックして、より多くの人にこの記事を見ていただければ幸いです。
+
+## AI アシスト声明
+
+本コンテンツは人工知能によるアシストを通じて作成され、筆者が審査を行い、筆者の見解と立場に合致することを確認しました。
+
+## メタ情報
+
+- **記事作者:** [newbe36524](https://www.newbe.pro)
+- **記事リンク:** [https://hagicode.com/blog/2026/01/25/how-to-sync-docker-hub-to-azure-acr-with-github](https://hagicode.com/blog/2026/01/25/how-to-sync-docker-hub-to-azure-acr-with-github)
+- **著作権声明:** 特に断りのない限り、本ブログのすべての記事は BY-NC-SA ライセンスに従います。転載する場合は出典を明記してください！

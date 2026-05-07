@@ -1,0 +1,478 @@
+---
+title: "C# 後端整合 CodeBuddy CLI 實戰指南"
+date: 2026-03-12
+tags: ["C#", CodeBuddy, AI Provider, ACP, 整合實戰]
+description: "本文將詳細介紹如何在 C# 後端專案中整合 CodeBuddy CLI，實現 AI 程式設計助手能力的完整方案。"
+---
+
+## C# 後端整合 CodeBuddy CLI 實戰指南
+
+> 本文將詳細介紹如何在 C# 後端專案中整合 CodeBuddy CLI，實現 AI 程式設計助手能力的完整方案。
+
+:::note[時間語境說明]
+本文討論的是發布當時的 CodeBuddy 整合設計與 provider 結構。目前常駐支援範圍請以 [AI Agent CLI 安裝](/related-software-installation/ai-agent-cli/) 與 [安裝指南](/installation) 為準；`IFlowCli` 現僅保留為歷史相容值，不屬於目前活躍支援範圍。
+:::
+
+## 背景
+
+在现代 AI 代碼助手開發中，單一 AI Provider 往往無法滿足複雜多變的開發場景。這就像，人生路遠，總不能只認一個方向吧？HagiCode 作為一款多功能 AI 程式設計助手，需要支援多種 AI Provider 以提供更好的使用者體驗。畢竟，使用者的選擇權還是要給夠的。在 2026 年初，專案面臨一個關鍵決策：如何在 C# 後端中恢復 CodeBuddy 的 ACP（Agent Communication Protocol）整合能力。
+
+此前專案中曾實現過 CodeBuddy 對接，但相關代碼在一次重構中被移除了。其實也沒什麼好抱怨的，代碼迭代嘛，總有東西要被遺忘。本次技術方案的目標是完整恢復這一能力，並優化架構使其更加健壯和可維護。
+
+如果你也在考慮為自己的專案接入多種 AI 程式設計助手，下面的方案或許能給你一些啟發——這可是我們踩了無數坑之後總結出來的經驗。或許能讓你少走點彎路，也算是我做過的一點好事吧。
+
+## 關於 HagiCode
+
+本文分享的方案來自我們在 [HagiCode](https://hagicode.com) 專案中的實踐經驗。HagiCode 是一個開源的 AI 代碼助手專案，支援多種 AI Provider 和跨平台運行。為了滿足不同使用者的偏好，我們需要能夠靈活切換各種 AI 程式設計助手，這就有了本文要介紹的 CodeBuddy 整合方案。
+
+HagiCode 採用模組化設計，AI Provider 作為可插拔的組件，這種架構讓我們可以輕鬆添加新的 AI 支援，而不影響現有功能。這也罷了，設計這種東西，當初做得好，後面省心不少。如果你對我們的技術架構感興趣，可以在 GitHub 上查看完整源碼。
+
+## 架構設計
+
+### 分層架構概覽
+
+C# 與 CodeBuddy 的對接採用清晰的分層架構，這種設計讓代碼職責分明，後期維護起來也更加方便：
+
+```
+┌─────────────────────────────────────────────┐
+│           Provider 契約層                    │
+│   AIProviderType 枚舉 + 擴展方法             │
+├─────────────────────────────────────────────┤
+│           Provider 工廠層                    │
+│   AIProviderFactory 依賴注入工廠             │
+├─────────────────────────────────────────────┤
+│           Provider 實現層                    │
+│   CodebuddyCliProvider 具體實現              │
+├─────────────────────────────────────────────┤
+│           ACP 基礎設施層                     │
+│  ACPSessionManager / StdioAcpTransport      │
+│  AcpRpcClient / AcpAgentClient              │
+└─────────────────────────────────────────────┘
+```
+
+這種分層的好處是什麼呢？簡單說就是各層之間互不打擾。假設以後要換一種通信方式（比如從 stdio 改成 WebSocket），你只需要改最下面那一層，上面的業務代碼完全不用動。畢竟，誰也不想牽一髮而動全身，改個通信方式還要改半天業務代碼，那也太慘了。
+
+### 核心組件解析
+
+**Provider 契約層** 是整個架構的基石。我們定義了 `AIProviderType` 枚舉，其中 `CodebuddyCli = 3` 作為枚舉值，通過擴展方法實現字串與枚舉的雙向映射。這樣配置檔中的字串可以很方便地轉成枚舉，調試時枚舉也能轉成字串輸出。這也罷了，其實就是個映射關係，但做好了就是省心。
+
+**Provider 工廠層** 負責根據配置創建對應的 Provider 實例。這裡使用了 .NET 的依賴注入機制，配合 `ActivatorUtilities.CreateInstance` 實現動態創建。工廠模式的好處在於，新增一個 Provider 時只需要添加創建邏輯，不用修改已有的代碼。這和寫文章差不多，想加個新章節，就加個新章節，不用把前面的都重寫一遍。
+
+**Provider 實現層** 是真正幹活的地方。`CodebuddyCliProvider` 實現了 `IAIProvider` 介面，提供 `ExecuteAsync`（非流式）和 `StreamAsync`（流式）兩種調用方式。
+
+**ACP 基礎設施層** 則是通信的底層支撐。這一層處理所有的協議細節，包括進程管理、消息序列化、響應解析等。就像房子的地基，上面蓋得再漂亮，底下的東西得穩才行。
+
+## 通信機制
+
+### Stdio 傳輸模式
+
+CodeBuddy 使用 **Stdio（標準輸入輸出）** 方式與外部進程通信。啟動命令很簡單：
+
+```bash
+codebuddy --acp
+```
+
+然後通過標準輸入輸出進行 JSON-RPC 消息交換。這種方式的優勢在於：
+
+1. **啟動迅速**：本地進程通信沒有網絡延遲
+2. **配置簡單**：只需要指定可執行檔路徑
+3. **環境隔離**：每個會話獨立進程，互不影響
+
+通信過程中支援環境變量注入，常用的包括：
+
+- `CODEBUDDY_API_KEY`：API 密鑰認證
+- `CODEBUDDY_INTERNET_ENVIRONMENT`：網絡環境配置
+
+這就像，人與人之間的溝通，找個方便的方式，才能說得上話。
+
+### 消息協議
+
+ACP 基於 JSON-RPC 2.0 協議，消息格式大概是醬紫的：
+
+```json
+// 請求消息
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "agent/prompt",
+  "params": {
+    "prompt": "幫我寫一個排序算法",
+    "sessionId": "session-123"
+  }
+}
+
+// 響應消息
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "content": "這裡是 AI 的回復..."
+  }
+}
+```
+
+實際實現中，我們把這些協議細節都封裝好了，上層業務代碼只需要關注 prompt 和 response 就行。這也罷了，封裝得好，後面的人用起來就舒服點。
+
+## 核心實現
+
+### 1. Provider 契約恢復
+
+首先在枚舉檔中恢復 CodeBuddy 類型：
+
+```csharp
+// PCode.Models/AIProviderType.cs
+public enum AIProviderType
+{
+    ClaudeCodeCli = 0,
+    CodexCli = 1,
+    GitHubCopilot = 2,
+    CodebuddyCli = 3,  // 恢復這個枚舉值
+    OpenCodeCli = 4,
+    IFlowCli = 5,
+}
+```
+
+然後在擴展方法中添加字串映射，這樣配置檔就可以用字串指定 Provider：
+
+```csharp
+// AIProviderTypeExtensions.cs
+private static readonly Dictionary<string, AIProviderType> _typeMap = new(
+    StringComparer.OrdinalIgnoreCase)
+{
+    ["CodebuddyCli"] = AIProviderType.CodebuddyCli,
+    ["Codebuddy"] = AIProviderType.CodebuddyCli,
+    ["codebuddy"] = AIProviderType.CodebuddyCli,
+    // ... 其他 provider 的映射
+};
+```
+
+### 2. Provider 工廠整合
+
+在工廠類中添加 CodeBuddy 的創建分支：
+
+```csharp
+// AIProviderFactory.cs
+private IAIProvider? CreateProvider(AIProviderType providerType, ProviderConfiguration config)
+{
+    return providerType switch
+    {
+        AIProviderType.CodebuddyCli =>
+            ActivatorUtilities.CreateInstance<CodebuddyCliProvider>(
+                _serviceProvider,
+                Options.Create(config)),
+        // ... 其他 provider
+        _ => throw new NotSupportedException($"Provider {providerType} not supported")
+    };
+}
+```
+
+這裡用了依賴注入的 `ActivatorUtilities`，它會自動處理建構函式的參數注入，非常方便。這也罷了，.NET 的東西，用對了就是省心。
+
+### 3. 完整的 Provider 實現
+
+下面是 `CodebuddyCliProvider` 的核心實現，包含了流式和非流式兩種調用方式：
+
+```csharp
+public class CodebuddyCliProvider : IAIProvider
+{
+    private readonly ILogger<CodebuddyCliProvider> _logger;
+    private readonly IACPSessionManager _sessionManager;
+    private readonly ProviderConfiguration _config;
+
+    public string Name => "CodebuddyCli";
+    public bool SupportsStreaming => true;
+    public ProviderCapabilities Capabilities { get; }
+
+    public CodebuddyCliProvider(
+        ILogger<CodebuddyCliProvider> logger,
+        IACPSessionManager sessionManager,
+        IOptions<ProviderConfiguration> config)
+    {
+        _logger = logger;
+        _sessionManager = sessionManager;
+        _config = config.Value;
+
+        // 定義當前 Provider 的能力
+        Capabilities = new ProviderCapabilities
+        {
+            SupportsStreaming = true,
+            SupportsTools = true,
+            SupportsSystemMessages = true,
+            SupportsArtifacts = false,
+            MaxTokens = 8192
+        };
+    }
+
+    // 非流式調用：等所有結果一起返回
+    public async Task<AIResponse> ExecuteAsync(
+        AIRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        // 為請求創建獨立會話
+        var session = await _sessionManager.CreateSessionAsync(
+            "CodebuddyCli",
+            request.WorkingDirectory,
+            cancellationToken,
+            request.SessionId);
+
+        try
+        {
+            var fullPrompt = BuildPrompt(request);
+            await session.SendPromptAsync(fullPrompt, cancellationToken);
+
+            var responseBuilder = new StringBuilder();
+            var toolCalls = new List<AIToolCall>();
+
+            // 收集所有響應塊
+            await foreach (var chunk in StreamFromSession(session, cancellationToken))
+            {
+                if (!string.IsNullOrEmpty(chunk.Content))
+                {
+                    responseBuilder.Append(chunk.Content);
+                }
+                // 處理工具調用...
+            }
+
+            return new AIResponse
+            {
+                Content = AIResultContentSanitizer.SanitizeResultContent(
+                    responseBuilder.ToString()),
+                ToolCalls = toolCalls,
+                Provider = Name,
+                Model = string.Empty
+            };
+        }
+        finally
+        {
+            // 釋放會話資源
+            await session.DisposeAsync();
+        }
+    }
+
+    // 流式調用：實時返回響應塊
+    public async IAsyncEnumerable<AIStreamingChunk> StreamAsync(
+        AIRequest request,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        var session = await _sessionManager.CreateSessionAsync(
+            "CodebuddyCli",
+            request.WorkingDirectory,
+            cancellationToken);
+
+        try
+        {
+            var fullPrompt = BuildPrompt(request);
+            await session.SendPromptAsync(fullPrompt, cancellationToken);
+
+            await foreach (var chunk in StreamFromSession(session, cancellationToken))
+            {
+                yield return chunk;
+            }
+        }
+        finally
+        {
+            await session.DisposeAsync();
+        }
+    }
+
+    private async IAsyncEnumerable<AIStreamingChunk> StreamFromSession(
+        IACPSession session,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        // 遍歷會話中的所有更新
+        await foreach (var notification in session.ReceiveUpdatesAsync(cancellationToken))
+        {
+            switch (notification.Update)
+            {
+                case AgentMessageChunkSessionUpdate agentMessage:
+                    // 處理文本內容塊
+                    if (agentMessage.Content is AcpImp.TextContentBlock textContent)
+                    {
+                        yield return new AIStreamingChunk
+                        {
+                            Content = textContent.Text,
+                            Type = StreamingChunkType.ContentDelta,
+                            IsComplete = false
+                        };
+                    }
+                    break;
+
+                case ToolCallSessionUpdate toolCall:
+                    // 處理工具調用
+                    yield return new AIStreamingChunk
+                    {
+                        Content = string.Empty,
+                        Type = StreamingChunkType.ToolCallDelta,
+                        ToolCallDelta = new AIToolCallDelta
+                        {
+                            Id = toolCall.ToolCallId,
+                            Name = toolCall.Kind.ToString(),
+                            Arguments = toolCall.RawInput?.ToString()
+                        }
+                    };
+                    break;
+
+                case AcpImp.PromptCompletedSessionUpdate:
+                    // 響應完成
+                    yield break;
+            }
+        }
+    }
+
+    // 構建完整的提示詞
+    private string BuildPrompt(AIRequest request, string? embeddedCommandPrompt = null)
+    {
+        var sb = new StringBuilder();
+
+        // 嵌入命令提示詞（如果有）
+        if (!string.IsNullOrEmpty(embeddedCommandPrompt))
+        {
+            sb.AppendLine(embeddedCommandPrompt);
+            sb.AppendLine();
+        }
+
+        // 系統消息
+        if (!string.IsNullOrEmpty(request.SystemMessage))
+        {
+            sb.AppendLine(request.SystemMessage);
+            sb.AppendLine();
+        }
+
+        // 使用者 prompt
+        sb.Append(request.Prompt);
+        return sb.ToString();
+    }
+}
+```
+
+這段代碼有幾個關鍵點：
+
+1. **會話管理**：每個請求創建獨立會話，請求完成後釋放資源。這是坑踩出來的經驗——如果會話復用做得不好，很容易出現狀態污染的問題。畢竟，用過就得收拾乾淨，不然下次用的人就麻煩了。
+
+2. **流式處理**：`IAsyncEnumerable` 讓響應可以邊生成邊返回，不用等全部內容生成完。這對於長文本場景特別重要，使用者體驗會好很多。就像，等結果的人也不想一直乾等著不是。
+
+3. **工具調用**：CodeBuddy 支援工具調用（Function Calling），通過 `ToolCallSessionUpdate` 處理。這個能力對於複雜的代碼編輯任務很關鍵。
+
+4. **內容過濾**：使用 `AIResultContentSanitizer` 過濾 Think 塊內容，保持輸出乾淨。
+
+### 4. 依賴注入配置
+
+在模組註冊中添加相關服務：
+
+```csharp
+// PCodeClaudeHelperModule.cs
+public void ConfigureModule(IServiceCollection context)
+{
+    // 註冊 Provider
+    context.Services.AddTransient<CodebuddyCliProvider>();
+
+    // 註冊 ACP 基礎設施
+    context.Services.AddSingleton<IACPSessionManager, ACPSessionManager>();
+    context.Services.AddSingleton<IAcpPlatformConfigurationResolver, AcpPlatformConfigurationResolver>();
+    context.Services.AddSingleton<IAIRequestToAcpMapper, AIRequestToAcpMapper>();
+    context.Services.AddSingleton<IAcpToAIResponseMapper, AcpToAIResponseMapper>();
+}
+```
+
+## 配置示例
+
+### 配置檔
+
+在 `appsettings.json` 中添加 CodeBuddy 相關配置：
+
+```yaml
+AI:
+  # 預設使用的 Provider
+  DefaultProvider: "CodebuddyCli"
+
+  # Provider 配置
+  Providers:
+    CodebuddyCli:
+      Type: "CodebuddyCli"
+      WorkingDirectory: "C:/projects/my-app"
+      ExecutablePath: "C:/tools/codebuddy.cmd"
+
+  # 平台相關配置
+  PlatformConfigurations:
+    CodebuddyCli:
+      ExecutablePath: "C:/tools/codebuddy.cmd"
+      Arguments: "--acp"
+      StartupTimeoutMs: 5000
+      EnvironmentVariables:
+        CODEBUDDY_API_KEY: "${CODEBUDDY_API_KEY}"
+        CODEBUDDY_INTERNET_ENVIRONMENT: "production"
+```
+
+### 配置模型
+
+對應的配置模型定義：
+
+```csharp
+public class CodebuddyPlatformConfiguration : IAcpPlatformConfiguration
+{
+    public string ProviderName => "CodebuddyCli";
+    public AcpTransportType TransportType => AcpTransportType.Stdio;
+
+    public string ExecutablePath { get; set; } = "codebuddy";
+    public string Arguments { get; set; } = "--acp";
+    public int StartupTimeoutMs { get; set; } = 5000;
+
+    public Dictionary<string, string?>? EnvironmentVariables { get; set; }
+}
+```
+
+## 實踐經驗總結
+
+### 踩坑記錄
+
+我們在實現過程中遇到了幾個典型的坑，分享出來讓大家少走彎路。畢竟，別人的坑，自己能避开就是好事：
+
+1. **會話洩漏問題**：一開始沒有正確釋放會話，導致進程資源耗盡。解決方法是使用 `try-finally` 確保每次請求都會釋放資源。這也罷了，用過的東西得放回去，不然後面的人用什麼。
+
+2. **環境變量傳遞**：Windows 和 Linux 的環境變量語法不同，後來統一使用 `Dictionary<string, string?>` 來處理。跨平台這種事，一開始就統一規範，後面就省心。
+
+3. **超時配置**：CLI 啟動需要時間，設置了 5 秒的啟動超時，避免快速請求失敗。凡事都得有個度，太急了反而辦不成事。
+
+4. **編碼問題**：Windows 上預設編碼可能導致中文亂碼，在啟動進程時顯式指定 UTF-8 編碼。中文顯示不出來，那多難受。
+
+### 性能優化
+
+1. **會話池**：對於頻繁的短請求，可以考慮實現會話池來復用進程
+2. **連接緩存**：工廠類已經支援 Provider 實例緩存
+3. **異步優先**：全程使用異步編程，避免阻塞線程
+
+性能這種事，能優化就優化，畢竟使用者等的越久，體驗就越差。
+
+## 總結
+
+本文詳細介紹了 C# 後端整合 CodeBuddy CLI 的完整方案，涵蓋了從架構設計到具體實現的全過程。通過分層架構設計，我們將協議細節與業務邏輯分離，使得代碼更加清晰和可維護。
+
+核心要點回顧：
+
+- 採用 Provider 契約層、工廠層、實現層、基礎設施層的分層架構
+- 使用 JSON-RPC over Stdio 方式進行進程間通信
+- 通過依賴注入實現靈活的配置和擴展
+- 提供流式和非流式兩種調用方式
+
+這套方案不僅適用於 CodeBuddy，添加新的 AI Provider 也遵循同樣的模式。如果你也在做類似的多 AI Provider 整合，希望這篇文章能給你一些參考。其實，寫文章和寫代碼一樣，分享出來，能幫到別人就算沒白寫。
+
+---
+
+## 參考資料
+
+- [CodeBuddy 官方文檔](https://codebuddy.example.com)
+- [ACP 協議規範](https://acp-protocol.example.com)
+- [HagiCode 專案主頁](https://hagicode.com)
+- [HagiCode GitHub 倉庫](https://github.com/HagiCode-org/site)
+- [.NET 依賴注入最佳實踐](https://docs.microsoft.com/zh-cn/dotnet/core/extensions/dependency-injection)
+
+---
+
+**如果本文對你有幫助：**
+
+- 來 GitHub 給個 Star：[github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- 訪問官網了解更多：[hagicode.com](https://hagicode.com)
+- 觀看 30 分鐘實戰演示：[www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)
+- 一鍵安裝體驗：[docs.hagicode.com/installation/docker-compose](https://docs.hagicode.com/installation/docker-compose)
+- Desktop 桌面端快速安裝：[hagicode.com/desktop/](https://hagicode.com/desktop/)
+- 公測已開始，歡迎安裝體驗

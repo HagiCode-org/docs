@@ -1,0 +1,378 @@
+---
+title: GitHub Actions で Steam 自動リリースを実現する方法
+date: 2026-04-16
+tags: [GitHub Actions, Steam, 自動化リリース, DevOps, CI/CD]
+description: "この記事では、HagiCode Desktop プロジェクトで実装した Steam 自動リリースの完全なソリューションを共有します。GitHub Release から Steam プラットフォームまでの全自動化フロー、Steam Guard 認証、マルチプラットフォーム Depot アップロードなどの重要な技術的詳細を含みます。"
+---
+
+## GitHub Actions で Steam 自動リリースを実現する方法
+
+> この記事では、HagiCode Desktop プロジェクトで実装した Steam 自動リリースの完全なソリューションを共有します。GitHub Release から Steam プラットフォームまでの全自動化フロー、Steam Guard 認証、マルチプラットフォーム Depot アップロードなどの重要な技術的詳細を含みます。
+
+## 背景
+
+Steam プラットフォームのリリースプロセスは、従来のアプリケーション配信方法とはかなり異なります。Steam には独自の完全な更新配信システムがあり、開発者は SteamCMD ツールを使用してビルド成果物を Steam の CDN ネットワークにアップロードする必要があります。他のプラットフォームのようにダウンロードリンクを投げるだけでは終わらないのです。
+
+HagiCode Desktop プロジェクトは Steam プラットフォームでのリリースを計画しており、これによりリリースプロセスにいくつかの新しい課題が生じました：
+
+1. 既存のビルド成果物を Steam 互換の形式に変換する必要がある
+2. SteamCMD ツールを使用して Steam プラットフォームにアップロードする必要がある
+3. Steam Guard 認証を処理しなければならない
+4. マルチプラットフォーム（Linux、Windows、macOS）の Depot アップロードをサポートする必要がある
+5. GitHub Release から Steam への自動化フローを実現する必要がある
+
+プロジェクトでは既に「ポータブル版モード」を実装しており、アプリケーションが extra ディレクトリにパッケージされた固定サービスペイロードを検出できるようになっています。私たちの目標は、このポータブル版モードと Steam 配信をシームレスに統合することでした。
+
+## HagiCode について
+
+この記事で共有するソリューションは、[HagiCode](https://hagicode.com) プロジェクトでの実践経験から来ています。HagiCode は AI コードアシスタントプロジェクトで、デスクトップ版の実行をサポートしています。現在 Steam プラットフォームでの公開を進めており、そのために信頼できる自動リリースプロセスを構築する必要がありました。
+
+## アーキテクチャ設計
+
+Steam リリースプロセス全体の中核は、プロセスを 3 つの主要な段階に分ける GitHub Actions ワークフローです：
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ GitHub Actions Workflow (Steam Release)                      │
+├─────────────────────────────────────────────────────────────┤
+│ 1. 準備段階:                                                 │
+│    - portable-version コードをチェックアウト                 │
+│    - GitHub Release からビルド成果物をダウンロード           │
+│    - 解凍して Steam コンテンツディレクトリを準備            │
+│                                                             │
+│ 2. SteamCMD 設定:                                           │
+│    - SteamCMD のインストール/再利用                         │
+│    - Steam Guard を使用した認証                             │
+│                                                             │
+│ 3. リリース段階:                                             │
+│    - Depot VDF 設定ファイルを生成                           │
+│    - App Build VDF 設定ファイルを生成                       │
+│    - SteamCMD を呼び出して Steam にアップロード             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+この設計の利点は、どう言えばいいかな：
+- 既存の GitHub Release 成果物を再利用し、重複ビルドを回避します。結局のところ、誰も重複作業を望まないでしょう
+- セルフホストランナーを使用してセキュリティ分離を実現し、もう一層の保障を提供します
+- プレビューモードと正式リリースブランチの切り替えをサポートし、柔軟性があります
+- 完全なエラー処理とログ記録により、問題が発生したときに迷わずに済みます
+
+## ワークフローの実装
+
+### トリガーパラメータ設計
+
+私たちのワークフローは以下の主要なパラメータをサポートします：
+
+```yaml
+inputs:
+  release:           # Portable Version リリースタグ
+    description: 'リリースするバージョンタグ（例：v1.0.0）'
+    required: true
+  steam_preview:     # プレビュービルドを生成するかどうか
+    description: 'プレビューモードかどうか'
+    required: false
+    default: 'false'
+  steam_branch:      # live に設定する Steam ブランチ
+    description: 'ターゲット Steam ブランチ'
+    required: false
+    default: 'preview'
+  steam_description: # ビルド説明の上書き
+    description: 'ビルド説明'
+    required: false
+```
+
+### セルフホストランナー設定
+
+セキュリティ上の理由から、steam タグの付いたセルフホストランナーを使用します：
+
+```yaml
+runs-on:
+  - self-hosted
+  - Linux
+  - X64
+  - steam
+```
+
+これにより、Steam リリースが専用ランナーで実行され、機密資格情報の安全な分離が保証されます。結局のところ、セキュリティには気を使うに越したことはありません。
+
+### 並行性制御
+
+同一バージョンのリリースが相互に干渉しないように、並行性制御を設定しました：
+
+```yaml
+concurrency:
+  group: portable-version-steam-${{ github.event.inputs.release }}
+  cancel-in-progress: false
+```
+
+ここで `cancel-in-progress: false` に設定していることに注意してください。Steam リリースプロセスは長時間に及ぶ可能性があるため、新しいトリガーで進行中のリリースをキャンセルしたくありません。結局のところ、バージョンをリリースするのは簡単じゃありませんし、最後まで実行させてあげるべきでしょう。
+
+## コアスクリプト実装
+
+### リリース入力の準備
+
+`prepare-steam-release-input.mjs` スクリプトは、リリースに必要な入力を準備する担当です：
+
+```javascript
+// GitHub Release のビルドマニフェストとアーティファクトインベントリをダウンロード
+const buildManifest = await downloadBuildManifest(releaseTag);
+const artifactInventory = await downloadArtifactInventory(releaseTag);
+
+// 各プラットフォームの圧縮ファイルをダウンロード
+for (const platform of ['linux-x64', 'win-x64', 'osx-universal']) {
+  const artifactUrl = getArtifactUrl(artifactInventory, platform);
+  await downloadArtifact(artifactUrl, platform);
+}
+
+// Steam コンテンツディレクトリ構造に解凍
+await extractToSteamContent(sources, contentRoot);
+```
+
+### Steam Guard 認証
+
+Steam は Steam Guard を使用したアカウント保護を要求しており、共有秘密に基づくコード生成アルゴリズムを実装しました：
+
+```javascript
+function generateSteamGuardCode(sharedSecret, timestamp = Date.now()) {
+  const secret = decodeSharedSecret(sharedSecret);
+  const time = Math.floor(timestamp / 1000 / 30);
+
+  const timeBuffer = Buffer.alloc(8);
+  timeBuffer.writeBigUInt64BE(BigInt(time));
+
+  // HMAC-SHA1 を使用して時間ベースのワンタイムコードを生成
+  const hash = crypto.createHmac('sha1', secret)
+    .update(timeBuffer)
+    .digest();
+
+  // 5 文字の Steam Guard コードに変換
+  const code = steamGuardCode(hash);
+  return code;
+}
+```
+
+この実装は Steam Guard の TOTP（Time-based One-Time Password）メカニズムに基づいており、30 秒ごとに新しい検証コードを生成します。結局のところ、セキュリティは信頼できる方法でやるべきです。
+
+### VDF 設定生成
+
+VDF（Valve Data Format）は Steam が使用する設定形式です。2 種類の VDF ファイルを生成する必要があります：
+
+**Depot VDF** は各プラットフォームのコンテンツを設定するために使用されます：
+
+```javascript
+function buildDepotVdf(depotId, contentRoot) {
+  return [
+    '"DepotBuildConfig"',
+    '{',
+    `  "DepotID" "${escapeVdf(depotId)}"`,
+    `  "ContentRoot" "${escapeVdf(contentRoot)}"`,
+    '  "FileMapping"',
+    '  {',
+    '    "LocalPath" "*"',
+    '    "DepotPath" "."',
+    '    "recursive" "1"',
+    '  }',
+    '}'
+  ].join('\n');
+}
+```
+
+**App Build VDF** はアプリケーションビルド全体を設定するために使用されます：
+
+```javascript
+function buildAppBuildVdf(appId, depotBuilds, description, setLive) {
+  const vdf = [
+    '"appbuild"',
+    '{',
+    `  "appid" "${appId}"`,
+    `  "desc" "${escapeVdf(description)}"`,
+    `  "contentroot" "${escapeVdf(contentRoot)}"`,
+    '  "buildoutput" "build_output"',
+    '  "depots"',
+    '  {'
+  ];
+
+  for (const [depotId, depotVdfPath] of Object.entries(depotBuilds)) {
+    vdf.push(`    "${depotId}" "${depotVdfPath}"`);
+  }
+
+  if (setLive) {
+    vdf.push(`  }`);
+    vdf.push(`  "setlive" "${setLive}"`);
+  }
+
+  vdf.push('}');
+  return vdf.join('\n');
+}
+```
+
+### SteamCMD 呼び出し
+
+最後に、SteamCMD を呼び出してアップロードを実行します：
+
+```javascript
+await runCommand(steamcmdPath, [
+  '+login', steamUsername, steamPassword, steamGuardCode,
+  '+run_app_build', appBuildPath,
+  '+quit'
+]);
+```
+
+このステップはプロセス全体の最後の飛躍であり、越えれば完成です......
+
+## マルチプラットフォーム Depot 処理
+
+Steam は Depot システムを使用して異なるプラットフォームのコンテンツを管理しており、3 つの主要な Depot をサポートしています：
+
+| プラットフォーム | Depot 識別子 | アーキテクチャサポート |
+|-----|-----------|---------|
+| Linux | `linux-x64` | x64_64 |
+| Windows | `win-x64` | x64_64 |
+| macOS | `osx-universal` | universal, x64_64, arm64 |
+
+各 Depot は独立したコンテンツディレクトリと VDF 設定ファイルを持っており、これにより異なるプラットフォームのユーザーが必要なコンテンツのみをダウンロードできるようになります。結局のところ、トラフィックもお金ですし、少しでも節約できるものです。
+
+## リリースプロセス
+
+### ステップ 1：GitHub Release の準備
+
+まず portable-version リポジトリで GitHub Release を作成する必要があります。以下を含みます：
+- 各プラットフォームの圧縮ファイル
+- ビルドマニフェスト（`{tag}.build-manifest.json`）
+- アーティファクトインベントリ（`{tag}.artifact-inventory.json`）
+
+### ステップ 2：Steam リリースワークフローのトリガー
+
+GitHub Actions を使用して手動でワークフローをトリガーし、必要なパラメータを入力します：
+- `release`: リリースするバージョンタグ（例：v1.0.0）
+- `steam_branch`: ターゲットブランチ（例：`preview` または `public`）
+- `steam_preview`: プレビューモードかどうか
+
+### ステップ 3：リリースプロセスの自動実行
+
+ワークフローは自動的に以下のステップを実行します：
+
+1. GitHub Release 成果物をダウンロードして解凍
+2. SteamCMD のインストール/更新
+3. Steam VDF 設定ファイルの生成
+4. Steam Guard を使用した認証
+5. Steam CDN へのコンテンツアップロード
+6. 指定されたブランチを live に設定
+
+この一連のプロセスを実行すれば、やるべきことはすべてやったことになります。
+
+## 設定ガイド
+
+### 必須 Secrets 設定
+
+GitHub リポジトリ設定で以下の秘密鍵を設定します：
+
+| Secret 名 | 説明 |
+|-----------|------|
+| `STEAM_USERNAME` | Steam アカウントのユーザー名 |
+| `STEAM_PASSWORD` | Steam アカウントのパスワード |
+| `STEAM_SHARED_SECRET` | Steam Guard 共有秘密（オプション） |
+| `STEAM_GUARD_CODE` | Steam Guard コード（オプション） |
+| `STEAM_APP_ID` | Steam アプリケーション ID |
+| `STEAM_DEPOT_ID_LINUX` | Linux Depot ID |
+| `STEAM_DEPOT_ID_WINDOWS` | Windows Depot ID |
+| `STEAM_DEPOT_ID_MACOS` | macOS Depot ID |
+
+これらの設定項目は、別に特別なものではなく、あるべきものがあるだけです。
+
+### 環境変数設定
+
+| 変数名 | 説明 | デフォルト値 |
+|---------|------|--------|
+| `PORTABLE_VERSION_STEAMCMD_ROOT` | SteamCMD インストールディレクトリ | `~/.local/share/portable-version/steamcmd` |
+
+## ベストプラクティス
+
+### Steam Guard 認証管理
+
+初回実行時は Steam Guard コードを手動で入力する必要がありますが、その後は共有秘密を設定してコードを自動生成することをお勧めします。これにより、リリースごとに手動介入を回避できます。結局のところ、毎回同じ操作を繰り返す人はいません。
+
+SteamCMD はログイントークンを保存し、後で再利用できます。ただし、トークンの有効期限には注意が必要で、期限切れ後は再認証する必要があります。これも仕方ありません。
+
+### コンテンツディレクトリ構造
+
+Steam コンテンツディレクトリ構造が正しいことを確認してください：
+
+```
+steam-content/
+├── linux-x64/     # Linux プラットフォームコンテンツ
+├── win-x64/       # Windows プラットフォームコンテンツ
+└── osx-universal/ # macOS ユニバーサルバイナリコンテンツ
+```
+
+各ディレクトリの下には、対応するプラットフォームの完全なアプリケーションファイルを含める必要があります。この点は特に言うことはありません。あるべき通りにやるだけです。
+
+### プレビューモードの使用
+
+プレビューモードではブランチを live に設定しないため、テスト検証に適しています：
+
+```yaml
+if [ "$STEAM_PREVIEW_INPUT" = 'true' ]; then
+  cmd+=(--preview)
+fi
+```
+
+これにより、最初に Steam プラットフォームにアップロードして検証し、問題がないことを確認してから正式ブランチに切り替えることができます。もう一層の検証は常に良いことです。
+
+### エラー処理とログ
+
+スクリプトには完全なエラー処理とログ記録が含まれています：
+- GitHub Release の存在を検証
+- 必須のメタデータファイルをチェック
+- プラットフォームコンテンツの存在を確認
+- GitHub Actions サマリーレポートを生成
+
+これらの情報はデバッグと監査に非常に価値があります。結局のところ、問題が発生したときに手がかりがあれば、何もわからないよりはずっと良いです。
+
+### アーティファクト管理
+
+ワークフローは 2 種類のアーティファクトを生成します：
+- `portable-steam-release-preparation-{tag}`: リリース準備メタデータ
+- `portable-steam-build-metadata-{tag}`: Steam ビルドメタデータ
+
+これらのアーティファクトは後続の監査とデバッグに使用でき、保存期間は 30 日に設定することをお勧めします。それほど場所も取りませんし、残しておいても問題ありません。
+
+## 実際の応用
+
+HagiCode プロジェクトでは、この自動リリースプロセスがすでに複数のバージョンで正常に動作しています。GitHub Release から Steam プラットフォームまでの全チェーンが完全に自動化されており、人的介入は不要です。
+
+これにより、リリース効率と信頼性が大幅に向上しました。以前は手動リリースに 30 分以上かかっていましたが、今では数分でプロセス全体を完了できます。時間は節約できるものは節約すべきです。
+
+さらに重要なのは、自動化プロセスが人的エラーの可能性を減らし、各リリースが標準化されたプロセスになり、結果もより予測可能になることです。結局のところ、反復作業は機械に任せれば、人も楽になります。
+
+## まとめ
+
+この記事で共有したソリューションにより、以下を実現しました：
+1. GitHub Release から Steam プラットフォームまでの完全自動化
+2. マルチプラットフォームの Depot アップロードサポート
+3. Steam Guard に基づくセキュア認証
+4. プレビューモードと正式リリースの柔軟な切り替え
+5. 完全なエラー処理とログ記録
+
+このソリューションは HagiCode プロジェクトだけでなく、Steam プラットフォームでの公開を計画している他のプロジェクトの参考にもなります。もしあなたも Steam 自動リリースを検討しているなら、この記事の実践が役に立つことを願っています。
+
+技術というものは、複雑とも言えますし、簡単とも言えます。重要なのは、自分に適した方法を見つけることです。
+
+この記事が役に立ったと思ったら、HagiCode の GitHub リポジトリに Star を付けたり、公式サイトにアクセスして詳細情報を確認したりしてください。
+
+## 参考資料
+
+- [SteamCMD Documentation](https://developer.valvesoftware.com/wiki/SteamCMD)
+- [Steamworks SDK](https://partner.steamgames.com/)
+- [HagiCode プロジェクトアドレス](https://github.com/HagiCode-org/site)
+- [HagiCode 公式サイト](https://hagicode.com)
+- [HagiCode インストールガイド](https://docs.hagicode.com/installation/docker-compose)
+- [HagiCode Desktop デスクトップ版](https://hagicode.com/desktop/)
+
+## 著作権説明
+
+お読みいただきありがとうございます。もしこの記事が役に立ったと思ったら、いいね、保存、共有でサポートしてください。
+このコンテンツは人工知能による支援で作成され、最終的な内容は著者によって審査・確認されています。
+- 記事著者: [newbe36524](https://www.newbe.pro)
+- 原文リンク: [https://docs.hagicode.com/blog/2026-04-16-steam-release-automation-github-actions/](https://docs.hagicode.com/blog/2026-04-16-steam-release-automation-github-actions/)
+- 著作権声明: このブログのすべての記事は特別な声明を除き、BY-NC-SA ライセンス契約を採用しています。転載する場合は出典を明記してください！

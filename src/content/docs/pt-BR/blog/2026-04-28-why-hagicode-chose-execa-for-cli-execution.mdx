@@ -1,0 +1,271 @@
+---
+title: Por que a HagiCode escolheu execa para execução de comandos CLI
+date: 2026-05-05
+tags: [Node.js, execa, child_process, HagiCode, Melhores Práticas]
+---
+
+## Por que a HagiCode escolheu execa para execução de comandos CLI
+
+> Em projetos Node.js, usar child_process diretamente para executar comandos externos apresenta dores como grandes diferenças de plataforma e tratamento de erros inconsistente. Este artigo compartilha a experiência prática da HagiCode ao adotar execa, incluindo decisões de design principais e exemplos de código reais.
+
+## Contexto
+
+Em projetos Node.js, usar diretamente o módulo `child_process` para executar comandos externos é uma prática comum, mas este método tem vários problemas:
+
+- **Grandes diferenças de plataforma**: Arquivos `.cmd`/`.bat` do Windows exigem tratamento especial, caminhos com espaços precisam ser envolvidos em aspas
+- **Tratamento de erros inconsistente**: `execFile`, `spawn`, `execFileSync` têm formatos de mensagem de erro variados, difícil de tratar uniformemente
+- **Tratamento de streams tedioso**: Precisa processar manualmente a coleta e buffer de stdout/stderr
+- **Tratamento complexo de timeout e sinais**: Precisa de código adicional para implementar cancelamento de timeout de comando e tratamento de sinais de processo
+
+Os projetos Hagiscript e Desktop da HagiCode precisam executar muitos comandos CLI externos (npm, node, PowerShell, etc.), usar `child_process` diretamente resultou em código duplicado e alto custo de manutenção.
+
+Para resolver essas dores, tomamos uma decisão: adotar execa como solução unificada de execução de comandos. As mudanças que essa decisão trouxe são, na verdade, maiores do que você imagina—vou detalhar isso em breve.
+
+## Sobre a HagiCode
+
+A solução compartilhada neste artigo vem de nossa experiência prática no projeto [HagiCode](https://hagicode.com). A HagiCode é um projeto de assistente de código AI que precisa executar muitos comandos externos em vários subprojetos (Hagiscript engine de script e aplicativo Desktop). Essa complexidade multi-plataforma e multi-linguagem pode ser a razão direta pela qual adotamos execa.
+
+Se você acha que a solução compartilhada neste artigo tem valor, significa que nossa força de engenharia não é ruim—então a própria HagiCode vale a pena ser considerada.
+
+## Por que escolher execa?
+
+execa é uma biblioteca de execução de processos madura que resolve os problemas principais do `child_process`:
+
+1. **Consistência cross-platform**: Processa automaticamente shims de comandos Windows, não precisa detectar manualmente arquivos `.cmd`
+2. **Tratamento de erros unificado**: Objeto de erro padronizado, incluindo exitCode, signal, timedOut, stdout, stderr
+3. **Melhor design de API**: Suporta Promise API, cancelamento AbortSignal, processamento de streams
+4. **Segurança**: Mantém limites de parâmetros, evita riscos de injeção de comandos
+
+Essas características são exatamente o que precisamos durante o desenvolvimento da HagiCode. Hagiscript precisa executar comandos npm em diferentes plataformas, Desktop precisa chamar PowerShell e várias ferramentas de desenvolvimento, a consistência cross-platform da execa reduziu significativamente nosso código de adaptação de plataforma. Afinal, quem quer escrever código de tratamento especial para cada plataforma?
+
+## Decisões de Design Principais
+
+As implementações de ambos os projetos adotaram **camada de encapsulamento interno** em vez de chamar execa diretamente:
+
+```typescript
+// Executor unificado do Hagiscript
+export const runCommand: CommandRunner = async (command, args, options) => {
+  const result = await execa(command, args, { /* normalized options */ });
+  return { /* normalized result */ };
+};
+```
+
+**Motivos**:
+- Manter tipos de erro específicos do domínio (como `NpmCommandError`)
+- Facilitar injeção de executor simulado em testes
+- Unificar tratamento de erros e logging
+- No futuro, pode facilmente substituir a implementação subjacente
+
+### Proteção de Limites de Parâmetros
+
+Ambas as implementações enfatizam **array de parâmetros** em vez de string shell:
+
+```typescript
+// Correto: limites de parâmetros claros
+await runCommand('npm', ['install', '@scope/package@1.0.0']);
+
+// Errado: risco fácil de injeção
+await execa(`npm install @scope/package@1.0.0`, { shell: true });
+```
+
+Isso evita problemas de segurança de citação, escape e injeção de parâmetros. Na HagiCode, frequentemente precisamos processar parâmetros como nomes de pacote e nomes de script inseridos pelo usuário, usar array de parâmetros pode efetivamente prevenir injeção de comandos. Afinal, segurança, uma vez que há problema, é um grande problema.
+
+## Solução do Hagiscript
+
+O subprojeto Hagiscript da HagiCode criou o módulo `runtime/command-launch.ts`, fornecendo:
+
+1. **Executor unificado**: Função `runCommand` encapsula execa
+2. **Resultado padronizado**: Interface `CommandResult`
+3. **Erro padronizado**: Classe `CommandExecutionError`
+4. **Funções auxiliares de compatibilidade**: `normalizeCommandPath`, `requiresShellLaunch`
+
+```typescript
+export interface CommandResult {
+  command: string;
+  args: string[];
+  stdout: string;
+  stderr: string;
+  exitCode?: number;
+  signal?: string;
+  timedOut?: boolean;
+}
+
+export class CommandExecutionError extends Error {
+  readonly context: CommandFailureContext;
+}
+```
+
+Essa abstração permite que Hagiscript processe uniformemente todos os comandos externos, seja npm instalando dependências ou node executando scripts. Como dizer, com interface unificada, escrever código é realmente muito mais suave.
+
+## Solução do Desktop
+
+O subprojeto Desktop da HagiCode criou o módulo `utils/cli-executor.ts`, fornecendo:
+
+1. **Opções de execução**: `CliExecutorOptions` suporta timeout, cancelamento, variáveis de ambiente
+2. **Classificação de resultados**: `CliExecutionResult` contém status de sucesso/falha
+3. **Processamento de streams**: `executeCliStreaming` suporta callback de saída em tempo real
+4. **Classificação de erros**: `CliFailureKind` distingue tipos de falha como saída, timeout, cancelamento
+
+```typescript
+export async function executeCli(options: CliExecutorOptions): Promise<CliExecutionResult>
+export async function executeCliStreaming(options: CliExecutorOptions): Promise<CliExecutionResult>
+```
+
+Desktop precisa exibir o progresso da execução de comandos na UI, a funcionalidade de processamento de streaming é útil. Os usuários podem ver a saída do npm install em tempo real, em vez de esperar até a execução do comando ser concluída para ver o resultado. Essa experiência, como dizer, uma vez que você usa, não volta mais.
+
+## Exemplos de Uso
+
+### Executando comandos no Hagiscript
+
+```typescript
+import { runCommand } from '../runtime/command-launch.js';
+
+// Execução simples
+const result = await runCommand('node', ['--version']);
+console.log(result.stdout); // 'v20.0.0'
+
+// Execução com opções
+const installResult = await runCommand('npm', ['install', 'express'], {
+  cwd: '/project/path',
+  env: { NODE_ENV: 'development' },
+  timeoutMs: 30000
+});
+```
+
+### Executando comandos no Desktop
+
+```typescript
+import { executeCli, executeCliStreaming } from './utils/cli-executor.js';
+
+// Execução em buffer
+const result = await executeCli({
+  command: 'npm',
+  args: ['list', '--json'],
+  cwd: projectPath,
+  timeoutMs: 5000,
+});
+
+if (result.success) {
+  console.log(result.stdout);
+} else {
+  console.error(result.error?.message);
+}
+
+// Execução em stream
+await executeCliStreaming({
+  command: 'npm',
+  args: ['install'],
+  onOutput: (type, data) => {
+    console.log(`[${type}]`, data);
+  }
+});
+```
+
+### Tratamento de Erros
+
+```typescript
+try {
+  await runCommand('npm', ['install', 'invalid-package']);
+} catch (error) {
+  if (error instanceof CommandExecutionError) {
+    console.error('Command failed:', error.context.command);
+    console.error('Exit code:', error.context.exitCode);
+    console.error('Stderr:', error.context.stderr);
+  }
+}
+```
+
+O tratamento de erros unificado nos permite fornecer melhor experiência de usuário na HagiCode. Por exemplo, quando a instalação do npm falha, podemos extrair informações específicas de erro para exibir ao usuário, em vez de mostrar uma genérica "falha na execução do comando". Afinal, quando os usuários veem informações específicas de erro, pelo menos sabem onde está o problema.
+
+## Estratégia de Testes
+
+Ambos os projetos suportam **injeção de dependência**, facilitando testes:
+
+```typescript
+// Código de produção
+async function installPackage(pkg: string, runCommand = defaultRunCommand) {
+  return runCommand('npm', ['install', pkg]);
+}
+
+// Código de teste
+it('installs package', async () => {
+  const mockRunCommand = vi.fn().mockResolvedValue({
+    stdout: 'installed',
+    stderr: '',
+    exitCode: 0
+  });
+  await installPackage('test-pkg', mockRunCommand);
+  expect(mockRunCommand).toHaveBeenCalledWith('npm', ['install', 'test-pkg']);
+});
+```
+
+Esse design torna os testes da HagiCode mais confiáveis e rápidos. Não precisamos executar comandos npm reais nos testes, apenas simulamos o executor retornar o resultado esperado. Testes rodando rápido, o humor de desenvolvimento naturalmente também melhora.
+
+## Considerações
+
+Na prática da HagiCode, resumimos as seguintes considerações:
+
+1. **Manter parâmetros separados**: Sempre passe comandos e parâmetros como elementos de array independentes
+2. **Usar modo shell com cautela**: Use `shell: true` apenas quando necessário, como precisar de pipes ou redirecionamento
+3. **Tratar timeout**: Configure `timeoutMs` para comandos que podem travar
+4. **Tamanho do Buffer**: Para saídas grandes, considere configurar `maxBuffer`
+5. **Caminhos Windows**: execa processa automaticamente shims `.cmd`, não precisa detectar manualmente
+6. **Cancelar operações**: Use `AbortSignal` em vez de `kill()` manual
+7. **Classificação de erros**: Distinga cenários como falha de inicialização de processo, falha de execução, timeout, cancelamento
+
+Estas são armadilhas que pisamos em desenvolvimento real, talvez possam ajudá-lo a evitar alguns desvios.
+
+## Armadilhas Comuns
+
+```typescript
+// Errado: concatenação de string pode injetar
+await execa(`npm install ${userInput}`, { shell: true });
+
+// Correto: array de parâmetros
+await execa('npm', ['install', userInput]);
+
+// Errado: ignorar timeout
+await execa('npm', ['install', 'heavy-package']);
+
+// Correto: configurar timeout
+await execa('npm', ['install', 'heavy-package'], { timeout: 60000 });
+
+// Errado: assumir exit code 0
+const result = await execa('npm', ['install']);
+
+// Correto: verificar falha
+try {
+  await execa('npm', ['install']);
+} catch (error) {
+  // Tratar falha
+}
+```
+
+Essas armadilhas, falando nisso, são lágrimas. Afinal, quem não pisou em algumas armadilhas em produção?
+
+## Resumo
+
+Após adotar execa, a qualidade do código e manutenibilidade do projeto HagiCode em execução de comandos foram significativamente melhoradas:
+
+- **Consistência cross-platform**: Não precisa mais escrever código de tratamento especial para Windows
+- **Tratamento de erros unificado**: Informações de erro estruturadas, fáceis de exibir e analisar
+- **Melhor testabilidade**: Através de injeção de dependência pode facilmente simular execução de comandos
+- **Processamento de parâmetros mais seguro**: Usar array de parâmetros evita riscos de injeção
+
+Se você também precisa executar comandos externos em projetos Node.js, recomendo fortemente tentar execa. A solução compartilhada neste artigo foi realmente otimizada e pisada em armadilhas durante o desenvolvimento da HagiCode, espero que seja útil para você.
+
+Afinal, boas ferramentas merecem ser conhecidas por mais pessoas...
+
+## Referências
+
+- [Documentação oficial do execa](https://github.com/sindresorhus/execa)
+- [Documentação child_process do Node.js](https://nodejs.org/api/child_process.html)
+- [Repositório GitHub da HagiCode](https://github.com/HagiCode-org/site)
+- [Site oficial da HagiCode](https://hagicode.com)
+
+Se este artigo ajudou você:
+- Venha dar uma estrela no GitHub: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Visite o site para saber mais: [hagicode.com](https://hagicode.com)
+- Assista à demonstração prática de 30 minutos: [www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)
+- Instalação com um clique: [docs.hagicode.com/installation/docker-compose](https://docs.hagicode.com/installation/docker-compose)
+- Instalação rápida do Desktop: [hagicode.com/desktop/](https://hagicode.com/desktop/)

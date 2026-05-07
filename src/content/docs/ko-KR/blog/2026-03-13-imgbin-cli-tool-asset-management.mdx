@@ -1,0 +1,384 @@
+---
+title: ImgBin CLI 도구 설계: HagiCode 이미지 자산 관리 솔루션
+date: 2026-03-13
+tags: [CLI, 이미지 관리, TypeScript, Node.js, 자산 파이프라인]
+description: "本文介绍如何从零构建一个可自动化执行的图片资产流水线，包括 CLI 工具设计、Provider Adapter 架构、以及元数据管理策略。"
+---
+
+## ImgBin CLI 도구 설계: HagiCode 이미지 자산 관리 솔루션
+
+> 本文介绍如何从零构建一个可自动化执行的图片资产流水线，包括 CLI 工具设计、Provider Adapter 架构、以及元数据管理策略。
+
+## 배경
+
+사실 생각지도 못하게, 이미지 자산 관리 이 일 때문에 이렇게 오랫동안 고민하게 될 줄은 몰랐습니다.
+
+HagiCode 프로젝트 개발 과정에서 우리는 겉보기엔 간단해 보이지만 매우 까다로운 문제에 직면했습니다: 이미지 자산의 생성과 관리. 말하자면 사춘기의 그 일들과 같죠 — 겉평은 평온하지만 속은 요동칩니다.
+
+프로젝트 문서와 마케팅 자료가 늘어남에 따라 많은 이미지가 필요했습니다. 이 이미지 중 일부는 AI로 생성해야 하고, 일부는 기존 자료 라이브러리에서 선택해야 하며, 일부는 기존 이미지에 대해 AI 인식을 통해 자동 태그 지정이 필요했습니다. 문제는 이 작업들이 오랫동안 산발적인 스크립트와 수동 작업으로 완료되어 왔다는 것입니다 — 이미지를 생성할 때마다 수동으로 스크립트를 실행하고, 메타데이터를 수동으로 정리하고, 썸네일을 수동으로 생성해야 했습니다. 그것도 그렇지만, 더 중요한 문제는 이러한 산발적인 것들이 여기저기 흩어져 있어서, 찾을 때는 찾을 수 없고 사용할 때는 사용할 수 없다는 것입니다.
+
+구체적인 문제점은 다음과 같습니다:
+
+1. **통합 진입점 부족**: 이미지 생성 로직이 다른 스크립트에 분산되어 있어 일괄 실행이 불가능
+2. **메타데이터 부족**: 생성된 이미지에 통일된 metadata.json이 없어 검색 및 추적이 불가능
+3. **높은 수동 정리 비용**: 이미지의 제목, 태그를 모두 수동으로 일일이 정리해야 하므로 효율성이 낮음
+4. **자동화 불가**: CI/CD 프로세스에서 자동으로 이미지를 생성하고 싶다면 불가능
+
+그냥 포기하려고도 했지만, 결국 프로젝트를 해야 했으니까요. 피할 수 없다면 해결 방법을 찾아봐야죠. 그래서 우리는 ImgBin을 '산발적인 스크립트'에서 자동화할 수 있는 이미지 자산 파이프라인으로 업그레이드하기로 결정했습니다.毕竟有些事儿, 逃避也不是办法。
+
+## HagiCode 소개
+
+本文分享的方案来自我们在 [HagiCode](https://hagicode.com) 项目中的实践经验。HagiCode 是一个 AI 代码助手项目,同时维护着 VSCode 扩展、后端 AI 服务、跨平台桌面客户端等多种组件。在这种多语言、多平台的复杂场景下,图片资产的规范管理成了提升开发效率的关键一环。
+
+怎么说呢,这也算是 HagiCode 成长过程中的一个小小烦恼吧。每个项目都会有这样的时候,看起来不起眼的小问题,却能让人折腾半天。
+
+HagiCode 的构建系统采用 TypeScript + Node.js 生态,因此 ImgBin 也顺理成章地选择了相同的技术栈,确保整个项目的技术一致性。毕竟都用习惯了,换别的也嫌麻烦嘛。
+
+---
+
+## 핵심 설계
+
+### 전체 아키텍처
+
+ImgBin은 계층형 아키텍처를 채택하여 CLI 명령, 애플리케이션 서비스, 타사 API 어댑터 및 인프라 계층을 명확하게 분리합니다:
+
+```
+구성 요소 계층 구조
+├── CLI Entry (cli.ts)              전역 매개변수 구문 분석, 명령 라우팅
+├── Commands (commands/*)           generate | batch | annotate | thumbnail
+├── Application Services            job-runner | metadata | thumbnail | asset-writer
+├── Provider Adapters               image-api-provider | vision-api-provider
+└── Infrastructure Layer            config | logger | paths | schema
+```
+
+이러한 계층형 설계의 장점은 다음과 같습니다: 각 계층의 책임이 명확하고 테스트할 때 외부 종속성을 쉽게 mock할 수 있습니다.其实就是让各干各的,互不打扰,这样出了问题也容易找原因,不是么?
+
+### 단일 자산 디렉터리 모델
+
+ImgBin은 '하나의 자산당 하나의 디렉터리' 모델을 채택하며, 이미지를 생성할 때마다 다음과 같은 구조를 만듭니다:
+
+```
+library/
+└── 2026-03/
+    └── orange-dashboard/
+        ├── original.png      # 원본 이미지
+        ├── thumbnail.webp    # 512x512 썸네일
+        └── metadata.json     # 구조화된 메타데이터
+```
+
+이 모델의 장점은 다음과 같습니다:
+
+1. **자체 포함**: 각 자산의 모든 파일이 동일한 디렉터리에 있어 마이그레이션과 백업이 매우 편리함
+2. **추적 가능**: metadata.json을 통해 이미지 생성 시간, 사용된 prompt, 모델 등의 정보를 추적할 수 있음
+3. **확장 가능**: 향후 더 많은 변형(예: 다른 크기의 썸네일)을 추가해야 하는 경우 동일한 디렉터리에 파일만 추가하면 됨
+
+美的事物或人,不一定要占有,只要她还是美的,自己好好看着她的美就好了。这话虽然说得有点远了,但理儿是这么个理儿——图片放在一起了,看起来也舒服,找起来也方便。
+
+### 메타데이터 계층형 저장
+
+metadata.json은 전체 시스템의 핵심으로, 계층형 저장 전략을 채택하여 세 가지 유형의 필드를 구분합니다:
+
+```json
+{
+  "schemaVersion": 2,
+  "assetId": "orange-dashboard",
+  "slug": "orange-dashboard",
+  "title": "Orange Dashboard",
+  "tags": ["dashboard", "hero", "orange"],
+
+  "source": { "type": "generated" },
+
+  "paths": {
+    "assetDir": "library/2026-03/orange-dashboard",
+    "original": "original.png",
+    "thumbnail": "thumbnail.webp"
+  },
+
+  "generated": {
+    "prompt": "orange dashboard for docs hero",
+    "provider": "azure-openai-image-api",
+    "model": "gpt-image-1.5"
+  },
+
+  "recognized": {
+    "title": "Orange Dashboard",
+    "tags": ["dashboard", "ui", "orange"],
+    "description": "A modern orange dashboard with charts and metrics"
+  },
+
+  "status": {
+    "generation": "succeeded",
+    "recognition": "succeeded",
+    "thumbnail": "succeeded"
+  },
+
+  "timestamps": {
+    "createdAt": "2026-03-11T04:01:19.570Z",
+    "updatedAt": "2026-03-11T04:02:09.132Z"
+  }
+}
+```
+
+- **generated**: 이미지 생성 시의 원본 정보(사용된 prompt, 제공업체, 모델 등) 기록
+- **recognized**: AI 인식 결과(자동 생성된 제목, 태그, 설명)
+- **manual**: 수동 정리 결과, 이 영역의 데이터가 우선순위가 가장 높으며 AI 인식으로 덮어쓰지 않음
+
+이러한 계층형 전략은 우리가 이전에 가진 핵심 모순을 해결했습니다: AI 인식 결과와 수동 정리 결과 중 누가 우선인가? 답은 수동이 우선이며 AI 인식은 보조일 뿐입니다。这事儿也想明白了——有些东西嘛,机器终究是机器,终究还是得人来把关。
+
+---
+
+## Provider Adapter 패턴
+
+ImgBin의 또 다른 핵심 설계는 Provider Adapter 패턴입니다。우리는 외부 API를 통합된 인터페이스로 추상화하여 AI 서비스 제공업체를 변경하더라도 비즈니스 로직을 수정할 필요가 없도록 했습니다。
+
+怎么说呢,这就跟感情一样——外表怎么变不重要,重要的是内心那套东西不变。接口定好了,内部的实现怎么换都行。
+
+### Image Generation Provider
+
+```typescript
+interface ImageGenerationProvider {
+  // 생성 图片, 반환 이미지의 Buffer
+  generate(options: GenerateOptions): Promise<Buffer>;
+
+  // 가져오기 지원되는 모델 리스트
+  getSupportedModels(): Promise<string[]>;
+}
+
+interface GenerateOptions {
+  prompt: string;
+  model?: string;
+  size?: '1024x1024' | '1792x1024' | '1024x1792';
+  quality?: 'standard' | 'hd';
+  format?: 'png' | 'webp' | 'jpeg';
+}
+```
+
+### Vision Recognition Provider
+
+```typescript
+interface VisionRecognitionProvider {
+  // 인식 이미지 내용, 반환 구조화된 메타데이터
+  recognize(imageBuffer: Buffer): Promise<RecognitionResult>;
+
+  // 가져오기 지원되는 모델 리스트
+  getSupportedModels(): Promise<string[]>;
+}
+
+interface RecognitionResult {
+  title?: string;
+  tags: string[];
+  description?: string;
+  confidence: number;
+}
+```
+
+이러한 인터페이스 설계의 장점은 다음과 같습니다:
+
+1. **테스트 가능**: 단위 테스트 시 mock provider를 전달할 수 있으며 실제 외부 API를 호출할 필요가 없음
+2. **확장 가능**: 새 provider를 추가하려면 인터페이스만 구현하면 되며 호출자 코드를 수정할 필요가 없음
+3. **교체 가능**: 프로덕션 환경에서는 Azure OpenAI를 사용, 테스트 환경에서는 로컬 모델을 사용, 구성만 전환하면 됨
+
+想笑来伪装自己掉下的泪,想哭来试探自己麻痹了没——有时候做项目就是这样,表面上看是换了个 API,实际上内在的那套逻辑一点没变,也就没什么好怕的了。
+
+---
+
+## CLI 명령 설계
+
+ImgBin은 다양한 사용 시나리오를 충족하는 4개의 핵심 명령을 제공합니다:
+
+### generate: 단일 이미지 생성
+
+```bash
+# 가장 간단한 사용법
+imgbin generate --prompt "orange dashboard for docs hero"
+
+# 동시에 썸네일과 AI 태그 지정 생성
+imgbin generate --prompt "orange dashboard" --annotate --thumbnail
+
+# 출력 디렉터리 지정
+imgbin generate --prompt "orange dashboard" --output ./library
+```
+
+### batch: 일괄 작업
+
+일괄 작업은 YAML 또는 JSON manifest 파일로 정의하며 CI/CD 프로세스에서 사용하기에 적합합니다:
+
+```yaml
+# assets/jobs/launch.yaml
+defaults:
+  annotate: true
+  thumbnail: true
+  libraryRoot: ./library
+
+jobs:
+  - prompt: "orange dashboard hero"
+    slug: orange-dashboard
+    tags: [dashboard, hero, orange]
+
+  - prompt: "pricing grid for docs"
+    slug: pricing-grid
+    tags: [pricing, grid, docs]
+```
+
+명령 실행:
+
+```bash
+imgbin batch assets/jobs/launch.yaml
+```
+
+일괄 작업 설계는 실패 격리를 지원합니다: manifest에서 항목을 순차적으로 처리하며 단일 항목 실패가 다른 작업에 영향을 주지 않습니다。`--dry-run`을 통해 미리보기만 가능하며 실제 실행은 하지 않습니다。
+
+这也就罢了,关键是它还能告诉你哪儿成功了哪儿失败了,不像某些事儿,失败了都不知道怎么失败的。
+
+### annotate: AI 태그 지정
+
+기존 이미지에 대해 AI 인식을 수행하여 제목, 태그, 설명을 자동으로 생성:
+
+```bash
+# 단일 이미지 태그 지정
+imgbin annotate ./library/2026-03/orange-dashboard
+
+# 전체 디렉터리 일괄 태그 지정
+imgbin annotate ./library/2026-03/
+```
+
+### thumbnail: 썸네일 생성
+
+기존 이미지에 썸네일을 생성:
+
+```bash
+# 썸네일 생성
+imgbin thumbnail ./library/2026-03/orange-dashboard
+```
+
+---
+
+## 일괄 작업 Manifest 설계
+
+일괄 작업의 manifest는 유연한 구성을 지원하며 기본값을 통합으로 설정할 수 있고 단일 작업에서도 재정의 가능합니다:
+
+```yaml
+# 전역 기본값
+defaults:
+  annotate: true        # 기본값으로 AI 태그 지정 활성화
+  thumbnail: true       # 기본값으로 썸네일 생성
+  libraryRoot: ./library
+  model: gpt-image-1.5
+
+jobs:
+  # 최소 구성, prompt만 제공
+  - prompt: "first image"
+
+  # 완전한 구성
+  - prompt: "second image"
+    slug: custom-slug
+    tags: [tag1, tag2]
+    annotate: false     # 이 작업은 AI 태그 지정을 실행하지 않음
+    model: dall-e-3    # 이 작업은 다른 모델 사용
+```
+
+실행 시 ImgBin은 작업을 하나씩 처리하며 각 작업의 결과는 해당 metadata.json에 기록됩니다。특정 작업이 실패하더라도 다른 작업에 영향을 주지 않습니다。작업 완료 후 요약 보고서가 출력됩니다:
+
+```
+✓ orange-dashboard (succeeded)
+✓ pricing-grid (succeeded)
+✗ hero-banner (failed: API rate limit exceeded)
+
+2/3 succeeded, 1 failed
+```
+
+有些事儿吧,急也急不来,一个一个来,反而踏实。这,或许就是批量任务的哲学吧。
+
+---
+
+## 환경 변수 구성
+
+ImgBin은 환경 변수를 통해 유연한 구성을 지원합니다:
+
+```bash
+# ImgBin 작업 디렉터리
+IMGBIN_WORKDIR=/path/to/imgbin
+
+# 실행 파일 경로(스크립트에서 호출 시 사용)
+IMGBIN_EXECUTABLE=/path/to/imgbin/dist/cli.js
+
+# 자산 라이브러리 루트 디렉터리
+IMGBIN_LIBRARY_ROOT=./.imgbin-library
+
+# Azure OpenAI 구성(Azure provider를 사용하는 경우)
+AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com/
+AZURE_OPENAI_API_KEY=your-api-key
+AZURE_OPENAI_IMAGE_DEPLOYMENT=gpt-image-1
+```
+
+配置这东西,说重要也重要,说不重要也不重要。毕竟怎么舒服怎么来嘛,适合自己的才是最好的。
+
+---
+
+## 구현要点
+
+구현 과정에서 우리는 다음과 같은 핵심 사항을 요약했습니다:
+
+### Provider 인터페이스 설계
+
+인터페이스 정의는 명확하고 완전해야 하며 입력 매개변수, 반환값, 오류 처리를 포함해야 합니다。동기 및 비동기 호출 방식을 모두 제공하여 다양한 시나리오에서 사용하기 편리합니다。
+
+这也算是过来人的一点经验吧,毕竟接口这东西,定好了就不想再改,麻烦。
+
+### 실패 처리 전략
+
+일괄 작업에서 특정 항목이 실패할 경우 다음을 수행해야 합니다:
+
+1. 별도의 로그 파일에 상세한 오류 정보 기록
+2. 다른 작업 계속 실행, 전체 프로세스 중단 안 함
+3. 최종적으로 0이 아닌 종료 코드 반환, 작업 실패 표시
+4. 요약 보고서에서 각 작업의 실행 결과를 명확하게 표시
+
+有些事儿失败了就是失败了,逃避也没用,不如大大方方承认,然后想办法解决。这道理,做项目和做人是一样的。
+
+### 메타데이터 병합 전략
+
+인식 결과는 기본적으로 `recognized` 영역에 기록되며 수동 수정된 필드는 `manual` 표시가 있습니다。메타데이터 업데이트 시 '증가만 하고 삭제하지 않는' 전략을 채택합니다: 명시적으로 `--force` 매개변수를 전달하지 않는 한 기존 수동 정리 결과를 덮어쓰지 않습니다。
+
+这事儿也想明白了——有些东西啊,错过了就是错过了,覆盖了也就没了。还是保留着比较好,毕竟记录本身也是一种美。
+
+### 디렉터리 생성 원자성
+
+`fs.mkdir({ recursive: true })`를 사용하여 디렉터리 생성의 원자성을 보장하고 동시성 시나리오에서의 경쟁 상태를 방지합니다。
+
+这大概就是所谓的安全感吧——该稳稳该快快,不拖泥带水,也不瞻前顾后。
+
+---
+
+## 요약
+
+ImgBin은 HagiCode 프로젝트의 이미지 자산 관리 핵심 도구로서 다음 설계를 통해 우리가 직면한 문제를 해결했습니다:
+
+1. **통합 진입점**: CLI 명령은 생성, 태그 지정, 썸네일 등 모든 작업을 포함
+2. **메타데이터 기반**: 각 자산은 완전한 metadata.json을 가지며 검색 및 추적 지원
+3. **Provider Adapter**: 유연한 외부 API 추상화로 테스트와 확장이 용이
+4. **일괄 작업 지원**: CI/CD 프로세스에서 자동으로 일괄 이미지 생성 실행 가능
+
+一切都淡了......可这方案啊,还真是用上了。
+
+이 솔루션은 HagiCode 자체의 개발 효율성을 높일 뿐만 아니라 재사용 가능한 이미지 자산 관리 프레임워크를 형성했습니다。만약 당신도 유사한 다중 구성 요소 프로젝트를 개발 중이라면 ImgBin의 설계 아이디어가 영감을 줄 것이라 확신합니다。
+
+青春嘛,总是要折腾的。不折腾折腾,怎么知道自个儿几斤几两呢？
+
+---
+
+## 참고 자료
+
+- ImgBin 기술 제안: https://github.com/HagiCode-org/site/tree/main/openspec/changes/archive/2026-03-10-imgbin-cli-tool
+- HagiCode 공식 웹사이트: https://hagicode.com
+- HagiCode GitHub: https://github.com/HagiCode-org/site
+
+---
+
+感谢您的阅读,如果您觉得本文有用,快点击下方点赞按钮,让更多的人看到本文。
+
+本内容采用人工智能辅助协作,经本人审核,符合本人观点与立场。
+
+- 本文作者: [newbe36524](https://www.newbe.pro)
+- 本文链接: [https://docs.hagicode.com/blog/2026-03-13-imgbin-cli-tool-asset-management/](https://docs.hagicode.com/blog/2026-03-13-imgbin-cli-tool-asset-management/)
+- 版权声明: 本博客所有文章除特别声明外,均采用 BY-NC-SA 许可协议。版权所有!

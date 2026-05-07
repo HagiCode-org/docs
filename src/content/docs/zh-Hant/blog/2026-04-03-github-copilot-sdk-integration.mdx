@@ -1,0 +1,395 @@
+---
+title: 從 CLI 調用到 SDK 整合:GitHub Copilot 在 .NET 專案中的最佳實踐
+date: 2026-04-03
+tags: [GitHub Copilot, .NET, AI 整合, Orleans, SDK 整合]
+description: "從命令列調用到官方 SDK 整合的升級之路,說起來也算是一段經歷,今天就分享我們在 HagiCode 專案中踩過的坑和學到的東西。"
+---
+
+## 從 CLI 調用到 SDK 整合:GitHub Copilot 在 .NET 專案中的最佳實踐
+
+> 從命令列調用到官方 SDK 整合的升級之路,說起來也算是一段經歷,今天就分享我們在 HagiCode 專案中踩過的坑和學到的東西。
+
+## 背景設定
+
+GitHub Copilot SDK 在 2025 年正式發布後,我們開始將其整合到 AI 能力層中。在此之前的專案,主要透過直接呼叫 Copilot CLI 命令列工具來使用 GitHub Copilot 能力,這種方式其實也存在幾個明顯問題:
+
+- **程序管理複雜**:需要手動管理 CLI 程序的生命週期、啟動逾時和程序清理——畢竟程序這東西,說崩潰就崩潰了,也沒什麼預兆
+- **事件處理不完整**:原始 CLI 呼叫難以擷取模型推理過程和工具執行的細粒度事件,就像只能看到結果,卻看不到思考的過程
+- **會話管理困難**:缺乏有效的會話複用和恢復機制,每次都得重新開始,想想也是挺累的
+- **相容性問題**:CLI 參數更新頻繁,需要持續維護參數相容性邏輯,這無異於和風車作戰了
+
+這些問題在日常開發中逐漸顯現,特別是在需要即時追蹤模型推理過程(thinking)和工具執行狀態時,CLI 呼叫的侷限性尤為明顯。我們也算是想明白了,需要一個更底層、更完整的整合方式——畢竟,條條大路通羅馬,只是有的路好走一點,有的路稍微曲折一點罷了。
+
+## 關於 HagiCode
+
+本文分享的方案來自我們在 [HagiCode](https://hagicode.com) 專案中的實踐經驗。HagiCode 是一個開源的 AI 程式碼助手專案,在開發過程中我們需要深度整合 GitHub Copilot 的各種能力——從基礎的程式碼補全到複雜的多輪對話和工具呼叫。這些實際需求推動我們從 CLI 呼叫升級到了官方 SDK 整合。
+
+如果你對本文的實踐方案感興趣,說明我們的工程實踐可能對你有幫助——那麼 HagiCode 專案本身也值得關注一下。或許在文末你會發現更多關於專案的資訊和連結,誰知道呢......
+
+## 架構設計
+
+專案採用了分層架構來解決 CLI 呼叫的問題:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  hagicode-core (Orleans Grains + AI Provider Layer)    │
+│  - CopilotAIProvider: 將 AIRequest 轉換為 CopilotOptions │
+│  - GitHubCopilotGrain: Orleans 分散式執行介面            │
+└─────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────┐
+│  HagiCode.Libs (Shared Provider Layer)                 │
+│  - CopilotProvider: CLI Provider 介面實作               │
+│  - ICopilotSdkGateway: SDK 呼叫抽象                     │
+│  - GitHubCopilotSdkGateway: SDK 會話管理與事件分發     │
+└─────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────┐
+│  GitHub Copilot SDK (Official .NET SDK)                │
+│  - CopilotClient: SDK 用戶端                            │
+│  - CopilotSession: 會話管理                             │
+│  - SessionEvent: 事件串流                                 │
+└─────────────────────────────────────────────────────────┘
+```
+
+這種分層設計帶來的技術優勢,其實也還挺實用的:
+
+1. **關注點分離**:核心業務邏輯與 SDK 實作細節解耦——畢竟,什麼層做什麼事,井水不犯河水
+2. **可測試性**:透過 `ICopilotSdkGateway` 介面可以輕鬆進行單元測試,測試起來也不那麼費勁
+3. **複用性**:HagiCode.Libs 可被多個專案引用,寫一次,多處用
+4. **可維護性**:SDK 升級只需修改 Gateway 層,上面的程式碼不用動,美得很
+
+## 核心實作
+
+### 認證流程
+
+認證是 SDK 整合的第一步,也是最重要的一步——畢竟,門都進不去,後面的事情就免談了。我們設計了一個靈活的認證配置,支援多種認證來源:
+
+```csharp
+// CopilotProvider.cs - 認證來源配置
+public class CopilotOptions
+{
+    public bool UseLoggedInUser { get; set; } = true;
+    public string? GitHubToken { get; set; }
+    public string? CliUrl { get; set; }
+}
+
+// 轉換為 SDK 請求
+return new CopilotSdkRequest(
+    GitHubToken: options.AuthSource == CopilotAuthSource.GitHubToken
+        ? options.GitHubToken
+        : null,
+    UseLoggedInUser: options.AuthSource != CopilotAuthSource.GitHubToken
+);
+```
+
+這個設計的好處,其實也挺明顯的:
+
+- 支援已登入使用者模式(無需 token),適合桌面端場景——使用者用自己的帳號登入就行
+- 支援 GitHub Token 模式,適用於伺服器端部署——統一管理也方便
+- 支援 Copilot CLI URL 覆蓋,方便企業代理配置——企業環境嘛,總有些特殊的規矩
+
+在實際使用中,這種靈活的認證方式大大簡化了不同部署場景的配置工作。桌面端可以使用使用者自己的 Copilot 登入狀態,伺服器端則可以透過 Token 進行統一管理。怎麼說呢,各取所需罷了。
+
+### 事件串流處理
+
+SDK 最強大的能力之一,應該就是對事件串流的完整擷取了。我們實作了一個事件分發系統,能夠即時處理各種 SDK 事件——畢竟,知道過程和只知道結果,感覺還是不一樣的:
+
+```csharp
+// GitHubCopilotSdkGateway.cs - 事件分發核心邏輯
+internal static SessionEventDispatchResult DispatchSessionEvent(
+    SessionEvent evt, bool sawDelta)
+{
+    switch (evt)
+    {
+        case AssistantReasoningEvent reasoningEvent:
+            // 擷取模型推理過程
+            events.Add(new CopilotSdkStreamEvent(
+                CopilotSdkStreamEventType.ReasoningDelta,
+                Content: reasoningEvent.Data.Content));
+            break;
+
+        case ToolExecutionStartEvent toolStartEvent:
+            // 擷取工具呼叫開始
+            events.Add(new CopilotSdkStreamEvent(
+                CopilotSdkStreamEventType.ToolExecutionStart,
+                ToolName: toolStartEvent.Data.ToolName,
+                ToolCallId: toolStartEvent.Data.ToolCallId));
+            break;
+
+        case ToolExecutionCompleteEvent toolCompleteEvent:
+            // 擷取工具呼叫完成及結果
+            events.Add(new CopilotSdkStreamEvent(
+                CopilotSdkStreamEventType.ToolExecutionEnd,
+                Content: ExtractToolExecutionContent(toolCompleteEvent)));
+            break;
+
+        default:
+            // 未處理事件作為 RawEvent 保留
+            events.Add(new CopilotSdkStreamEvent(
+                CopilotSdkStreamEventType.RawEvent,
+                RawEventType: evt.GetType().Name));
+            break;
+    }
+}
+```
+
+這個實作帶來的價值,怎麼說呢:
+
+- **完整擷取模型推理過程**(thinking):使用者可以看到 AI 的思考過程,而不僅僅是最終結果——就像知道答案不如知道怎麼思考出來的
+- **即時追蹤工具執行狀態**:知道哪些工具正在執行、何時完成、回傳了什麼結果
+- **零事件遺失**:透過 fallback 到 RawEvent 機制,確保所有事件都被記錄,什麼都不落下
+
+在 HagiCode 的實際使用中,這些細粒度的事件讓使用者能夠更深入地理解 AI 的工作過程,特別是在除錯複雜任務時——這還是有點用處的。
+
+### CLI 相容性處理
+
+從 CLI 呼叫遷移到 SDK 後,我們發現一些原有的 CLI 參數在 SDK 中不再適用。為了保持向後相容,我們實作了一個參數過濾系統——畢竟,舊設定不能用,也挺讓人頭疼的:
+
+```csharp
+// CopilotCliCompatibility.cs - 參數過濾
+private static readonly Dictionary<string, string> RejectedFlags = new()
+{
+    ["--headless"] = "不支援的啟動參數",
+    ["--model"] = "透過 SDK 原生欄位傳遞",
+    ["--prompt"] = "透過 SDK 原生欄位傳遞",
+    ["--interactive"] = "由 provider 管理互動",
+};
+
+public static CopilotCliArgumentBuildResult BuildCliArgs(CopilotOptions options)
+{
+    // 過濾不支援的參數,保留相容參數
+    // 生成診斷資訊
+}
+```
+
+這樣做的好處:
+
+- 自動過濾不相容的 CLI 參數,避免執行時錯誤——程式崩潰可不是鬧著玩的
+- 生成清晰的錯誤診斷資訊,幫助開發者快速定位問題
+- 保證 SDK 穩定性,不受 CLI 參數變化的影響
+
+在升級過程中,這個相容性處理機制幫助我們平滑過渡,舊的設定檔仍然可以使用,只需要根據診斷資訊逐步調整即可——也算個漸進的過程了。
+
+### 執行時期池化
+
+Copilot SDK 的會話建立成本較高,頻繁建立和銷毀會話會影響效能。我們實作了一個會話池管理系統——就像池子裡的水,用完了再裝,不如留著下次接著用:
+
+```csharp
+// CopilotProvider.cs - 會話池管理
+await using var lease = await _poolCoordinator.AcquireCopilotRuntimeAsync(
+    request,
+    async ct => await _gateway.CreateRuntimeAsync(sdkRequest, ct),
+    cancellationToken);
+
+if (lease.IsWarmLease)
+{
+    // 複用已有會話
+    yield return CreateSessionReusedMessage();
+}
+
+await foreach (var eventData in lease.Entry.Resource.SendPromptAsync(...))
+{
+    yield return MapEvent(eventData);
+}
+```
+
+會話池化的好處:
+
+- **會話複用**:相同 sessionId 的請求可以複用已有會話,減少啟動開銷
+- **支援會話恢復**:網路中斷後可以恢復之前的會話狀態——畢竟網路這東西,誰敢保證一直穩定呢
+- **自動池化管理**:自動清理過期會話,避免資源洩漏
+
+在 HagiCode 的實際使用中,會話池化顯著提升了回應速度,特別是在處理連續對話時效果明顯——這種提升還是能感覺到的。
+
+### Orleans 整合
+
+HagiCode 使用 Orleans 作為分散式框架,我們將 Copilot SDK 整合到了 Orleans Grain 中——分散式這東西,說起來複雜,用起來倒也挺順手:
+
+```csharp
+// GitHubCopilotGrain.cs - 分散式執行
+public async IAsyncEnumerable<GitHubCopilotResponse> ExecuteCommandStreamAsync(
+    string command,
+    CancellationToken token = default)
+{
+    var provider = await aiProviderFactory.GetProviderAsync(AIProviderType.GitHubCopilot);
+
+    await foreach (var chunk in provider.SendMessageAsync(request, null, token))
+    {
+        // 對應為統一的回應格式
+        yield return BuildChunkResponse(chunk, startedAt);
+    }
+}
+```
+
+Orleans 整合帶來的優勢:
+
+- **統一的 AI Provider 抽象**:可以輕鬆切換不同的 AI 提供商——今天用這個,明天用那個,也挺靈活
+- **多租戶隔離**:不同使用者的 Copilot 會話相互隔離,井水不犯河水
+- **持久化會話狀態**:會話狀態可以跨伺服器重啟恢復,重啟也不怕丟資料
+
+對於需要處理大量並發請求的場景,Orleans 的分散式能力提供了很好的擴充性——畢竟,單機扛不住的時候,只能靠分散式頂上了。
+
+## 實踐指南
+
+### 配置範例
+
+以下是一個完整的配置範例——直接複製貼上改改就能用:
+
+```json
+{
+  "AI": {
+    "Providers": {
+      "Providers": {
+        "GitHubCopilot": {
+          "Enabled": true,
+          "ExecutablePath": "copilot",
+          "Model": "gpt-5",
+          "WorkingDirectory": "/path/to/project",
+          "Timeout": 7200,
+          "StartupTimeout": 30,
+          "UseLoggedInUser": true,
+          "NoAskUser": true,
+          "Permissions": {
+            "AllowAllTools": false,
+            "AllowedTools": ["Read", "Bash", "Grep"],
+            "DeniedTools": ["Edit"]
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+### 使用注意事項
+
+在實際使用中,我們總結了一些需要注意的地方——有些是踩坑得來的經驗:
+
+**啟動逾時配置**:首次啟動 Copilot CLI 需要較長時間,建議設定 `StartupTimeout` 至少 30 秒。如果是首次登入,可能需要更長的時間——畢竟首次登入總得驗證一下,這也沒辦法。
+
+**權限管理**:正式環境避免使用 `AllowAllTools: true`。使用 `AllowedTools` 白名單控制可用工具,使用 `DeniedTools` 黑名單禁止危險操作。這樣可以有效防止 AI 執行危險指令——安全這東西,小心點總是對的。
+
+**會話管理**:相同 `sessionId` 的請求會自動複用會話。會話狀態透過 `ProviderSessionId` 持久化。取消操作透過 `CancellationTokenSource` 傳遞——會話管理做得好,體驗自然就好。
+
+**診斷輸出**:不相容的 CLI 參數會生成 `diagnostic` 類型訊息。原始 SDK 事件以 `event.raw` 類型保留。錯誤資訊包含分類(啟動逾時、參數不相容等),方便排查問題——出了問題能快速定位,也算是一種安慰了。
+
+### 最佳實踐
+
+基於我們的實際經驗,這裡分享一些最佳實踐——算是一些總結吧:
+
+**1. 使用工具白名單**
+
+```csharp
+var request = new AIRequest
+{
+    Prompt = "分析這個檔案",
+    AllowedTools = new[] { "Read", "Grep", "Bash(git:*)" }
+};
+```
+
+透過白名單明確指定允許的工具,避免 AI 執行意外操作。特別是對於有寫入權限的工具(如 Edit),需要格外謹慎——畢竟刪庫這種事,誰也不想經歷。
+
+**2. 設定合理的逾時**
+
+```csharp
+options.Timeout = 3600;  // 1小時
+options.StartupTimeout = 60;  // 1分鐘
+```
+
+根據任務的複雜度設定合適的逾時時間。太短可能導致任務中斷,太長則可能浪費資源等待無回應的請求——凡事適度,過猶不及。
+
+**3. 啟用會話複用**
+
+```csharp
+options.SessionId = "my-session-123";
+```
+
+為相關任務設定相同的 sessionId,可以複用之前的會話上下文,提升回應速度——上下文這東西,有時候還挺重要的。
+
+**4. 處理串流回應**
+
+```csharp
+await foreach (var chunk in provider.StreamAsync(request))
+{
+    switch (chunk.Type)
+    {
+        case StreamingChunkType.ThinkingDelta:
+            // 處理推理過程
+            break;
+        case StreamingChunkType.ToolCallDelta:
+            // 處理工具呼叫
+            break;
+        case StreamingChunkType.ContentDelta:
+            // 處理文字輸出
+            break;
+    }
+}
+```
+
+串流回應可以即時顯示 AI 的處理進度,提升使用者體驗。特別是對於耗時任務,即時回饋非常重要——看著進度條總比乾等著強。
+
+**5. 錯誤處理和重試**
+
+```csharp
+try
+{
+    await foreach (var chunk in provider.StreamAsync(request))
+    {
+        // 處理回應
+    }
+}
+catch (CopilotSessionException ex)
+{
+    // 處理會話異常
+    logger.LogError(ex, "Copilot session failed");
+    // 根據異常類型決定是否重試
+}
+```
+
+適當的錯誤處理和重試機制可以提升系統的穩定性——誰也不能保證程式永遠不出錯,出了錯能處理好就行。
+
+## 總結
+
+從 CLI 呼叫到 SDK 整合的升級,為 HagiCode 專案帶來了顯著的價值——怎麼說呢,這次升級還挺值的:
+
+- **穩定性提升**:SDK 提供了更穩定的介面,不受 CLI 版本變化影響——不用天天擔心版本更新了
+- **功能完整性**:能夠擷取完整的事件串流,包括推理過程和工具執行狀態——過程和結果都能看到
+- **開發效率**:型別安全的 SDK 介面讓開發更高效,減少執行時錯誤——有型別檢查,心裡踏實
+- **使用者體驗**:即時的事件回饋讓使用者更清晰地了解 AI 的工作過程——知道它在想什麼,總比一無所知強
+
+這次升級不僅僅是技術方案的替換,更是對整個 AI 能力層架構的優化。透過分層設計和抽象介面,我們獲得了更好的可維護性和可擴充性——架構做好了,後面的事情就好辦了。
+
+如果你正在考慮將 GitHub Copilot 整合到你的 .NET 專案中,希望本文的實踐經驗能夠幫助你少走一些彎路。官方 SDK 確實比 CLI 呼叫更加穩定和完整,值得投入時間去理解和掌握——畢竟,正確的工具能讓事情事半功倍,這話也不是沒有道理的。
+
+## 參考資料
+
+- [GitHub Copilot SDK 官方文件](https://docs.github.com/en/copilot)
+- [Orleans 分散式框架](https://learn.microsoft.com/en-us/dotnet/orleans/)
+- [HagiCode 專案 GitHub 存儲庫](https://github.com/HagiCode-org/site)
+- [HagiCode 官方文件](https://docs.hagicode.com)
+- [.NET 依賴注入最佳實踐](https://docs.microsoft.com/en-us/dotnet/core/extensions/dependency-injection-guidelines)
+
+---
+
+如果本文對你有幫助:
+
+- 點個讚讓更多人看到——你的支持,對我們很重要
+- 來 GitHub 給個 Star:[github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- 訪問官網了解更多:[hagicode.com](https://hagicode.com)
+- 觀看 30 分鐘實戰演示:[www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)
+- 一鍵安裝體驗:[docs.hagicode.com/installation/docker-compose](https://docs.hagicode.com/installation/docker-compose)
+- Desktop 桌面端快速安裝:[hagicode.com/desktop/](https://hagicode.com/desktop/)
+- 公測已開始,歡迎安裝體驗
+
+---
+
+寫到這裡也差不多了。技術文章嘛,總是寫不完的,畢竟技術在發展,我們也在學習。如果你在使用 HagiCode 的過程中什麼問題或建議,歡迎隨時聯絡我們。好了,就這樣吧......
+
+## 版權說明
+
+感謝您的閱讀,如果您覺得本文有用,歡迎點讚、收藏和分享支持。
+本內容採用人工智能輔助協作,最終內容由作者審核並確認。
+- 本文作者:[newbe36524](https://www.newbe.pro)
+- 原文連結:[https://docs.hagicode.com/blog/2026-04-03-github-copilot-sdk-integration/](https://docs.hagicode.com/blog/2026-04-03-github-copilot-sdk-integration/)
+- 版權聲明:本部落格所有文章除特別聲明外,均採用 BY-NC-SA 許可協議。轉載請註明出處!

@@ -1,0 +1,378 @@
+---
+title: 如何用 GitHub Actions 實現 Steam 自動化發布
+date: 2026-04-16
+tags: [GitHub Actions, Steam, 自動化發布, DevOps, CI/CD]
+description: "本文分享了 HagiCode Desktop 專案中實現 Steam 自動化發布的完整方案，從 GitHub Release 到 Steam 平台的全鏈路自動化流程，包"
+---
+
+## 如何用 GitHub Actions 實現 Steam 自動化發布
+
+> 本文分享了 HagiCode Desktop 專案中實現 Steam 自動化發布的完整方案，從 GitHub Release 到 Steam 平台的全鏈路自動化流程，包括 Steam Guard 認證、多平台 Depot 上傳等關鍵技術細節。
+
+## 背景
+
+Steam 平台的發布流程，其實和傳統的應用分發方式挺不一樣的。Steam 有自己的一套完整更新分發系統，開發者得通過 SteamCMD 工具把構建產物上傳到 Steam 的 CDN 網路，而不是像其他平台那樣直接丟個下載連結就完事了。
+
+HagiCode Desktop 專案計畫上架 Steam 平台，這也算是給我們的發布流程帶來了點新挑戰：
+
+1. 需要把現有的構建產物轉換成 Steam 相容的格式
+2. 得通過 SteamCMD 工具上傳到 Steam 平台
+3. 還必須處理 Steam Guard 認證這玩藝兒
+4. 需要支援多平台（Linux、Windows、macOS）的 Depot 上傳
+5. 還要實現從 GitHub Release 到 Steam 的自動化流轉
+
+專案此前已經實現了「便攜版模式」（portable version mode），允許應用檢測打包在 extra 目錄中的固定服務載荷。我們的目標，其實就是讓這套便攜版模式和 Steam 分發能無縫集成罷了。
+
+## 關於 HagiCode
+
+本文分享的方案，來自我們在 [HagiCode](https://hagicode.com) 專案中的實踐經驗。HagiCode 是一個 AI 程式碼助手專案，支援桌面端運行，我們正在推進 Steam 平台的上架工作，因此才需要建立一套可靠的自動化發布流程。
+
+## 架構設計
+
+整個 Steam 發布流程的核心是一個 GitHub Actions 工作流，它把整個過程分為三個主要階段：
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ GitHub Actions Workflow (Steam Release)                      │
+├─────────────────────────────────────────────────────────────┤
+│ 1. 準備階段:                                                 │
+│    - 檢出 portable-version 程式碼                             │
+│    - 從 GitHub Release 下載構建產物                         │
+│    - 解壓並準備 Steam 內容目錄                              │
+│                                                             │
+│ 2. SteamCMD 設置:                                           │
+│    - 安裝/複用 SteamCMD                                     │
+│    - 使用 Steam Guard 進行認證                              │
+│                                                             │
+│ 3. 發布階段:                                                 │
+│    - 生成 Depot VDF 配置檔案                                │
+│    - 生成 App Build VDF 配置檔案                            │
+│    - 呼叫 SteamCMD 上傳到 Steam                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+這種設計的優勢，怎麼說呢：
+- 複用現有的 GitHub Release 產物，避免重複構建，畢竟誰願意重複勞動呢
+- 通過自託管運行器實現安全隔離，多一層保障總是好的
+- 支援預覽模式和正式發布分支切換，靈活一點
+- 完整的錯誤處理和日誌記錄，出問題的時候不至於太迷茫
+
+## 工作流實現
+
+### 觸發參數設計
+
+我們的工作流支援以下關鍵參數：
+
+```yaml
+inputs:
+  release:           # Portable Version 發布標籤
+    description: '要發布的版本標籤（如 v1.0.0）'
+    required: true
+  steam_preview:     # 是否生成預覽構建
+    description: '是否為預覽模式'
+    required: false
+    default: 'false'
+  steam_branch:      # 設置為 live 的 Steam 分支
+    description: '目標 Steam 分支'
+    required: false
+    default: 'preview'
+  steam_description: # 構建描述覆蓋
+    description: '構建描述'
+    required: false
+```
+
+### 自託管運行器配置
+
+出於安全考慮，我們使用帶 steam 標籤的自託管運行器：
+
+```yaml
+runs-on:
+  - self-hosted
+  - Linux
+  - X64
+  - steam
+```
+
+這樣可以確保 Steam 發布在專用運行器上執行，保持敏感憑證的安全隔離。畢竟安全這事兒，多注意一點總是好的。
+
+### 並發控制
+
+為了避免同一版本的發布相互干擾，我們配置了並發控制：
+
+```yaml
+concurrency:
+  group: portable-version-steam-${{ github.event.inputs.release }}
+  cancel-in-progress: false
+```
+
+注意這裡設置 `cancel-in-progress: false`，因為 Steam 發布過程可能較長，我們也不想因為新的觸發就取消正在進行的發布。畢竟發布個版本也不容易，總得讓人家跑完不是？
+
+## 核心腳本實現
+
+### 準備發布輸入
+
+`prepare-steam-release-input.mjs` 腳本負責準備發布所需的輸入：
+
+```javascript
+// 下載 GitHub Release 的構建清單和產物清單
+const buildManifest = await downloadBuildManifest(releaseTag);
+const artifactInventory = await downloadArtifactInventory(releaseTag);
+
+// 下載各平台的壓縮包
+for (const platform of ['linux-x64', 'win-x64', 'osx-universal']) {
+  const artifactUrl = getArtifactUrl(artifactInventory, platform);
+  await downloadArtifact(artifactUrl, platform);
+}
+
+// 解壓到 Steam 內容目錄結構
+await extractToSteamContent(sources, contentRoot);
+```
+
+### Steam Guard 認證
+
+Steam 要求使用 Steam Guard 保護帳戶，我們實現了基於共享密鑰的程式碼生成演算法：
+
+```javascript
+function generateSteamGuardCode(sharedSecret, timestamp = Date.now()) {
+  const secret = decodeSharedSecret(sharedSecret);
+  const time = Math.floor(timestamp / 1000 / 30);
+
+  const timeBuffer = Buffer.alloc(8);
+  timeBuffer.writeBigUInt64BE(BigInt(time));
+
+  // 使用 HMAC-SHA1 生成時間基礎的一次性程式碼
+  const hash = crypto.createHmac('sha1', secret)
+    .update(timeBuffer)
+    .digest();
+
+  // 轉換為 5 字元的 Steam Guard 程式碼
+  const code = steamGuardCode(hash);
+  return code;
+}
+```
+
+這個實現基於 Steam Guard 的 TOTP（Time-based One-Time Password）機制，每 30 秒生成一個新的驗證碼。畢竟安全這東西，還是得用靠譜的方式才行。
+
+### VDF 配置生成
+
+VDF（Valve Data Format）是 Steam 使用的配置格式，我們需要生成兩種類型的 VDF 檔案：
+
+**Depot VDF** 用於配置各個平台的內容：
+
+```javascript
+function buildDepotVdf(depotId, contentRoot) {
+  return [
+    '"DepotBuildConfig"',
+    '{',
+    `  "DepotID" "${escapeVdf(depotId)}"`,
+    `  "ContentRoot" "${escapeVdf(contentRoot)}"`,
+    '  "FileMapping"',
+    '  {',
+    '    "LocalPath" "*"',
+    '    "DepotPath" "."',
+    '    "recursive" "1"',
+    '  }',
+    '}'
+  ].join('\n');
+}
+```
+
+**App Build VDF** 用於配置整個應用構建：
+
+```javascript
+function buildAppBuildVdf(appId, depotBuilds, description, setLive) {
+  const vdf = [
+    '"appbuild"',
+    '{',
+    `  "appid" "${appId}"`,
+    `  "desc" "${escapeVdf(description)}"`,
+    `  "contentroot" "${escapeVdf(contentRoot)}"`,
+    '  "buildoutput" "build_output"',
+    '  "depots"',
+    '  {'
+  ];
+
+  for (const [depotId, depotVdfPath] of Object.entries(depotBuilds)) {
+    vdf.push(`    "${depotId}" "${depotVdfPath}"`);
+  }
+
+  if (setLive) {
+    vdf.push(`  }`);
+    vdf.push(`  "setlive" "${setLive}"`);
+  }
+
+  vdf.push('}');
+  return vdf.join('\n');
+}
+```
+
+### SteamCMD 呼叫
+
+最後，通過呼叫 SteamCMD 執行上傳：
+
+```javascript
+await runCommand(steamcmdPath, [
+  '+login', steamUsername, steamPassword, steamGuardCode,
+  '+run_app_build', appBuildPath,
+  '+quit'
+]);
+```
+
+這一步算是整個流程的最後一躍，跨過去就完成了......
+
+## 多平台 Depot 處理
+
+Steam 使用 Depot 系統管理不同平台的內容，我們支援三種主要的 Depot：
+
+| 平台 | Depot 標識 | 架構支援 |
+|-----|-----------|---------|
+| Linux | `linux-x64` | x64_64 |
+| Windows | `win-x64` | x64_64 |
+| macOS | `osx-universal` | universal, x64_64, arm64 |
+
+每個 Depot 都有獨立的內容目錄和 VDF 配置檔案，這樣可以確保不同平台的用戶只下載自己需要的內容。畢竟流量也是錢，能省一點是一點。
+
+## 發布流程
+
+### 步驟 1：準備 GitHub Release
+
+首先需要在 portable-version 倉庫創建一個 GitHub Release，包含：
+- 各平台的壓縮包
+- 構建清單（`{tag}.build-manifest.json`）
+- 產物清單（`{tag}.artifact-inventory.json`）
+
+### 步驟 2：觸發 Steam 發布工作流
+
+通過 GitHub Actions 手動觸發工作流，填寫必要參數：
+- `release`: 要發布的版本標籤（如 v1.0.0）
+- `steam_branch`: 目標分支（如 `preview` 或 `public`）
+- `steam_preview`: 是否預覽模式
+
+### 步驟 3：自動執行發布流程
+
+工作流會自動執行以下步驟：
+
+1. 下載並解壓 GitHub Release 產物
+2. 安裝/更新 SteamCMD
+3. 生成 Steam VDF 配置檔案
+4. 使用 Steam Guard 認證
+5. 上傳內容到 Steam CDN
+6. 設置指定分支為 live
+
+這套流程走下來，也算是把該做的都做了。
+
+## 配置指南
+
+### 必需的 Secrets 配置
+
+在 GitHub 倉庫設置中配置以下密鑰：
+
+| Secret 名稱 | 說明 |
+|-----------|------|
+| `STEAM_USERNAME` | Steam 帳戶用戶名 |
+| `STEAM_PASSWORD` | Steam 帳戶密碼 |
+| `STEAM_SHARED_SECRET` | Steam Guard 共享密鑰（可選） |
+| `STEAM_GUARD_CODE` | Steam Guard 程式碼（可選） |
+| `STEAM_APP_ID` | Steam 應用 ID |
+| `STEAM_DEPOT_ID_LINUX` | Linux Depot ID |
+| `STEAM_DEPOT_ID_WINDOWS` | Windows Depot ID |
+| `STEAM_DEPOT_ID_MACOS` | macOS Depot ID |
+
+這些配置項，其實也沒什麼特別的，就是該有的都得有罷了。
+
+### 環境變量配置
+
+| 變量名稱 | 說明 | 預設值 |
+|---------|------|--------|
+| `PORTABLE_VERSION_STEAMCMD_ROOT` | SteamCMD 安裝目錄 | `~/.local/share/portable-version/steamcmd` |
+
+## 最佳實踐
+
+### Steam Guard 認證管理
+
+首次運行需要手動輸入 Steam Guard 程式碼，之後建議配置共享密鑰自動生成程式碼。這樣可以避免每次發布都需要手動干預，畢竟誰也不想每次都重複同樣的操作。
+
+SteamCMD 會保存登入令牌，後續可以複用。但要注意令牌的有效期，過期後還是得重新認證的，這也沒辦法。
+
+### 內容目錄結構
+
+確保 Steam 內容目錄結構正確：
+
+```
+steam-content/
+├── linux-x64/     # Linux 平台內容
+├── win-x64/       # Windows 平台內容
+└── osx-universal/ # macOS 通用二進制內容
+```
+
+每個目錄下應該包含對應平台的完整應用檔案。這點倒也沒什麼好說的，該怎麼做就怎麼做。
+
+### 預覽模式使用
+
+預覽模式不會設置任何分支為 live，適合測試驗證：
+
+```yaml
+if [ "$STEAM_PREVIEW_INPUT" = 'true' ]; then
+  cmd+=(--preview)
+fi
+```
+
+這樣可以先上傳到 Steam 平台進行驗證，確認無誤後再切換到正式分支。多一層驗證，總是好的。
+
+### 錯誤處理和日誌
+
+腳本包含了完善的錯誤處理和日誌記錄：
+- 驗證 GitHub Release 存在性
+- 檢查必需的元數據檔案
+- 確保平台內容存在
+- 生成 GitHub Actions 摘要報告
+
+這些資訊對於調試和審計都非常有價值，畢竟出問題的時候能有個線索，總比一頭霧水要好。
+
+### 產物管理
+
+工作流生成兩種產物：
+- `portable-steam-release-preparation-{tag}`: 發布準備元數據
+- `portable-steam-build-metadata-{tag}`: Steam 構建元數據
+
+這些產物可以用於後續的審計和調試，保存時間建議設置為 30 天。反正也不佔多少地方，留著也無妨。
+
+## 實際應用
+
+在 HagiCode 專案中，這套自動化發布流程已經成功運行了多個版本。從 GitHub Release 到 Steam 平台的整個鏈路完全自動化，無需人工干預。
+
+這大大提高了我們的發布效率和可靠性。之前手動發布一個版本需要 30 分鐘以上的時間，現在只需要幾分鐘就能完成整個流程。時間這東西，省下來總歸是好的。
+
+更重要的是，自動化流程減少了人為錯誤的可能性，每次發布都是標準化的流程，結果也更加可預測。畢竟重複的事情交給機器去做，人也輕鬆點。
+
+## 總結
+
+通過本文分享的方案，我們實現了：
+1. 從 GitHub Release 到 Steam 平台的自動化
+2. 支援多平台的 Depot 上傳
+3. 基於 Steam Guard 的安全認證
+4. 預覽模式和正式發布的靈活切換
+5. 完善的錯誤處理和日誌記錄
+
+這套方案不僅適用於 HagiCode 專案，也可以為其他計畫上架 Steam 平台的專案提供參考。如果你也在考慮 Steam 自動化發布，希望本文的實踐能夠對你有所幫助。
+
+其實技術這東西，說複雜也複雜，說簡單也簡單。關鍵是找到適合自己的方式罷了。
+
+如果本文對你有幫助，歡迎來 HagiCode 的 GitHub 倉庫給個 Star，或者訪問官網了解更多資訊。
+
+## 參考資料
+
+- [SteamCMD Documentation](https://developer.valvesoftware.com/wiki/SteamCMD)
+- [Steamworks SDK](https://partner.steamgames.com/)
+- [HagiCode 專案地址](https://github.com/HagiCode-org/site)
+- [HagiCode 官網](https://hagicode.com)
+- [HagiCode 安裝指南](https://docs.hagicode.com/installation/docker-compose)
+- [HagiCode Desktop 桌面端](https://hagicode.com/desktop/)
+
+## 版權說明
+
+感謝您的閱讀,如果您覺得本文有用,歡迎點贊、收藏和分享支持。
+本內容採用人工智能輔助協作,最終內容由作者審核並確認。
+- 本文作者: [newbe36524](https://www.newbe.pro)
+- 原文連結: [https://docs.hagicode.com/blog/2026-04-16-steam-release-automation-github-actions/](https://docs.hagicode.com/blog/2026-04-16-steam-release-automation-github-actions/)
+- 版權聲明: 本部落格所有文章除特別聲明外,均採用 BY-NC-SA 許可協議。轉載請註明出處!

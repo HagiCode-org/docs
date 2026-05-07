@@ -1,0 +1,343 @@
+---
+title: .NET 코드 보호 실전: 난독화에서 가상머신 보호까지
+date: 2026-03-18
+tags: [dotnet, code-protection, obfuscation, vmprotect, security]
+description: "이 문서에서는 .NET 프로젝트에서 다층 코드 보호 전략을 구현하는 방법을 소개합니다. 기본 난독화부터 전문 가상머신 보호까지 전체 솔루션을 다룹니다."
+---
+
+## .NET 코드 보호 실전: 난독화에서 가상머신 보호까지
+
+> 이 문서에서는 .NET 프로젝트에서 다층 코드 보호 전략을 구현하는 방법을 소개합니다. 기본 난독화부터 전문 가상머신 보호까지 전체 솔루션을 다룹니다.
+
+## 배경
+
+.NET 애플리케이션 개발에서 핵심 코드(라이선스 검증, 비즈니스 로직, 민감한 구성 등)가 디컴파일과 리버스 엔지니어링으로부터 보호되는 것은, 솔직히 말해서 피할 수 없는 주제입니다. .NET 생태계의 성숙과 함께 개발자는 내장 난독화 속성부터 전문 가상화 보호 도구까지 다양한 코드 보호 수단을 갖게 되었고, 선택할 수 있는 옵션도 꽤 많습니다.
+
+복잡한 다언어 monorepo 프로젝트인 HagiCode는 데스크톱 애플리케이션, 빌드 시스템, 라이선스 관리 기능을 포함합니다. 코드에는 필연적으로 라이선스 검증 로직, 민감한 구성(API 키, 제품 ID 등), 비즈니스 핵심 로직이 포함되어 있습니다. 이런 것들은 철저히 보호해야 합니다. 결국 누구도 자신의 노력이 쉽게 남들에게 드러나는 것을 원하지 않습니다.
+
+이 문서에서는 HagiCode 프로젝트에서 실제로 채택한 코드 보호 솔루션을 공유하고, 시행착오부터 최적화까지의 전체 과정을 정리합니다. 아마도 여러분에게 어떤 영감을 줄 수 있을 것입니다.
+
+## HagiCode에 대해
+
+[HagiCode](https://hagicode.com)는 개발자에게 지능형 프로그래밍 보조 경험을 제공하는 것을 목표로 하는 오픈소스 AI 코드 어시스턴트 프로젝트입니다. 프로젝트는 monorepo 아키텍처를 채택하여 VSCode 확장, 백엔드 AI 서비스, 크로스플랫폼 데스크톱 클라이언트 등 여러 컴포넌트를 동시에 유지 관리합니다. 이러한 다언어, 다플랫폼의 복잡성으로 인해 코드 보호는 반드시 직면해야 하는 엔지니어링 과제가 되었습니다. 어쩔 수 없죠, 프로젝트가 이렇게 복잡하니까요.
+
+이 문서에서 공유하는 솔루션은 HagiCode 개발 과정에서 실제로 시행착오를 겪고 실제로 최적화한 것입니다. 우리가 이러한 기술적 문제들을 어떻게 해결했는지 알고 싶다면 계속 읽어보세요. 뜻밖의 수확이 있을지도 모릅니다.
+
+## 핵심 내용
+
+### 1. 마이크로소프트 내장 난독화 Attribute
+
+.NET Framework는 내장된 `[ObfuscationAttribute]`를 제공합니다. 이것이 가장 기본적이고 가장 널리 사용되는 코드 난독화 마커입니다. 이 속성은 `System.Reflection` 네임스페이스에 있으며, 서드파티 도구를 도입하지 않고도 코드를 기본적으로 보호할 수 있어 꽤 편리합니다.
+
+**핵심 특성**:
+- `Feature` 속성: 난독화 특성 지정(예: `"ultra"`(고도 난독화), `"all"`(전체 난독화))
+- `Exclude` 속성: `true`는 난독화 제외, `false`는 난독화 적용
+- 클래스, 메서드, 속성 등 타입 멤버에 적용 가능
+
+HagiCode 프로젝트에서 실제 사용 예를 볼 수 있습니다:
+
+```csharp
+[Obfuscation(Feature = "ultra", Exclude = false)]
+public async Task<LicenseValidationResult?> ValidateLicenseAsync(...)
+```
+
+이 방식의 **장점**은 꽤 명확합니다:
+- 추가 의존성이 필요 없고, .NET Framework에 내장되어 있어 많은 일을 절약합니다
+- 서드파티 난독화 도구가 인식하고 처리할 수 있습니다
+- 컴파일된 어셈블리 크기를 크게 증가시키지 않습니다
+
+하지만 한계도 있습니다: 단순한 마커 역할만 하며, 실제 난독화 효과는 도구 구현에 의존합니다. 가상머신 보호 수준의 보안을 제공할 수 없습니다. 이것도 어쩔 수 없습니다. 원래 그런 용도로 만들어진 것이 아니니까요.
+
+### 2. VMP(Virtual Machine Protection)
+
+VMP는 코드를 가상머신 명령어로 컴파일하여 고급 보호를 제공하는 전문 코드 보호 도구입니다. 단순한 이름 난독화와 달리 VMP는 코드 로직을 일반 디컴파일러가 복원할 수 없는 형태로 실제로 변환합니다. 이 점은 꽤 훌륭합니다.
+
+**보호 수준 분류**:
+
+| 수준 | 가상화 | 변이 | 안티디버깅 | 문자열 암호화 | 적용 시나리오 |
+|------|--------|------|--------|------------|----------|
+| HIGH | full | high | 활성화 | 활성화 | 라이선스 검증, 세션 동시성, 민감한 상수 |
+| MEDIUM | partial | medium | 활성화 | 활성화 | 비즈니스 로직, 도메인 모델 |
+| LOW | none | low | 비활성화 | 비활성화 | 유틸리티 클래스, 비중요 코드 |
+
+HagiCode 프로젝트는 보호가 필요한 코드를 표시하기 위해 선언적 속성 시스템을 정의했습니다:
+
+```csharp
+// 높은 우선순위 보호
+[VmProtect(VmProtectionPriority.High, Reason = "Contains license verification logic")]
+public class KeygenClient { ... }
+
+// 보호 제외
+[VmExclude(Reason = "Public API that must remain unchanged")]
+public class PublicApi { ... }
+
+// 상속 보호
+[VmProtect(Priority.High, ProtectDerived = true)]
+public class BaseLicenseValidator { ... }
+```
+
+### 3. 빌드 시 보호 전략
+
+VMP 보호는 런타임에만 적용되는 것이 아니라 빌드 프로세스에서 자동화해야 합니다. 수동으로 하면 너무 번거롭습니다. HagiCode의 빌드 시스템은 여러 모드를 지원합니다:
+
+- **Windows 네이티브 모드**: VMProtect 도구를 직접 호출
+- **Linux Docker 컨테이너 모드**: 컨테이너에서 VMP 실행(크로스플랫폼 호환성 문제 해결)
+- **Attribute 스캔**: 코드의 보호 마커 자동 발견
+- **검증 메커니즘**: 보호가 성공적으로 적용되었는지 확인
+
+이러한 기능들이 결합되어 꽤 편리합니다.
+
+## 솔루션
+
+### 1. 마이크로소프트 내장 난독화 Attribute 사용
+
+코드에 `ObfuscationAttribute`를 직접 적용합니다:
+
+```csharp
+using System.Reflection;
+
+[Obfuscation(Feature = "ultra", Exclude = false)]
+public class LicenseService
+{
+    [Obfuscation(Feature = "ultra", Exclude = false)]
+    public async Task<bool> ValidateLicenseAsync(string key)
+    {
+        // 라이선스 검증 로직
+    }
+
+    [Obfuscation(Feature = "flow", Exclude = false)]
+    private string DecryptToken(string encrypted)
+    {
+        // 복호화 로직
+    }
+}
+```
+
+때로는 테스트 어셈블리가 내부 멤버에 접근하도록 하면서 동시에 프로덕션 코드의 보안을 유지해야 할 때가 있습니다:
+
+```csharp
+// AssemblyInfo.cs
+[assembly: InternalsVisibleTo("HagiCode.Application.Tests")]
+[assembly: InternalsVisibleTo("DynamicProxyGenAssembly2")] // for Moq
+```
+
+이렇게 하면 테스트하기가 훨씬 편합니다. 결국 코드는 테스트해야 하니까요.
+
+### 2. VMP 보호를 위한 사용자 정의 Attribute 정의
+
+VMP 동작을 제어하기 위해 사용자 정의 보호 속성을 만듭니다:
+
+```csharp
+using System;
+
+[AttributeUsage(AttributeTargets.Class | AttributeTargets.Method | AttributeTargets.Property)]
+public class VmProtectAttribute : Attribute
+{
+    public VmProtectionPriority Priority { get; set; }
+    public string? Reason { get; set; }
+    public bool ProtectDerived { get; set; }
+}
+
+[AttributeUsage(AttributeTargets.Class | AttributeTargets.Method | AttributeTargets.Property)]
+public class VmExcludeAttribute : Attribute
+{
+    public string? Reason { get; set; }
+}
+
+public enum VmProtectionPriority
+{
+    None = 0,
+    Low = 1,
+    Medium = 2,
+    High = 3
+}
+```
+
+직접 정의한 속성이 더 사용하기 편합니다. 자신의 요구사항을 잘 알고 있으니까요.
+
+### 3. VMP 구성 파일
+
+```yaml
+# vmp_config.yml
+protection:
+  priority_mode: "attribute"  # Attribute 기반 우선순위
+  default_level: "medium"
+
+tools:
+  - name: "vmprotect"
+    path: "C:\\Program Files\\VMProtect Ultimate\\VMProtect.exe"
+
+protection_levels:
+  high:
+    virtualization: "full"
+    mutation: "high"
+    anti_debug: true
+    anti_dump: true
+    encrypt_strings: true
+    encrypt_resources: true
+
+  medium:
+    virtualization: "partial"
+    mutation: "medium"
+    anti_debug: true
+    encrypt_strings: true
+
+  low:
+    virtualization: "none"
+    mutation: "low"
+    anti_debug: false
+```
+
+구성을 명확하게 작성해두면 나중에 유지 관리하기도 편합니다.
+
+## 실전 가이드
+
+### 1. 핵심 컴포넌트 보호 실전
+
+HagiCode의 code-protection 사양에 따라 다음 컴포넌트는 HIGH 우선순위 보호를 사용해야 합니다:
+
+```csharp
+// 프로덕션 환경 상수 - 반드시 암호화하고 VMP 보호 필요
+[VmProtect(VmProtectionPriority.High, Reason = "Production constants")]
+public static class ProductionConstants
+{
+    // VMP로 보호되는 암호화된 문자열 접근자
+    [VmProtect(VmProtectionPriority.High)]
+    public static string GetLicenseServerUrl(IOptions<LicenseOptions> options) => ...;
+}
+
+// 라이선스 검증 로직
+[VmProtect(VmProtectionPriority.High, Reason = "License verification logic")]
+public class KeygenClient : IKeygenClient
+{
+    [Obfuscation(Feature = "ultra", Exclude = false)]
+    public async Task<LicenseValidationResult?> ValidateLicenseAsync(...) { ... }
+}
+
+// 머신 지문 서비스
+[VmProtect(VmProtectionPriority.High)]
+public class MachineFingerprintService : IMachineFingerprintService { ... }
+```
+
+핵심 코드는 중점적으로 보호해야 합니다. 핵심 로직이 유출되면 곤란하니까요.
+
+### 2. 문자열 암호화 런타임 복호화
+
+빌드 시 문자열을 암호화하고 런타임에 복호화합니다:
+
+```csharp
+public static class StringDecryption
+{
+    [VmProtect(VmProtectionPriority.High, Reason = "CRITICAL SECURITY")]
+    public static string DecryptString(byte[] encryptedData, byte[] key, byte[] iv)
+    {
+        using var aes = Aes.Create();
+        aes.Key = key;
+        aes.IV = iv;
+
+        using var decryptor = aes.CreateDecryptor();
+        using var ms = new MemoryStream(encryptedData);
+        using var cs = new CryptoStream(ms, decryptor, CryptoStreamMode.Read);
+        using var reader = new StreamReader(cs);
+
+        return reader.ReadToEnd();
+    }
+}
+
+// 프로덕션 상수 접근자(지연 로딩 + 캐싱)
+public static class ProductionConstants
+{
+    private static string? _cachedLicenseServerUrl;
+
+    public static string GetLicenseServerUrl(IOptions<LicenseOptions> options)
+    {
+        if (_cachedLicenseServerUrl == null)
+        {
+            var encrypted = GetEncryptedLicenseServerUrl();
+#if DEBUG
+            _cachedLicenseServerUrl = options.Value.PrimaryServer.Url;
+#else
+            _cachedLicenseServerUrl = StringDecryption.DecryptString(
+                encrypted,
+                GetEncryptionKey(),
+                GetEncryptionIV());
+#endif
+        }
+        return _cachedLicenseServerUrl;
+    }
+}
+```
+
+문자열 암호화 단계도 꽤 중요합니다. 민감한 정보를 평문으로 둘 수는 없으니까요.
+
+### 3. VMP 보호 검증
+
+빌드 후 보호가 성공적으로 적용되었는지 검증해야 합니다. 그래야 보호가 적용되었는지 알 수 있습니다:
+
+```csharp
+// 검증 스크립트 예
+public bool VerifyProtection(string assemblyPath)
+{
+    // 1. VMP 서명 확인
+    var bytes = File.ReadAllBytes(assemblyPath);
+    var vmpSignature = Encoding.ASCII.GetBytes("VMProtect");
+    if (bytes.Any(b => vmpSignature.Contains(b)))
+    {
+        return true;
+    }
+
+    // 2. 파일 크기 변화 확인(보호 후 일반적으로 커짐)
+    var originalInfo = new FileInfo(assemblyPath.Replace(".dll", ".bak"));
+    if (originalInfo.Exists)
+    {
+        var sizeRatio = (double)new FileInfo(assemblyPath).Length / originalInfo.Length;
+        return sizeRatio > 1.1;
+    }
+
+    return false;
+}
+```
+
+검증하는 것은 항상 좋습니다. 나중에 문제가 생겨도 모르는 상황을 방지할 수 있습니다.
+
+### 4. 주의사항
+
+여기有几 가지 주의해야 할 함정이 있습니다. 우리 모두 겪어왔던 것들입니다:
+
+1. **모든 코드를 난독화하지 마세요**: 공용 API, 인터페이스 정의, DTO 클래스는 일반적으로 보호가 필요하지 않습니다. 과도한 난독화는 성능과 디버깅에 영향을 줍니다. HagiCode 프로젝트도 이 부분에서 고생한 적이 있습니다. 이 점을 주의하세요
+
+2. **키 접근자 보호**: 암호화 키 가져오기 메서드는 암호화된 데이터와 동급 또는 더 높은 수준의 보호를 받아야 합니다. 그렇지 않으면 무용지물입니다. 의미가 없어집니다
+
+3. **테스트와 프로덕션의 균형**: DEBUG 빌드는 개발 디버깅을 위해 암호화를 건너뛰어야 하고, RELEASE 빌드는 전체 보호를 활성화해야 합니다. 조건부 컴파일 `#if DEBUG`를 사용하여 구분하세요. 그래야 개발하기 편합니다
+
+4. **Docker 환경 고려**: Linux 환경에서 VMP를 실행하려면 컨테이너화 솔루션을 사용해야 하며, 보호 도구의 호환성을 보장해야 합니다. HagiCode는 Wine + VMP 컨테이너 솔루션을 사용합니다. 크로스플랫폼 문제는 이렇게 해결했습니다
+
+5. **검증은 필수**: 빌드 완료 후 보호가 성공했는지 검증해야 합니다. 그렇지 않으면 민감한 코드가 노출될 수 있습니다. 앞서 언급한 검증 코드가 바로 이 역할을 합니다. 확인하는 것이 좋습니다
+
+## 요약
+
+이러한 다층 보호 전략을 통해 HagiCode는 기본 난독화부터 가상머신 보호까지 포괄적인 코드 보안 체계를 구현했습니다:
+
+- **1단계**: `ObfuscationAttribute`를 사용하여 기본 마커를 제공하고 서드파티 도구에 힌트 제공
+- **2단계**: 사용자 정의 `VmProtectAttribute`를 통해 보호 의도와 우선순위 선언
+- **3단계**: VMP 가상머신 보호가 핵심 코드를 되돌릴 수 없는 가상머신 명령어로 변환
+- **4단계**: 빌드 시 자동 스캔으로 보호를 적용하고 보호 결과를 검증
+
+这套 솔루션은 일반 디컴파일 도구뿐만 아니라 고급 리버스 엔지니어링 공격도 방어할 수 있습니다. 코드 보호가 필요한 .NET 애플리케이션을 개발 중이라면 참고가 되었기를 바랍니다. 작은 영감이라도 얻으셨다면 충분합니다.
+
+## 참고 자료
+
+- [VMProtect 공식 문서](https://vmpsoft.com/)
+- [.NET ObfuscationAttribute 문서](https://docs.microsoft.com/en-us/dotnet/api/system.reflection.obfuscationattribute)
+- [HagiCode 프로젝트 메인 페이지](https://github.com/HagiCode-org/site)
+- [HagiCode 공식 문서](https://docs.hagicode.com)
+
+---
+
+이 문서가 도움이 되셨다면:
+- GitHub에서 Star 주세요: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- 공식 웹사이트를 방문하여 자세히 알아보세요: [hagicode.com](https://hagicode.com)
+- 30분 실전 데모 시청: [www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)
+- 원클릭 설치 체험: [docs.hagicode.com/installation/docker-compose](https://docs.hagicode.com/installation/docker-compose)
+- Desktop 데스크톱 클라이언트 빠른 설치: [hagicode.com/desktop/](https://hagicode.com/desktop/)
+- 공베타가 시작되었습니다. 설치하여 체험해 보세요

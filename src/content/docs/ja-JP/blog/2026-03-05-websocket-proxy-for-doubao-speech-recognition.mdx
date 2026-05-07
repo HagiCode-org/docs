@@ -1,0 +1,502 @@
+---
+title: ブラウザWebSocket認証の課題解決：豆包音声認識のプロキシソリューション実践
+date: 2026-03-05
+tags: [WebSocket, Proxy, Speech Recognition, Authentication, Backend]
+description: "ブラウザのWebSocket APIはカスタムHTTPヘッダーをサポートしていないため、ヘッダー経由で認証情報を渡す必要がある音声認証サービスにとって課題となります。本文ではHagiCode"
+---
+
+## ブラウザWebSocket認証の課題解決：豆包音声認識のプロキシソリューション実践
+
+> ブラウザのWebSocket APIはカスタムHTTPヘッダーをサポートしていないため、ヘッダー経由で認証情報を渡す必要がある音声認識サービスにとって課題となります。本文ではHagiCodeプロジェクトでバックエンドプロキシソリューションを通じてこの課題を解決した方法と、playgroundから本番環境への実践プロセスを共有します。
+
+
+## 背景
+
+実はHagiCodeプロジェクトの音声認識機能を開発していた時、私たちは自信満々に字节跳动の豆包音声認識サービスを選びました。最初の設計はとてもシンプルでした——フロントエンドが豆包のWebSocketサービスに直接接続する。これが何の難しいことでしょうか？ただ接続を確立して、データを転送するだけですよね？
+
+でも、まさか豆包のAPIがHTTPヘッダー経由で認証情報を渡すことを要求しているとは思いもしませんでした。accessTokenとかsecretKeyとかですね。これだと少し気まずいことになりました。なぜならブラウザのWebSocket APIはカスタムヘッダーの設定を全くサポートしていないからです。
+
+サポートしていないならどうすればいいのでしょうか？
+
+その時はしばらく悩みました。目の前にあった2つの選択肢：
+
+1. 認証情報をURLクエリパラメータに詰め込む——シンプルで荒っぽい
+2. バックエンドでプロキシ層を作る——ちょっと面倒そう
+
+最初の方案ですが、認証情報がフロントエンドコードとローカルストレージにそのまま露出してしまいます。これは安全でしょうか？私はあまり賛成できません。さらに、一部のAPIはヘッダーでの検証を必須としており、全く通りません。
+
+最終的に考えた結果、2番目の方案を選びました——バックエンドでWebSocketプロキシを実装する。実は偶然にも、この方案は最初に私たちのplayground試験場で検証され、その後安定していることを確認してから本番環境に適用されました。結局のところ、誰も本番環境で実験台になりたくないでしょう、このくらいのことは分かっています。
+
+## HagiCodeについて
+
+本文で共有する方案は、[HagiCode](https://github.com/HagiCode-org/site)プロジェクトでの実践経験から来ています。
+
+HagiCodeはAIコードアシスタントプロジェクトで、音声対話機能をサポートしています。どういうわけか、フロントエンドで音声認識サービスを呼び出す必要があったため、私たちはこのWebSocket認証の問題に遭遇し、その後の解決策が生まれました。時々思うのですが、困難というものも全くメリットがないわけではなく、少なくともプロキシの使い方を学べましたよね？
+
+## 技術的課題の分析
+
+### ブラウザWebSocketの制限
+
+標準WebSocket APIは本当にシンプルに見えます：
+
+```javascript
+const ws = new WebSocket('wss://example.com/ws');
+```
+
+でも問題は「シンプル」という点にあります——パラメータはURLの中でしか渡せず、HTTPリクエストのようにheadersを設定できないのです：
+
+```javascript
+// これはWebSocket APIではサポートされていません
+const ws = new WebSocket('wss://example.com/ws', {
+  headers: {
+    'Authorization': 'Bearer token'
+  }
+});
+```
+
+見てください、これを誰に文句を言えばいいのでしょうか？豆包音声認識のようにヘッダー認証が必要なサービスにとって、この制限は越えられない壁のようなものです。
+
+まあ、どうすることもできないですね。
+
+### アーキテクチャ設計の決定
+
+方案を設計する際、私たちはあれこれ考え、何度も衡量しました。
+
+**決定一：プロキシモードの選択**
+
+私たちは2つの方案を比較しました：
+
+| 方案 | メリット | デメリット | 決定 |
+|------|------|------|------|
+| ネイティブWebSocket | 軽量、シンプル、直接転送 | 接続管理を手動で処理する必要がある | 選択 |
+| SignalR | 自動再接続、強い型付け | 過度に複雑、追加の依存関係 | 非選択 |
+
+最終的にネイティブWebSocketを選びました。正直に言うと、最も軽量で、シンプルな双方向バイナリストリーム転送に適しているからです。SignalRを追加するのは、確かにちょっと大げさな感じがしますし、レイテンシも増えます——これなら何もする必要はありませんよね？
+
+**決定二：接続管理戦略**
+
+私たちは「1接続1セッション」モードを採用しました——各フロントエンドWebSocket接続が独立した豆包バックエンド接続に対応します。
+
+这样做的好处也是显而易见的：
+- 实现简单，符合典型使用场景
+- 易于调试和故障排查
+- 资源隔离，避免会话间互相干扰
+
+其实说白了也就是——简单粗暴有时候反而是最好的选择。复杂的方案不一定好，简单的不一定差。
+
+**決定三：認証情報の保存**
+
+認証情報はバックエンド設定ファイル（appsettings.ymlまたは環境変数）に保存され、依存性注入を通じて読み込まれます：
+
+- 設定方式がシンプルで、既存のバックエンド設定モードに合致
+- 機密情報がフロントエンドに露出しない
+- マルチ環境設定をサポート（開発、テスト、本番）
+
+この安心感というのは、やはり必要です。結局のところ、誰も自分の認証情報が飛び回るのを望みませんよね？
+
+### データフローの設計
+
+全体のデータフローはこのようになります：
+
+```
+フロントエンド (ブラウザ)
+  │
+  │ ws://backend/api/voice/ws
+  │ WebSocket (バイナリ)
+  ▼
+バックエンド (プロキシ)
+  │
+  │ wss://openspeech.bytedance.com/
+  │ (認証ヘッダー付き)
+  ▼
+豆包API
+```
+
+プロセスはそれほど複雑ではなく、たったこれらのステップです：
+1. フロントエンドがWebSocketを通じてバックエンドプロキシに接続
+2. バックエンドプロキシがオーディオデータを受信し、ヘッダー付きで豆包APIに接続
+3. 豆包APIが認識結果を返し、プロキシがフロントエンドに転送
+4. 全プロセス非同期双方向ストリーミング転送
+
+すべてが自然に見えますよね？
+
+## コアコンポーネントの実装
+
+### 1. WebSocketエンドポイントの設定
+
+```csharp
+app.Map("/ws", async context =>
+{
+    if (context.WebSockets.IsWebSocketRequest)
+    {
+        // クエリパラメータから設定を読み取る
+        var appId = context.Request.Query["appId"];
+        var accessToken = context.Request.Query["accessToken"];
+
+        // 必須パラメータの検証
+        if (string.IsNullOrEmpty(appId) || string.IsNullOrEmpty(accessToken))
+        {
+            context.Response.StatusCode = 400;
+            return;
+        }
+
+        // WebSocket接続を受け入れる
+        using var webSocket = await context.WebSockets.AcceptWebSocketAsync();
+
+        // メッセージ処理ループ
+        var buffer = new byte[4096];
+        while (!webSocket.CloseStatus.HasValue)
+        {
+            var result = await webSocket.ReceiveAsync(buffer, CancellationToken.None);
+
+            if (result.MessageType == WebSocketMessageType.Close)
+            {
+                await webSocket.CloseAsync(
+                    result.CloseStatus.Value,
+                    result.CloseStatusDescription,
+                    CancellationToken.None);
+                break;
+            }
+
+            // オーディオデータの処理
+            await HandleAudioDataAsync(buffer, result.Count);
+        }
+    }
+});
+```
+
+### 2. セッション管理
+
+```csharp
+public class DoubaoSessionManager : IDoubaoSessionManager
+{
+    private readonly ConcurrentDictionary<string, DoubaoSession> _sessions = new();
+
+    public DoubaoSession CreateSession(string connectionId)
+    {
+        var session = new DoubaoSession(connectionId);
+        _sessions[connectionId] = session;
+        return session;
+    }
+
+    public async Task SendAudioAsync(string connectionId, byte[] audioData)
+    {
+        if (_sessions.TryGetValue(connectionId, out var session))
+        {
+            await session.SendAudioAsync(audioData);
+        }
+    }
+
+    public void RemoveSession(string connectionId)
+    {
+        if (_sessions.TryRemove(connectionId, out var session))
+        {
+            session.Dispose();
+        }
+    }
+}
+```
+
+ConcurrentDictionaryでセッションを管理すれば、スレッドセーフも気にする必要がありません。各接続が入ってくればSessionを作成し、切断時に自動的にクリーンアップ——これがいわゆる「来るのも去るのも早い」ということでしょう。
+
+### 3. 設定の検証
+
+```csharp
+public class ClientConfigDto
+{
+    public string AppId { get; set; } = null!;
+    public string AccessToken { get; set; } = null!;
+    public string? ServiceUrl { get; set; }
+    public string? ResourceId { get; set; }
+    public int? SampleRate { get; set; }
+    public int? BitsPerSample { get; set; }
+    public int? Channels { get; set; }
+
+    public void Validate()
+    {
+        if (string.IsNullOrWhiteSpace(AppId))
+            throw new ArgumentException("AppId is required");
+        if (string.IsNullOrWhiteSpace(AccessToken))
+            throw new ArgumentException("AccessToken is required");
+    }
+}
+```
+
+設定検証は、起動時に問題を発見するためであり、実行時に何か予期しないことが起こるのを防ぐためです。このくらいの保障は必要です。
+
+## メッセージプロトコルの設計
+
+フロントエンドとバックエンドの間ではJSON形式のテキストメッセージで制御を行い、バイナリメッセージでオーディオデータを転送します。
+
+制御メッセージの例：
+
+```json
+{
+    "type": "control",
+    "messageId": "msg_123",
+    "timestamp": "2026-03-03T10:00:00Z",
+    "payload": {
+        "command": "StartRecognition",
+        "parameters": {
+            "hotwordId": "hotword1",
+            "boosting_table_id": "table123"
+        }
+    }
+}
+```
+
+認識結果の例：
+
+```json
+{
+    "type": "result",
+    "timestamp": "2026-03-03T10:00:03Z",
+    "payload": {
+        "text": "こんにちは世界",
+        "confidence": 0.95,
+        "duration": 1500,
+        "isFinal": true,
+        "utterances": [
+            {
+                "text": "こんにちは",
+                "startTime": 0,
+                "endTime": 800,
+                "definite": true
+            }
+        ]
+    }
+}
+```
+
+このような設計により、制御シグナルとオーディオデータを分離し、処理がより明確になります。時には分けて治めるのも良い方法です。
+
+## フロントエンド接続の実践
+
+### WebSocket接続
+
+```javascript
+class DoubaoVoiceClient {
+    constructor(config) {
+        this.config = config;
+        this.ws = null;
+    }
+
+    async connect() {
+        const url = new URL(this.config.wsUrl);
+        // クエリパラメータを追加
+        Object.entries(this.config.params).forEach(([key, value]) => {
+            url.searchParams.set(key, value);
+        });
+
+        this.ws = new WebSocket(url);
+
+        return new Promise((resolve, reject) => {
+            this.ws.onopen = () => {
+                console.log('[DoubaoVoice] Connected');
+                resolve();
+            };
+
+            this.ws.onmessage = (event) => {
+                this._handleMessage(JSON.parse(event.data));
+            };
+
+            this.ws.onerror = reject;
+        });
+    }
+
+    _handleMessage(message) {
+        switch (message.type) {
+            case 'status':
+                this._handleStatus(message.payload);
+                break;
+            case 'result':
+                this.onResult?.(message.payload);
+                break;
+            case 'error':
+                console.error('[DoubaoVoice] Error:', message.payload);
+                break;
+        }
+    }
+}
+
+// 使用例
+const client = new DoubaoVoiceClient({
+    wsUrl: 'ws://localhost:5000/ws',
+    params: {
+        appId: 'your-app-id',
+        accessToken: 'your-access-token',
+        sampleRate: 16000,
+        bitsPerSample: 16,
+        channels: 1
+    }
+});
+```
+
+### オーディオ収集と送信
+
+AudioWorkletNodeでオーディオ処理を行えば、パフォーマンスも良くなります：
+
+```javascript
+// audio-worklet.js
+class AudioProcessorWorklet extends AudioWorkletProcessor {
+    process(inputs, outputs, parameters) {
+        const input = inputs[0]?.[0];
+        if (!input) return true;
+
+        // 16-bit PCMに変換
+        const pcm = new Int16Array(input.length);
+        for (let i = 0; i < input.length; i++) {
+            pcm[i] = Math.max(-32768, Math.min(32767, input[i] * 32767));
+        }
+
+        this.port.postMessage({
+            type: 'audioData',
+            data: pcm.buffer
+        }, [pcm.buffer]);
+
+        return true;
+    }
+}
+
+registerProcessor('audio-processor', AudioProcessorWorklet);
+
+// メインスレッドコード
+async function startAudioRecording() {
+    const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+            sampleRate: 48000
+        }
+    });
+
+    const audioContext = new AudioContext();
+    const audioSource = audioContext.createMediaStreamSource(stream);
+
+    await audioContext.audioWorklet.addModule('/audio-worklet.js');
+    const audioWorkletNode = new AudioWorkletNode(audioContext, 'audio-processor');
+
+    audioWorkletNode.port.onmessage = (event) => {
+        if (event.data.type === 'audioData' && ws?.readyState === WebSocket.OPEN) {
+            ws.send(event.data.data); // バイナリデータを直接送信
+        }
+    };
+
+    audioSource.connect(audioWorkletNode);
+}
+```
+
+AudioWorkletはScriptProcessorNodeよりパフォーマンスがはるかに良く、オーディオの途切れ問題がありません。この時代、誰でもまだあのザザッというノイズを聞きたいと思うのでしょうか？
+
+## バックエンド設定
+
+### appsettings.jsonの例
+
+```json
+{
+  "Serilog": {
+    "MinimumLevel": {
+      "Default": "Information",
+      "Override": {
+        "Microsoft": "Warning",
+        "System": "Warning"
+      }
+    },
+    "WriteTo": [
+      { "Name": "Console" },
+      {
+        "Name": "File",
+        "Args": { "path": "logs/log-.txt", "rollingInterval": "Day" }
+      }
+    ]
+  },
+  "Kestrel": {
+    "Urls": "http://0.0.0.0:5000"
+  }
+}
+```
+
+ログ設定は問題の追跡に役立ちます。SerilogのFile sinkは日次でローテートでき、ログファイルも大きくなりすぎません。結局のところ、一部の問題については、事後の诸葛亮（あとから言うのは簡単）の方が少し簡単です。
+
+## 注意事項とベストプラクティス
+
+### 1. 接続監視
+
+- 定期的にセッション状態ログを出力し、接続ライフサイクルの追跡を容易にする
+- オーディオセグメント数と持続時間を監視し、異常接続を識別する
+- 豆包サービスとの接続状態と再接続状況を記録する
+
+これらは基本的な操作に過ぎません。
+
+### 2. エラーハンドリング
+
+- すべてのWebSocket例外をキャッチして記録する
+- IAsyncDisposableを使用してリソースのクリーンアップを確実にする
+- エレガントな接続終了とタイムアウト処理を実装する
+
+要するに、安定第一です。
+
+### 3. オーディオフォーマット要件
+
+- サンプリングレート：16000 Hz（推奨）または 8000 Hz
+- ビット深度：16-bit
+- チャンネル：モノラル
+- エンコーディング：PCM (raw)
+
+フォーマットが間違っていると認識失敗や効果が悪くなります。このくらいのルールは守るべきです。
+
+### 4. セキュリティ考慮事項
+
+- 機密の認証情報はバックエンド設定にのみ保存する
+- 接続数制限を実装し、リソース枯渇を防ぐ
+- 本番環境ではHTTPS/WSSを使用する
+
+セキュリティは小事ではありません、慎重に進めましょう。
+
+### 5. パフォーマンス最適化
+
+- 非同期操作を使用してブロッキングを回避する
+- バッファサイズを適切に調整する（デフォルト4096バイト）
+- 接続プールと再利用戦略を検討する
+
+これらの最適化手段は、使えるものは使いましょう。
+
+## デプロイ提案
+
+1. **Dockerデプロイ**：プロキシサービスをコンテナにパッケージ化し、拡張と管理を容易にする
+2. **負荷分散**：NginxまたはEnvoyでWebSocketリバースプロキシを行う
+3. **ヘルスチェック**：ハートビートメカニズムを実装し、サービス可用性を監視する
+4. **ログ集約**：ログを集中ログシステム（ELK、Lokiなど）に送信する
+
+デプロイというのは、簡単とも言えるし、複雑とも言えます。人によって異なり、状況によります。
+
+## まとめ
+
+WebSocketプロキシソリューションは、ブラウザWebSocket APIがカスタムヘッダーをサポートしていないという根本的な問題を解決しました。HagiCodeプロジェクトでは、このソリューションはplaygroundでの検証から本番環境へのデプロイまで、その実現可能性と安定性を証明しました。
+
+重要なポイントのまとめ：
+- バックエンドプロキシは認証情報を安全に転送できる
+- ネイティブWebSocketは軽量で高効率、シンプルなシーンに適している
+- 「1接続1セッション」が実装とデバッグを簡素化
+- フロントエンドとバックエンドのメッセージプロトコルが制御シグナルとオーディオデータを分離
+
+もしあなたもWebSocket認証が必要な機能を開発しているなら、このソリューションが何らかのインスピレーションを与えれば幸いです。
+
+何か質問があれば、ぜひ議論に参加してください。技術というのは、結局のところ交流の中で進歩するものです。
+
+## 参考資料
+
+- [HagiCodeプロジェクトリポジトリ](https://github.com/HagiCode-org/site)
+- [MDN Web API - WebSocket](https://developer.mozilla.org/en-US/docs/Web/API/WebSocket)
+- [豆包音声認識ドキュメント](https://www.volcengine.com/docs/6561/81958)
+
+---
+
+お読みいただきありがとうございます。もしこの記事が役に立ったと思ったら、下のいいねボタン👍をクリックして、より多くの人にこの記事を見ていただければ幸いです。
+
+本内容は人工知能による支援の下作成され、私自身が審査を行い、私の視点と立場に合致することを確認しています。
+
+- 本文の著者: [newbe36524](https://www.newbe.pro)
+- 本文のリンク: [https://docs.hagicode.com/blog/2026-03-05-websocket-proxy-for-doubao-speech-recognition/](https://docs.hagicode.com/blog/2026-03-05-websocket-proxy-for-doubao-speech-recognition/)
+- 著作権声明: 本ブログのすべての記事は特別な声明を除き、BY-NC-SAライセンス契約を採用しています。転載する場合は出典を明記してください！

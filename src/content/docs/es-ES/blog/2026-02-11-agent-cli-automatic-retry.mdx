@@ -1,0 +1,300 @@
+---
+title: Cómo implementar el reintento automático para Agent CLI como Claude Code y Codex
+date: 2026-04-18
+tags: [Agent CLI, Claude Code, Codex, reintento automático, HagiCode]
+description: "El reintento automático parece un pequeño interruptor, pero en la práctica de ingeniería es algo completamente diferente. Hola a todos, productores de HagiCode, soy Yu Kun, productor de HagiCode. Hoy no hablaremos de palabras vacías, sino de cómo implementar realmente el reintento automático para Agent CLI como Claude Code y Codex."
+---
+
+## Cómo implementar el reintento automático para Agent CLI como Claude Code y Codex
+
+> El reintento automático parece un pequeño interruptor, pero en la práctica de ingeniería es algo completamente diferente. Hola a todos, productores de HagiCode, soy Yu Kun, productor de HagiCode. Hoy no hablaremos de palabras vacías, sino de cómo implementar realmente el reintento automático para Agent CLI como Claude Code y Codex, de modo que podamos manejar las excepciones sin llevar al sistema a una ejecución interminable.
+
+## Antecedentes
+
+Si últimamente también estás experimentando con programación con IA, probablemente ya te hayas encontrado con este tipo de problemas: las tareas no fallan desde el principio, sino que se interrumpen a mitad de camino.
+
+En el caso de solicitudes HTTP normales, muchas veces basta con reenviar, añadiendo como máximo un retroceso exponencial. Pero los Agent CLI son diferentes. Herramientas como Claude Code y Codex suelen ejecutarse de manera fluida, la salida se envía por fragmentos, y durante el proceso se vinculan thread, session o resume token. En otras palabras, no se trata de si esta solicitud falló o no, sino:
+
+- Si el contenido ya enviado sigue siendo válido
+- Si el contexto actual puede continuar ejecutándose
+- Si este fallo debería recuperarse automáticamente
+- Si se va a recuperar, cuánto tiempo esperar antes de reintentar, qué enviar al reintentar, y si se debe reutilizar el contexto original
+
+Muchos equipos que hacen esto por primera vez escribirán inconscientemente la versión más simple: si hay un error, inténtalo de nuevo. Esta idea es muy natural, pero una vez que entra en el proyecto, los problemas surgen uno tras otro.
+
+- Algunos errores que claramente son fallos temporales se tratan como fallos finales
+- Algunos errores que no merecen la pena reintentar se repiten una y otra vez
+- Las solicitudes con thread y sin thread se tratan indistintamente
+- Las estrategias de retroceso no tienen límites, las solicitudes en segundo plano se autodestruyen
+
+HagiCode también ha caído en estos errores al integrar múltiples Agent CLI. Especialmente en el lado de Codex, el problema inicial que surgió fue que cierto tipo de mensajes de reconexión no se reconocían como un estado final reintentable, por lo que el mecanismo de recuperación existente nunca tuvo la oportunidad de entrar en vigor. En pocas palabras, no era que el sistema no tuviera reintento automático, sino que el sistema no reconocía que "este fallo merece la pena reintentarse".
+
+Por lo tanto, el punto central que este artículo quiere explicar es muy claro: **el reintento automático no es un botón, sino un diseño por capas.**
+
+## Sobre HagiCode
+
+La solución compartida en este artículo proviene de nuestra práctica real en el proyecto [HagiCode](https://hagicode.com). Lo que HagiCode pretende hacer no es simplemente conectar un modelo y terminar, sino unificar los mensajes fluidos, las llamadas a herramientas, la recuperación de fallos y el contexto de sesión de múltiples Agent CLI en un modelo de ejecución que pueda mantenerse a largo plazo.
+
+Una de las cosas que más me preocupa es cómo hacer que la programación con IA realmente llegue a la práctica de ingeniería. Escribir un demo no es difícil, lo difícil es convertir el demo en algo que el equipo realmente quiera usar a largo plazo. HagiCode se toma en serio el reintento automático no porque esta función parezca avanzada, sino porque si la ejecución CLI de cadena larga, fluida y reanudable no se conecta de manera estable, lo que ven los usuarios no es un asistente inteligente, sino un envoltorio de comandos que se desconecta a mitad de camino todo el tiempo.
+
+Si quieres ver primero la entrada del proyecto, aquí hay dos:
+
+- GitHub: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Sitio web oficial: [hagicode.com](https://hagicode.com)
+
+Un paso más, HagiCode ya está disponible en Steam, los amigos de Steam pueden añadirlo a su lista de deseos:
+
+- [Página de tienda de Steam (añadir a la lista de deseos / ver detalles)](https://store.steampowered.com/app/4625540/Hagicode/)
+
+## Por qué el reintento automático de Agent CLI es más difícil que el reintento normal
+
+Esta pregunta es muy práctica, vayamos directamente a la conclusión: la dificultad del reintento automático de Agent CLI no está en "volver a intentarlo después de unos segundos", sino en "si se puede continuar en el contexto original".
+
+Puedes entenderlo como una conversación larga. El reintento de API normal es más como volver a marcar cuando la línea está ocupada; mientras que el reintento de Agent CLI es más como cuando la señal se corta a mitad de conversación, primero debes decidir si devolver la llamada, si después de devolverla debes empezar desde el principio, y si la otra parte todavía recuerda por dónde iban. ¿Quién dice que estas dos cosas son lo mismo? Simplemente no son el mismo problema de ingeniería.
+
+Específicamente, hay cuatro dificultades típicas.
+
+### 1. Es fluido
+
+Una vez que la salida ya se ha enviado al usuario, no puedes manejar el fallo en silencio y volver a intentarlo discretamente como lo harías con una solicitud normal. Porque esa parte del contenido ya se ha visto, y si la estrategia es incorrecta al volver a reproducir, el frontend很容易 verá texto duplicado, estados desordenados, y el ciclo de vida de las llamadas a herramientas también se desordenará. Esto no es magia negra, es ingeniería.
+
+### 2. Generalmente vincula contexto de sesión
+
+Providers como Codex vincularán thread, y las implementaciones como Claude Code también tendrán continuation target o un contexto de continuación equivalente. La premisa para un verdadero reintento automático no es solo "este error parece un fallo temporal", sino también "si esta ejecución todavía tiene un portador para continuar".
+
+### 3. No todos los errores merecen reintentarse
+
+Las fluctuaciones de red, el tiempo de inactividad de SSE, los fallos temporales en el origen, estos generalmente pueden intentar reintentarse. Pero si te encuentras con un fallo de autenticación, el contexto se ha perdido, o el provider simplemente no tiene capacidad de resume, entonces continuar reintentando la mayoría de las veces no es recuperación, sino crear ruido.
+
+### 4. Necesita límites
+
+El reintento automático infinito casi siempre está mal. Las tendencias tecnológicas pueden animarse durante un tiempo, pero las leyes de ingeniería a menudo se mantienen estables durante muchos años, y una de ellas es: la recuperación de fallos debe tener límites. El sistema debe saber cuántas veces intentar como máximo, cuánto tiempo esperar entre cada intento, y cuándo detenerse y admitir que esta vez realmente no funcionó.
+
+Precisamente debido a estas características, HagiCode finalmente no escribió el reintento automático como unas pocas líneas de `try/catch` en algún provider, sino que lo extrajo como una capacidad compartida. Al final, los problemas de ingeniería deben volver a los métodos de ingeniería para resolverse.
+
+## El enfoque de HagiCode: sacar el reintento del Provider
+
+La implementación real actual de HagiCode puede comprimirse en una frase:
+
+**La capa compartida gestiona uniformemente el proceso de reintento, el Provider específico solo es responsable de responder dos preguntas: ¿este estado final merece reintentarse? ¿el contexto actual puede continuar?**
+
+Esto no es complicado, pero es muy clave. Porque una vez que se separan las responsabilidades, Claude Code, Codex, e incluso otros Agent CLI pueden reutilizar el mismo esqueleto. Los modelos cambiarán, las herramientas cambiarán, los flujos de trabajo se actualizarán, pero la base de ingeniería siempre estará allí.
+
+### Primera capa: usar un coordinador unificado para gestionar el bucle de reintento
+
+El fragmento de implementación central en el proyecto es aproximadamente así:
+
+```csharp
+internal static class ProviderErrorAutoRetryCoordinator
+{
+    public static async IAsyncEnumerable<CliMessage> ExecuteAsync(
+        string prompt,
+        ProviderErrorAutoRetrySettings? settings,
+        Func<string, IAsyncEnumerable<CliMessage>> executeAttemptAsync,
+        Func<bool> canRetryInSameContext,
+        Func<TimeSpan, CancellationToken, Task> delayAsync,
+        Func<CliMessage, bool> isRetryableTerminalMessage,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        var normalizedSettings = ProviderErrorAutoRetrySettings.Normalize(settings);
+        var retrySchedule = normalizedSettings.Enabled
+            ? normalizedSettings.GetRetrySchedule()
+            : [];
+
+        for (var attempt = 0; ; attempt++)
+        {
+            var attemptPrompt = attempt == 0
+                ? prompt
+                : ProviderErrorAutoRetrySettings.ContinuationPrompt;
+
+            CliMessage? terminalFailure = null;
+
+            await foreach (var message in executeAttemptAsync(attemptPrompt)
+                               .WithCancellation(cancellationToken))
+            {
+                if (isRetryableTerminalMessage(message))
+                {
+                    terminalFailure = message;
+                    break;
+                }
+
+                yield return message;
+            }
+
+            if (terminalFailure is null)
+            {
+                yield break;
+            }
+
+            if (attempt >= retrySchedule.Count || !canRetryInSameContext())
+            {
+                yield return terminalFailure;
+                yield break;
+            }
+
+            await delayAsync(retrySchedule[attempt], cancellationToken);
+        }
+    }
+}
+```
+
+Lo que hace este código es muy simple, pero muy poderoso.
+
+- Los fallos intermedios no se pasan directamente, el coordinador primero juzga si se puede recuperar
+- Solo cuando se agota el presupuesto de reintentos, el fallo final vuelve realmente a la capa superior
+- A partir de la segunda ronda ya no se envía el prompt original, sino que se envía uniformemente un continuation prompt
+
+Por eso siempre he enfatizado antes que el reintento automático no es simplemente "volver a solicitar". No es complementar una rama de excepción, sino gestionar un ciclo de vida de ejecución. Suena un poco a gerente de producto, pero en ingeniería es realmente así.
+
+### Segunda capa: convertir la estrategia de reintento en instantánea
+
+Otro problema que fácilmente se pasa por alto es: ¿quién decide si esta solicitud habilita el reintento automático?
+
+La respuesta de HagiCode es: no depender de una "configuración global en este momento", sino hacer que la estrategia sea una instantánea que viaje con esta solicitud. De esta manera, la cola de sesión, la persistencia de mensajes, el reenvío de ejecución y la adaptación del provider no perderán la estrategia. Un éxito no es un sistema, el éxito continuo es un sistema.
+
+La estructura central se puede simplificar así:
+
+```csharp
+public sealed record ProviderErrorAutoRetrySnapshot
+{
+    public const string DefaultStrategy = "default";
+
+    public bool Enabled { get; init; }
+
+    public string Strategy { get; init; } = DefaultStrategy;
+
+    public static ProviderErrorAutoRetrySnapshot Normalize(bool? enabled, string? strategy)
+    {
+        return new ProviderErrorAutoRetrySnapshot
+        {
+            Enabled = enabled ?? true,
+            Strategy = string.IsNullOrWhiteSpace(strategy)
+                ? DefaultStrategy
+                : strategy.Trim()
+        };
+    }
+}
+```
+
+Luego, en el lado de ejecución, se mapea al objeto de configuración que el provider realmente consume. El valor de este enfoque es muy directo:
+
+- La capa de negocio decide "si se debe reintentar"
+- El tiempo de ejecución decide "cómo reintentar"
+
+Cada lado gestiona su propia parte, sin conflictos. Muchos problemas no es que no se puedan hacer, simplemente no se han calculado bien los costos. Convertir la estrategia en instantánea es esencialmente calcular los costos por adelantado.
+
+### Tercera capa: El Provider solo hace la determinación de estado final y contexto
+
+Cuando llega al provider específico de Claude Code o Codex, las responsabilidades aquí son bastante delgadas. Puedes entenderlo como una mejora, no como un reemplazo.
+
+Tomando Codex como ejemplo, cuando finalmente se integra al coordinador compartido, esencialmente solo necesita proporcionar tres cosas:
+
+```csharp
+await foreach (var message in ProviderErrorAutoRetryCoordinator.ExecuteAsync(
+                   prompt,
+                   options.ProviderErrorAutoRetry,
+                   retryPrompt => ExecuteCodexAttemptAsync(...),
+                   () => !string.IsNullOrWhiteSpace(resolvedThreadId),
+                   DelayAsync,
+                   IsRetryableTerminalFailure,
+                   cancellationToken))
+{
+    yield return message;
+}
+```
+
+Descubrirás que lo que realmente pertenece al juicio del Provider son solo dos cosas:
+
+- `IsRetryableTerminalFailure`
+- `canRetryInSameContext`
+
+Codex mira si el thread puede continuar, Claude Code mira si el continuation target todavía está ahí. La estrategia de retroceso, el número de reintentos, el prompt posterior, todas estas cosas no deberían ser reinventadas por el Provider.
+
+Una vez que se extrae esta capa, el costo de que HagiCode integre más CLI es mucho menor. No tienes que copiar una máquina de estados de reintento completa, solo necesitas conectar "las condiciones límite de este provider". Escribir rápido no es igual a escribir de manera estable; poder conectar no es igual a conectar bien; poder ejecutarse no es igual a poder mantenerse a largo plazo.
+
+## Un punto fácil de hacer mal: no trates todos los errores como reintentables
+
+En este análisis, creo que lo que más vale la pena sacar单独 para explicar no es "cómo implementar el reintento", sino "cómo evitar reintentos erróneos".
+
+El punto de entrada inicial del problema fue que Codex no reconoció un mensaje de reconexión. Por intuición, muchas personas elegirían una reparación mínima: añadir otro prefijo de cadena a la lista blanca. Esta idea no se puede decir que esté mal, solo que parece más una solución del período de demo, no una solución para mantenimiento a largo plazo.
+
+Desde la implementación actual de HagiCode, el sistema ya ha dado un paso en una dirección más estable. Ya no solo se centra en una cadena literal, sino que entrega uniformemente los estados finales recuperables al coordinador compartido para su procesamiento. Los beneficios de esto son obvios:
+
+- No es fácil fallar completamente debido a pequeños cambios en cierto texto
+- La cobertura de pruebas puede desarrollarse alrededor del "sobre de estado final", en lugar de un solo texto codificado
+- La lógica de reintento del mismo provider será más consistente
+
+Por supuesto, aquí hay que establecer un límite: más general no equivale a más indulgente. **Mientras el contexto actual no pueda continuar, incluso si el error parece un fallo temporal, no se debe reproducir ciegamente.**
+
+Este punto es clave. Lo que realmente da tranquilidad no es que ocasionalmente funcione una vez, sino que la mayoría de las veces sea confiable. Si un proceso solo puede ser mantenido por expertos, todavía está lejos de ser popular.
+
+## Tres experiencias más vale la pena保留 en la práctica
+
+El artículo ha llegado hasta aquí, casi puede recopilarse a nivel de práctica. Si vas a implementar capacidades similares en tu propio proyecto, lo que más te recomiendo es mantener primero las siguientes tres.
+
+### 1. El presupuesto de reintento debe tener límites
+
+El ritmo de retroceso actual predeterminado de HagiCode es:
+
+- 10 segundos
+- 20 segundos
+- 60 segundos
+
+Este ritmo no necesariamente se adapta a todos los sistemas, pero "tener límites" debe mantenerse. De lo contrario, el reintento automático pronto pasará de ser un mecanismo de recuperación a un amplificador de accidentes. No te apures por darle un nombre grandioso, primero mira si esta cosa puede sobrevivir dos iteraciones en el equipo.
+
+### 2. El continuation prompt debe ser unificado
+
+El proyecto usa un continuation prompt fijo, de modo que los intentos posteriores sigan claramente la ruta "continuar en el contexto actual", en lugar de iniciar una nueva ronda de solicitudes completas. Esta capacidad no es llamativa, pero realmente no puedes prescindir de ella cuando haces proyectos reales. Muchas capacidades parecen magia, pero cuando las desmontas, no son más que un proceso de ingeniería pulido.
+
+### 3. Tanto la biblioteca compartida como la capa de adaptación necesitan pruebas de espejo
+
+Este punto realmente quiero decir un poco más. Muchos equipos escribirán una capa de pruebas en el tiempo de ejecución compartido, y luego pensarán que es suficiente. En realidad no.
+
+La razón por la que HagiCode me hace sentir más confiado es porque se complementaron pruebas en ambas capas:
+
+- Las pruebas compartidas del Provider miden "si realmente ocurrió la continuación automática"
+- La capa de adaptación mide "si los errores finales y los mensajes fluidos se han corrompido"
+
+Esta vez también ejecuté adicionalmente dos grupos de pruebas relacionadas, y los resultados fueron que 31 casos de prueba pasaron todos. Este resultado en sí no puede demostrar que el diseño sea perfecto, pero al menos puede explicar una cosa: el conjunto actual de reintento automático no es una solución en papel, sino una capacidad que ha sido restringida conjuntamente por código y pruebas. Talk is cheap. Show me the code. Ponerlo aquí es muy apropiado.
+
+## Resumen
+
+Si comprimimos todo el artículo en una frase, sería:
+
+**El reintento automático de Agent CLI como Claude Code y Codex no debería hacerse como un truco local dentro de cierto Provider, sino como una combinación de coordinador compartido + instantánea de estrategia + determinación de contexto + pruebas de espejo.**
+
+Los beneficios que esto aporta son realmente muy prácticos:
+
+- La lógica solo se escribe una vez, múltiples Providers pueden reutilizarla
+- Si la solicitud permite reintentar puede seguir establemente la cadena de ejecución
+- Continuar ejecutándose cuando hay contexto, detenerse a tiempo cuando no hay contexto
+- El frontend finalmente ve un estado completo estable o un estado de fallo, en lugar de un montón de ruido intermedio abandonado
+
+Esta solución fue pulida poco a poco por HagiCode en el proceso de integración real de múltiples Agent CLI. ¿Quién dice que la programación asistida por IA no es la programación en pareja de la nueva era? El modelo te ayuda a comenzar, completar y divergir, pero lo que realmente decide el límite superior de la experiencia a menudo sigue siendo el contexto, el proceso y las restricciones.
+
+Si este artículo te ayuda, también eres bienvenido a ver las entradas públicas de HagiCode:
+
+- GitHub: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Sitio web oficial: [hagicode.com](https://hagicode.com)
+- Demostración práctica de 30 minutos: [www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)
+- Entrada de instalación de Desktop: [hagicode.com/desktop/](https://hagicode.com/desktop/)
+- Steam: [Página de tienda de Steam (añadir a la lista de deseos / ver detalles)](https://store.steampowered.com/app/4625540/Hagicode/)
+
+HagiCode ya está disponible en Steam, esto no es un pastel, el enlace también te lo pongo aquí. Los amigos de Steam pueden añadirlo primero a su lista de deseos, entrar y verlo ustedes mismos, es más directo que yo decir diez frases aquí.
+
+Déjalo aquí por ahora, nos veremos en proyectos reales después.
+
+## Referencias
+
+- Página del proyecto HagiCode: [https://hagicode.com](https://hagicode.com)
+- Repositorio GitHub de HagiCode: [https://github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Video de demostración oficial: [https://www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)
+- Instrucciones de instalación de Desktop: [https://hagicode.com/desktop/](https://hagicode.com/desktop/)
+
+## Nota de derechos de autor
+
+Gracias por leer, si considera que este artículo es útil, bienvenido a darle like, guardarlo y compartirlo para apoyar.
+Este contenido utiliza colaboración asistida por inteligencia artificial, el contenido final es revisado y confirmado por el autor.
+- Autor del artículo: [newbe36524](https://www.newbe.pro)
+- Enlace original: [https://docs.hagicode.com/blog/2026-02-11-agent-cli-automatic-retry/](https://docs.hagicode.com/blog/2026-02-11-agent-cli-automatic-retry/)
+- Aviso de derechos de autor: Todos los artículos de este blog, excepto los declarados específicamente, están licenciados bajo el acuerdo BY-NC-SA. Indique la fuente al reimpresión!

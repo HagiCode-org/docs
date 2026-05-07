@@ -1,0 +1,478 @@
+---
+title: "C# バックエンド CodeBuddy CLI 統合実践ガイド"
+date: 2026-03-12
+tags: ["C#", CodeBuddy, AI Provider, ACP, 統合実践]
+description: "本記事では、C# バックエンドプロジェクトに CodeBuddy CLI を統合し、AI プログラミングアシスタント機能を完全に実装する方法を詳しく解説します。"
+---
+
+## C# バックエンド CodeBuddy CLI 統合実践ガイド
+
+> 本記事では、C# バックエンドプロジェクトに CodeBuddy CLI を統合し、AI プログラミングアシスタント機能を完全に実装する方法を詳しく解説します。
+
+:::note[時間的文脈について]
+本記事で讨论するのは、公開当時の CodeBuddy 統合設計と provider 構造です。現在の常駐サポート範囲については、[AI Agent CLI インストール](/related-software-installation/ai-agent-cli/) と [インストールガイド](/installation) を参照してください。`IFlowCli` は現在、歴史的互換性のためにのみ残されており、現在のアクティブなサポート範囲には含まれません。
+:::
+
+## 背景
+
+現代の AI コードアシスタント開発では、単一の AI Provider だけでは複雑で変化に富んだ開発シーンを満たすことができません。これは人生の旅路のようなもので、一つの方向だけを认めるわけにはいかないのです。HagiCode は多機能 AI プログラミングアシスタントとして、より良いユーザー体験を提供するために複数の AI Provider をサポートする必要があります。何より、ユーザーの選択権は十分に与えるべきです。2026 年初頭、プロジェクトは重要な決断に直面しました：C# バックエンドで CodeBuddy の ACP（Agent Communication Protocol）統合機能をどのように復活させるかという課題です。
+
+以前プロジェクトで CodeBuddy の接続を実装したことがありましたが、関連するコードはあるリファクタリングで削除されました。文句を言っても仕方ありません。コードの反復開発にはどうしても忘れ去られるものがあるものです。今回の技術ソリューションの目標は、この機能を完全に復活させ、アーキテクチャをより堅牢で保守しやすいものにすることです。
+
+あなたも自分のプロジェクトに複数の AI プログラミングアシスタントを統合することを検討しているなら、以下のソリューションが何らかのインスピレーションを与えてくれるかもしれません。これは私たちが数え切れないほどの落とし穴を踏んでからまとめた経験です。無駄な遠回りを減らすことができれば、私がした小さな善行になるでしょう。
+
+## HagiCode について
+
+本記事で共有するソリューションは、[HagiCode](https://hagicode.com) プロジェクトでの実践経験から来ています。HagiCode はオープンソースの AI コードアシスタントプロジェクトで、複数の AI Provider とクロスプラットフォーム動作をサポートしています。異なるユーザーの好みを満たすため、様々な AI プログラミングアシスタントを柔軟に切り替える必要があり、これこそが本記事で紹介する CodeBuddy 統合ソリューションが生まれた理由です。
+
+HagiCode はモジュール設計を採用しており、AI Provider はプラガブルなコンポーネントとして実装されています。このアーキテクチャにより、既存の機能に影響を与えることなく、新しい AI サポートを簡単に追加できます。こういう設計は最初にしっかりしておけば、後で楽になるものです。技術アーキテクチャに興味がある場合は、GitHub で完全なソースコードを確認できます。
+
+## アーキテクチャ設計
+
+### レイヤードアーキテクチャ概要
+
+C# と CodeBuddy の接続には明確なレイヤードアーキテクチャを採用しており、この設計によりコードの責任が明確になり、後の保守もより容易になります：
+
+```
+┌─────────────────────────────────────────────┐
+│           Provider 契約層                    │
+│   AIProviderType 列挙型 + 拡張メソッド       │
+├─────────────────────────────────────────────┤
+│           Provider ファクトリ層              │
+│   AIProviderFactory 依存性注入ファクトリ     │
+├─────────────────────────────────────────────┤
+│           Provider 実装層                    │
+│   CodebuddyCliProvider 具体的な実装          │
+├─────────────────────────────────────────────┤
+│           ACP インフラストラクチャ層         │
+│  ACPSessionManager / StdioAcpTransport      │
+│  AcpRpcClient / AcpAgentClient              │
+└─────────────────────────────────────────────┘
+```
+
+このレイヤーの利点は何でしょうか？簡単に言えば、各レイヤーが互いに干渉しないことです。仮に後で通信方式を変える必要ができたとして（stdio から WebSocket に変更するなど）、最下層だけを変更すればよく、上層のビジネスコードは完全に変更不要です。結局のところ、一箇所変更するだけで全体に影響が出て、通信方式を変えるために半日もビジネスコードを修正するなんて、あまりにも悲惨すぎます。
+
+### コアコンポーネント解析
+
+**Provider 契約層** はアーキテクチャ全体の土台です。`AIProviderType` 列挙型を定義し、`CodebuddyCli = 3` を列挙値として、拡張メソッドを通じて文字列と列挙型の双方向マッピングを実現します。これにより、設定ファイル内の文字列を簡単に列挙型に変換でき、デバッグ時には列挙型を文字列として出力できます。これは単なるマッピング関係ですが、しっかり作っておけば安心です。
+
+**Provider ファクトリ層** は設定に基づいて対応する Provider インスタンスを作成する責任を持ちます。ここでは .NET の依存性注入メカニズムを使用し、`ActivatorUtilities.CreateInstance` を組み合わせて動的な作成を実現します。ファクトリパターンの利点は、新しい Provider を追加する際に作成ロジックを追加するだけで、既存のコードを修正する必要がないことです。これは記事を書くのと似ていて、新しい章を追加したければ追加するだけで、前の内容をすべて書き直す必要はありません。
+
+**Provider 実装層** は実際の作業を行う場所です。`CodebuddyCliProvider` は `IAIProvider` インターフェースを実装し、`ExecuteAsync`（非ストリーミング）と `StreamAsync`（ストリーミング）の 2 つの呼び出し方式を提供します。
+
+**ACP インフラストラクチャ層** は通信の下位サポートです。この層はプロセス管理、メッセージシリアル化、レスポンス解析など、すべてのプロトコル詳細を処理します。これは家の基礎のようなもので、上層がどんなに美しくても、下層がしっかりしていないといけません。
+
+## 通信メカニズム
+
+### Stdio 伝送モード
+
+CodeBuddy は **Stdio（標準入出力）** 方式で外部プロセスと通信します。起動コマンドはとても簡単です：
+
+```bash
+codebuddy --acp
+```
+
+その後、標準入出力を通じて JSON-RPC メッセージ交換を行います。この方式の利点は以下の通りです：
+
+1. **起動が迅速**：ローカルプロセス通信でネットワーク遅延がない
+2. **設定が簡単**：実行可能ファイルのパスを指定するだけ
+3. **環境分離**：各セッションが独立したプロセスで、互いに影響しない
+
+通信過程では環境変数のインジェクションがサポートされており、よく使用されるものには以下があります：
+
+- `CODEBUDDY_API_KEY`：API キー認証
+- `CODEBUDDY_INTERNET_ENVIRONMENT`：ネットワーク環境設定
+
+これは人と人のコミュニケーションのようなもので、便利な方法を見つけてこそ、話ができるのです。
+
+### メッセージプロトコル
+
+ACP は JSON-RPC 2.0 プロトコルに基づいており、メッセージ形式は大体こんな感じです：
+
+```json
+// リクエストメッセージ
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "agent/prompt",
+  "params": {
+    "prompt": "ソートアルゴリズムを書いてください",
+    "sessionId": "session-123"
+  }
+}
+
+// レスポンスメッセージ
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "content": "ここが AI の返信です..."
+  }
+}
+```
+
+実際の実装では、これらのプロトコル詳細をすべてカプセル化しており、上層のビジネスコードは prompt と response にだけ注意すればいいです。これも結局、カプセル化が良ければ、後で使う人が快適になります。
+
+## コア実装
+
+### 1. Provider 契約の復元
+
+まず列挙型ファイルで CodeBuddy タイプを復元します：
+
+```csharp
+// PCode.Models/AIProviderType.cs
+public enum AIProviderType
+{
+    ClaudeCodeCli = 0,
+    CodexCli = 1,
+    GitHubCopilot = 2,
+    CodebuddyCli = 3,  // この列挙値を復元
+    OpenCodeCli = 4,
+    IFlowCli = 5,
+}
+```
+
+次に拡張メソッドで文字列マッピングを追加し、設定ファイルで文字列を使って Provider を指定できるようにします：
+
+```csharp
+// AIProviderTypeExtensions.cs
+private static readonly Dictionary<string, AIProviderType> _typeMap = new(
+    StringComparer.OrdinalIgnoreCase)
+{
+    ["CodebuddyCli"] = AIProviderType.CodebuddyCli,
+    ["Codebuddy"] = AIProviderType.CodebuddyCli,
+    ["codebuddy"] = AIProviderType.CodebuddyCli,
+    // ... 他の provider のマッピング
+};
+```
+
+### 2. Provider ファクトリ統合
+
+ファクトリクラスに CodeBuddy の作成分岐を追加します：
+
+```csharp
+// AIProviderFactory.cs
+private IAIProvider? CreateProvider(AIProviderType providerType, ProviderConfiguration config)
+{
+    return providerType switch
+    {
+        AIProviderType.CodebuddyCli =>
+            ActivatorUtilities.CreateInstance<CodebuddyCliProvider>(
+                _serviceProvider,
+                Options.Create(config)),
+        // ... 他の provider
+        _ => throw new NotSupportedException($"Provider {providerType} not supported")
+    };
+}
+```
+
+ここでは依存性注入の `ActivatorUtilities` を使用しており、コンストラクタのパラメータ注入を自動的に処理してくれるため非常に便利です。これも結局、.NET の機能を正しく使えば安心です。
+
+### 3. 完全な Provider 実装
+
+以下が `CodebuddyCliProvider` のコア実装で、ストリーミングと非ストリーミングの 2 つの呼び出し方式を含みます：
+
+```csharp
+public class CodebuddyCliProvider : IAIProvider
+{
+    private readonly ILogger<CodebuddyCliProvider> _logger;
+    private readonly IACPSessionManager _sessionManager;
+    private readonly ProviderConfiguration _config;
+
+    public string Name => "CodebuddyCli";
+    public bool SupportsStreaming => true;
+    public ProviderCapabilities Capabilities { get; }
+
+    public CodebuddyCliProvider(
+        ILogger<CodebuddyCliProvider> logger,
+        IACPSessionManager sessionManager,
+        IOptions<ProviderConfiguration> config)
+    {
+        _logger = logger;
+        _sessionManager = sessionManager;
+        _config = config.Value;
+
+        // 現在の Provider の機能を定義
+        Capabilities = new ProviderCapabilities
+        {
+            SupportsStreaming = true,
+            SupportsTools = true,
+            SupportsSystemMessages = true,
+            SupportsArtifacts = false,
+            MaxTokens = 8192
+        };
+    }
+
+    // 非ストリーミング呼び出し：すべての結果がまとめて返されるのを待つ
+    public async Task<AIResponse> ExecuteAsync(
+        AIRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        // リクエストのために独立したセッションを作成
+        var session = await _sessionManager.CreateSessionAsync(
+            "CodebuddyCli",
+            request.WorkingDirectory,
+            cancellationToken,
+            request.SessionId);
+
+        try
+        {
+            var fullPrompt = BuildPrompt(request);
+            await session.SendPromptAsync(fullPrompt, cancellationToken);
+
+            var responseBuilder = new StringBuilder();
+            var toolCalls = new List<AIToolCall>();
+
+            // すべてのレスポンスチャンクを収集
+            await foreach (var chunk in StreamFromSession(session, cancellationToken))
+            {
+                if (!string.IsNullOrEmpty(chunk.Content))
+                {
+                    responseBuilder.Append(chunk.Content);
+                }
+                // ツール呼び出しを処理...
+            }
+
+            return new AIResponse
+            {
+                Content = AIResultContentSanitizer.SanitizeResultContent(
+                    responseBuilder.ToString()),
+                ToolCalls = toolCalls,
+                Provider = Name,
+                Model = string.Empty
+            };
+        }
+        finally
+        {
+            // セッションリソースを解放
+            await session.DisposeAsync();
+        }
+    }
+
+    // ストリーミング呼び出し：レスポンスチャンクをリアルタイムで返す
+    public async IAsyncEnumerable<AIStreamingChunk> StreamAsync(
+        AIRequest request,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        var session = await _sessionManager.CreateSessionAsync(
+            "CodebuddyCli",
+            request.WorkingDirectory,
+            cancellationToken);
+
+        try
+        {
+            var fullPrompt = BuildPrompt(request);
+            await session.SendPromptAsync(fullPrompt, cancellationToken);
+
+            await foreach (var chunk in StreamFromSession(session, cancellationToken))
+            {
+                yield return chunk;
+            }
+        }
+        finally
+        {
+            await session.DisposeAsync();
+        }
+    }
+
+    private async IAsyncEnumerable<AIStreamingChunk> StreamFromSession(
+        IACPSession session,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        // セッション内のすべての更新を走査
+        await foreach (var notification in session.ReceiveUpdatesAsync(cancellationToken))
+        {
+            switch (notification.Update)
+            {
+                case AgentMessageChunkSessionUpdate agentMessage:
+                    // テキストコンテンツチャンクを処理
+                    if (agentMessage.Content is AcpImp.TextContentBlock textContent)
+                    {
+                        yield return new AIStreamingChunk
+                        {
+                            Content = textContent.Text,
+                            Type = StreamingChunkType.ContentDelta,
+                            IsComplete = false
+                        };
+                    }
+                    break;
+
+                case ToolCallSessionUpdate toolCall:
+                    // ツール呼び出しを処理
+                    yield return new AIStreamingChunk
+                    {
+                        Content = string.Empty,
+                        Type = StreamingChunkType.ToolCallDelta,
+                        ToolCallDelta = new AIToolCallDelta
+                        {
+                            Id = toolCall.ToolCallId,
+                            Name = toolCall.Kind.ToString(),
+                            Arguments = toolCall.RawInput?.ToString()
+                        }
+                    };
+                    break;
+
+                case AcpImp.PromptCompletedSessionUpdate:
+                    // レスポンス完了
+                    yield break;
+            }
+        }
+    }
+
+    // 完全なプロンプトを構築
+    private string BuildPrompt(AIRequest request, string? embeddedCommandPrompt = null)
+    {
+        var sb = new StringBuilder();
+
+        // 埋め込みコマンドプロンプト（もしあれば）
+        if (!string.IsNullOrEmpty(embeddedCommandPrompt))
+        {
+            sb.AppendLine(embeddedCommandPrompt);
+            sb.AppendLine();
+        }
+
+        // システムメッセージ
+        if (!string.IsNullOrEmpty(request.SystemMessage))
+        {
+            sb.AppendLine(request.SystemMessage);
+            sb.AppendLine();
+        }
+
+        // ユーザープロンプト
+        sb.Append(request.Prompt);
+        return sb.ToString();
+    }
+}
+```
+
+このコードにはいくつかの重要なポイントがあります：
+
+1. **セッション管理**：各リクエストが独立したセッションを作成し、リクエスト完了後にリソースを解放します。これは落とし穴から得た経験です。セッションの再利用がうまくいかないと、状態汚染の問題が発生しやすいです。結局、使った後はきれいに片付けるべきで、そうしないと次に使う人が困ります。
+
+2. **ストリーミング処理**：`IAsyncEnumerable` を使うことで、レスポンスを生成しながら返すことができ、すべてのコンテンツの生成を待つ必要がありません。これは長いテキストシナリオで特に重要で、ユーザー体験が大幅に向上します。結果を待っている人もずっと待たされたくないものです。
+
+3. **ツール呼び出し**：CodeBuddy はツール呼び出し（Function Calling）をサポートしており、`ToolCallSessionUpdate` を通じて処理します。この機能は複雑なコード編集タスクで重要です。
+
+4. **コンテンツフィルタリング**：`AIResultContentSanitizer` を使用して Think ブロックのコンテンツをフィルタリングし、出力をきれいに保ちます。
+
+### 4. 依存性注入設定
+
+モジュール登録で関連サービスを追加します：
+
+```csharp
+// PCodeClaudeHelperModule.cs
+public void ConfigureModule(IServiceCollection context)
+{
+    // Provider を登録
+    context.Services.AddTransient<CodebuddyCliProvider>();
+
+    // ACP インフラストラクチャを登録
+    context.Services.AddSingleton<IACPSessionManager, ACPSessionManager>();
+    context.Services.AddSingleton<IAcpPlatformConfigurationResolver, AcpPlatformConfigurationResolver>();
+    context.Services.AddSingleton<IAIRequestToAcpMapper, AIRequestToAcpMapper>();
+    context.Services.AddSingleton<IAcpToAIResponseMapper, AcpToAIResponseMapper>();
+}
+```
+
+## 設定例
+
+### 設定ファイル
+
+`appsettings.json` に CodeBuddy 関連の設定を追加します：
+
+```yaml
+AI:
+  # デフォルトで使用する Provider
+  DefaultProvider: "CodebuddyCli"
+
+  # Provider 設定
+  Providers:
+    CodebuddyCli:
+      Type: "CodebuddyCli"
+      WorkingDirectory: "C:/projects/my-app"
+      ExecutablePath: "C:/tools/codebuddy.cmd"
+
+  # プラットフォーム関連設定
+  PlatformConfigurations:
+    CodebuddyCli:
+      ExecutablePath: "C:/tools/codebuddy.cmd"
+      Arguments: "--acp"
+      StartupTimeoutMs: 5000
+      EnvironmentVariables:
+        CODEBUDDY_API_KEY: "${CODEBUDDY_API_KEY}"
+        CODEBUDDY_INTERNET_ENVIRONMENT: "production"
+```
+
+### 設定モデル
+
+対応する設定モデルの定義：
+
+```csharp
+public class CodebuddyPlatformConfiguration : IAcpPlatformConfiguration
+{
+    public string ProviderName => "CodebuddyCli";
+    public AcpTransportType TransportType => AcpTransportType.Stdio;
+
+    public string ExecutablePath { get; set; } = "codebuddy";
+    public string Arguments { get; set; } = "--acp";
+    public int StartupTimeoutMs { get; set; } = 5000;
+
+    public Dictionary<string, string?>? EnvironmentVariables { get; set; }
+}
+```
+
+## 実践経験のまとめ
+
+### 落とし穴の記録
+
+実装過程でいくつかの典型的な落とし穴に遭遇しました。ここで共有して、皆さんが無駄な遠回りをしないようにします。結局、他人の落とし穴を避けられるのは良いことです：
+
+1. **セッションリーク問題**：最初はセッションを正しく解放していなかったため、プロセスリソースが枯渇しました。解決策は `try-finally` を使用して、各リクエストが必ずリソースを解放するようにすることです。これも結局、使ったものは戻すべきで、そうしないと後で使う人が困ります。
+
+2. **環境変数の引き渡し**：Windows と Linux で環境変数の構文が異なるため、後で `Dictionary<string, string?>` を使用して統一的に処理するようにしました。クロスプラットフォームの問題は、最初から統一規範を決めておけば後で楽になります。
+
+3. **タイムアウト設定**：CLI の起動には時間がかかるため、5 秒の起動タイムアウトを設定し、高速リクエストの失敗を防ぎます。何事も程々が重要で、急ぎすぎると逆にうまくいきません。
+
+4. **エンコーディング問題**：Windows でのデフォルトエンコーディングは中国語の文字化けを引き起こす可能性があるため、プロセス起動時に UTF-8 エンコーディングを明示的に指定します。中国語が表示されないのは非常に不快です。
+
+### パフォーマンス最適化
+
+1. **セッションプール**：頻繁な短時間リクエストの場合、セッションプールを実装してプロセスを再利用することを検討できます
+2. **接続キャッシュ**：ファクトリクラスはすでに Provider インスタンスのキャッシュをサポートしています
+3. **非同期優先**：全体で非同期プログラミングを使用し、スレッドのブロックを回避します
+
+パフォーマンスの問題は最適化できるものは最適化すべきです。結局、ユーザーが待つ時間が長いほど、体験は悪くなります。
+
+## まとめ
+
+本記事では、C# バックエンドでの CodeBuddy CLI 統合の完全なソリューションを詳しく紹介し、アーキテクチャ設計から具体的な実装までの全プロセスをカバーしました。レイヤードアーキテクチャ設計により、プロトコル詳細とビジネスロジックを分離し、コードをより明確で保守しやすいものにしました。
+
+重要ポイントの振り返り：
+
+- Provider 契約層、ファクトリ層、実装層、インフラストラクチャ層のレイヤードアーキテクチャを採用
+- JSON-RPC over Stdio 方式でプロセス間通信を実現
+- 依存性注入を通じて柔軟な設定と拡張を実現
+- ストリーミングと非ストリーミングの 2 つの呼び出し方式を提供
+
+このソリューションは CodeBuddy だけでなく、新しい AI Provider を追加する場合も同じパターンに従います。同様のマルチ AI Provider 統合を行っている場合、この記事が何らかの参考になれば幸いです。結局、記事を書くのもコードを書くのも同じで、共有して他人の役に立てれば、書いた価値があります。
+
+---
+
+## 参考資料
+
+- [CodeBuddy 公式ドキュメント](https://codebuddy.example.com)
+- [ACP プロトコル仕様](https://acp-protocol.example.com)
+- [HagiCode プロジェクトホームページ](https://hagicode.com)
+- [HagiCode GitHub リポジトリ](https://github.com/HagiCode-org/site)
+- [.NET 依存性注入ベストプラクティス](https://docs.microsoft.com/ja-jp/dotnet/core/extensions/dependency-injection)
+
+---
+
+**本記事がお役に立てた場合：**
+
+- GitHub で Star をください：[github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- 公式サイトにアクセスして詳細を：[hagicode.com](https://hagicode.com)
+- 30 分間の実践デモを視聴：[www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)
+- ワンクリックインストール体験：[docs.hagicode.com/installation/docker-compose](https://docs.hagicode.com/installation/docker-compose)
+- デスクトップ版クイックインストール：[hagicode.com/desktop/](https://hagicode.com/desktop/)
+- ベータテスト開始、インストールして体験してください

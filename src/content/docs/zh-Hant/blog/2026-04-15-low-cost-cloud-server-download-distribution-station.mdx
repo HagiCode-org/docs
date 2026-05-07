@@ -1,0 +1,435 @@
+---
+title: 如何利用廉價的雲服務器搭建加速下載的分發站
+date: 2026-04-15
+tags: [雲服務器, Nginx, 緩存, 文件分發, 成本優化]
+description: "如何利用廉價的雲服務器搭建加速下載的分發站：雲存儲的流量貴得離譜，跨國訪問慢得讓人抓狂，CDN 的價格又讓人望而卻步. . . . . . 這些痛，大概做分發的都懂吧"
+---
+
+## 如何利用廉價的雲服務器搭建加速下載的分發站
+
+> 雲存儲的流量貴得離譜，跨國訪問慢得讓人抓狂，CDN 的價格又讓人望而卻步......這些痛，大概做分發的都懂吧。本文分享一下我們在 [HagiCode](https://hagicode.com) 項目裡摸索出來的一套低成本方案。雲服務器 + Nginx 緩存層，成本降了一半，速度倒是提上去了，也算是一點小小的安慰。
+
+## 背景
+
+互聯網嘛，下載速度和穩定性，說到底都是用戶體驗。開源也罷，商業也罷，總得給用戶一個靠譜的下載方式。
+
+直接從雲存儲（比如 Azure Blob Storage、AWS S3）下文件，看起來簡單，實際上問題還真不少：
+
+**網絡延遲**：跨國跨地域的訪問，慢得讓人想砸鍵盤。用戶等得花兒都謝了，體驗能好到哪去？
+
+**帶寬成本**：雲存儲的出口流量，貴得讓人心疼。Azure Blob Storage 在中國大陸訪問，差不多每 GB 0.5 元，一個月 1TB 就是 500 塊。對於小團隊來說，這筆錢說多不多，說少也不少，畢竟誰的錢都不是大風刮來的。
+
+**訪問限制**：某些地區訪問國外雲服務，時好時壞，有時候乾脆就訪問不了。用戶想下都下不了，這事兒本身就挺無奈的。
+
+**CDN 成本**：商業 CDN 確實能解決問題，但價格也確實美麗。小團隊哪裡用得起？
+
+那有沒有既省錢又好用的辦法呢？其實也是有的。雲服務器 + 反向代理 + 緩存層，就這麼簡單粗暴。成本降了一半左右，速度還提上去了，也算是一點小小的慰藉。
+
+## 關於 HagiCode
+
+這套方案也不是憑空想出來的，是我們在 [HagiCode](https://hagicode.com) 項目裡折騰出來的經驗。
+
+HagiCode 是一個 AI 代碼助手，要給用戶提供服務器端和桌面端的下載服務。既然是給開發者用的工具，全球用戶都能快速穩定地下載，這事兒本身就很重要。這也是我們為什麼非要琢磨出一套低成本方案的原因——畢竟誰的錢都不是大風刮來的。
+
+如果你覺得這套方案還挺有價值的，那說明我們工程實力還算湊合......既然如此，HagiCode 本身也值得關注一下了吧？
+
+## 架構設計
+
+### 整體架構思路
+
+先來看一下整體的架構設計：
+
+```
+用戶請求
+    ↓
+DNS 解析
+    ↓
+┌─────────────────────────────────────┐
+│   反向代理層 (Traefik/Bunker Web)   │ ← SSL 終止、路由分發、安全防護
+├─────────────────────────────────────┤
+│   端口: 80/443                       │
+│   功能: 自動 Let's Encrypt 證書      │
+│         Host 路由                    │
+└─────────────────────────────────────┘
+    ↓
+┌─────────────────────────────────────┐
+│   緩存層 (Nginx)                     │ ← 文件緩存、Gzip 壓縮
+├─────────────────────────────────────┤
+│   端口: 8080(server) / 8081(desktop) │
+│   緩存策略:                          │
+│   - index.json: 1 小時               │
+│   - 其他文件: 7 天                   │
+│   緩存大小: 1GB                      │
+└─────────────────────────────────────┘
+    ↓
+┌─────────────────────────────────────┐
+│   源站 (Azure Blob Storage)         │ ← 文件存儲
+└─────────────────────────────────────┘
+```
+
+這個架構的核心思想，說白了就是：**在用戶和雲存儲之間，加一層緩存罷了**。
+
+用戶請求先到雲服務器上的反向代理層，然後 Nginx 緩存層接手。緩存裡有文件？直接給用戶。沒有？去雲存儲拉一份，順便在本地存一份。下次再訪問同一個文件，就不用麻煩雲存儲了。其實就像記憶一樣，有些東西記住了，下次就不用再費勁去想......
+
+### 為什麼選擇這個架構？
+
+**雲服務器優勢**：
+- 成本可控：阿里雲等提供廉價雲服務器（1-2 核 2GB 配置月費約 50-100 元）
+- 部署靈活：可自由配置反向代理、緩存策略
+- 地理位置靈活：可選擇靠近用戶的服務器區域
+- 擴展性強：可根據流量需求升級配置
+
+**反向代理 + 緩存架構**：
+- 減少源站壓力：緩存熱點文件，減少對雲存儲的訪問
+- 降低成本：雲服務器流量費用遠低於雲存儲出口流量
+- 提升速度：就近訪問，服務器帶寬通常優於雲存儲
+
+**為什麼選擇 Nginx 作為緩存層？**
+
+這事兒也不是隨便選的，畢竟 Nginx 確實有它的道理：
+
+1. 高性能：Nginx 反向代理的性能，業界是有目共睹的
+2. 緩存成熟：內置的 proxy_cache 功能，穩定可靠，不會動不動就出幺蛾子
+3. 資源占用低：256MB 內存就能跑，對服務器也算友好
+4. 配置靈活：不同的文件類型可以設置不同的緩存策略，這點還是很貼心的
+
+## 反向代理層：Traefik vs Bunker Web
+
+HagiCode 的部署方案，其實支持兩種反向代理，怎麼說呢，各有各的特點：
+
+| 方案 | 特點 | 適用場景 |
+|------|------|----------|
+| **Traefik** | 輕量級、自動 SSL、配置簡單 | 基礎部署、低流量場景 |
+| **Bunker Web** | 內置 WAF、防 DDoS、防爬蟲 | 高安全要求、高流量場景 |
+
+### Traefik：輕量級首選
+
+Traefik 是一個現代 HTTP 反向代理和負載均衡器，最大的特點就是配置簡單，還能自動搞 Let's Encrypt 證書。
+
+對於初始部署或者流量不大的場景，Traefik 其實是挺不錯的選擇：
+- 資源占用不多（1.5 CPU/512MB 內存就夠了）
+- SSL 證書自動配置，不用自己操心
+- 路由配置基於 Docker 標籤，也算方便
+
+### Bunker Web：高安全場景
+
+Bunker Web 是一個基於 Nginx 的 Web 應用防火牆，安全防護更全面一些。
+
+什麼時候可以考慮切換到 Bunker Web 呢？大概就是這些情況吧：
+- 遭受 DDoS 攻擊（雖然誰都不希望遇到）
+- 需要 ModSecurity 防護
+- 想要防爬蟲功能
+- 對安全有更高的要求
+
+HagiCode 提供了 `switch-deployment.sh` 腳本，可以在兩種方案之間快速切換：
+
+```bash
+# 切換到 Bunker Web
+./switch-deployment.sh bunkerweb
+
+# 切換回 Traefik
+./switch-deployment.sh traefik
+
+# 查看當前狀態
+./switch-deployment.sh status
+```
+
+腳本會自動做預檢查、健康檢查，還能自動回滾，切換過程也算安全可靠，不會說換著換著就掛了。
+
+## Nginx 緩存層配置
+
+緩存層是整個架構的核心，Nginx 配置得好不好，緩存效果天差地別。畢竟這事兒還挺關鍵的。
+
+### 緩存路徑配置
+
+```nginx
+# 緩存路徑配置
+proxy_cache_path /var/cache/nginx levels=1:2 keys_zone=azure_cache:10m
+                   max_size=1g inactive=7d use_temp_path=off;
+```
+
+參數說明：
+- `levels=1:2`：緩存目錄層級，2 級目錄結構，提高文件訪問效率
+- `keys_zone=azure_cache:10m`：緩存鍵存儲區域，10MB 足夠存儲大量鍵
+- `max_size=1g`：最大緩存大小 1GB
+- `inactive=7d`：緩存文件 7 天未被訪問則刪除
+- `use_temp_path=off`：直接寫入緩存目錄，提高性能
+
+### 分級緩存策略
+
+不同類型的文件需要不同的緩存策略：
+
+```nginx
+# Server 下載服務
+server {
+    listen 8080;
+
+    # index.json 短期緩存（便於及時更新）
+    location /index.json {
+        proxy_cache azure_cache;
+        proxy_cache_valid 200 1h;
+        proxy_cache_key "$scheme$server_port$request_uri";
+        add_header X-Cache-Status $upstream_cache_status;
+        add_header Cache-Control "public, max-age=3600";
+
+        # 反向代理到 Azure OSS
+        proxy_pass https://${SERVER_DL_HOST}/${SERVER_DL_CONTAINER}$uri?${SERVER_DL_SAS_TOKEN};
+        proxy_ssl_server_name on;
+        proxy_ssl_protocols TLSv1.2 TLSv1.3;
+    }
+
+    # 安裝包等靜態文件長期緩存
+    location / {
+        proxy_cache azure_cache;
+        proxy_cache_valid 200 7d;
+        proxy_cache_key "$scheme$server_port$request_uri";
+        add_header X-Cache-Status $upstream_cache_status;
+        add_header Cache-Control "public, max-age=604800";
+
+        proxy_pass https://${SERVER_DL_HOST}/${SERVER_DL_CONTAINER}$uri?${SERVER_DL_SAS_TOKEN};
+        proxy_ssl_server_name on;
+        proxy_ssl_protocols TLSv1.2 TLSv1.3;
+    }
+}
+```
+
+**為什麼這樣設計？**
+
+`index.json` 是版本檢查文件，得及時更新，所以緩存時間設成了 1 小時。這樣發布新版本後，最多 1 小時用戶就能檢測到更新，也不算太久。
+
+安裝包這些靜態文件，變化本來就少，緩存 7 天能大幅減少源站訪問。需要更新的時候手動清理一下緩存就好了，也不算麻煩。
+
+**X-Cache-Status 響應頭**：
+
+這個響應頭能讓你看看緩存命中情況怎麼樣，也挺有用的：
+- `HIT`：緩存命中
+- `MISS`：緩存未命中，從源站拉取
+- `EXPIRED`：緩存過期，重新從源站拉取
+- `BYPASS`：緩存被繞過
+
+查看方法：
+```bash
+curl -I https://server.dl.hagicode.com/app.zip
+```
+
+## 成本分析
+
+假設每月下載流量 1TB，我們來算算賬：
+
+| 方案 | 流量費用 | 服務器費用 | 合計 |
+|------|----------|------------|------|
+| 直接 Azure OSS | 約 ¥500 | ¥0 | ¥500 |
+| 雲服務器 + OSS (緩存命中率 80%) | ¥100 + ¥80 | ¥60 | ¥240 |
+| 商業 CDN | ¥300-500 | ¥0 | ¥300-500 |
+
+**結論**：緩存層能省下大概 50% 的分發成本。
+
+這個計算假設緩存命中率 80%，實際情況中，如果文件更新頻率不高，命中率可能還會更高一些，畢竟這也是自然而然的事。
+
+## 部署實踐
+
+### 環境準備
+
+首先配置環境變量：
+
+```bash
+cd /path/to/hagicode_aliyun_deployment/docker
+cp .env.example .env
+vi .env  # 填入 Azure OSS SAS URL、Lark Webhook URL
+```
+
+**重要**：`.env` 文件包含敏感信息（SAS Token、Webhook URL），千萬別提交到版本控制，這事兒還挺關鍵的。
+
+### DNS 配置
+
+添加以下 DNS A 記錄，這步別忘了：
+- `server.dl.hagicode.com` → 服務器 IP
+- `desktop.dl.hagicode.com` → 服務器 IP
+
+### 初始化服務器
+
+使用 Ansible 自動化初始化服務器：
+
+```bash
+cd /path/to/hagicode_aliyun_deployment
+ansible-playbook -i ./ansible/inventory/hosts.yml ./ansible/playbooks/init.yml
+```
+
+這個 Playbook 會自動搞定這些：
+- 創建部署用戶
+- 安裝 Docker 和 Docker Compose
+- 配置 SSH 密鑰
+- 設置防火牆規則
+
+也不算太複雜，畢竟自動化這東西，省時省力。
+
+### 部署服務
+
+```bash
+./deploy.sh
+```
+
+部署腳本會幫你做這些：
+- 檢查環境配置
+- 拉取最新代碼
+- 啟動 Docker 容器
+- 執行健康檢查
+- 發送部署通知（飛書）
+
+一條命令搞定，也算方便。
+
+### 驗證部署
+
+```bash
+# 檢查容器狀態
+docker ps
+
+# 測試下載域名
+curl -I https://server.dl.hagicode.com/index.json
+curl -I https://desktop.dl.hagicode.com/index.json
+```
+
+## 運維技巧
+
+### 緩存管理
+
+緩存這東西，偶爾也得打理一下：
+
+**查看緩存磁盤使用**：
+```bash
+docker volume inspect docker_nginx-cache
+du -sh /var/lib/docker/volumes/docker_nginx-cache/_data
+```
+
+**手動清除緩存**：
+```bash
+./clear-cache.sh
+```
+
+或者手動執行，雖然麻煩一點，但也管用：
+```bash
+docker exec nginx sh -c "rm -rf /var/cache/nginx/*"
+docker restart nginx
+```
+
+### 資源限制
+
+在 1 核 2GB 服務器上，資源限制配置如下：
+
+```yaml
+services:
+  traefik:
+    deploy:
+      resources:
+        limits:
+          cpus: '1.50'
+          memory: 512M
+
+  nginx:
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 256M
+```
+
+監控資源使用情況，偶爾看看也挺好：
+```bash
+docker stats
+```
+
+### SAS Token 安全實踐
+
+SAS Token 是訪問 Azure Blob Storage 的憑證，泄露了可不是鬧著玩的：
+
+- `.env` 文件不提交到版本控制（已在 .gitignore）
+- SAS Token 設置適當過期時間（推薦 1 年）
+- 限制 SAS Token 權限（僅讀取）
+- 定期輪換 SAS Token
+
+### 監控告警
+
+HagiCode 集成了 Lark/飛書 Webhook 通知，可以在以下情況發送通知：
+- 部署成功/失敗
+- 緩存清除狀態
+- 服務異常
+
+通知包含服務器信息、時間戳、錯誤詳情，快速定位問題也方便一些。
+
+### 高可用擴展
+
+當單台服務器撐不住的時候，也可以考慮：
+
+1. **水平擴展**：部署多個節點，通過 DNS 輪詢或負載均衡分發
+2. **CDN 加持**：在雲服務器前接入 CDN，進一步提升訪問速度
+3. **緩存預熱**：使用腳本提前將熱門文件加載到緩存
+
+## 注意事項
+
+有幾點還得提醒一下，畢竟誰都不想遇到幺蛾子：
+
+1. **SSL 證書**：Let's Encrypt 有速率限制，別頻繁切換部署，不然可能申請不到證書
+2. **緩存清理**：更新重要文件後記得清理緩存，不然用戶可能下載不到新版本
+3. **日誌管理**：定期清理 Docker 日誌，不然磁盤滿了就麻煩了
+4. **備份策略**：Traefik acme.json、Bunker Web 配置這些，還是備份一下比較好
+5. **監控告警**：配置飛書通知，及時了解部署狀態，出問題也能快速反應
+
+## 總結
+
+雲服務器 + Nginx 緩存層，就這麼簡單。HagiCode 用這套方案，成本不算高（服務器費用大概 60-100 元/月），效果還挺不錯的。核心優勢大概也就這些：
+
+- **成本可控**：比直接用雲存儲或商業 CDN，成本降了大概 50%
+- **部署靈活**：Traefik 還是 Bunker Web，看你自已選
+- **擴展性強**：需要的話可以水平擴展，或者再加個 CDN
+- **運維簡單**：Shell 腳本 + Ansible，自動化部署也方便
+
+對於需要文件分發的小團隊和個人開發者來說，這方案倒是可以試試。
+
+HagiCode 用這套架構在生產環境穩定運行了一段時間，全球用戶下載也沒出什麼大問題。如果你也在找類似的解決方案，不妨試試看，說不定對你也有幫助。
+
+## 技術棧總結
+
+最後整理一下用到的技術，也算有個交代：
+
+| 組件 | 選型 | 用途 |
+|------|------|------|
+| 雲服務器 | 阿里雲 ECS | 基礎運行環境 |
+| 反向代理 | Traefik / Bunker Web | SSL 終止、路由、安全防護 |
+| 緩存層 | Nginx | 反向代理緩存、Gzip 壓縮 |
+| 文件存儲 | Azure Blob Storage | 文件源站 |
+| 容器化 | Docker Compose | 服務編排 |
+| 自動化 | Ansible | 服務器配置管理 |
+| 通知 | Lark/飛書 Webhook | 部署狀態通知 |
+
+## 參考資料
+
+最後還是給些參考資料吧，也算有個著落：
+
+- HagiCode 項目地址：[github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- HagiCode 官網：[hagicode.com](https://hagicode.com)
+- 30 分鐘實戰演示：[www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)
+- Docker Compose 一鍵安裝：[docs.hagicode.com/installation/docker-compose](https://docs.hagicode.com/installation/docker-compose)
+- Desktop 桌面端快速安裝：[hagicode.com/desktop/](https://hagicode.com/desktop/)
+
+---
+
+如果本文對你有幫助，那也算是值得了：
+- 點個讚讓更多人看到
+- 來 GitHub 給個 Star：[github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- 訪問官網了解更多：[hagicode.com](https://hagicode.com)
+- 觀看 30 分鐘實戰演示：[www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)
+- 一鍵安裝體驗：[docs.hagicode.com/installation/docker-compose](https://docs.hagicode.com/installation/docker-compose)
+- Desktop 桌面端快速安裝：[hagicode.com/desktop/](https://hagicode.com/desktop/)
+- 公測已開始，歡迎安裝體驗
+
+---
+
+寫到這裡也差不多了。希望這套方案對你有幫助，畢竟折騰這些東西也不容易......如果你也有什麼好辦法，歡迎一起交流。技術這東西，說到底還是一起進步比較好。
+
+## 版權說明
+
+感謝您的閱讀,如果您覺得本文有用,歡迎點讚、收藏和分享支持。
+本內容採用人工智能輔助協作,最終內容由作者審核並確認。
+- 本文作者: [newbe36524](https://www.newbe.pro)
+- 原文鏈接: [https://docs.hagicode.com/blog/2026-04-15-low-cost-cloud-server-download-distribution-station/](https://docs.hagicode.com/blog/2026-04-15-low-cost-cloud-server-download-distribution-station/)
+- 版權聲明: 本博客所有文章除特別聲明外,均採用 BY-NC-SA 許可協議。轉載請註明出處!

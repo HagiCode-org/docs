@@ -1,0 +1,271 @@
+---
+title: 왜 HagiCode가 CLI 명령 실행을 위해 execa를 선택했나
+date: 2026-05-05
+tags: [Node.js, execa, child_process, HagiCode, 모범 사례]
+---
+
+## 왜 HagiCode가 CLI 명령 실행을 위해 execa를 선택했나
+
+> Node.js 프로젝트에서 `child_process`를 직접 사용하여 외부 명령을 실행하면 플랫폼 차이가 크고 오류 처리가 일관되지 않는 등의 문제가 있습니다. 이 문서에서는 HagiCode 프로젝트에 execa를 도입한 실전 경험을 공유합니다. 핵심 설계 결정과 실제 코드 예시를 포함합니다.
+
+## 배경
+
+Node.js 프로젝트에서 `child_process` 모듈을 직접 사용하여 외부 명령을 실행하는 것은 일반적인 방법이지만, 이 방식에는 꽤 많은 문제가 있습니다:
+
+- **플랫폼 차이가 큼**: Windows의 `.cmd`/`.bat` 파일은 특수 처리가 필요하고, 경로에 공백이 포함된 경우 따옴표로 감싸야 합니다
+- **오류 처리가 일관되지 않음**: `execFile`, `spawn`, `execFileSync`의 오류 메시지 형식이 각각 다르며, 통합 처리가 어렵습니다
+- **스트림 처리가 번거로움**: stdout/stderr의 스트림 수집과 버퍼링을 수동으로 처리해야 합니다
+- **제한 시간 및 신호 처리가 복잡함**: 명령 제한 시간 취소 및 프로세스 신호 처리를 위한 추가 코드가 필요합니다
+
+HagiCode 프로젝트의 Hagiscript와 Desktop 애플리케이션은 모두 많은 외부 CLI 명령(npm, node, PowerShell 등)을 실행해야 하므로, `child_process`를 직접 사용하면 코드 중복이 발생하고 유지 관리 비용이 높습니다.
+
+이러한 문제를 해결하기 위해 우리는 한 가지 결정을 내렸습니다: execa를 통일된 명령 실행 솔루션으로 도입합니다. 이 결정이 가져온 변화는 생각보다 훨씬 큽니다—나중에 구체적으로 설명하겠습니다.
+
+## HagiCode 소개
+
+이 문서에서 공유하는 솔루션은 [HagiCode](https://hagicode.com) 프로젝트에서의 실전 경험에서 나왔습니다. HagiCode는 AI 코드 어시스턴트 프로젝트로, 여러 하위 프로젝트(Hagiscript 스크립트 엔진 및 Desktop 데스크톱 애플리케이션)에서 많은 외부 명령을 실행해야 합니다. 이러한 다언어, 다플랫폼의 복잡성이 우리가 execa를 도입한 직접적인 이유일 수 있습니다.
+
+이 문서에서 공유하는 솔루션이 가치 있다고 생각하신다면, 우리의 엔지니어링 역량이 꽤 괜찮다는 것을 의미합니다—그렇다면 HagiCode 자체도 주목해 볼 만합니다.
+
+## 왜 execa를 선택했나?
+
+execa는 성숙한 프로세스 실행 라이브러리로, `child_process`의 핵심 문제를 해결합니다:
+
+1. **크로스 플랫폼 일관성**: Windows 명령 shim을 자동으로 처리하며, `.cmd` 파일을 수동으로 감지할 필요가 없습니다
+2. **통일된 오류 처리**: 표준화된 오류 객체로 exitCode, signal, timedOut, stdout, stderr를 포함합니다
+3. **더 나은 API 설계**: Promise API, AbortSignal 취소, 스트림 처리를 지원합니다
+4. **보안**: 매개변수 경계를 유지하여 명령 인젝션 위험을 방지합니다
+
+이러한 기능은 HagiCode 개발 과정에서 우리가 필요로 하는 것입니다. Hagiscript는 다양한 플랫폼에서 npm 명령을 실행해야 하고, Desktop은 PowerShell과 다양한 개발 도구를 호출해야 합니다. execa의 크로스 플랫폼 일관성은 플랫폼适配 코드를 크게 줄여줍니다. 결국, 누가 각 플랫폼마다 특수 처리 코드를 한 번씩 작성하고 싶어 하겠습니까?
+
+## 핵심 설계 결정
+
+두 프로젝트의 구현 모두 execa를 직접 호출하는 대신 **내부 래퍼 계층**을 채택했습니다:
+
+```typescript
+// Hagiscript의 통일된 실행기
+export const runCommand: CommandRunner = async (command, args, options) => {
+  const result = await execa(command, args, { /* normalized options */ });
+  return { /* normalized result */ };
+};
+```
+
+**이유**:
+- 도메인별 오류 유형 유지(예: `NpmCommandError`)
+- 테스트 시 모의 실행기 주입 용이
+- 통일된 오류 처리 및 로깅
+- 향후 하위 구현을 쉽게 교체 가능
+
+### 매개변수 경계 보호
+
+두 구현 모두 shell 문자열 대신 **매개변수 배열**을 강조합니다:
+
+```typescript
+// 올바름: 매개변수 경계가 명확함
+await runCommand('npm', ['install', '@scope/package@1.0.0']);
+
+// 잘못됨: 인젝션 위험이 쉬움
+await execa(`npm install @scope/package@1.0.0`, { shell: true });
+```
+
+이는 매개변수 인용, 이스케이프 및 인젝션의 보안 문제를 방지합니다. HagiCode에서 우리는 사용자가 입력한 패키지 이름, 스크립트 이름 등의 매개변수를 자주 처리해야 하므로, 매개변수 배열을 사용하면 명령 인젝션을 효과적으로 방지할 수 있습니다. 결국, 보안은 한 번 문제가 생기면 큰 문제가 됩니다.
+
+## Hagiscript의 솔루션
+
+HagiCode의 Hagiscript 하위 프로젝트는 `runtime/command-launch.ts` 모듈을 만들어 다음을 제공합니다:
+
+1. **통일된 실행기**: execa를 캡슐화하는 `runCommand` 함수
+2. **표준화된 결과**: `CommandResult` 인터페이스
+3. **표준화된 오류**: `CommandExecutionError` 클래스
+4. **호환성 보조 함수**: `normalizeCommandPath`, `requiresShellLaunch`
+
+```typescript
+export interface CommandResult {
+  command: string;
+  args: string[];
+  stdout: string;
+  stderr: string;
+  exitCode?: number;
+  signal?: string;
+  timedOut?: boolean;
+}
+
+export class CommandExecutionError extends Error {
+  readonly context: CommandFailureContext;
+}
+```
+
+이러한 추상화를 통해 Hagiscript는 npm 종속성 설치든 node 스크립트 실행이든 모든 외부 명령을 통일된 방식으로 처리할 수 있습니다. 뭐랄까, 통일된 인터페이스가 있으면 코드를 작성할 때 훨씬 편합니다.
+
+## Desktop의 솔루션
+
+HagiCode의 Desktop 하위 프로젝트는 `utils/cli-executor.ts` 모듈을 만들어 다음을 제공합니다:
+
+1. **실행 옵션**: 제한 시간, 취소, 환경 변수를 지원하는 `CliExecutorOptions`
+2. **결과 분류**: 성공/실패 상태를 포함하는 `CliExecutionResult`
+3. **스트림 처리**: 실시간 출력 콜백을 지원하는 `executeCliStreaming`
+4. **오류 분류**: 종료, 제한 시간, 취소 등 실패 유형을 구분하는 `CliFailureKind`
+
+```typescript
+export async function executeCli(options: CliExecutorOptions): Promise<CliExecutionResult>
+export async function executeCliStreaming(options: CliExecutorOptions): Promise<CliExecutionResult>
+```
+
+Desktop은 UI에서 명령 실행 진행률을 표시해야 하므로 스트리밍 처리 기능이 유용합니다. 사용자는 명령 실행이 완료될 때까지 기다리지 않고 npm install의 출력을 실시간으로 볼 수 있습니다. 이러한 경험은, 뭐랄까, 한 번 사용하면 돌아갈 수 없습니다.
+
+## 사용 예시
+
+### Hagiscript에서 명령 실행
+
+```typescript
+import { runCommand } from '../runtime/command-launch.js';
+
+// 간단한 실행
+const result = await runCommand('node', ['--version']);
+console.log(result.stdout); // 'v20.0.0'
+
+// 옵션과 함께 실행
+const installResult = await runCommand('npm', ['install', 'express'], {
+  cwd: '/project/path',
+  env: { NODE_ENV: 'development' },
+  timeoutMs: 30000
+});
+```
+
+### Desktop에서 명령 실행
+
+```typescript
+import { executeCli, executeCliStreaming } from './utils/cli-executor.js';
+
+// 버퍼링 실행
+const result = await executeCli({
+  command: 'npm',
+  args: ['list', '--json'],
+  cwd: projectPath,
+  timeoutMs: 5000,
+});
+
+if (result.success) {
+  console.log(result.stdout);
+} else {
+  console.error(result.error?.message);
+}
+
+// 스트리밍 실행
+await executeCliStreaming({
+  command: 'npm',
+  args: ['install'],
+  onOutput: (type, data) => {
+    console.log(`[${type}]`, data);
+  }
+});
+```
+
+### 오류 처리
+
+```typescript
+try {
+  await runCommand('npm', ['install', 'invalid-package']);
+} catch (error) {
+  if (error instanceof CommandExecutionError) {
+    console.error('Command failed:', error.context.command);
+    console.error('Exit code:', error.context.exitCode);
+    console.error('Stderr:', error.context.stderr);
+  }
+}
+```
+
+통일된 오류 처리를 통해 HagiCode에서 더 나은 사용자 경험을 제공할 수 있습니다. 예를 들어 npm 설치가 실패할 때 일반적인 "명령 실행 실패"를 표시하는 대신 구체적인 오류 정보를 추출하여 사용자에게 표시할 수 있습니다. 결국, 사용자가 구체적인 오류 정보를 보면 최소한 문제가 어디에 있는지 알 수 있습니다.
+
+## 테스트 전략
+
+두 프로젝트 모두 **의존성 주입**을 지원하여 테스트를 용이하게 합니다:
+
+```typescript
+// 프로덕션 코드
+async function installPackage(pkg: string, runCommand = defaultRunCommand) {
+  return runCommand('npm', ['install', pkg]);
+}
+
+// 테스트 코드
+it('installs package', async () => {
+  const mockRunCommand = vi.fn().mockResolvedValue({
+    stdout: 'installed',
+    stderr: '',
+    exitCode: 0
+  });
+  await installPackage('test-pkg', mockRunCommand);
+  expect(mockRunCommand).toHaveBeenCalledWith('npm', ['install', 'test-pkg']);
+});
+```
+
+이러한 설계는 HagiCode의 테스트를 더욱 신뢰할 수 있고 빠르게 만듭니다. 우리는 테스트에서 실제로 npm 명령을 실행할 필요가 없으며, 모의 실행기가 예상 결과를 반환하도록 하면 됩니다. 테스트가 빠르게 실행되면 개발자의 기분도 자연스럽게 좋아집니다.
+
+## 주의 사항
+
+HagiCode의 실무 경험에서 우리는 다음 주의 사항을 요약했습니다:
+
+1. **매개변수 분리 유지**: 명령과 매개변수를 항상 개별 배열 요소로 전달합니다
+2. **shell 모드 신중 사용**: 파이프나 리디렉션이 필요할 때만 `shell: true`를 사용합니다
+3. **제한 시간 처리**: 중단될 수 있는 명령에 `timeoutMs`를 설정합니다
+4. **버퍼 크기**: 큰 출력의 경우 `maxBuffer` 설정을 고려합니다
+5. **Windows 경로**: execa는 `.cmd` shim을 자동으로 처리하므로 수동 감지가 필요하지 않습니다
+6. **작업 취소**: 수동 `kill()` 대신 `AbortSignal`을 사용합니다
+7. **오류 분류**: 프로세스 시작 실패, 실행 실패, 제한 시간, 취소 등의 시나리오를 구분합니다
+
+이것들은 모두 우리가 실제 개발에서 겪은 문제들로, 아마도 여러분이 우회로를 덜 걷게 도와줄 수 있을 것입니다.
+
+## 일반적인 함정
+
+```typescript
+// 잘못됨: 문자열 연결은 인젝션 가능
+await execa(`npm install ${userInput}`, { shell: true });
+
+// 올바름: 매개변수 배열
+await execa('npm', ['install', userInput]);
+
+// 잘못됨: 제한 시간 무시
+await execa('npm', ['install', 'heavy-package']);
+
+// 올바름: 제한 시간 설정
+await execa('npm', ['install', 'heavy-package'], { timeout: 60000 });
+
+// 잘못됨: 종료 코드가 0이라고 가정
+const result = await execa('npm', ['install']);
+
+// 올바름: 실패 확인
+try {
+  await execa('npm', ['install']);
+} catch (error) {
+  // 실패 처리
+}
+```
+
+이러한 함정들은 말하면 눈물입니다. 결국, 프로덕션 환경에서 몇 번쨰 문제를 겪지 않은 사람이 누구입니까?
+
+## 요약
+
+execa를 도입한 후 HagiCode 프로젝트의 명령 실행 측면에서 코드 품질과 유지 관리성이 크게 향상되었습니다:
+
+- **크로스 플랫폼 일관성**: Windows용 특수 처리 코드를 더 이상 작성할 필요가 없습니다
+- **통일된 오류 처리**: 오류 메시지가 구조화되어 표시 및 분석이 용이합니다
+- **더 나은 테스트 가능성**: 의존성 주입을 통해 명령 실행을 쉽게 모의할 수 있습니다
+- **더 안전한 매개변수 처리**: 매개변수 배열을 사용하여 인젝션 위험을 방지합니다
+
+Node.js 프로젝트에서 외부 명령을 실행해야 한다면 execa를 강력히 사용해 보시기 바랍니다. 이 문서에서 공유하는 솔루션은 HagiCode 개발 과정에서 실제로 겪은 문제와 실제로 최적화한 것으로, 도움이 되기를 바랍니다.
+
+결국, 좋은 도구는 더 많은 사람들이 알아야 합니다......
+
+## 참고 자료
+
+- [execa 공식 문서](https://github.com/sindresorhus/execa)
+- [Node.js child_process 문서](https://nodejs.org/api/child_process.html)
+- [HagiCode GitHub 저장소](https://github.com/HagiCode-org/site)
+- [HagiCode 공식 웹사이트](https://hagicode.com)
+
+이 문서가 도움이 되셨다면:
+- GitHub에서 Star 주시기: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- 공식 웹사이트 방문하여 자세히 알아보기: [hagicode.com](https://hagicode.com)
+- 30분 실전 데모 시청: [www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)
+- 원클릭 설치 체험: [docs.hagicode.com/installation/docker-compose](https://docs.hagicode.com/installation/docker-compose)
+- Desktop 데스크톱용 빠른 설치: [hagicode.com/desktop/](https://hagicode.com/desktop/)

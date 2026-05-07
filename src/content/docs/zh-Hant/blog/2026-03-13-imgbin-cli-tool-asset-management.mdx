@@ -1,0 +1,384 @@
+---
+title: ImgBin CLI 工具設計：HagiCode 圖片資產管理方案
+date: 2026-03-13
+tags: [CLI, 圖片管理, TypeScript, Node.js, 資產流水線]
+description: "本文介紹如何從零構建一個可自動化執行的圖片資產流水線，包括 CLI 工具設計、Provider Adapter 架構、以及元數據管理策略。"
+---
+
+## ImgBin CLI 工具設計：HagiCode 圖片資產管理方案
+
+> 本文介紹如何從零構建一個可自動化執行的圖片資產流水線，包括 CLI 工具設計、Provider Adapter 架構、以及元數據管理策略。
+
+## 背景
+
+其實也沒想到，圖片資產管理這兒事也能讓我們糾結這麼久。
+
+在 HagiCode 項目開發過程中，我們遇到了一個看似簡單卻十分棘手的問題：圖片資產的生成和管理。怎麼說呢，就像青春期的那些兒事一樣——表面上風平浪靜，暗地裡波瀾起伏。
+
+隨著項目文檔和營銷物料的增多，需要大量配圖。這些配圖有些需要 AI 生成，有些需要從現有素材庫中挑選，還有些需要對現有圖片進行 AI 識別並自動標註。問題在於，這些工作長期以來都是用零散的腳本加人工操作來完成的——每次生成一張圖片，都需要手動執行腳本、手動整理元數據、手動生成縮略圖。這也就罷了，關鍵是這些零散的東西散落在各處，想找的時候找不到，想用的時候用不了。
+
+具體痛點包括：
+
+1. **缺乏統一入口**：圖片生成的邏輯分散在不同腳本中，想批量執行根本沒門
+2. **元數據缺失**：生成後的圖片沒有統一的 metadata.json，無法檢索和追蹤
+3. **人工整理成本高**：圖片的標題、標籤都需要人工一一整理，效率低下
+4. **無法自動化**：CI/CD 流程中想要自動生成配圖？門都沒有
+
+也曾想過乾脆不管了，可是畢竟還是要做項目的嘛。既然躲不掉，那就想辦法解決唄。於是我們決定，將 ImgBin 從「零散腳本」升級為可自動化執行的圖片資產流水線。畢竟有些兒事，逃避也不是辦法。
+
+## 關於 HagiCode
+
+本文分享的方案來自我們在 [HagiCode](https://hagicode.com) 項目中的實踐經驗。HagiCode 是一個 AI 代碼助手項目，同時維護著 VSCode 擴展、後端 AI 服務、跨平台桌面客戶端等多種組件。在這種多語言、多平台的複雜場景下，圖片資產的規範管理成了提升開發效率的關鍵一環。
+
+怎麼說呢，這也算是 HagiCode 成長過程中的一個小小煩惱吧。每個項目都會有這樣的時候，看起來不起眼的小問題，卻能讓人折騰半天。
+
+HagiCode 的構建系統採用 TypeScript + Node.js 生態，因此 ImgBin 也順理成章地選擇了相同的技術棧，確保整個項目的技術一致性。畢竟都用習慣了，換別的也嫌麻煩嘛。
+
+---
+
+## 核心設計
+
+### 整體架構
+
+ImgBin 採用分層架構，將 CLI 命令、應用服務、第三方 API 適配器和基礎設施層清晰分離：
+
+```
+組件層次結構
+├── CLI Entry (cli.ts)              全局參數解析、命令路由
+├── Commands (commands/*)           generate | batch | annotate | thumbnail
+├── Application Services            job-runner | metadata | thumbnail | asset-writer
+├── Provider Adapters               image-api-provider | vision-api-provider
+└── Infrastructure Layer            config | logger | paths | schema
+```
+
+這種分層設計的好處是：每層的職責清晰，測試時可以方便地 mock 掉外部依賴。其實也就是讓各幹各的，互不打擾，這樣出了問題也容易找原因，不是麼？
+
+### 單資產目錄模型
+
+ImgBin 採用了「一個資產一個目錄」的模型，每次生成圖片時，都會創建如下結構：
+
+```
+library/
+└── 2026-03/
+    └── orange-dashboard/
+        ├── original.png      # 原始圖片
+        ├── thumbnail.webp    # 512x512 縮略圖
+        └── metadata.json     # 結構化元數據
+```
+
+這種模型的優勢在於：
+
+1. **自包含**：每個資產的所有文件都在同一個目錄，遷移、備份都很方便
+2. **可追溯**：通過 metadata.json 可以追溯圖片的生成時間、使用的 prompt、模型等信息
+3. **可擴展**：未來如果需要添加更多變體（比如不同尺寸的縮略圖），只需要在同一目錄下新增文件即可
+
+美的事物或人，不一定要佔有，只要她還是美的，自己好好看著她的美就好了。這話雖然說得有點遠了，但理兒是這麼個理兒——圖片放在一起了，看起來也舒服，找起來也方便。
+
+### 元數據分層存儲
+
+metadata.json 是整個系統的核心，它採用分層存儲策略，區分了三類字段：
+
+```json
+{
+  "schemaVersion": 2,
+  "assetId": "orange-dashboard",
+  "slug": "orange-dashboard",
+  "title": "Orange Dashboard",
+  "tags": ["dashboard", "hero", "orange"],
+
+  "source": { "type": "generated" },
+
+  "paths": {
+    "assetDir": "library/2026-03/orange-dashboard",
+    "original": "original.png",
+    "thumbnail": "thumbnail.webp"
+  },
+
+  "generated": {
+    "prompt": "orange dashboard for docs hero",
+    "provider": "azure-openai-image-api",
+    "model": "gpt-image-1.5"
+  },
+
+  "recognized": {
+    "title": "Orange Dashboard",
+    "tags": ["dashboard", "ui", "orange"],
+    "description": "A modern orange dashboard with charts and metrics"
+  },
+
+  "status": {
+    "generation": "succeeded",
+    "recognition": "succeeded",
+    "thumbnail": "succeeded"
+  },
+
+  "timestamps": {
+    "createdAt": "2026-03-11T04:01:19.570Z",
+    "updatedAt": "2026-03-11T04:02:09.132Z"
+  }
+}
+```
+
+- **generated**：記錄圖片生成時的原始信息，如使用的 prompt、提供商、模型等
+- **recognized**：AI 識別結果，如自動生成的標題、標籤、描述
+- **manual**：人工整理的結果，這個區的數據優先級最高，不會被 AI 識別覆蓋
+
+這種分層策略解決了我們之前的一個核心矛盾：AI 識別結果和人工整理結果誰優先？答案是人工優先，AI 識別只是輔助。這事兒也想明白了——有些東西嘛，機器終究是機器，終究還是得人來把關。
+
+---
+
+## Provider Adapter 模式
+
+ImgBin 的另一個核心設計是 Provider Adapter 模式。我們將外部 API 抽象為統一的接口，這樣即使更換 AI 服務商，也不需要修改業務邏輯。
+
+怎麼說呢，這就跟感情一樣——外表怎麼變不重要，重要的是內心那套東西不變。接口定好了，內部的實現怎麼換都行。
+
+### Image Generation Provider
+
+```typescript
+interface ImageGenerationProvider {
+  // 生成圖片，返回圖片的 Buffer
+  generate(options: GenerateOptions): Promise<Buffer>;
+
+  // 獲取支持的模型列表
+  getSupportedModels(): Promise<string[]>;
+}
+
+interface GenerateOptions {
+  prompt: string;
+  model?: string;
+  size?: '1024x1024' | '1792x1024' | '1024x1792';
+  quality?: 'standard' | 'hd';
+  format?: 'png' | 'webp' | 'jpeg';
+}
+```
+
+### Vision Recognition Provider
+
+```typescript
+interface VisionRecognitionProvider {
+  // 識別圖片內容，返回結構化的元數據
+  recognize(imageBuffer: Buffer): Promise<RecognitionResult>;
+
+  // 獲取支持的模型列表
+  getSupportedModels(): Promise<string[]>;
+}
+
+interface RecognitionResult {
+  title?: string;
+  tags: string[];
+  description?: string;
+  confidence: number;
+}
+```
+
+這種接口設計的優勢在於：
+
+1. **可測試**：單元測試時可以傳入 mock provider，不需要真正調用外部 API
+2. **可擴展**：新增一個 provider 只需要實現接口，不需要修改調用方代碼
+3. **可替換**：生產環境用 Azure OpenAI，測試環境用本地模型，只需要切換配置
+
+想笑來偽裝自己掉下的淚，想哭來試探自己麻痹了沒——有時候做項目就是這樣，表面上看是換了個 API，實際上內在的那套邏輯一點沒變，也就沒什麼好怕的了。
+
+---
+
+## CLI 命令設計
+
+ImgBin 提供了四個核心命令，滿足不同的使用場景：
+
+### generate：單圖生成
+
+```bash
+# 最簡單的用法
+imgbin generate --prompt "orange dashboard for docs hero"
+
+# 同時生成縮略圖和 AI 標註
+imgbin generate --prompt "orange dashboard" --annotate --thumbnail
+
+# 指定輸出目錄
+imgbin generate --prompt "orange dashboard" --output ./library
+```
+
+### batch：批量任務
+
+批量任務通過 YAML 或 JSON manifest 文件定義，適合 CI/CD 流程中使用：
+
+```yaml
+# assets/jobs/launch.yaml
+defaults:
+  annotate: true
+  thumbnail: true
+  libraryRoot: ./library
+
+jobs:
+  - prompt: "orange dashboard hero"
+    slug: orange-dashboard
+    tags: [dashboard, hero, orange]
+
+  - prompt: "pricing grid for docs"
+    slug: pricing-grid
+    tags: [pricing, grid, docs]
+```
+
+執行命令：
+
+```bash
+imgbin batch assets/jobs/launch.yaml
+```
+
+批量任務的設計支持失敗隔離：manifest 中逐項處理，單項失敗不影響其他任務。可以通過 `--dry-run` 預覽而不實際執行。
+
+這也就罷了，關鍵是它還能告訴你哪兒成功了哪兒失敗了，不像某些兒事，失敗了都不知道怎麼失敗的。
+
+### annotate：AI 標註
+
+對現有圖片執行 AI 識別，自動生成標題、標籤、描述：
+
+```bash
+# 標註單張圖片
+imgbin annotate ./library/2026-03/orange-dashboard
+
+# 批量標註整個目錄
+imgbin annotate ./library/2026-03/
+```
+
+### thumbnail：縮略圖生成
+
+為既有圖片補生成縮略圖：
+
+```bash
+# 生成縮略圖
+imgbin thumbnail ./library/2026-03/orange-dashboard
+```
+
+---
+
+## 批量任務 Manifest 設計
+
+批量任務的 manifest 支持靈活的配置，默認值可以統一設置，單個任務也可以覆蓋：
+
+```yaml
+# 全局默認值
+defaults:
+  annotate: true        # 默認開啟 AI 標註
+  thumbnail: true       # 默認生成縮略圖
+  libraryRoot: ./library
+  model: gpt-image-1.5
+
+jobs:
+  # 最小配置，只提供 prompt
+  - prompt: "first image"
+
+  # 完整配置
+  - prompt: "second image"
+    slug: custom-slug
+    tags: [tag1, tag2]
+    annotate: false     # 這個任務不執行 AI 標註
+    model: dall-e-3    # 這個任務用不同的模型
+```
+
+執行時，ImgBin 會逐個處理任務，每個任務的結果會寫入對應的 metadata.json，即使某個任務失敗，也不會影響其他任務。任務完成後，會輸出彙總報告：
+
+```
+✓ orange-dashboard (succeeded)
+✓ pricing-grid (succeeded)
+✗ hero-banner (failed: API rate limit exceeded)
+
+2/3 succeeded, 1 failed
+```
+
+有些兒事吧，急也急不來，一個一個來，反而踏實。這，或許就是批量任務的哲學吧。
+
+---
+
+## 環境變量配置
+
+ImgBin 通過環境變量支持靈活的配置：
+
+```bash
+# ImgBin 工作目錄
+IMGBIN_WORKDIR=/path/to/imgbin
+
+# 可執行文件路徑（用於腳本中調用）
+IMGBIN_EXECUTABLE=/path/to/imgbin/dist/cli.js
+
+# 資產庫根目錄
+IMGBIN_LIBRARY_ROOT=./.imgbin-library
+
+# Azure OpenAI 配置（如果使用 Azure provider）
+AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com/
+AZURE_OPENAI_API_KEY=your-api-key
+AZURE_OPENAI_IMAGE_DEPLOYMENT=gpt-image-1
+```
+
+配置這東西，說重要也重要，說不重要也不重要。畢竟怎麼舒服怎麼來嘛，適合自己的才是最好的。
+
+---
+
+## 實現要點
+
+在實現過程中，我們總結了以下幾個關鍵點：
+
+### Provider 接口設計
+
+接口定義要清晰完整，包括輸入參數、返回值、錯誤處理。建議同時提供同步和異步兩種調用方式，方便不同場景使用。
+
+這也算是過來人的一點經驗吧，畢竟接口這東西，定好了就不想再改，麻煩。
+
+### 失敗處理策略
+
+批量任務中某項失敗時，應該：
+
+1. 記錄詳細錯誤信息到單獨的日誌文件
+2. 繼續執行其他任務，不中斷整個流程
+3. 最終返回非零退出碼，表示有任務失敗
+4. 在彙總報告中清晰展示每個任務的執行結果
+
+有些兒事失敗了就是失敗了，逃避也沒用，不如大大方方承認，然後想辦法解決。這道理，做項目和做人是一樣的。
+
+### 元數據合併策略
+
+識別結果默認寫入 `recognized` 區，人工修改的字段有 `manual` 標記。元數據更新時採用「只增不減」策略：除非顯式傳入 `--force` 參數，否則不覆蓋已有的人工整理結果。
+
+這事兒也想明白了——有些東西啊，錯過了就是錯過了，覆蓋了也就沒了。還是保留著比較好，畢竟記錄本身也是一种美。
+
+### 目錄創建原子性
+
+使用 `fs.mkdir({ recursive: true })` 確保目錄創建原子性，避免並發場景下的競態條件。
+
+這大概就是所謂的安全感吧——該穩穩該快快，不拖泥帶水，也不瞻前顧後。
+
+---
+
+## 總結
+
+ImgBin 作為 HagiCode 項目圖片資產管理的核心工具，通過以下設計解決了我們面臨的問題：
+
+1. **統一入口**：CLI 命令覆蓋了生成、標註、縮略圖等全部操作
+2. **元數據驅動**：每個資產都有完整的 metadata.json，支持檢索和追蹤
+3. **Provider Adapter**：靈活的外部 API 抽象，便於測試和擴展
+4. **批量任務支持**：CI/CD 流程中可以自動執行批量圖片生成
+
+一切都淡了......可這方案啊，還真是用上了。
+
+這套方案不僅提升了 HagiCode 自身的開發效率，也形成了一個可復用的圖片資產管理框架。如果你也在開發類似的多組件項目，相信 ImgBin 的設計思路會給你一些啟發。
+
+青春嘛，總是要折騰的。不折騰折騰，怎麼知道自個兒幾斤幾兩呢？
+
+---
+
+## 參考資料
+
+- ImgBin 技術提案：https://github.com/HagiCode-org/site/tree/main/openspec/changes/archive/2026-03-10-imgbin-cli-tool
+- HagiCode 官網：https://hagicode.com
+- HagiCode GitHub：https://github.com/HagiCode-org/site
+
+---
+
+感謝您的閱讀,如果您覺得本文有用,快點擊下方點贊按鈕,讓更多的人看到本文。
+
+本內容採用人工智能輔助協作,經本人審核,符合本人觀點與立場。
+
+- 本文作者: [newbe36524](https://www.newbe.pro)
+- 本文鏈接: [https://docs.hagicode.com/blog/2026-03-13-imgbin-cli-tool-asset-management/](https://docs.hagicode.com/blog/2026-03-13-imgbin-cli-tool-asset-management/)
+- 版權聲明: 本博客所有文章除特別聲明外,均採用 BY-NC-SA 許可協議。版權所有!

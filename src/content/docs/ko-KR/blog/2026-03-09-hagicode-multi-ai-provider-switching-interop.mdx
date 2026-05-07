@@ -1,0 +1,1128 @@
+---
+title: HagiCode 다중 AI 제공자 전환 및 상호운용성 구현 방안
+date: 2026-03-09
+tags: [HagiCode, AI Provider, Claude, Codex, Architecture, Interoperability]
+description: "현대 개발 도구 생태계에서 개발자들은 종종 다른 AI 코딩 어시스턴트를 사용하여 개발 작업을 보조해야 합니다. Anthropic의 Claude Code CLI와 OpenAI의 Codex"
+---
+
+## HagiCode 다중 AI 제공자 전환 및 상호운용성 구현 방안
+
+현대 개발 도구 생태계에서 개발자들은 종종 다른 AI 코딩 어시스턴트를 사용하여 개발 작업을 보조해야 합니다. Anthropic의 Claude Code CLI와 OpenAI의 Codex CLI는 각각 고유한 장점을 가지고 있습니다. Claude는 탁월한 코드 이해와 긴 컨텍스트 처리 능력으로 유명하며, Codex는 코드 생성 및 도구 사용에서 뛰어난 성능을 발휘합니다.
+
+本文에서는 hagicode 프로젝트가 여러 AI 제공자의 원활한 전환과 상호운용성을 어떻게 구현하는지 심층적으로 분석합니다. 핵심 아키텍처 설계, 주요 구현 세부 사항 및 실무상의 주의사항을 포함합니다.
+
+## 배경
+
+### 문제 영역
+
+hagicode 프로젝트가 직면한 핵심 과제는 동일한 플랫폼에서 여러 AI CLI를 지원하여 사용자가 다음을 수행할 수 있도록 하는 것입니다.
+
+1. 요구사항에 따라 다른 AI 제공자를 유연하게 전환
+2. 전환 과정에서 세션 상태의 연속성 유지
+3. 다른 CLI의 API 차이를 통일된 추상화로 제공
+4. 향후 새로운 AI 제공자 추가를 위한 확장 공간 확보
+
+### 기술적 과제
+
+1. **인터페이스 차이 통합**: Claude Code CLI는 명령줄을 통해 호출되고, Codex CLI는 JSON 이벤트 스트림을 사용합니다.
+2. **스트리밍 응답 처리**: 두 제공자 모두 스트리밍 응답을 지원하지만 데이터 형식이 다릅니다.
+3. **도구 호출 의미**: Claude와 Codex는 도구 호출의 표현과 수명 주기 관리가 다릅니다.
+4. **세션 수명 주기**: 각 제공자의 세션 생성, 복구 및 종료를 올바르게 관리해야 합니다.
+
+## 분석
+
+### 아키텍처 설계 아이디어
+
+hagicode는 **제공자 패턴(Provider Pattern)**과 **팩토리 패턴**을 결합하여 AI 서비스 호출을 추상화합니다. 이 설계의 핵심 아이디어는 다음과 같습니다.
+
+1. **통일된 인터페이스 추상화**: 모든 AI 제공자의 통일된 추상화로 `IAIProvider` 인터페이스 정의
+2. **팩토리 인스턴스 생성**: `AIProviderFactory`를 통해 유형에 따라 동적으로 해당 제공자 인스턴스 생성
+3. **지능형 선택 로직**: `AIProviderSelector`를 사용하여 시나리오와 구성에 따라 가장 적합한 제공자 자동 선택
+4. **세션 상태 관리**: 데이터베이스를 통해 세션과 CLI 스레드의 바인딩 관계를 지속화
+
+### 핵심 컴포넌트
+
+| 컴포넌트 | 책임 | 언어 |
+|------|--------|------|
+| `IAIProvider` | 통일된 제공자 인터페이스 | C# |
+| `AIProviderFactory` | 제공자 인스턴스 생성 및 관리 | C# |
+| `AIProviderSelector` | 지능형 제공자 선택 | C# |
+| `ClaudeCodeCliProvider` | Claude Code CLI 구현 | C# |
+| `CodexCliProvider` | Codex CLI 구현 | C# |
+| `AgentCliManager` | 데스크톱 CLI 관리 | TypeScript |
+
+## 해결
+
+### 1. 핵심 인터페이스 설계
+
+**IAIProvider 인터페이스**는 통일된 제공자 추상화를 정의합니다.
+
+```csharp
+public interface IAIProvider
+{
+    /// <summary>
+    /// 제공자 표시 이름
+    /// </summary>
+    string Name { get; }
+
+    /// <summary>
+    /// 스트리밍 응답 지원 여부
+    /// </summary>
+    bool SupportsStreaming { get; }
+
+    /// <summary>
+    /// 제공자 능력 설명
+    /// </summary>
+    ProviderCapabilities Capabilities { get; }
+
+    /// <summary>
+    /// 단일 AI 요청 실행
+    /// </summary>
+    Task<AIResponse> ExecuteAsync(AIRequest request, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// 스트리밍 AI 요청 실행
+    /// </summary>
+    IAsyncEnumerable<AIStreamingChunk> StreamAsync(AIRequest request, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// 제공자 연결성 및 응답 속도 확인
+    /// </summary>
+    Task<ProviderTestResult> PingAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// 임베디드 명령어와 함께 메시지 전송
+    /// </summary>
+    IAsyncEnumerable<AIStreamingChunk> SendMessageAsync(
+        AIRequest request,
+        string? embeddedCommandPrompt = null,
+        CancellationToken cancellationToken = default);
+}
+```
+
+인터페이스 설계의 핵심 특징:
+- **통일된 요청/응답 모델**: 모든 제공자가 동일한 `AIRequest` 및 `AIResponse` 유형 사용
+- **스트리밍 지원**: `IAsyncEnumerable<AIStreamingChunk>`를 통해 스트리밍 출력 통일
+- **능력 설명**: `ProviderCapabilities`는 제공자가 지원하는 기능(스트리밍, 도구, 최대 토큰 등)을 설명
+- **임베디드 명령어**: `SendMessageAsync`는 OpenSpec 명령어를 프롬프트에 임베드하는 것을 지원
+
+### 2. 제공자 유형 열거형
+
+```csharp
+public enum AIProviderType
+{
+    ClaudeCodeCli,   // Anthropic Claude Code
+    OpenCodeCli,     // 기타 CLI(확장 가능)
+    GitHubCopilot,    // GitHub Copilot
+    CodebuddyCli,    // Codebuddy
+    CodexCli         // OpenAI Codex
+}
+```
+
+이 열거형은 시스템이 지원하는 모든 제공자에 대해 타입 안전한 표현을 제공합니다.
+
+### 3. 팩토리 패턴 구현
+
+**AIProviderFactory**는 제공자 인스턴스의 생성과 관리를 담당합니다.
+
+```csharp
+public class AIProviderFactory : IAIProviderFactory
+{
+    private readonly ConcurrentDictionary<AIProviderType, IAIProvider> _cache;
+    private readonly IOptions<AIProviderOptions> _options;
+    private readonly IServiceProvider _serviceProvider;
+
+    public Task<IAIProvider?> GetProviderAsync(AIProviderType providerType)
+    {
+        // 캐시를 사용하여 반복 생성 방지
+        if (_cache.TryGetValue(providerType, out var cached))
+            return Task.FromResult<IAIProvider?>(cached);
+
+        // 구성에서 제공자 구성 가져오기
+        var aiOptions = _options.Value;
+        if (!aiOptions.Providers.TryGetValue(providerType, out var config))
+        {
+            _logger.LogWarning("Provider '{ProviderType}' not found in configuration", providerType);
+            return Task.FromResult<IAIProvider?>(null);
+        }
+
+        // 유형에 따라 제공자 생성
+        var provider = providerType switch
+        {
+            AIProviderType.ClaudeCodeCli =>
+                _serviceProvider.GetService(typeof(ClaudeCodeCliProvider)) as IAIProvider,
+            AIProviderType.CodexCli =>
+                _serviceProvider.GetService(typeof(CodexCliProvider)) as IAIProvider,
+            AIProviderType.GitHubCopilot =>
+                _serviceProvider.GetService(typeof(CopilotAIProvider)) as IAIProvider,
+            _ => null
+        };
+
+        if (provider != null)
+        {
+            _cache[providerType] = provider;
+        }
+
+        return Task.FromResult<IAIProvider?>(provider);
+    }
+}
+```
+
+팩토리 패턴의 장점:
+- **인스턴스 캐싱**: 동일한 유형의 제공자를 반복해서 생성하는 것을 방지
+- **의존성 주입**: `IServiceProvider`를 통해 인스턴스를 생성하며 의존성 주입 지원
+- **구성 기반**: 구성 파일에서 제공자 구성 읽기
+- **예외 처리**: 생성 실패 시 null을 반환하여 상위 계층에서 처리 용이
+
+### 4. 지능형 선택기
+
+**AIProviderSelector**는 제공자 선택 전략을 구현합니다.
+
+```csharp
+public class AIProviderSelector : IAIProviderSelector
+{
+    private readonly BusinessLayerConfiguration _configuration;
+    private readonly IAIProviderFactory _providerFactory;
+    private readonly IMemoryCache _cache;
+
+    public async Task<AIProviderType> SelectProviderAsync(
+        BusinessScenario scenario,
+        CancellationToken cancellationToken = default)
+    {
+        // 1. 시나리오 매핑에서 제공자 가져오기 시도
+        if (_configuration.ScenarioProviderMapping.TryGetValue(scenario, out var providerType))
+        {
+            if (await IsProviderAvailableAsync(providerType, cancellationToken))
+            {
+                _logger.LogDebug("Selected provider '{Provider}' for scenario '{Scenario}'",
+                    providerType, scenario);
+                return providerType;
+            }
+
+            _logger.LogWarning("Configured provider '{Provider}' for scenario '{Scenario}' is not available",
+                providerType, scenario);
+        }
+
+        // 2. 기본 제공자 사용 시도
+        if (await IsProviderAvailableAsync(_configuration.DefaultProvider, cancellationToken))
+        {
+            _logger.LogDebug("Using default provider '{Provider}' for scenario '{Scenario}'",
+                _configuration.DefaultProvider, scenario);
+            return _configuration.DefaultProvider;
+        }
+
+        // 3. 폴백 체인 시도
+        foreach (var fallbackProvider in _configuration.FallbackChain)
+        {
+            if (await IsProviderAvailableAsync(fallbackProvider, cancellationToken))
+            {
+                _logger.LogInformation("Using fallback provider '{Provider}' for scenario '{Scenario}'",
+                    fallbackProvider, scenario);
+                return fallbackProvider;
+            }
+        }
+
+        // 4. 사용 가능한 제공자를 찾을 수 없음
+        throw new InvalidOperationException(
+            $"No available AI provider found for scenario '{scenario}'");
+    }
+
+    public async Task<bool> IsProviderAvailableAsync(
+        AIProviderType providerType,
+        CancellationToken cancellationToken = default)
+    {
+        var cacheKey = $"provider_available_{providerType}";
+
+        // 캐시를 사용하여 Ping 호출 감소
+        if (_configuration.EnableCache &&
+            _cache.TryGetValue<bool>(cacheKey, out var cached))
+        {
+            return cached;
+        }
+
+        var provider = await _providerFactory.GetProviderAsync(providerType);
+        var isAvailable = provider != null;
+
+        if (_configuration.EnableCache && isAvailable)
+        {
+            _cache.Set(cacheKey, isAvailable,
+                TimeSpan.FromSeconds(_configuration.CacheExpirationSeconds));
+        }
+
+        return isAvailable;
+    }
+}
+```
+
+선택기 전략:
+- **시나리오 매핑 우선**: 비즈니스 시나리오에 특정 제공자 매핑이 있는지 먼저 확인
+- **기본 제공자 폴백**: 시나리오 매핑 실패 시 기본 제공자 사용
+- **폴백 체인兜底**: 폴백 체인의 제공자를 순차적으로 시도
+- **가용성 캐싱**: 제공자 가용성 확인 결과를 캐시하여 Ping 호출 감소
+
+### 5. Claude Code CLI 제공자 구현
+
+```csharp
+public class ClaudeCodeCliProvider : IAIProvider
+{
+    private readonly ILogger<ClaudeCodeCliProvider> _logger;
+    private readonly IClaudeStreamManager _streamManager;
+    private readonly ProviderConfiguration _config;
+
+    public string Name => "ClaudeCodeCli";
+    public bool SupportsStreaming => true;
+
+    public ProviderCapabilities Capabilities { get; }
+
+    public async Task<AIResponse> ExecuteAsync(AIRequest request, CancellationToken cancellationToken = default)
+    {
+        _logger.LogInformation("Executing AI request with provider: {Provider}", Name);
+
+        var sessionOptions = ClaudeRequestMapper.MapToSessionOptions(request, _config);
+
+        var messages = _streamManager.SendMessageAsync(request.Prompt, sessionOptions, cancellationToken);
+
+        var responseBuilder = new StringBuilder();
+        ResultMessage? finalResult = null;
+
+        await foreach (var streamMessage in messages)
+        {
+            switch (streamMessage.Message)
+            {
+                case ResultMessage result:
+                    finalResult = result;
+                    responseBuilder.Append(result.Result);
+                    break;
+            }
+        }
+
+        if (finalResult != null)
+        {
+            return ClaudeResponseMapper.MapToAIResponse(finalResult, Name);
+        }
+
+        return new AIResponse
+        {
+            Content = responseBuilder.ToString(),
+            FinishReason = FinishReason.Unknown,
+            Provider = Name
+        };
+    }
+}
+```
+
+Claude Code CLI 제공자의 특징:
+- **스트리밍 관리자 통합**: `IClaudeStreamManager`를 사용하여 Claude CLI와 통신
+- **CessionId 세션 격리**: 시스템 sessionId와 구분되는 세션 고유 식별자로 `CessionId` 사용
+- **작업 디렉터리 구성**: 작업 디렉터리, 권한 모드 등 구성 지원
+- **도구 지원**: AllowedTools, DisallowedTools 등 도구 권한 구성 지원
+
+### 6. Codex CLI 제공자 구현
+
+```csharp
+public class CodexCliProvider : IAIProvider
+{
+    private readonly ILogger<CodexCliProvider> _logger;
+    private readonly CodexSettings _settings;
+    private readonly ConcurrentDictionary<string, string> _sessionThreadBindings;
+
+    public string Name => "CodexCli";
+    public bool SupportsStreaming => true;
+
+    public ProviderCapabilities Capabilities { get; }
+
+    public async IAsyncEnumerable<AIStreamingChunk> StreamAsync(
+        AIRequest request,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        _logger.LogInformation("Executing streaming AI request with provider: {Provider}", Name);
+
+        var codex = CreateCodexClient();
+        var thread = ResolveThread(codex, request);
+
+        var currentTurn = 0;
+        var activeToolCalls = new Dictionary<string, AIToolCallDelta>();
+
+        await foreach (var threadEvent in thread.RunStreamedAsync(BuildPrompt(request), cancellationToken))
+        {
+            if (threadEvent is TurnStartedEvent)
+            {
+                currentTurn++;
+            }
+
+            switch (threadEvent)
+            {
+                case ItemCompletedEvent { Item: AgentMessageItem message }:
+                    var messageText = message.Text ?? string.Empty;
+                    yield return new AIStreamingChunk
+                    {
+                        Content = messageText,
+                        Type = StreamingChunkType.ContentDelta,
+                        IsComplete = false
+                    };
+                    break;
+
+                case ItemStartedEvent or ItemUpdatedEvent or ItemCompletedEvent:
+                    var toolChunk = BuildToolChunk(threadEvent, currentTurn);
+                    if (toolChunk?.ToolCallDelta != null)
+                    {
+                        yield return toolChunk;
+                    }
+                    break;
+
+                case TurnCompletedEvent turnCompleted:
+                    activeToolCalls.Clear();
+                    yield return new AIStreamingChunk
+                    {
+                        Content = string.Empty,
+                        Type = StreamingChunkType.Metadata,
+                        IsComplete = true,
+                        Usage = MapUsage(turnCompleted.Usage)
+                    };
+                    break;
+            }
+        }
+
+        BindSessionThread(request.SessionId, thread.Id);
+    }
+
+    private CodexThread ResolveThread(Codex codex, AIRequest request)
+    {
+        var sessionId = request.SessionId;
+
+        // 바인딩된 스레드가 있는지 확인
+        if (!string.IsNullOrWhiteSpace(sessionId) &&
+            _sessionThreadBindings.TryGetValue(sessionId, out var threadId) &&
+            !string.IsNullOrWhiteSpace(threadId))
+        {
+            _logger.LogInformation("Resuming Codex thread {ThreadId} for session {SessionId}", threadId, sessionId);
+            return codex.ResumeThread(threadId, threadOptions);
+        }
+
+        _logger.LogInformation("Starting new Codex thread for session {SessionId}", sessionId ?? "(none)");
+        return codex.StartThread(threadOptions);
+    }
+}
+```
+
+Codex CLI 제공자의 특징:
+- **JSON 이벤트 스트림 처리**: Codex의 JSON 이벤트 스트림(TurnStarted, ItemStarted, TurnCompleted 등) 구문 분석
+- **세션 스레드 바인딩**: SQLite 데이터베이스를 통해 세션과 스레드의 바인딩 관계 지속화
+- **스레드 재사용**: 기존 스레드 복구 지원, 세션 연속성 유지
+- **도구 호출 추적**: 활성 도구 호출 상태를 추적하여 도구 수명 주기를 올바르게 처리
+
+### 7. 세션 스레드 바인딩 메커니즘
+
+Codex CLI는 SQLite 데이터베이스를 사용하여 세션과 스레드의 바인딩을 지속화합니다.
+
+```csharp
+public class CodexCliProvider : IAIProvider
+{
+    private const int SessionThreadBindingRetentionDays = 30;
+    private readonly ConcurrentDictionary<string, string> _sessionThreadBindings;
+    private readonly string _sessionThreadBindingDatabaseConnectionString;
+    private readonly string _sessionThreadBindingDatabasePath;
+
+    private void BindSessionThread(string? sessionId, string? threadId)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId) || string.IsNullOrWhiteSpace(threadId))
+        {
+            return;
+        }
+
+        // 메모리 캐시
+        _sessionThreadBindings.AddOrUpdate(sessionId, threadId, (_, _) => threadId);
+
+        // SQLite에 지속화
+        PersistSessionThreadBinding(sessionId, threadId);
+    }
+
+    private void PersistSessionThreadBinding(string sessionId, string threadId)
+    {
+        try
+        {
+            using var connection = new SqliteConnection(_sessionThreadBindingDatabaseConnectionString);
+            connection.Open();
+
+            using var upsertCommand = connection.CreateCommand();
+            upsertCommand.CommandText =
+                """
+                INSERT INTO SessionThreadBindings (SessionId, ThreadId, CreatedAtUtc, UpdatedAtUtc)
+                VALUES ($sessionId, $threadId, $createdAtUtc, $updatedAtUtc)
+                ON CONFLICT(SessionId) DO UPDATE SET
+                    ThreadId = excluded.ThreadId,
+                    UpdatedAtUtc = excluded.UpdatedAtUtc;
+                """;
+            var nowUtc = DateTimeOffset.UtcNow.ToString("O");
+            upsertCommand.Parameters.AddWithValue("$sessionId", sessionId);
+            upsertCommand.Parameters.AddWithValue("$threadId", threadId);
+            upsertCommand.Parameters.AddWithValue("$createdAtUtc", nowUtc);
+            upsertCommand.Parameters.AddWithValue("$updatedAtUtc", nowUtc);
+            upsertCommand.ExecuteNonQuery();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "Failed to persist Codex session-thread binding for session {SessionId} to {DatabasePath}",
+                sessionId,
+                _sessionThreadBindingDatabasePath);
+        }
+    }
+
+    private void LoadPersistedSessionThreadBindings()
+    {
+        using var connection = new SqliteConnection(_sessionThreadBindingDatabaseConnectionString);
+        connection.Open();
+
+        using var loadCommand = connection.CreateCommand();
+        loadCommand.CommandText = "SELECT SessionId, ThreadId FROM SessionThreadBindings;";
+        using var reader = loadCommand.ExecuteReader();
+        while (reader.Read())
+        {
+            var sessionId = reader.GetString(0);
+            var threadId = reader.GetString(1);
+            _sessionThreadBindings[sessionId] = threadId;
+        }
+    }
+}
+```
+
+세션 스레드 바인딩의 장점:
+- **세션 복구**: 시스템 재시작 후 이전 세션을 복구할 수 있습니다.
+- **스레드 재사용**: 동일한 세션에서 기존 Codex 스레드를 재사용할 수 있습니다.
+- **자동 정리**: 30일이 지난 바인딩은 자동으로 정리됩니다.
+
+### 8. 데스크톱 CLI 관리
+
+hagicode-desktop은 `AgentCliManager`를 통해 CLI 선택을 관리합니다.
+
+```typescript
+export enum AgentCliType {
+  ClaudeCode = 'claude-code',
+  Codex = 'codex',
+  // 향후 확장 가능: Aider, Cursor 등 기타 CLI
+}
+
+export class AgentCliManager {
+  private static readonly STORE_KEY = 'agentCliSelection';
+  private static readonly EXECUTOR_TYPE_MAP: Record<AgentCliType, string> = {
+    [AgentCliType.ClaudeCode]: 'ClaudeCodeCli',
+    [AgentCliType.Codex]: 'CodexCli',
+  };
+
+  constructor(private store: any) {}
+
+  async saveSelection(cliType: AgentCliType): Promise<void> {
+    const selection: StoredAgentCliSelection = {
+      cliType,
+      isSkipped: false,
+      selectedAt: new Date().toISOString(),
+    };
+
+    this.store.set(AgentCliManager.STORE_KEY, selection);
+  }
+
+  loadSelection(): StoredAgentCliSelection {
+    return this.store.get(AgentCliManager.STORE_KEY, {
+      cliType: null,
+      isSkipped: false,
+      selectedAt: null,
+    });
+  }
+
+  getCommandName(cliType: AgentCliType): string {
+    switch (cliType) {
+      case AgentCliType.ClaudeCode:
+        return 'claude';
+      case AgentCliType.Codex:
+        return 'codex';
+      default:
+        return 'claude';
+    }
+  }
+
+  getExecutorType(cliType: AgentCliType | null): string {
+    if (!cliType) return 'ClaudeCodeCli';
+    return this.EXECUTOR_TYPE_MAP[cliType] || 'ClaudeCodeCli';
+  }
+}
+```
+
+데스크톱 IPC 핸들러 예시:
+
+```typescript
+ipcMain.handle('llm:call-api', async (event, manifestPath, region) => {
+  if (!state.llmInstallationManager) {
+    return { success: false, error: 'LLM Installation Manager not initialized' };
+  }
+
+  try {
+    const prompt = await state.llmInstallationManager.loadPrompt(manifestPath, region);
+
+    // 사용자 선택에 따라 CLI 명령어 결정
+    let commandName = 'claude';
+    if (state.agentCliManager) {
+      const selectedCliType = state.agentCliManager.getSelectedCliType();
+      if (selectedCliType) {
+        commandName = state.agentCliManager.getCommandName(selectedCliType);
+      }
+    }
+
+    // 해당 CLI를 사용하여 실행
+    const result = await state.llmInstallationManager.callApi(
+      prompt.filePath,
+      event.sender,
+      commandName
+    );
+
+    return result;
+  } catch (error) {
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error'
+    };
+  }
+});
+```
+
+### 9. Codex 내부의 모델 제공자 시스템
+
+Codex 자체도 여러 모델 제공자를 지원하며 `ModelProviderInfo`를 통해 구성합니다.
+
+```rust
+pub const OPENAI_PROVIDER_NAME: &str = "OpenAI";
+pub const OLLAMA_OSS_PROVIDER_ID: &str = "ollama";
+pub const LMSTUDIO_OSS_PROVIDER_ID: &str = "lmstudio";
+
+pub fn built_in_model_providers() -> HashMap<String, ModelProviderInfo> {
+    use ModelProviderInfo as P;
+
+    [
+        ("openai", P::create_openai_provider()),
+        (OLLAMA_OSS_PROVIDER_ID, create_oss_provider(DEFAULT_OLLAMA_PORT, WireApi::Responses)),
+        (LMSTUDIO_OSS_PROVIDER_ID, create_oss_provider(DEFAULT_LMSTUDIO_PORT, WireApi::Responses)),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v))
+    .collect()
+}
+
+pub struct ModelProviderInfo {
+    pub name: String,
+    pub base_url: Option<String>,
+    pub env_key: Option<String>,
+    pub query_params: Option<HashMap<String, String>>,
+    pub http_headers: Option<HashMap<String, String>>,
+    pub request_max_retries: Option<u64>,
+    pub stream_max_retries: Option<u64>,
+    pub stream_idle_timeout_ms: Option<u64>,
+    pub requires_openai_auth: bool,
+    pub supports_websockets: bool,
+}
+```
+
+Codex 모델 제공자 지원:
+- **내장 제공자**: OpenAI, Ollama, LM Studio
+- **사용자 정의 제공자**: 사용자가 config.toml에서 사용자 정의 제공자 추가 가능
+- **재시도 전략**: 요청 및 스트림 재시도 횟수 구성 가능
+- **WebSocket 지원**: 일부 제공자는 WebSocket 전송 지원
+
+## 실무
+
+### 구성 예시
+
+**appsettings.json**에서 여러 제공자 구성:
+
+```json
+{
+  "AI": {
+    "Providers": {
+      "DefaultProvider": "ClaudeCodeCli",
+      "Providers": {
+        "ClaudeCodeCli": {
+          "Type": "ClaudeCodeCli",
+          "Model": "claude-sonnet-4-20250514",
+          "WorkingDirectory": "/path/to/workspace",
+          "PermissionMode": "acceptEdits",
+          "AllowedTools": ["file-edit", "command-run", "bash"]
+        },
+        "CodexCli": {
+          "Type": "CodexCli",
+          "Model": "gpt-4.1",
+          "ExecutablePath": "codex",
+          "SandboxMode": "enabled",
+          "WebSearchMode": "auto",
+          "NetworkAccessEnabled": false
+        }
+      },
+      "ScenarioProviderMapping": {
+        "CodeAnalysis": "ClaudeCodeCli",
+        "CodeGeneration": "CodexCli",
+        "Refactoring": "ClaudeCodeCli",
+        "Debugging": "CodexCli"
+      },
+      "FallbackChain": ["CodexCli", "ClaudeCodeCli"]
+    },
+    "Selector": {
+      "EnableCache": true,
+      "CacheExpirationSeconds": 300
+    }
+  }
+}
+```
+
+### 사용 예시 - 백엔드 서비스
+
+```csharp
+public class AIOrchestrator
+{
+    private readonly IAIProviderFactory _providerFactory;
+    private readonly IAIProviderSelector _providerSelector;
+    private readonly ILogger<AIOrchestrator> _logger;
+
+    public AIOrchestrator(
+        IAIProviderFactory providerFactory,
+        IAIProviderSelector providerSelector,
+        ILogger<AIOrchestrator> logger)
+    {
+        _providerFactory = providerFactory;
+        _providerSelector = providerSelector;
+        _logger = logger;
+    }
+
+    public async Task<AIResponse> ProcessRequestAsync(
+        AIRequest request,
+        BusinessScenario scenario)
+    {
+        _logger.LogInformation("Processing request for scenario: {Scenario}", scenario);
+
+        try
+        {
+            // 지능형 제공자 선택
+            var providerType = await _providerSelector.SelectProviderAsync(scenario, request.CancellationToken);
+
+            // 제공자 인스턴스 가져오기
+            var provider = await _providerFactory.GetProviderAsync(providerType);
+            if (provider == null)
+            {
+                throw new InvalidOperationException($"Provider {providerType} not available");
+            }
+
+            _logger.LogInformation("Using provider: {Provider} for request", provider.Name);
+
+            // 요청 실행
+            var response = await provider.ExecuteAsync(request, request.CancellationToken);
+
+            _logger.LogInformation("Request completed with provider: {Provider}, tokens used: {Tokens}",
+                provider.Name,
+                response.Usage?.TotalTokens ?? 0);
+
+            return response;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to process request for scenario: {Scenario}", scenario);
+            throw;
+        }
+    }
+}
+```
+
+### 사용 예시 - 스트리밍 응답
+
+```csharp
+public async IAsyncEnumerable<AIStreamingChunk> StreamResponseAsync(
+    AIRequest request,
+    BusinessScenario scenario)
+{
+    var providerType = await _providerSelector.SelectProviderAsync(scenario);
+    var provider = await _providerFactory.GetProviderAsync(providerType);
+
+    if (provider == null)
+    {
+        throw new InvalidOperationException($"Provider {providerType} not available");
+    }
+
+    await foreach (var chunk in provider.StreamAsync(request))
+    {
+        // 스트리밍 청크 처리
+        switch (chunk.Type)
+        {
+            case StreamingChunkType.ContentDelta:
+                // 텍스트 내용 실시간 표시
+                await SendToClientAsync(chunk.Content);
+                break;
+
+            case StreamingChunkType.ToolCallDelta:
+                // 도구 호출 처리
+                await HandleToolCallAsync(chunk.ToolCallDelta);
+                break;
+
+            case StreamingChunkType.Metadata:
+                // 완료 이벤트 및 통계 처리
+                if (chunk.IsComplete)
+                {
+                    _logger.LogInformation("Stream completed, usage: {@Usage}", chunk.Usage);
+                }
+                break;
+
+            case StreamingChunkType.Error:
+                // 오류 처리
+                _logger.LogError("Stream error: {Error}", chunk.ErrorMessage);
+                throw new InvalidOperationException(chunk.ErrorMessage);
+        }
+    }
+}
+```
+
+### 사용 예시 - OpenSpec 명령어
+
+```csharp
+public async Task<string> ExecuteOpenSpecCommandAsync(
+    string command,
+    string arguments,
+    BusinessScenario scenario)
+{
+    var providerType = await _providerSelector.SelectProviderAsync(scenario);
+    var provider = await _providerFactory.GetProviderAsync(providerType);
+
+    // 임베디드 명령어 프롬프트 빌드
+    var commandPrompt = $"""
+        Execute the following OpenSpec command:
+        Command: {command}
+        Arguments: {arguments}
+
+        Please execute this command and return the results.
+        """;
+
+    var request = new AIRequest
+    {
+        Prompt = "Process this command request",
+        EmbeddedCommandPrompt = commandPrompt,
+        WorkingDirectory = Directory.GetCurrentDirectory()
+    };
+
+    var response = await provider.SendMessageAsync(request, commandPrompt);
+
+    return response.Content;
+}
+```
+
+## 주의사항
+
+### 1. 제공자 상태 확인
+
+제공자를 전환하기 전에 `PingAsync`를 호출하여 대상 제공자를 사용할 수 있는지 확인하는 것이 좋습니다.
+
+```csharp
+public async Task<bool> IsProviderHealthyAsync(AIProviderType providerType)
+{
+    var provider = await _providerFactory.GetProviderAsync(providerType);
+    if (provider == null) return false;
+
+    var testResult = await provider.PingAsync();
+
+    return testResult.Success &&
+           testResult.ResponseTimeMs < 5000; // 5초 내 응답을 정상으로 간주
+}
+```
+
+### 2. 세션 격리
+
+`CessionId`(Claude) 또는 `ThreadId`(Codex)를 사용하여 세션 격리를 보장합니다.
+
+- Claude Code CLI: 세션 고유 식별자로 `CessionId` 사용
+- Codex CLI: 세션 식별자로 `ThreadId` 사용
+
+```csharp
+// Claude Code CLI 세션 옵션
+var claudeSessionOptions = new ClaudeSessionOptions
+{
+    CessionId = CessionId.New(),  // 고유 ID 생성
+    WorkingDirectory = workspacePath,
+    AllowedTools = allowedTools,
+    PermissionMode = PermissionMode.acceptEdits
+};
+
+// Codex 스레드 옵션
+var codexThreadOptions = new ThreadOptions
+{
+    Model = "gpt-4.1",
+    SandboxMode = "enabled",
+    WorkingDirectory = workspacePath
+};
+```
+
+### 3. 오류 처리
+
+제공자를 사용할 수 없을 때의 폴백 메커니즘은 견고해야 하며, 최소한 하나의 사용 가능한 제공자를 보장해야 합니다.
+
+```csharp
+public async Task<AIResponse> ExecuteWithFallbackAsync(
+    AIRequest request,
+    List<AIProviderType> preferredProviders)
+{
+    Exception? lastException = null;
+
+    foreach (var providerType in preferredProviders)
+    {
+        try
+        {
+            var provider = await _providerFactory.GetProviderAsync(providerType);
+            if (provider == null) continue;
+
+            // 실행 시도
+            return await provider.ExecuteAsync(request);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Provider {ProviderType} failed, trying next", providerType);
+            lastException = ex;
+        }
+    }
+
+    // 모든 제공자 실패
+    throw new InvalidOperationException(
+        "All preferred providers failed. Last error: " + lastException?.Message,
+        lastException);
+}
+```
+
+### 4. 구성 검증
+
+시작 시 모든 구성된 제공자 설정을 검증하여 런타임 오류를 방지합니다.
+
+```csharp
+public void ValidateConfiguration(AIProviderOptions options)
+{
+    foreach (var (providerType, config) in options.Providers)
+    {
+        // 실행 파일 경로 검증(CLI 유형 제공자)
+        if (IsCliBasedProvider(providerType))
+        {
+            if (string.IsNullOrWhiteSpace(config.ExecutablePath))
+            {
+                throw new ConfigurationException(
+                    $"Provider {providerType} requires ExecutablePath");
+            }
+
+            if (!File.Exists(config.ExecutablePath))
+            {
+                throw new ConfigurationException(
+                    $"Executable not found for {providerType}: {config.ExecutablePath}");
+            }
+        }
+
+        // API 키 검증(API 유형 제공자)
+        if (IsApiBasedProvider(providerType))
+        {
+            if (string.IsNullOrWhiteSpace(config.ApiKey))
+            {
+                throw new ConfigurationException(
+                    $"Provider {providerType} requires ApiKey");
+            }
+        }
+
+        // 모델 이름 검증
+        if (string.IsNullOrWhiteSpace(config.Model))
+        {
+            _logger.LogWarning("No model configured for {ProviderType}, using default", providerType);
+        }
+    }
+}
+```
+
+### 5. 캐시 관리
+
+제공자 인스턴스가 캐시되므로 수명 주기 관리와 메모리 사용에 주의해야 합니다.
+
+```csharp
+// 정기적으로 캐시 정리
+public void ClearInactiveProviders(TimeSpan inactiveThreshold)
+{
+    var now = DateTimeOffset.UtcNow;
+    var keysToRemove = new List<AIProviderType>();
+
+    foreach (var (type, instance) in _cache)
+    {
+        // 제공자에 LastUsedTime 속성이 있다고 가정
+        if (instance.LastUsedTime.HasValue &&
+            now - instance.LastUsedTime.Value > inactiveThreshold)
+        {
+            keysToRemove.Add(type);
+        }
+    }
+
+    foreach (var key in keysToRemove)
+    {
+        _cache.TryRemove(key, out _);
+        _logger.LogInformation("Cleared inactive provider: {Provider}", key);
+    }
+}
+```
+
+### 6. 로깅
+
+제공자 선택, 전환 및 실행 과정을 자세히 기록하여 디버깅을 용이하게 합니다.
+
+```csharp
+public class AIProviderLogging
+{
+    private readonly ILogger _logger;
+
+    public void LogProviderSelection(
+        BusinessScenario scenario,
+        AIProviderType selectedProvider,
+        SelectionReason reason)
+    {
+        _logger.LogInformation(
+            "[ProviderSelection] Scenario={Scenario}, Provider={Provider}, Reason={Reason}",
+            scenario,
+            selectedProvider,
+            reason);
+    }
+
+    public void LogProviderSwitch(
+        AIProviderType fromProvider,
+        AIProviderType toProvider,
+        string reason)
+    {
+        _logger.LogWarning(
+            "[ProviderSwitch] From={FromProvider} To={ToProvider}, Reason={Reason}",
+            fromProvider,
+            toProvider,
+            reason);
+    }
+
+    public void LogProviderError(
+        AIProviderType provider,
+        Exception error,
+        AIRequest request)
+    {
+        _logger.LogError(error,
+            "[ProviderError] Provider={Provider}, RequestLength={Length}, Error={Message}",
+            provider,
+            request.Prompt.Length,
+            error.Message);
+    }
+}
+```
+
+### 7. 스레드 안전성
+
+`ConcurrentDictionary`와 같은 동시성 컬렉션을 사용하여 스레드 안전성을 보장합니다.
+
+```csharp
+public class ThreadSafeProviderCache
+{
+    private readonly ConcurrentDictionary<AIProviderType, IAIProvider> _cache;
+    private readonly ReaderWriterLockSlim _lock = new();
+
+    public IAIProvider? GetProvider(AIProviderType type)
+    {
+        // 읽기 작업에는 잠금 불필요
+        if (_cache.TryGetValue(type, out var provider))
+            return provider;
+
+        // 생성에는 쓰기 잠금 필요
+        _lock.EnterWriteLock();
+        try
+        {
+            // 이중 확인
+            if (_cache.TryGetValue(type, out provider))
+                return provider;
+
+            var newProvider = CreateProvider(type);
+            if (newProvider != null)
+            {
+                _cache[type] = newProvider;
+            }
+            return newProvider;
+        }
+        finally
+        {
+            _lock.ExitWriteLock();
+        }
+    }
+}
+```
+
+### 8. 데이터베이스 마이그레이션
+
+세션 스레드 바인딩 데이터베이스 구조가 변경될 때 데이터 마이그레이션을 고려해야 합니다.
+
+```csharp
+public class SessionThreadMigration
+{
+    public async Task MigrateAsync(string dbPath)
+    {
+        var version = await GetSchemaVersionAsync(dbPath);
+
+        if (version >= 2) return; // 이미 최신 버전
+
+        using var connection = new SqliteConnection(dbPath);
+        connection.Open();
+
+        // v2로 마이그레이션: CreatedAtUtc 열 추가
+        if (version < 2)
+        {
+            _logger.LogInformation("Migrating SessionThreadBindings to v2...");
+
+            using var addColumnCommand = connection.CreateCommand();
+            addColumnCommand.CommandText = "ALTER TABLE SessionThreadBindings ADD COLUMN CreatedAtUtc TEXT;";
+            addColumnCommand.ExecuteNonQuery();
+
+            using var backfillCommand = connection.CreateCommand();
+            backfillCommand.CommandText =
+                """
+                UPDATE SessionThreadBindings
+                SET CreatedAtUtc = COALESCE(NULLIF(UpdatedAtUtc, ''), $nowUtc)
+                WHERE CreatedAtUtc IS NULL OR CreatedAtUtc = '';
+                """;
+            backfillCommand.Parameters.AddWithValue("$nowUtc", DateTimeOffset.UtcNow.ToString("O"));
+            backfillCommand.ExecuteNonQuery();
+        }
+
+        await UpdateSchemaVersionAsync(dbPath, 2);
+        _logger.LogInformation("Migration to v2 completed");
+    }
+}
+```
+
+## 요약
+
+hagicode는 제공자 패턴, 팩토리 패턴 및 선택기 패턴의 조합을 통해 유연하고 확장 가능한 다중 AI 제공자 아키텍처를 구현합니다.
+
+- **통일된 인터페이스 추상화**: `IAIProvider` 인터페이스가 다른 CLI의 차이를 추상화합니다.
+- **동적 인스턴스 생성**: `AIProviderFactory`는 런타임에 제공자 인스턴스 생성을 지원합니다.
+- **지능형 선택 전략**: `AIProviderSelector`는 시나리오 기반 제공자 선택을 구현합니다.
+- **세션 상태 지속화**: 데이터베이스 바인딩을 통해 세션 연속성을 보장합니다.
+- **데스크톱 통합**: `AgentCliManager`는 사용자 선택 및 구성을 지원합니다.
+
+이 아키텍처 설계의 장점은 다음과 같습니다.
+1. **확장성**: 새로운 AI 제공자 추가는 `IAIProvider` 인터페이스를 구현하기만 하면 됩니다.
+2. **테스트 가능성**: 제공자는 독립적으로 테스트하고 모의할 수 있습니다.
+3. **유지보수성**: 각 제공자의 구현은 독립적이며 단일 책임을 가집니다.
+4. **사용자 친화성**: 시나리오 자동 선택 및 수동 전환을 지원합니다.
+
+이러한 설계를 통해 hagicode는 Claude Code CLI와 Codex CLI의 원활한 전환과 상호운용성을 성공적으로 구현하여 개발자에게 유연하고 강력한 AI 코딩 어시스턴트 경험을 제공합니다.
+
+## 참고자료
+
+- HagiCode 프로젝트 주소: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- HagiCode 공식 웹사이트: [hagicode.com](https://hagicode.com)
+- Claude Code 공식 문서: [docs.anthropic.com](https://docs.anthropic.com)
+- OpenAI Codex 문서: [platform.openai.com](https://platform.openai.com)
+- Codex SDK 공식 저장소: [github.com/openai/codex](https://github.com/openai/codex)
+- HagiCode 다중 플랫폼 CLI 지원: [https://docs.hagicode.com/blog/hagicode-ai-cli-multi-platform-support/](https://docs.hagicode.com/blog/hagicode-ai-cli-multi-platform-support/)
+
+---
+
+읽어주셔서 감사합니다.本文이 유용하시다면 아래 좋아요 버튼을 클릭하여 더 많은 분들이本文을 볼 수 있도록 해주세요👍.
+
+本 콘텐츠는 인공지능을 활용한 협업으로 작성되었으며, 본인의 검토를 거쳐 본인의 관점과 입장에 부합함을 확인하였습니다.
+
+- 本文作者: [newbe36524](https://www.newbe.pro)
+- 本文 링크: [https://docs.hagicode.com/blog/2026-03-09-hagicode-multi-ai-provider-switching-interop/](https://docs.hagicode.com/blog/2026-03-09-hagicode-multi-ai-provider-switching-interop/)
+- 저작권声明: 본 블로그의 모든 글은 특별한声明이 없는 한 BY-NC-SA 라이선스를 따릅니다. 재배포 시 출처를 밝혀주세요!

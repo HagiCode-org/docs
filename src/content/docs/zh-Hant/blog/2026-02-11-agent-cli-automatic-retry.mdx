@@ -1,0 +1,300 @@
+---
+title: 如何實現 Claude Code 和 Codex 等 Agent CLI 的自動重試
+date: 2026-04-18
+tags: [Agent CLI, Claude Code, Codex, 自動重試, HagiCode]
+description: "自動重試這詞，看著像是個小開關，真落到工程現場裡，完全不是那麼回事。全民製作人們大家好，我是 HagiCode 製作人俞坤。今天這篇我們不聊空話，就聊 Claude"
+---
+
+## 如何實現 Claude Code 和 Codex 等 Agent CLI 的自動重試
+
+> 自動重試這詞，看著像是個小開關，真落到工程現場裡，完全不是那麼回事。全民製作人們大家好，我是 HagiCode 製作人俞坤。今天這篇我們不聊空話，就聊 Claude Code、Codex 這類 Agent CLI 的自動重試到底該怎麼做，才能既接得住異常，又不把系統帶進無休止的重複執行裡。
+
+## 背景
+
+如果你最近也在折騰 AI 編程，那這類問題你大概率已經碰到了：任務不是一上來就掛，而是跑到一半斷掉。
+
+這事放到普通 HTTP 請求裡，很多時候就是重發一下，頂多補個指數退避。可是 Agent CLI 不一樣。Claude Code、Codex 這類工具通常是流式執行的，輸出是一段一段往外推，過程中還會綁定 thread、session 或 resume token。換句話說，它不是「這一請求失敗了沒有」，而是：
+
+- 前面已經吐出來的內容還算不算數
+- 當前上下文還能不能接著跑
+- 這次失敗該不該自動恢復
+- 如果要恢復，多久再試，試的時候發什麼，原上下文還要不要複用
+
+很多團隊第一次做這裡，都會下意識寫一個最樸素的版本：報錯了就再試一次。你說得非常正確，這個想法很自然，可是真進項目裡，問題就一個接一個冒出來了。
+
+- 有些錯誤明明是暫時故障，卻被當成最終失敗
+- 有些錯誤根本不值得重試，卻被系統反覆重放
+- 有 thread 的請求和沒有 thread 的請求，被一把梭地一視同仁
+- 退避策略沒邊界，後台請求自己把自己打爆
+
+HagiCode 在接多種 Agent CLI 的過程中，也踩過這些坑。尤其是 Codex 這一側，最初暴露出來的問題就是某類 reconnect 報文沒有被識別成可重試終態，結果原本已有的恢復機制根本沒機會生效。說白了，不是系統沒有自動重試，而是系統沒把「這次值得重試」認出來。
+
+所以這篇文章想講的核心點很明確：**自動重試不是一個按鈕，而是一套分層設計。**
+
+## 關於 HagiCode
+
+本文分享的方案，來自我們在 [HagiCode](https://hagicode.com) 專案裡的真實實踐。HagiCode 要做的事情，不是把某一個模型接上就完事，而是把多種 Agent CLI 的流式訊息、工具呼叫、失敗恢復、會話上下文，統一成一套能長期維護的執行模型。
+
+我平時最關心的事情之一，就是怎麼讓 AI 編程這件事真正落到工程現場。寫 Demo 不難，難的是把 Demo 變成團隊真的願意長期使用的東西。HagiCode 之所以認真做自動重試，不是因為這個功能看起來高級，而是因為長鏈路、流式、可續跑的 CLI 執行如果接不穩，用戶看到的就不是智慧助手，而是一個動不動半路掉線的命令包裝器。
+
+如果你想先看看專案入口，這裡先放兩個：
+
+- GitHub: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- 官網: [hagicode.com](https://hagicode.com)
+
+再往前走一步講，HagiCode 現在也已經上架 Steam 了，有 Steam 的朋友可以先加個願望清單：
+
+- [Steam 商店頁（加入願望清單 / 查看詳情）](https://store.steampowered.com/app/4625540/Hagicode/)
+
+## 為什麼 Agent CLI 的自動重試比普通重試更難
+
+這個問題提得很實在，我們直接上結論：Agent CLI 的自動重試，難點不在「隔幾秒再試一次」，而在「還能不能在原上下文裡繼續」。
+
+你可以把它理解成一次長對話。普通 API 重試，更像電話佔線再撥一遍；而 Agent CLI 重試，更像對方剛講到一半訊號斷了，你得先判斷要不要回撥，回撥以後要不要從頭說，對方還記不記得剛剛聊到哪。誰說這兩者是一回事呢？它們壓根不是一個工程問題。
+
+具體看，有四個難點最典型。
+
+### 1. 它是流式的
+
+一旦輸出已經發給用戶，你就不能像處理普通請求那樣，把失敗偷偷吞掉然後悄悄重來。因為前面那部分內容已經被看到了，再次重放時如果策略不對，前端很容易看到重複文本、錯亂狀態，工具呼叫生命週期也會一起亂套。這波不是玄學，是工程。
+
+### 2. 它通常綁定會話上下文
+
+Codex 這類 provider 會綁定 thread，Claude Code 一類實作也會有 continuation target 或等價的續跑上下文。真正能自動重試的前提，不只是「這個錯誤長得像暫時故障」，還包括「這次執行還有沒有繼續下去的載體」。
+
+### 3. 它不是所有錯誤都值得重試
+
+網路抖動、SSE idle timeout、上游臨時故障，這些通常可以試一試。可如果你遇到的是認證失敗、上下文已經丟了，或者 provider 根本沒有 resume 能力，那繼續重試多數不是恢復，而是在製造噪音。
+
+### 4. 它需要邊界
+
+無限自動重試幾乎總是錯的。技術趨勢可以熱鬧一陣子，工程規律往往會穩定很多年，其中一條就是：失敗恢復一定要有邊界。系統必須知道自己最多試幾次、每次隔多久、什麼時候該停手承認這回真不行了。
+
+也正因為這幾個特點，HagiCode 最後沒有把自動重試寫成某個 provider 裡的幾行 `try/catch`，而是把它提煉成一層共享能力。說到底，工程問題還是要回到工程方法裡解決。
+
+## HagiCode 的做法：把重試從 Provider 裡拿出來
+
+HagiCode 當前這套真實實作，可以壓縮成一句話：
+
+**共享層統一管理重試流程，具體 Provider 只負責回答兩個問題：這個終態值不值得重試？當前上下文還能不能繼續？**
+
+這件事不複雜，可是很關鍵。因為一旦把職責切開，Claude Code、Codex，甚至其他 Agent CLI 都能複用同一個骨架。模型會說，工具會變，工作流會升級，但工程上的基本盤一直都在那裡。
+
+### 第一層：用統一協調器管理重試循環
+
+專案中的核心實作片段大概是下面這樣：
+
+```csharp
+internal static class ProviderErrorAutoRetryCoordinator
+{
+    public static async IAsyncEnumerable<CliMessage> ExecuteAsync(
+        string prompt,
+        ProviderErrorAutoRetrySettings? settings,
+        Func<string, IAsyncEnumerable<CliMessage>> executeAttemptAsync,
+        Func<bool> canRetryInSameContext,
+        Func<TimeSpan, CancellationToken, Task> delayAsync,
+        Func<CliMessage, bool> isRetryableTerminalMessage,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        var normalizedSettings = ProviderErrorAutoRetrySettings.Normalize(settings);
+        var retrySchedule = normalizedSettings.Enabled
+            ? normalizedSettings.GetRetrySchedule()
+            : [];
+
+        for (var attempt = 0; ; attempt++)
+        {
+            var attemptPrompt = attempt == 0
+                ? prompt
+                : ProviderErrorAutoRetrySettings.ContinuationPrompt;
+
+            CliMessage? terminalFailure = null;
+
+            await foreach (var message in executeAttemptAsync(attemptPrompt)
+                               .WithCancellation(cancellationToken))
+            {
+                if (isRetryableTerminalMessage(message))
+                {
+                    terminalFailure = message;
+                    break;
+                }
+
+                yield return message;
+            }
+
+            if (terminalFailure is null)
+            {
+                yield break;
+            }
+
+            if (attempt >= retrySchedule.Count || !canRetryInSameContext())
+            {
+                yield return terminalFailure;
+                yield break;
+            }
+
+            await delayAsync(retrySchedule[attempt], cancellationToken);
+        }
+    }
+}
+```
+
+這段程式碼乾的事情，其實非常樸素，但很有力。
+
+- 中間失敗先不直接透傳，協調器先判斷能不能恢復
+- 只有重試預算耗盡，最終失敗才真正回到上層
+- 第二輪開始不再發送原始 prompt，而是統一發送 continuation prompt
+
+這也就是為什麼我前面一直強調，自動重試不是簡單的「再請求一次」。它不是在補一個異常分支，而是在管理一條執行生命週期。聽起來有點像產品經理，但工程上確實如此。
+
+### 第二層：把重試策略快照化
+
+另一個很容易被忽略的問題是：誰來決定這次請求是否開啟自動重試？
+
+HagiCode 的答案是，不要依賴某個「此刻的全域設定」，而是把策略做成 snapshot，跟著這次請求一起走。這樣一來，會話排隊、訊息持久化、執行轉發、provider 適配，都不會把策略弄丟。一次成功不叫體系，持續成功才叫體系。
+
+核心結構可以簡化成這樣：
+
+```csharp
+public sealed record ProviderErrorAutoRetrySnapshot
+{
+    public const string DefaultStrategy = "default";
+
+    public bool Enabled { get; init; }
+
+    public string Strategy { get; init; } = DefaultStrategy;
+
+    public static ProviderErrorAutoRetrySnapshot Normalize(bool? enabled, string? strategy)
+    {
+        return new ProviderErrorAutoRetrySnapshot
+        {
+            Enabled = enabled ?? true,
+            Strategy = string.IsNullOrWhiteSpace(strategy)
+                ? DefaultStrategy
+                : strategy.Trim()
+        };
+    }
+}
+```
+
+然後在執行側再映射成 provider 真正消費的設定物件。這個做法的價值很直接：
+
+- 業務層決定「該不該重試」
+- 執行時決定「怎麼重試」
+
+兩邊各管一攤，互相不打架。很多問題不是不能做，只是沒把代價算明白。把策略快照化，本質上就是在提前把代價算清楚。
+
+### 第三層：Provider 只做終態判定和上下文判定
+
+到了具體的 Claude Code 或 Codex provider，這裡的職責反而很薄。你可以把它理解成增強，不要把它誤會成代替。
+
+以 Codex 為例，它最終接入共享協調器時，本質上只需要提供三樣東西：
+
+```csharp
+await foreach (var message in ProviderErrorAutoRetryCoordinator.ExecuteAsync(
+                   prompt,
+                   options.ProviderErrorAutoRetry,
+                   retryPrompt => ExecuteCodexAttemptAsync(...),
+                   () => !string.IsNullOrWhiteSpace(resolvedThreadId),
+                   DelayAsync,
+                   IsRetryableTerminalFailure,
+                   cancellationToken))
+{
+    yield return message;
+}
+```
+
+你會發現，真正屬於 Provider 自己的判斷只有兩個：
+
+- `IsRetryableTerminalFailure`
+- `canRetryInSameContext`
+
+Codex 看的是 thread 還能不能續上，Claude Code 看的是 continuation target 還在不在。退避策略、重試次數、後續 prompt，這些通通不該讓 Provider 自己重新發明一遍。
+
+這一層拆出來以後，HagiCode 接更多 CLI 的成本就低很多了。你不用複製一整套重試狀態機，只要把「這個 provider 的邊界條件」接進來就行。寫得快，不等於寫得穩；接得住，不等於接得好；能跑起來，也不等於能長期維護。
+
+## 一個很容易做錯的點：別把所有報錯都當可重試
+
+這次分析裡，我覺得最值得單拎出來講的，不是「怎麼實作重試」，而是「怎麼避免錯誤重試」。
+
+最初的問題切入口，是 Codex 少識別了一條 reconnect 報文。按直覺，很多人會選一個最小修法：往白名單裡再加一條字串前綴。這個思路不能說錯，只是它更像 Demo 時期的解法，不太像長期維護的解法。
+
+從當前 HagiCode 的落地來看，系統已經往更穩的方向走了一步。它不再只盯著某個字面字串，而是把可恢復的終態統一交給共享協調器處理。這樣做的好處很明顯：
+
+- 不容易因為某條文案的小改動就徹底失效
+- 測試覆蓋可以圍繞「終態 envelope」展開，而不是單條硬編碼文本
+- 同一個 provider 的重試邏輯會更一致
+
+當然，這裡要立一個邊界：更通用，不等於更寬鬆。**只要當前上下文不能繼續，哪怕報錯看起來很像暫時故障，也不應該盲目 replay。**
+
+這點很關鍵。真正讓人安心的，不是它偶爾靈一次，而是它大多數時候都靠譜。如果一個流程只能靠高手維持，那它離普及還差得遠。
+
+## 實踐裡最值得保留的三條經驗
+
+文章寫到這裡，差不多可以往實踐層收一收了。如果你準備在自己的專案裡實作類似能力，我最建議先守住下面三條。
+
+### 1. 重試預算必須有邊界
+
+HagiCode 當前預設的退避節奏是：
+
+- 10 秒
+- 20 秒
+- 60 秒
+
+這個節奏不一定適合所有系統，但「有邊界」這件事必須保留。要不然，自動重試很快就會從恢復機制變成事故放大器。別急著名字起得太大，先看看這東西能不能在團隊裡活過兩個迭代。
+
+### 2. continuation prompt 要統一
+
+專案裡使用的是固定 continuation prompt，讓後續 attempt 明確走「繼續當前上下文」的路徑，而不是重新發起一輪完整請求。這個能力不花哨，可是你真做專案時離不開。很多能力看起來像魔法，拆開以後不過是一套被打磨過的工程流程。
+
+### 3. 共享庫和適配層都要有鏡像測試
+
+這點我很想多說一句。很多團隊會在共享執行時裡寫一層測試，然後覺得差不多了。其實不夠。
+
+HagiCode 這邊之所以讓我比較放心，是因為兩層都補了測試：
+
+- 共享 Provider 測「是否真的發生了自動續跑」
+- 適配層測「最終錯誤和流式訊息有沒有被整理壞」
+
+我這次也額外補跑了兩組相關測試，結果都是 31 個用例全部通過。這個結果本身說明不了設計一定完美，可它至少能說明一件事：當前這套自動重試不是紙面方案，而是已經被程式碼和測試共同約束住的能力。Talk is cheap. Show me the code. 放到這裡，恰好合適。
+
+## 總結
+
+如果把整篇文章壓縮成一句話，那就是：
+
+**Claude Code、Codex 等 Agent CLI 的自動重試，最好不要做成某個 Provider 內部的局部技巧，而應該做成共享協調器 + 策略快照 + 上下文判定 + 鏡像測試的組合。**
+
+這樣做帶來的收益，其實非常實在：
+
+- 邏輯只寫一遍，多個 Provider 都能複用
+- 請求是否允許重試，可以穩定地跟著執行鏈路走
+- 有上下文時繼續跑，沒上下文時及時停手
+- 前端最終看到的是穩定的完成態或失敗態，而不是一堆半途而廢的中間噪音
+
+這套方案，是 HagiCode 在真實接入多種 Agent CLI 的過程中一點點打磨出來的。誰說 AI 輔助編程就不是新時代的結對編程呢？模型幫你起步、補全、發散，可真正決定體驗上限的，往往還是上下文、流程和約束。
+
+如果本文對你有幫助，也歡迎順手看看 HagiCode 的公開入口：
+
+- GitHub: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- 官網: [hagicode.com](https://hagicode.com)
+- 30 分鐘實戰演示: [www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)
+- Desktop 安裝入口: [hagicode.com/desktop/](https://hagicode.com/desktop/)
+- Steam: [Steam 商店頁（加入願望清單 / 查看詳情）](https://store.steampowered.com/app/4625540/Hagicode/)
+
+HagiCode 現在已經上架 Steam 了，這不是畫餅，連結也給你放這兒了。有 Steam 的朋友可以先加個願望清單，自己點進去看一眼，比我在这儿多說十句都來得直接。
+
+先把這件事講到這裡，剩下的我們繼續在真實專案裡見。
+
+## 參考資料
+
+- HagiCode 專案主頁: [https://hagicode.com](https://hagicode.com)
+- HagiCode GitHub 倉庫: [https://github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- 官方演示影片: [https://www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)
+- Desktop 安裝說明: [https://hagicode.com/desktop/](https://hagicode.com/desktop/)
+
+## 版權說明
+
+感謝您的閱讀,如果您覺得本文有用,歡迎點讚、收藏和分享支持。
+本內容採用人工智慧輔助協作,最終內容由作者審核並確認。
+- 本文作者: [newbe36524](https://www.newbe.pro)
+- 原文連結: [https://docs.hagicode.com/blog/2026-02-11-agent-cli-automatic-retry/](https://docs.hagicode.com/blog/2026-02-11-agent-cli-automatic-retry/)
+- 版權聲明: 本部落格所有文章除特別聲明外,均採用 BY-NC-SA 許可協議。轉載請註明出處!

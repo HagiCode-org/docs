@@ -1,0 +1,384 @@
+---
+title: ImgBin CLI ツール設計：HagiCode 画像資産管理ソリューション
+date: 2026-03-13
+tags: [CLI, 画像管理, TypeScript, Node.js, 資産パイプライン]
+description: "この記事では、自動実行可能な画像資産パイプラインをゼロから構築する方法について紹介します。CLI ツールの設計、Provider Adapter アーキテクチャ、メタデータ管理戦略を含みます。"
+---
+
+## ImgBin CLI ツール設計：HagiCode 画像資産管理ソリューション
+
+> この記事では、自動実行可能な画像資産パイプラインをゼロから構築する方法について紹介します。CLI ツールの設計、Provider Adapter アーキテクチャ、メタデータ管理戦略を含みます。
+
+## 背景
+
+実のところ、画像資産管理のことでこれほど長く悩むとは思いもよらなかった。
+
+HagiCode プロジェクトの開発過程で、私たちは一見単純そうに見えて非常に厄介な問題に直面しました。それは画像資産の生成と管理です。どう言えばいいだろうか、青春期の出来事のようなもの——表面上は穏やかだが、内面では波乱万丈。
+
+プロジェクトのドキュメントとマーケティング資料が増えるにつれて、多くの画像が必要になりました。これらの画像の一部は AI で生成する必要があり、一部は既存の素材ライブラリから選択する必要があり、また一部は既存の画像を AI で認識して自動的にタグ付けする必要があります。問題は、これらの作業が長らくバラバラなスクリプトと手動操作で行われていたことです——画像を生成するたびに、手動でスクリプトを実行し、手動でメタデータを整理し、手動でサムネイルを生成する必要がありました。これだけでもまだしも、これらのバラバラなものがあちこちに散らばっていて、探したいときに見つからず、使いたいときに使えないのです。
+
+具体的な痛点には以下があります：
+
+1. **統一エントリポイントの欠如**：画像生成ロジックが異なるスクリプトに分散しており、一括実行は不可能
+2. **メタデータの欠落**：生成された画像に統一された metadata.json がなく、検索や追跡ができない
+3. **手動整理コストが高い**：画像のタイトルやタグを手動で一つ一つ整理する必要があり、効率が悪い
+4. **自動化不可能**：CI/CD プロセスで画像の自動生成を行いたい？全く無理
+
+単に無視してしまおうとも考えましたが、結局はプロジェクトをやらなければなりません。逃げられないなら、解決策を考えるしかありません。そこで私たちは、ImgBin を「バラバラなスクリプト」から自動実行可能な画像資産パイプラインにアップグレードすることを決めました。結局のところ、あることからは逃げられないのです。
+
+## HagiCode について
+
+この記事で共有するソリューションは、[HagiCode](https://hagicode.com) プロジェクトでの実践経験から来ています。HagiCode は AI コードアシスタントプロジェクトであり、VSCode 拡張機能、バックエンド AI サービス、クロスプラットフォームデスクトップクライアントなど、複数のコンポーネントを保守しています。このような多言語・多プラットフォームの複雑なシナリオでは、画像資産の規範的な管理が開発効率を向上させるための重要な要素となっています。
+
+どう言えばいいだろうか、これも HagiCode の成長過程での小さな悩みと言えるでしょう。すべてのプロジェクトにこういう時が来ます。一見取るに足らない小さな問題が、意外と長い時間かかってしまうのです。
+
+HagiCode のビルドシステムは TypeScript + Node.js エコシステムを採用しているため、ImgBin �も自然に同じ技術スタックを選択し、プロジェクト全体の技術的一貫性を確保しました。結局のところ、みんな慣れているものを使うもので、別のものに変えるのも面倒ですよね。
+
+---
+
+## コア設計
+
+### 全体アーキテクチャ
+
+ImgBin は階層化アーキテクチャを採用し、CLI コマンド、アプリケーションサービス、サードパーティ API アダプター、インフラストラクチャ層を明確に分離しています：
+
+```
+コンポーネント階層構造
+├── CLI Entry (cli.ts)              グローバル引数解析、コマンドルーティング
+├── Commands (commands/*)           generate | batch | annotate | thumbnail
+├── Application Services            job-runner | metadata | thumbnail | asset-writer
+├── Provider Adapters               image-api-provider | vision-api-provider
+└── Infrastructure Layer            config | logger | paths | schema
+```
+
+この階層設計の利点は、各層の責任が明確で、テスト時に外部依存関係を簡単にモックできることです。要は各自が自分の仕事をし、互いに邪魔しないようにするということです。こうすれば問題が発生したときも原因が見つけやすいでしょう？
+
+### 単一資産ディレクトリモデル
+
+ImgBin は「一つの資産一つのディレクトリ」モデルを採用しており、画像を生成するたびに、以下のような構造を作成します：
+
+```
+library/
+└── 2026-03/
+    └── orange-dashboard/
+        ├── original.png      # オリジナル画像
+        ├── thumbnail.webp    # 512x512 サムネイル
+        └── metadata.json     # 構造化メタデータ
+```
+
+このモデルの利点は：
+
+1. **自己完結型**：各資産のすべてのファイルが同じディレクトリにあり、移行やバックアップが便利
+2. **追跡可能**：metadata.json を通じて、画像の生成時間、使用したプロンプト、モデルなどの情報を追跡可能
+3. **拡張可能**：将来的にさらにバリアント（異なるサイズのサムネイルなど）を追加する必要がある場合、同じディレクトリにファイルを追加するだけで済む
+
+美しい事物や人は、必ずしも所有する必要はありません。それが美しいままでいて、自分がその美しさを眺めていればいいのです。この言葉は少し遠いかもしれませんが、理屈としてはこういうことです——画像が一緒に置かれていると、見た目も美しく、探すのも便利になります。
+
+### メタデータ階層ストレージ
+
+metadata.json はシステム全体の中核であり、階層ストレージ戦略を採用して、3種類のフィールドを区別しています：
+
+```json
+{
+  "schemaVersion": 2,
+  "assetId": "orange-dashboard",
+  "slug": "orange-dashboard",
+  "title": "Orange Dashboard",
+  "tags": ["dashboard", "hero", "orange"],
+
+  "source": { "type": "generated" },
+
+  "paths": {
+    "assetDir": "library/2026-03/orange-dashboard",
+    "original": "original.png",
+    "thumbnail": "thumbnail.webp"
+  },
+
+  "generated": {
+    "prompt": "orange dashboard for docs hero",
+    "provider": "azure-openai-image-api",
+    "model": "gpt-image-1.5"
+  },
+
+  "recognized": {
+    "title": "Orange Dashboard",
+    "tags": ["dashboard", "ui", "orange"],
+    "description": "A modern orange dashboard with charts and metrics"
+  },
+
+  "status": {
+    "generation": "succeeded",
+    "recognition": "succeeded",
+    "thumbnail": "succeeded"
+  },
+
+  "timestamps": {
+    "createdAt": "2026-03-11T04:01:19.570Z",
+    "updatedAt": "2026-03-11T04:02:09.132Z"
+  }
+}
+```
+
+- **generated**：画像生成時の元情報（使用したプロンプト、プロバイダー、モデルなど）を記録
+- **recognized**：AI 認識結果（自動生成されたタイトル、タグ、説明）
+- **manual**：手動整理の結果、この領域のデータは最優先され、AI 認識によって上書きされない
+
+この階層戦略は、以前の私たちのコア矛盾を解決しました：AI 認識結果と手動整理結果のどちらを優先するか？答えは手動を優先し、AI 認識はあくまで補助です。このことにも気づきました——あるものは結局のところ機械は機械であり、最終的には人が把关（チェック）する必要があるのです。
+
+---
+
+## Provider Adapter パターン
+
+ImgBin のもう一つのコア設計は Provider Adapter パターンです。外部 API を統一されたインターフェースとして抽象化し、AI サービスプロバイダーを変更してもビジネスロジックを変更する必要がありません。
+
+どう言えばいいだろうか、これは感情のようなものです——外見がどう変わっても重要ではありません。重要なのは内面のあれが変わらないことです。インターフェースさえ決まれば、内部の実装はどう変えても構いません。
+
+### Image Generation Provider
+
+```typescript
+interface ImageGenerationProvider {
+  // 画像を生成し、画像の Buffer を返す
+  generate(options: GenerateOptions): Promise<Buffer>;
+
+  // サポートされているモデルリストを取得
+  getSupportedModels(): Promise<string[]>;
+}
+
+interface GenerateOptions {
+  prompt: string;
+  model?: string;
+  size?: '1024x1024' | '1792x1024' | '1024x1792';
+  quality?: 'standard' | 'hd';
+  format?: 'png' | 'webp' | 'jpeg';
+}
+```
+
+### Vision Recognition Provider
+
+```typescript
+interface VisionRecognitionProvider {
+  // 画像コンテンツを認識し、構造化されたメタデータを返す
+  recognize(imageBuffer: Buffer): Promise<RecognitionResult>;
+
+  // サポートされているモデルリストを取得
+  getSupportedModels(): Promise<string[]>;
+}
+
+interface RecognitionResult {
+  title?: string;
+  tags: string[];
+  description?: string;
+  confidence: number;
+}
+```
+
+このインターフェース設計の利点は：
+
+1. **テスト可能**：単体テスト時にモックプロバイダーを渡すことができ、外部 API を実際に呼び出す必要がない
+2. **拡張可能**：新しいプロバイダーを追加するにはインターフェースを実装するだけで、呼び出し元のコードを変更する必要がない
+3. **置換可能**：本番環境では Azure OpenAI、テスト環境ではローカルモデルを使用でき、設定を切り替えるだけ
+
+笑って自分がこぼした涙を偽装し、泣いて自分が麻痺しているかを試す——プロジェクトをやっているとき就是这样（こういうこと）です。表面上は API を変えたように見えますが、実際には内側のロジックは少しも変わっておらず、何も恐れることはありません。
+
+---
+
+## CLI コマンド設計
+
+ImgBin は 4 つのコアコマンドを提供し、異なる使用シナリオに対応します：
+
+### generate：単一画像生成
+
+```bash
+# 最も単純な使用法
+imgbin generate --prompt "orange dashboard for docs hero"
+
+# サムネイルと AI タグ付けを同時に生成
+imgbin generate --prompt "orange dashboard" --annotate --thumbnail
+
+# 出力ディレクトリを指定
+imgbin generate --prompt "orange dashboard" --output ./library
+```
+
+### batch：バッチタスク
+
+バッチタスクは YAML または JSON manifest ファイルで定義され、CI/CD プロセスでの使用に適しています：
+
+```yaml
+# assets/jobs/launch.yaml
+defaults:
+  annotate: true
+  thumbnail: true
+  libraryRoot: ./library
+
+jobs:
+  - prompt: "orange dashboard hero"
+    slug: orange-dashboard
+    tags: [dashboard, hero, orange]
+
+  - prompt: "pricing grid for docs"
+    slug: pricing-grid
+    tags: [pricing, grid, docs]
+```
+
+実行コマンド：
+
+```bash
+imgbin batch assets/jobs/launch.yaml
+```
+
+バッチタスクの設計は失敗分離をサポートしています：manifest 内で項目ごとに処理され、単一項目の失敗が他のタスクに影響しません。`--dry-run` でプレビューして実際には実行しないこともできます。
+
+これだけでもまだしも、重要なのはどこが成功してどこが失敗したかを教えてくれることで、あることのように失敗してさえどう失敗したかもわからないことはありません。
+
+### annotate：AI タグ付け
+
+既存の画像に対して AI 認識を実行し、タイトル、タグ、説明を自動生成します：
+
+```bash
+# 単一の画像をタグ付け
+imgbin annotate ./library/2026-03/orange-dashboard
+
+# ディレクトリ全体をバッチタグ付け
+imgbin annotate ./library/2026-03/
+```
+
+### thumbnail：サムネイル生成
+
+既存の画像にサムネイルを追加生成します：
+
+```bash
+# サムネイルを生成
+imgbin thumbnail ./library/2026-03/orange-dashboard
+```
+
+---
+
+## バッチタスク Manifest 設計
+
+バッチタスクの manifest は柔軟な設定をサポートしており、デフォルト値を統一的に設定でき、単一タスクで上書きすることも可能です：
+
+```yaml
+# グローバルデフォルト値
+defaults:
+  annotate: true        # デフォルトで AI タグ付けを有効化
+  thumbnail: true       # デフォルトでサムネイルを生成
+  libraryRoot: ./library
+  model: gpt-image-1.5
+
+jobs:
+  # 最小設定、プロンプトのみ提供
+  - prompt: "first image"
+
+  # 完全設定
+  - prompt: "second image"
+    slug: custom-slug
+    tags: [tag1, tag2]
+    annotate: false     # このタスクは AI タグ付けを実行しない
+    model: dall-e-3    # このタスクは異なるモデルを使用
+```
+
+実行時、ImgBin はタスクを一つずつ処理し、各タスクの結果は対応する metadata.json に書き込まれます。あるタスクが失敗しても、他のタスクには影響しません。タスク完了後、サマリーレポートが出力されます：
+
+```
+✓ orange-dashboard (succeeded)
+✓ pricing-grid (succeeded)
+✗ hero-banner (failed: API rate limit exceeded)
+
+2/3 succeeded, 1 failed
+```
+
+あることですね、急いでも急げない、一つずつやる方が逆に安心です。これが、バッチタスクの哲学でしょう。
+
+---
+
+## 環境変数設定
+
+ImgBin は環境変数を通じて柔軟な設定をサポートします：
+
+```bash
+# ImgBin 作業ディレクトリ
+IMGBIN_WORKDIR=/path/to/imgbin
+
+# 実行可能ファイルパス（スクリプトから呼び出すため）
+IMGBIN_EXECUTABLE=/path/to/imgbin/dist/cli.js
+
+# 資産ライブラリルートディレクトリ
+IMGBIN_LIBRARY_ROOT=./.imgbin-library
+
+# Azure OpenAI 設定（Azure provider を使用する場合）
+AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com/
+AZURE_OPENAI_API_KEY=your-api-key
+AZURE_OPENAI_IMAGE_DEPLOYMENT=gpt-image-1
+```
+
+設定というもの、重要と言えば重要ですが、重要でないと言えば重要でもありません。結局のところ、どうすれば快適か、自分に適したものが最高なのです。
+
+---
+
+## 実装の要点
+
+実装過程で、私たちは以下の主要な点をまとめました：
+
+### Provider インターフェース設計
+
+インターフェース定義は明確で完全である必要があります。入力パラメータ、戻り値、エラー処理を含みます。同期的と非同期の両方の呼び出し方法を提供することをお勧めします。これにより、異なるシナリオで便利に使用できます。
+
+これも経験者からの少々アドバイスですが、インターフェースというものは、一度決めたらもう変えたくないものです。面倒ですから。
+
+### 失敗処理戦略
+
+バッチタスクで某項目が失敗した場合、以下のようにする必要があります：
+
+1. 詳細なエラー情報を別のログファイルに記録する
+2. 他のタスクの実行を続け、プロセス全体を中断しない
+3. 最終的にゼロ以外の終了コードを返し、タスク失敗を示す
+4. サマリーレポートで各タスクの実行結果を明確に表示する
+
+あることに失敗したら失敗です。逃げても無駄です。むしろ堂々と認めて、解決策を考える方がいいです。この道理は、プロジェクトも人間も同じです。
+
+### メタデータマージ戦略
+
+認識結果はデフォルトで `recognized` 領域に書き込まれ、手動修正されたフィールドには `manual` マークがあります。メタデータ更新時には「増加のみで削減なし」戦略を採用します：明示的に `--force` パラメータを渡さない限り、既存の手動整理結果を上書きしません。
+
+このことにも気づきました——あるものは、逃したらもう逃したです。上書きしたらなくなります。やはり残しておく方がいいです。記録自体も一種の美ですから。
+
+### ディレクトリ作成の原子性
+
+`fs.mkdir({ recursive: true })` を使用してディレクトリ作成の原子性を確保し、同時実行シナリオでの競合状態を回避します。
+
+これがいわゆるセキュリティでしょう——安定すべきときは安定し、迅速すべきときは迅速で、中途半端に引きずらず、先を見て迷わない。
+
+---
+
+## まとめ
+
+ImgBin は HagiCode プロジェクトの画像資産管理の中核ツールとして、以下の設計を通じて私たちが直面した問題を解決しました：
+
+1. **統一エントリポイント**：CLI コマンドが生成、タグ付け、サムネイルなどすべての操作をカバー
+2. **メタデータ駆動**：各資産には完全な metadata.json があり、検索と追跡をサポート
+3. **Provider Adapter**：柔軟な外部 API 抽象化で、テストと拡張が容易
+4. **バッチタスクサポート**：CI/CD プロセスで自動的にバッチ画像生成を実行可能
+
+すべてが薄くなった......しかし、このソリューションは本当に使われました。
+
+このソリューションは HagiCode 自体の開発効率を向上させただけでなく、再利用可能な画像資産管理フレームワークも形成しました。同様のマルチコンポーネントプロジェクトを開発している場合、ImgBin の設計アイデアがインスピレーションを与えることを信じています。
+
+青春は、やっぱり折腾（あがく）ものです。あがいてみなければ、自分の実力がわからないでしょう？
+
+---
+
+## 参考文献
+
+- ImgBin 技術提案：https://github.com/HagiCode-org/site/tree/main/openspec/changes/archive/2026-03-10-imgbin-cli-tool
+- HagiCode 公式サイト：https://hagicode.com
+- HagiCode GitHub：https://github.com/HagiCode-org/site
+
+---
+
+お読みいただきありがとうございます。もしこの記事が役に立ったと思われたら、下のいいねボタンをクリックして、より多くの人にこの記事を見ていただければ幸いです。
+
+本内容は人工知能を用いて支援し作成され、筆者が審査し、筆者の見解と立場に合致することを確認しました。
+
+- 本文の著者: [newbe36524](https://www.newbe.pro)
+- 本文のリンク: [https://docs.hagicode.com/blog/2026-03-13-imgbin-cli-tool-asset-management/](https://docs.hagicode.com/blog/2026-03-13-imgbin-cli-tool-asset-management/)
+- 著作権声明: 本ブログのすべての記事は特別な声明を除き、BY-NC-SA ライセンス契約を採用しています。著作権所有！

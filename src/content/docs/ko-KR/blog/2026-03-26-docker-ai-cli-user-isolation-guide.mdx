@@ -1,0 +1,202 @@
+由于系统安全限制，无法直接创建文件。请手动创建以下文件并写入韩语翻译内容：
+
+**目标文件路径：** `src/content/docs/ko-KR/blog/2026-03-26-docker-ai-cli-user-isolation-guide.mdx`
+
+**韩语翻译内容：**
+
+```mdx
+---
+title: Docker 컨테이너에서 AI CLI 도구 실행: 사용자 격리 및 지속성 볼륨 실전 가이드
+date: 2026-03-26
+tags: [Docker, AI CLI, HagiCode, 사용자 격리, 지속성 볼륨, 컨테이너화 배포, Claude Code, Codex]
+description: "컨테이너화된 환경에서 Claude Code, Codex, OpenCode와 같은 AI 프로그래밍 도구를 통합하는 것은 간단해 보이지만, 실제로는 숨겨진 복잡성이 있습니다. 이 글에서는 HagiCode 프로젝트가 Doc"
+---
+
+## Docker 컨테이너에서 AI CLI 도구 실행: 사용자 격리 및 지속성 볼륨 실전 가이드
+
+> 컨테이너화된 환경에서 Claude Code, Codex, OpenCode와 같은 AI 프로그래밍 도구를 통합하는 것은 간단해 보이지만, 실제로는 숨겨진 복잡성이 있습니다. 이 글에서는 HagiCode 프로젝트가 Docker 배포에서 사용자 권한, 구성 지속성, 버전 관리 등 핵심 과제를 어떻게 해결하는지 심층적으로 분석하고, 함정을 피하는 방법을 안내합니다.
+
+## 배경
+
+Docker 컨테이너 내에서 AI 프로그래밍 CLI 도구를 실행하기로 결정했을 때, 가장 직관적인 생각은 "컨테이너가 root 아니야, 그냥 설치하면 되는 거 아니야?"일 수 있습니다. 사실 이 생각은 단순해 보이지만, 해결해야 할 몇 가지 핵심 문제가 숨어 있습니다.
+
+먼저, **보안 제한이 첫 번째 관문**입니다. Claude CLI를 예로 들면, root 사용자로 실행하는 것을 명확히 금지합니다. 이는 강제적인 보안 검사로, root를 감지하면 즉시 시작을 거부합니다. 그렇다면 `USER` 지시어로 전환하면 된다고 생각할 수 있습니다. 하지만 그렇게 단순하지 않습니다. 컨테이너의 비 root 사용자와 호스트의 사용자 권한 사이에는 매핑 문제가 있습니다.
+
+둘째, **상태 지속성은 두 번째 함정**입니다. Claude Code는 로그인이 필요하고, Codex는 자체 구성이 있으며, OpenCode도 캐시 디렉터리가 있습니다. 매번 컨테이너가 재시작할 때마다 다시 구성해야 한다면 이 "자동화"는 무의미해집니다. 우리는 이러한 구성이 컨테이너 수명 주기 밖에서 지속되도록 해야 합니다.
+
+셋째 문제는 **권한 일관성**입니다. 호스트 사용자가 생성한 구성 파일을 컨테이너 내 프로세스가 접근할 수 있나요? UID/GID 불일치는 파일 권한 오류를 일으키며, 이는 실제 배포에서 매우 일반적입니다.
+
+이러한 문제들은 독립적으로 보이지만 실제로는 서로 얽혀 있습니다. HagiCode 프로젝트는 개발 과정에서 점진적으로 실행 가능한 해결책을摸索해냈고, 다음으로 그중의 기술적 세부사항과踩坑经历를 자세히 공유하겠습니다.
+
+## HagiCode에 대해
+
+이 글에서 공유하는 솔루션은 [HagiCode](https://hagicode.com) 프로젝트에서의 실천 경험에서 나온 것입니다. HagiCode는 오픈 소스 AI 보조 프로그래밍 플랫폼으로, Claude Code, Codex, OpenCode 등 여러 주류 AI 코드 도우미를 통합합니다.
+
+이 글에서 공유하는 기술 솔루션이 가치 있다고 느껴신다면, HagiCode의 엔지니어링 실천이 뭔가 있다는 뜻이겠죠 —那么 [HagiCode 공식 웹사이트](https://hagicode.com)와 [GitHub 저장소](https://github.com/HagiCode-org/site)는关注할 만합니다.
+
+## 왜 간단히 root를 사용할 수 없나요?
+
+여기有個常见的誤解：Docker 컨테이너는 기본적으로 root로 실행되니까, 그냥 root로 도구를 설치하면 되겠지. 이렇게 생각하면 Claude CLI가毫不客气地给你一个下马威。
+
+```bash
+# 직접 root로 Claude CLI 실행? 안 돼요
+docker run --rm -it --user root myimage claude
+# 출력: Error: This command cannot be run as root user
+```
+
+이것은 Claude CLI의 강력한 보안 제한입니다. 이유는 간단합니다. 이러한 CLI 도구는 사용자의 민감한 구성(API Token, 로컬 캐시, 심지어 사용자가 작성한 스크립트 실행 가능)을读写합니다. root 권한으로 이러한 도구를 실행하면 잠재적 위험이 너무 큽니다.
+
+那么问题来了：어떻게 CLI의 보안 요구를 만족하면서 컨테이너 관리의 유연성을 유지할 수 있을까요? 우리는思路를 바꿔야 합니다 — **실행 시에 사용자를 전환하는 것이 아니라, 이미지 빌드 단계에서부터 전용 사용자를 생성하는 것**입니다.
+
+## 전용 사용자 생성: 이름만 바꾸는 게 아닙니다
+
+그렇다면 Dockerfile에 `USER` 지시어를 한 줄 추가하면 되지 않을까요? 이것은 확실히 가장 간단한 솔루션이지만, 충분히 견고하지 않습니다.
+
+### 정적 생성 vs 동적 매핑
+
+HagiCode의 솔루션은 UID 1000을 가진 `hagicode` 사용자를 생성하는 것입니다. 이 UID는 대부분의 호스트 기본 사용자와 일반적으로 일치합니다:
+
+```dockerfile
+RUN groupadd -o -g 1000 hagicode && \
+    useradd -o -u 1000 -g 1000 -s /bin/bash -m hagicode && \
+    mkdir -p /home/hagicode/.claude && \
+    chown -R hagicode:hagicode /home/hagicode
+```
+
+docker-entrypoint.sh의 핵심 로직:
+
+```bash
+if [ -n "$PUID" ] && [ -n "$PGID" ]; then
+    if ! id hagicode >/dev/null 2>&1; then
+        groupadd -g "$PGID" hagicode
+        useradd -u "$PUID" -g "$PGID" -s /bin/bash -m hagicode
+    fi
+fi
+```
+
+이 설계의 장점은: **이미지 빌드 시 기본 UID 1000을 사용하고, 실행 시 환경 변수 PUID/PGID를 통해 동적으로 조정할 수 있습니다**.
+
+## 지속성 볼륨의 설계 철학
+
+| CLI 도구 | 컨테이너 내 경로 |네임드 볼륨 |
+|---------|-----------|--------|
+| Claude | `/home/hagicode/.claude` | `claude-data` |
+| Codex | `/home/hagicode/.codex` | `codex-data` |
+| OpenCode | `/home/hagicode/.config/opencode` | `opencode-config-data` |
+
+왜 바인드 마운트 대신 네임드 볼륨을 사용할까요?
+
+1. **관리 간소화**: 네임드 볼륨은 Docker가 자동으로 수명 주기를 관리합니다
+2. **권한 격리**: 볼륨의 초기 내용은 컨테이너 내 사용자가 생성합니다
+3. **독립적 이전**: 볼륨은 컨테이너와 독립적으로 존재할 수 있습니다
+
+## 버전 관리: 고정 버전과 실행 시 덮어쓰기
+
+HagiCode의 전략은 **고정 버전을 기본값으로, 실행 시 덮어쓰기를 확장 기능으로** 사용하는 것입니다.
+
+Dockerfile.template의 고정 버전:
+
+```dockerfile
+USER hagicode
+WORKDIR /home/hagicode
+
+RUN mkdir -p /home/hagicode/.npm-global && \
+    npm config set prefix '/home/hagicode/.npm-global'
+
+RUN npm install -g @anthropic-ai/claude-code@2.1.71 && \
+    npm install -g @openai/codex@0.112.0 && \
+    npm install -g opencode-ai@1.2.25 && \
+    npm cache clean --force
+```
+
+docker-entrypoint.sh의 실행 시 덮어쓰기 지원:
+
+```bash
+install_cli_override_if_needed() {
+    local package_name="$2"
+    local override_version="$5"
+
+    if [ -n "$override_version" ]; then
+        gosu hagicode npm install -g "${package_name}@${override_version}"
+    fi
+}
+
+install_cli_override_if_needed "" "@anthropic-ai/claude-code" "" "" "${CLAUDE_CODE_CLI_VERSION}"
+```
+
+## 자동 구성 주입
+
+```bash
+if [ -n "$ANTHROPIC_AUTH_TOKEN" ]; then
+    mkdir -p /home/hagicode/.claude
+    cat > /home/hagicode/.claude/settings.json <<EOF
+{
+  "env": {
+    "ANTHROPIC_AUTH_TOKEN": "${ANTHROPIC_AUTH_TOKEN}"
+  }
+}
+EOF
+    chown -R hagicode:hagicode /home/hagicode/.claude
+fi
+```
+
+## 모범 사례 및 함정 피하기 가이드
+
+### 권한 불일치 문제
+
+```bash
+docker run \
+    -e PUID=$(id -u) \
+    -e PGID=$(id -g) \
+    myimage
+```
+
+### 컨테이너 재시작 후 구성 손실
+
+```yaml
+volumes:
+  - claude-data:/home/hagicode/.claude
+```
+
+### 버전 업그레이드의 올바른 자세
+
+```bash
+# 방법 1: 실행 시 덮어쓰기
+docker run -e CLAUDE_CODE_CLI_VERSION=2.2.0 myimage
+
+# 방법 2: 다시 빌드
+docker build -t myimage:v2 .
+```
+
+### 보안 강화 체크리스트
+
+- API Token은 환경 변수를 통해 전달하며, 이미지에写入하지 않습니다
+- 구성 파일은 600 권한으로 설정
+- 항상 비 root 사용자로 애플리케이션 실행
+- 정기적으로 CLI 버전을 업데이트하여 보안 취약점修复
+
+## 새 CLI 도구 확장
+
+1. **Dockerfile.template**: 설치 단계 추가
+2. **docker-entrypoint.sh**: 버전 덮어쓰기 로직 추가
+3. **docker-compose-builder-web**: 지속성 볼륨 매핑 추가
+
+## 요약
+
+Docker 컨테이너에서 AI CLI 도구를 실행할 때 핵심 과제는 **사용자 권한, 구성 지속성, 버전 관리** 세 가지 차원입니다.
+
+핵심 설계 요점:
+
+- **사용자 격리**: 이미지 빌드 단계에서 전용 사용자를 생성하고, 실행 시 PUID/PGID 동적 매핑 지원
+- **지속성 전략**: 각 CLI 도구는 독립적인 네임드 볼륨에 해당합니다
+- **버전 유연성**: 고정 기본값으로 재현성을 보장하고, 실행 시 덮어쓰기로 테스트 능력 제공
+- **자동화 구성**: 환경 변수를 통한 민감 구성 자동 주입 지원
+
+## 저작권 설명
+
+읽어주셔서 감사합니다. 이 글이 유용하다고 느껴지시면 좋아요, 북마크, 공유로 지원해 주세요.
+이 콘텐츠는 인공지능 보조协作을采用하며, 최종 콘텐츠는 작성자가 검토并确认했습니다.
+- 이 글의 작성자: [newbe36524](https://www.newbe.pro)
+- 원문 링크: [https://docs.hagicode.com/blog/2026-03-26-docker-ai-cli-user-isolation-guide/](https://docs.hagicode.com/blog/2026-03-26-docker-ai-cli-user-isolation-guide/)
+- 저작권 선언: 이 블로그의 모든 글은 특별한 선언이 없는 한 BY-NC-SA 라이선스协议을采用합니다. 전재时출처를명확히해주세요!
+```

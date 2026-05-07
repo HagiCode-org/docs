@@ -1,0 +1,395 @@
+---
+title: Des appels CLI à l'intégration SDK : meilleures pratiques GitHub Copilot dans les projets .NET
+date: 2026-04-03
+tags: [GitHub Copilot, .NET, intégration IA, Orleans, intégration SDK]
+description: "Le parcours de mise à niveau des appels en ligne de commande à l'intégration officielle du SDK, c'est toute une expérience. Aujourd'hui, je partage les obstacles que nous avons rencontrés et les leçons apprises dans le projet HagiCode."
+---
+
+## Des appels CLI à l'intégration SDK : meilleures pratiques GitHub Copilot dans les projets .NET
+
+> Le parcours de mise à niveau des appels en ligne de commande à l'intégration officielle du SDK, c'est toute une expérience. Aujourd'hui, je partage les obstacles que nous avons rencontrés et les leçons apprises dans le projet HagiCode.
+
+## Contexte
+
+Après la sortie officielle du GitHub Copilot SDK en 2025, nous avons commencé à l'intégrer dans notre couche de capacités IA. Auparavant, le projet utilisait principalement les capacités de GitHub Copilot en appelant directement l'outil CLI Copilot en ligne de commande, ce qui présentait plusieurs problèmes évidents :
+
+- **Gestion de processus complexe** : nécessité de gérer manuellement le cycle de vie du processus CLI, le délai de démarrage et le nettoyage des processus — après tout, les processus peuvent planter sans aucun avertissement
+- **Traitement des événements incomplet** : les appels CLI bruts ont du mal à capturer les événements granulaires du processus d'inférence du modèle et de l'exécution des outils, comme ne voir que le résultat sans voir le processus de réflexion
+- **Gestion de session difficile** : manque de mécanismes efficaces de réutilisation et de récupération de session, chaque fois il faut tout recommencer, c'est fatiguant
+- **Problèmes de compatibilité** : les paramètres CLI sont fréquemment mis à jour, nécessitant une maintenance continue de la logique de compatibilité des paramètres, c'est comme se battre contre des moulins à vent
+
+Ces problèmes sont apparus progressivement dans le développement quotidien, en particulier lorsqu'il fallait suivre en temps réel le processus d'inférence du modèle (thinking) et l'état d'exécution des outils. Les limitations des appels CLI sont devenues particulièrement évidentes. Nous avons finalement compris que nous avions besoin d'une méthode d'intégration plus basique et plus complète — après tout, tous les chemins mènent à Rome, mais certains sont plus faciles à parcourir que d'autres.
+
+## À propos de HagiCode
+
+La solution partagée dans cet article provient de notre expérience pratique dans le projet [HagiCode](https://hagicode.com). HagiCode est un projet open source d'assistant de code IA. Au cours du développement, nous avions besoin d'une intégration approfondie des diverses capacités de GitHub Copilot — de la complétion de code de base aux conversations multi-tours complexes et aux appels d'outils. Ces besoins réels nous ont poussés à passer des appels CLI à l'intégration officielle du SDK.
+
+Si vous êtes intéressé par la solution pratique de cet article, cela signifie que notre pratique d'ingénierie peut vous aider — alors le projet HagiCode lui-même mérite également votre attention. Peut-être qu'à la fin de l'article, vous trouverez plus d'informations et de liens sur le projet, qui sait......
+
+## Conception de l'architecture
+
+Le projet adopte une architecture en couches pour résoudre les problèmes des appels CLI :
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  hagicode-core (Orleans Grains + AI Provider Layer)    │
+│  - CopilotAIProvider: Convertit AIRequest en CopilotOptions │
+│  - GitHubCopilotGrain: Interface d'exécution distribuée Orleans            │
+└─────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────┐
+│  HagiCode.Libs (Shared Provider Layer)                 │
+│  - CopilotProvider: Implémentation de l'interface CLI Provider               │
+│  - ICopilotSdkGateway: Abstraction des appels SDK                     │
+│  - GitHubCopilotSdkGateway: Gestion de session SDK et distribution d'événements     │
+└─────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────┐
+│  GitHub Copilot SDK (Official .NET SDK)                │
+│  - CopilotClient: Client SDK                            │
+│  - CopilotSession: Gestion de session                             │
+│  - SessionEvent: Flux d'événements                                 │
+└─────────────────────────────────────────────────────────┘
+```
+
+Les avantages techniques de cette conception en couches sont en fait assez pratiques :
+
+1. **Séparation des préoccupations** : la logique métier principale est découplée des détails d'implémentation du SDK — après tout, chaque couche fait son travail, sans se marcher sur les pieds
+2. **Testabilité** : grâce à l'interface `ICopilotSdkGateway`, les tests unitaires peuvent être facilement effectués, ce qui rend les tests moins pénibles
+3. **Réutilisabilité** : HagiCode.Libs peut être référencé par plusieurs projets, écrit une fois, utilisé plusieurs fois
+4. **Maintenabilité** : la mise à niveau du SDK nécessite seulement de modifier la couche Gateway, le code ci-dessus n'a pas besoin d'être modifié, c'est très bien
+
+## Implémentation principale
+
+### Flux d'authentification
+
+L'authentification est la première et la plus importante étape de l'intégration du SDK — après tout, si on ne peut même pas entrer, tout le reste est inutile. Nous avons conçu une configuration d'authentification flexible qui prend en charge plusieurs sources d'authentification :
+
+```csharp
+// CopilotProvider.cs - Configuration de la source d'authentification
+public class CopilotOptions
+{
+    public bool UseLoggedInUser { get; set; } = true;
+    public string? GitHubToken { get; set; }
+    public string? CliUrl { get; set; }
+}
+
+// Conversion en requête SDK
+return new CopilotSdkRequest(
+    GitHubToken: options.AuthSource == CopilotAuthSource.GitHubToken
+        ? options.GitHubToken
+        : null,
+    UseLoggedInUser: options.AuthSource != CopilotAuthSource.GitHubToken
+);
+```
+
+Les avantages de cette conception sont en fait assez évidents :
+
+- Prend en charge le mode utilisateur connecté (sans token), adapté aux scénarios de bureau — l'utilisateur se connecte avec son propre compte
+- Prend en charge le mode GitHub Token, adapté au déploiement côté serveur — la gestion unifiée est également pratique
+- Prend en charge la substitution de l'URL CLI Copilot, facilitant la configuration du proxy d'entreprise — les environnements d'entreprise ont toujours des règles spéciales
+
+Dans l'utilisation réelle, cette méthode d'authentification flexible simplifie considérablement le travail de configuration dans différents scénarios de déploiement. Le bureau peut utiliser l'état de connexion Copilot de l'utilisateur lui-même, tandis que le serveur peut effectuer une gestion unifiée via Token. Chacun prend ce dont il a besoin, en quelque sorte.
+
+### Traitement du flux d'événements
+
+L'une des capacités les plus puissantes du SDK devrait être la capture complète du flux d'événements. Nous avons implémenté un système de distribution d'événements capable de traiter en temps réel divers événements du SDK — après tout, connaître le processus et connaître uniquement le résultat, ce n'est pas la même chose :
+
+```csharp
+// GitHubCopilotSdkGateway.cs - Logique principale de distribution d'événements
+internal static SessionEventDispatchResult DispatchSessionEvent(
+    SessionEvent evt, bool sawDelta)
+{
+    switch (evt)
+    {
+        case AssistantReasoningEvent reasoningEvent:
+            // Capture le processus d'inférence du modèle
+            events.Add(new CopilotSdkStreamEvent(
+                CopilotSdkStreamEventType.ReasoningDelta,
+                Content: reasoningEvent.Data.Content));
+            break;
+
+        case ToolExecutionStartEvent toolStartEvent:
+            // Capture le début de l'appel d'outil
+            events.Add(new CopilotSdkStreamEvent(
+                CopilotSdkStreamEventType.ToolExecutionStart,
+                ToolName: toolStartEvent.Data.ToolName,
+                ToolCallId: toolStartEvent.Data.ToolCallId));
+            break;
+
+        case ToolExecutionCompleteEvent toolCompleteEvent:
+            // Capture la fin de l'appel d'outil et le résultat
+            events.Add(new CopilotSdkStreamEvent(
+                CopilotSdkStreamEventType.ToolExecutionEnd,
+                Content: ExtractToolExecutionContent(toolCompleteEvent)));
+            break;
+
+        default:
+            // Les événements non traités sont conservés comme RawEvent
+            events.Add(new CopilotSdkStreamEvent(
+                CopilotSdkStreamEventType.RawEvent,
+                RawEventType: evt.GetType().Name));
+            break;
+    }
+}
+```
+
+La valeur de cette implémentation, comment dire :
+
+- **Capture complète du processus d'inférence du modèle** (thinking) : les utilisateurs peuvent voir le processus de réflexion de l'IA, pas seulement le résultat final — comme connaître la réponse moins bien que connaître comment y réfléchir
+- **Suivi en temps réel de l'état d'exécution des outils** : savoir quels outils sont en cours d'exécution, quand ils se terminent et quels résultats ils renvoient
+- **Zéro perte d'événements** : grâce au mécanisme de repli vers RawEvent, tous les événements sont enregistrés, rien n'est laissé de côté
+
+Dans l'utilisation réelle de HagiCode, ces événements granulaires permettent aux utilisateurs de mieux comprendre le processus de travail de l'IA, en particulier lors du débogage de tâches complexes — c'est encore assez utile.
+
+### Gestion de la compatibilité CLI
+
+Après avoir migré des appels CLI vers le SDK, nous avons constaté que certains paramètres CLI d'origine ne s'appliquaient plus dans le SDK. Pour maintenir la compatibilité descendante, nous avons implémenté un système de filtrage de paramètres — après tout, si l'ancienne configuration ne fonctionne pas, c'est assez ennuyeux :
+
+```csharp
+// CopilotCliCompatibility.cs - Filtrage des paramètres
+private static readonly Dictionary<string, string> RejectedFlags = new()
+{
+    ["--headless"] = "Paramètre de démarrage non pris en charge",
+    ["--model"] = "Passé via les champs natifs du SDK",
+    ["--prompt"] = "Passé via les champs natifs du SDK",
+    ["--interactive"] = "Géré par le provider",
+};
+
+public static CopilotCliArgumentBuildResult BuildCliArgs(CopilotOptions options)
+{
+    // Filtrer les paramètres non pris en charge, conserver les paramètres compatibles
+    // Générer des informations de diagnostic
+}
+```
+
+Les avantages de cette approche :
+
+- Filtrage automatique des paramètres CLI incompatibles, évitant les erreurs d'exécution — les plantages de programme ne sont pas une plaisanterie
+- Génération d'informations de diagnostic d'erreur claires, aidant les développeurs à localiser rapidement les problèmes
+- Garantie de la stabilité du SDK, non affectée par les changements de paramètres CLI
+
+Au cours du processus de mise à niveau, ce mécanisme de gestion de la compatibilité nous a aidés à effectuer une transition en douceur. Les anciens fichiers de configuration peuvent toujours être utilisés, il suffit de les ajuster progressivement en fonction des informations de diagnostic — c'est aussi un processus progressif.
+
+### Mise en pool du runtime
+
+La création de sessions du Copilot SDK est coûteuse, et la création et la destruction fréquentes de sessions affectent les performances. Nous avons implémenté un système de gestion de mise en pool de sessions — comme l'eau dans une piscine, mieux vaut la garder pour la prochaine fois que de la remplacer après chaque utilisation :
+
+```csharp
+// CopilotProvider.cs - Gestion du pool de sessions
+await using var lease = await _poolCoordinator.AcquireCopilotRuntimeAsync(
+    request,
+    async ct => await _gateway.CreateRuntimeAsync(sdkRequest, ct),
+    cancellationToken);
+
+if (lease.IsWarmLease)
+{
+    // Réutiliser la session existante
+    yield return CreateSessionReusedMessage();
+}
+
+await foreach (var eventData in lease.Entry.Resource.SendPromptAsync(...))
+{
+    yield return MapEvent(eventData);
+}
+```
+
+Les avantages de la mise en pool de sessions :
+
+- **Réutilisation de sessions** : les requêtes avec le même sessionId peuvent réutiliser la session existante, réduisant les coûts de démarrage
+- **Prise en charge de la récupération de session** : peut récupérer l'état de session précédent après une interruption réseau — après tout, qui peut garantir que le réseau sera toujours stable
+- **Gestion automatique du pool** : nettoyage automatique des sessions expirées, évitant les fuites de ressources
+
+Dans l'utilisation réelle de HagiCode, la mise en pool de sessions a considérablement amélioré la vitesse de réponse, en particulier lors du traitement de conversations continues — cette amélioration se fait ressentir.
+
+### Intégration Orleans
+
+HagiCode utilise Orleans comme framework distribué, et nous avons intégré le Copilot SDK dans Orleans Grain — le distribué, c'est compliqué à expliquer, mais assez pratique à utiliser :
+
+```csharp
+// GitHubCopilotGrain.cs - Exécution distribuée
+public async IAsyncEnumerable<GitHubCopilotResponse> ExecuteCommandStreamAsync(
+    string command,
+    CancellationToken token = default)
+{
+    var provider = await aiProviderFactory.GetProviderAsync(AIProviderType.GitHubCopilot);
+
+    await foreach (var chunk in provider.SendMessageAsync(request, null, token))
+    {
+        // Mapper vers un format de réponse unifié
+        yield return BuildChunkResponse(chunk, startedAt);
+    }
+}
+```
+
+Les avantages de l'intégration Orleans :
+
+- **Abstraction unifiée de AI Provider** : peut facilement basculer entre différents fournisseurs IA — utiliser celui-ci aujourd'hui, celui-ci demain, assez flexible
+- **Isolation multi-tenant** : les sessions Copilot de différents utilisateurs sont isolées les unes des autres
+- **Persistance de l'état de session** : l'état de session peut être récupéré après un redémarrage du serveur, pas de perte de données après un redémarrage
+
+Pour les scénarios nécessitant le traitement d'un grand nombre de requêtes simultanées, les capacités distribuées d'Orleans offrent une bonne évolutivité — après tout, quand une seule machine ne suffit plus, on compte sur le distribué.
+
+## Guide pratique
+
+### Exemple de configuration
+
+Voici un exemple de configuration complet — copiez-collez et modifiez, ça marche :
+
+```json
+{
+  "AI": {
+    "Providers": {
+      "Providers": {
+        "GitHubCopilot": {
+          "Enabled": true,
+          "ExecutablePath": "copilot",
+          "Model": "gpt-5",
+          "WorkingDirectory": "/path/to/project",
+          "Timeout": 7200,
+          "StartupTimeout": 30,
+          "UseLoggedInUser": true,
+          "NoAskUser": true,
+          "Permissions": {
+            "AllowAllTools": false,
+            "AllowedTools": ["Read", "Bash", "Grep"],
+            "DeniedTools": ["Edit"]
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+### Précautions d'utilisation
+
+Dans l'utilisation réelle, nous avons résumé certains points à surveiller — certains sont des expériences acquises en trébuchant :
+
+**Configuration du délai de démarrage** : le premier démarrage du Copilot CLI prend beaucoup de temps, il est recommandé de définir `StartupTimeout` à au moins 30 secondes. S'il s'agit de la première connexion, il faudra peut-être plus de temps — après tout, la première connexion nécessite une vérification, on ne peut rien y faire.
+
+**Gestion des permissions** : en production, évitez d'utiliser `AllowAllTools: true`. Utilisez la liste blanche `AllowedTools` pour contrôler les outils disponibles, utilisez la liste noire `DeniedTools` pour interdire les opérations dangereuses. Cela peut empêcher efficacement l'IA d'exécuter des commandes dangereuses — en matière de sécurité, il vaut mieux être prudent.
+
+**Gestion des sessions** : les requêtes avec le même `sessionId` réutilisent automatiquement la session. L'état de session est persisté via `ProviderSessionId`. L'annulation d'opération est transmise via `CancellationTokenSource` — une bonne gestion des sessions signifie une bonne expérience.
+
+**Sortie de diagnostic** : les paramètres CLI incompatibles génèrent des messages de type `diagnostic`. Les événements SDK bruts sont conservés sous le type `event.raw`. Les messages d'erreur incluent une classification (délai de démarrage, paramètres incompatibles, etc.), facilitant le dépannage — pouvoir localiser rapidement les problèmes est aussi une forme de réconfort.
+
+### Meilleures pratiques
+
+Basé sur notre expérience réelle, voici quelques meilleures pratiques — un résumé en quelque sorte :
+
+**1. Utiliser une liste blanche d'outils**
+
+```csharp
+var request = new AIRequest
+{
+    Prompt = "Analyser ce fichier",
+    AllowedTools = new[] { "Read", "Grep", "Bash(git:*)" }
+};
+```
+
+Spécifiez explicitement les outils autorisés via une liste blanche pour éviter que l'IA n'exécute des opérations inattendues. En particulier pour les outils avec des droits d'écriture (comme Edit), une prudence particulière est nécessaire — après tout, personne ne veut vivre une suppression de base de données.
+
+**2. Définir des délais raisonnables**
+
+```csharp
+options.Timeout = 3600;  // 1 heure
+options.StartupTimeout = 60;  // 1 minute
+```
+
+Définissez des délais appropriés en fonction de la complexité de la tâche. Trop court peut entraîner une interruption de la tâche, trop long peut gaspiller des ressources en attendant des requêtes sans réponse — la modération est essentielle, l'excès est aussi mauvais que l'insuffisance.
+
+**3. Activer la réutilisation de sessions**
+
+```csharp
+options.SessionId = "my-session-123";
+```
+
+Définir le même sessionId pour les tâches connexes peut réutiliser le contexte de session précédent, améliorant la vitesse de réponse — le contexte est parfois assez important.
+
+**4. Traiter les réponses en flux**
+
+```csharp
+await foreach (var chunk in provider.StreamAsync(request))
+{
+    switch (chunk.Type)
+    {
+        case StreamingChunkType.ThinkingDelta:
+            // Traiter le processus de raisonnement
+            break;
+        case StreamingChunkType.ToolCallDelta:
+            // Traiter l'appel d'outil
+            break;
+        case StreamingChunkType.ContentDelta:
+            // Traiter la sortie de texte
+            break;
+    }
+}
+```
+
+Les réponses en flux peuvent afficher en temps réel la progression du traitement de l'IA, améliorant l'expérience utilisateur. En particulier pour les tâches longues, le feedback en temps réel est très important — voir la barre de progression vaut mieux que d'attendre sans rien faire.
+
+**5. Gestion des erreurs et nouvelles tentatives**
+
+```csharp
+try
+{
+    await foreach (var chunk in provider.StreamAsync(request))
+    {
+        // Traiter la réponse
+    }
+}
+catch (CopilotSessionException ex)
+{
+    // Traiter l'exception de session
+    logger.LogError(ex, "Échec de la session Copilot");
+    // Décider de réessayer en fonction du type d'exception
+}
+```
+
+Une gestion appropriée des erreurs et un mécanisme de nouvelle tentative peuvent améliorer la stabilité du système — personne ne peut garantir qu'un programme ne plantera jamais, mais savoir gérer les erreurs suffit.
+
+## Résumé
+
+La mise à niveau des appels CLI vers l'intégration SDK a apporté une valeur significative au projet HagiCode — comment dire, cette mise à niveau en vaut vraiment la peine :
+
+- **Amélioration de la stabilité** : le SDK fournit une interface plus stable, non affectée par les changements de version CLI — plus besoin de s'inquiéter des mises à jour de version tous les jours
+- **Complétude fonctionnelle** : capable de capturer le flux d'événements complet, y compris le processus de raisonnement et l'état d'exécution des outils — processus et résultats visibles
+- **Efficacité de développement** : l'interface de typage sécurisé du SDK rend le développement plus efficace, réduisant les erreurs d'exécution — avec la vérification de type, on est plus rassuré
+- **Expérience utilisateur** : le feedback d'événements en temps réel permet aux utilisateurs de mieux comprendre le processus de travail de l'IA — savoir ce qu'il pense vaut mieux que ne rien savoir du tout
+
+Cette mise à niveau n'est pas seulement un remplacement de solution technique, mais aussi une optimisation de l'architecture entière de la couche de capacités IA. Grâce à la conception en couches et aux interfaces d'abstraction, nous avons obtenu une meilleure maintenabilité et évolutivité — une fois l'architecture en place, la suite est plus facile.
+
+Si vous envisagez d'intégrer GitHub Copilot dans votre projet .NET, j'espère que l'expérience pratique de cet article vous aidera à éviter certains détours. Le SDK officiel est en effet plus stable et complet que les appels CLI, et vaut la peine d'investir du temps pour comprendre et maîtriser — après tout, le bon outil peut rendre les choses plus efficaces, ce n'est pas sans raison.
+
+## Références
+
+- [Documentation officielle du GitHub Copilot SDK](https://docs.github.com/en/copilot)
+- [Framework distribué Orleans](https://learn.microsoft.com/en-us/dotnet/orleans/)
+- [Dépôt GitHub du projet HagiCode](https://github.com/HagiCode-org/site)
+- [Documentation officielle HagiCode](https://docs.hagicode.com)
+- [Meilleures pratiques d'injection de dépendances .NET](https://docs.microsoft.com/en-us/dotnet/core/extensions/dependency-injection-guidelines)
+
+---
+
+Si cet article vous aide :
+
+- Donnez un like pour que plus de gens le voient — votre soutien nous est très important
+- Venez donner une Star sur GitHub : [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Visitez le site officiel pour en savoir plus : [hagicode.com](https://hagicode.com)
+- Regardez la démo pratique de 30 minutes : [www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)
+- Installation en un clic : [docs.hagicode.com/installation/docker-compose](https://docs.hagicode.com/installation/docker-compose)
+- Installation rapide Desktop : [hagicode.com/desktop/](https://hagicode.com/desktop/)
+- La bêta publique a commencé, bienvenue pour installer et essayer
+
+---
+
+J'ai presque fini d'écrire ici. Les articles techniques, on ne finit jamais de les écrire, la technologie évolue et nous apprenons aussi. Si vous avez des questions ou des suggestions lors de l'utilisation de HagiCode, n'hésitez pas à nous contacter à tout moment. Voilà, c'est tout......
+
+## Mention de copyright
+
+Merci d'avoir lu, si vous trouvez cet article utile, n'hésitez pas à liker, favoriser et partager pour nous soutenir.
+Ce contenu est réalisé avec une collaboration assistée par l'intelligence artificielle, le contenu final est examiné et confirmé par l'auteur.
+- Auteur de l'article : [newbe36524](https://www.newbe.pro)
+- Lien vers l'article original : [https://docs.hagicode.com/blog/2026-04-03-github-copilot-sdk-integration/](https://docs.hagicode.com/blog/2026-04-03-github-copilot-sdk-integration/)
+- Mention de copyright : Sauf mention contraire, tous les articles de ce blog sont soumis à la licence BY-NC-SA. Veuillez indiquer la source pour toute reproduction !

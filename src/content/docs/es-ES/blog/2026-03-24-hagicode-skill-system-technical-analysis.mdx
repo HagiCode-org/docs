@@ -1,0 +1,423 @@
+---
+title: Análisis técnico del sistema Skill de HagiCode: cómo crear una plataforma de gestión de habilidades de IA escalable
+date: 2026-03-24
+tags: [HagiCode, Skill, AI, Orleans, TanStack, arquitectura técnica]
+description: "Este artículo analiza en profundidad el diseño arquitectónico y el plan de implementación del sistema de gestión de habilidades (Skill) en el proyecto HagiCode, cubriendo los detalles de implementación técnica de cuatro funciones principales: gestión local global, búsqueda en el mercado, recomendación inteligente y gestión de proveedores confiables."
+---
+
+## Análisis técnico del sistema Skill de HagiCode: cómo crear una plataforma de gestión de habilidades de IA escalable
+
+> Este artículo analiza en profundidad el diseño arquitectónico y el plan de implementación del sistema de gestión de habilidades (Skill) en el proyecto HagiCode, cubriendo los detalles de implementación técnica de cuatro funciones principales: gestión local global, búsqueda en el mercado, recomendación inteligente y gestión de proveedores confiables.
+
+## Antecedentes
+
+En el campo de los asistentes de código con IA, cómo extender los límites de las capacidades de la IA siempre ha sido un tema central. La capacidad de asistencia de código de Claude Code en sí es bastante fuerte, pero diferentes equipos de desarrollo y diferentes stacks tecnológicos a menudo necesitan capacidades profesionales para escenarios específicos, como el manejo de despliegues de Docker, optimización de bases de datos, generación de componentes frontend, etc. En este momento, el sistema de habilidades (Skill) se vuelve particularmente importante.
+
+El proyecto HagiCode también encontró desafíos similares durante su desarrollo: cómo hacer que Claude Code pueda "aprender" nuevas habilidades profesionales como un humano, mientras mantiene una buena experiencia de usuario y mantenibilidad de ingeniería. Después de todo, este problema es difícil y simple al mismo tiempo. Alrededor de este problema, diseñamos e implementamos un sistema completo de gestión de habilidades.
+
+Este artículo analizará en detalle la arquitectura técnica y la implementación central de este sistema, adecuado para desarrolladores interesados en la escalabilidad de IA y la integración de herramientas de línea de comandos. Quizás te sea útil, quizás no, pero al final está escrito.
+
+## Sobre HagiCode
+
+La solución compartida en este artículo proviene de nuestra experiencia práctica en el proyecto [HagiCode](https://hagicode.com). HagiCode es un proyecto de asistente de código con IA de código abierto, cuyo objetivo es ayudar a los equipos de desarrollo a mejorar la eficiencia de I+D. El stack tecnológico del proyecto cubre ASP.NET Core, el framework distribuido Orleans, TanStack Start + React para el frontend, y el subsistema de gestión de habilidades que se presenta en este artículo.
+
+La dirección de GitHub del proyecto es [HagiCode-org/site](https://github.com/HagiCode-org/site). Si consideras que la solución técnica presentada en este artículo es valiosa, bienvenido a darle una estrella. Después de todo, cuando hay más estrellas, el estado de ánimo también mejora.
+
+## Resumen de la arquitectura del sistema
+
+El sistema Skill adopta un diseño de arquitectura de separación entre frontend y backend, la verdad no tiene nada de especial.
+
+**La parte frontend** usa TanStack Start + React para construir la interfaz de usuario, gestiona el estado a través de Redux Toolkit, y las cuatro funciones principales corresponden a cuatro componentes Tab: habilidades locales, galería del mercado, recomendaciones inteligentes y proveedores confiables. Este diseño, en realidad, también es para la experiencia del usuario.
+
+**La parte backend** se basa en ASP.NET Core + ABP Framework, usando Orleans Grain para implementar la gestión de estado distribuida. El cliente de API en línea encapsula la interfaz `IOnlineApiClient` para comunicarse con el servicio remoto de directorio de habilidades.
+
+El principio de diseño general de la arquitectura es "separación de ejecución de comandos y lógica de negocio", usando el patrón adaptador para aislar los detalles de ejecución de comandos npm/npx en módulos independientes. Después de todo, ¿quién quiere ver un montón de líneas de comando dispersas por todo el código?
+
+## Función principal 1: gestión local global
+
+La gestión local global es el módulo de funcionalidad más básico, responsable de listar las habilidades instaladas y admitir operaciones de desinstalación. No es nada complicado, simplemente se trata de hacer bien las cosas.
+
+### Solución técnica
+
+La ubicación de implementación está en `LocalSkillsTab.tsx` y `LocalSkillCommandAdapter.cs`. La idea central es encapsular el comando `npx skills`, analizar su salida JSON y convertirla a estructuras de datos internas. Suena simple, y en realidad también es simple de implementar.
+
+```csharp
+public async Task<IReadOnlyList<LocalSkillInventoryResponseDto>> GetLocalSkillsAsync(
+    CancellationToken cancellationToken = default)
+{
+    var result = await _commandAdapter.ListGlobalSkillsAsync(cancellationToken);
+    return result.Skills.Select(skill => new LocalSkillInventoryResponseDto
+    {
+        Name = skill.Name,
+        Version = skill.Version,
+        Source = skill.Source,
+        InstalledPath = skill.InstalledPath,
+        Description = skill.Description
+    }).ToList();
+}
+```
+
+El flujo de datos es muy claro: frontend inicia la solicitud → SkillGalleryAppService recibe → LocalSkillCommandAdapter ejecuta el comando npx → analiza el resultado JSON → devuelve el objeto DTO. Un eslabón tras otro, no hay mucho que decir.
+
+La desinstalación de habilidades usa el comando `npx skills remove -g <skillName> -y`, el sistema maneja automáticamente las dependencias y la limpieza. Los metadatos de instalación se almacenan en `managed-install.json` en el directorio de habilidades, registrando información como la hora de instalación y la versión de origen, facilitando actualizaciones y auditorías posteriores. Después de todo, algunas cosas, es bueno registrarlas.
+
+### Explicación detallada del flujo de instalación
+
+La instalación de habilidades implica la coordinación de múltiples pasos, como se dice, en realidad no es demasiado complicada:
+
+```csharp
+public async Task<SkillInstallResultDto> InstallAsync(
+    SkillInstallRequestDto request,
+    CancellationToken cancellationToken = default)
+{
+    // 1. Normalizar referencia de instalación
+    var normalized = _referenceNormalizer.Normalize(
+        request.SkillId,
+        request.Source,
+        request.SkillSlug,
+        request.Version);
+
+    // 2. Verificar prerrequisitos
+    await _prerequisiteChecker.CheckAsync(cancellationToken);
+
+    // 3. Obtener bloqueo de instalación
+    using var installLock = await _lockProvider.AcquireAsync(normalized.SkillId);
+
+    // 4. Ejecutar comando de instalación
+    var result = await _installCommandRunner.ExecuteAsync(
+        new SkillInstallCommandExecutionRequest
+        {
+            Command = $"npx skills add {normalized.FullReference} -g -y",
+            Timeout = TimeSpan.FromMinutes(4)
+        },
+        cancellationToken);
+
+    // 5. Persistir metadatos de instalación
+    await _metadataStore.WriteAsync(normalized.SkillPath, request);
+
+    return new SkillInstallResultDto { Success = result.Success };
+}
+```
+
+Aquí se utilizan varios patrones de diseño clave: el **normalizador de referencias** es responsable de convertir varios formatos de entrada (como `tanweai/pua`, `@opencode/docker-skill`) a una representación interna unificada; el **mecanismo de bloqueo de instalación** garantiza que solo una operación de instalación esté en progreso para la misma habilidad al mismo tiempo; la **salida en streaming** envía el progreso de instalación en tiempo real al frontend a través de Server-Sent Events, para que el usuario pueda ver registros en tiempo tiempo similar a los de una terminal.
+
+Estos patrones de diseño, en el fondo, también son para hacer las cosas simples.
+
+## Función principal 2: búsqueda en el mercado
+
+La búsqueda en el mercado permite a los usuarios descubrir e instalar habilidades de la comunidad. Después de todo, la capacidad de una persona es limitada, la sabiduría de muchos es infinita.
+
+### Solución técnica
+
+La funcionalidad de búsqueda depende de la API en línea `https://api.hagicode.com/v1/skills/search`. Para mejorar la velocidad de respuesta, el sistema implementa un mecanismo de caché. La caché, como la memoria, algunas cosas se recuerdan y la próxima vez no hay que esforzarse tanto en pensar.
+
+```csharp
+private async Task<IReadOnlyList<SkillGallerySkillDto>> SearchCatalogAsync(
+    string query,
+    CancellationToken cancellationToken,
+    IReadOnlySet<string>? allowedSources = null)
+{
+    var cacheKey = $"skill_search:{query}:{string.Join(",", allowedSources ?? Array.Empty<string>())}";
+
+    if (_memoryCache.TryGetValue(cacheKey, out var cached))
+        return (IReadOnlyList<SkillGallerySkillDto>)cached!;
+
+    var response = await _onlineApiClient.SearchAsync(
+        new SearchSkillsRequest
+        {
+            Query = query,
+            Limit = _options.LimitPerQuery,
+        },
+        cancellationToken);
+
+    var results = response.Skills
+        .Where(skill => allowedSources is null || allowedSources.Contains(skill.Source))
+        .Select(skill => new SkillGallerySkillDto { ... })
+        .ToList();
+
+    _memoryCache.Set(cacheKey, results, TimeSpan.FromMinutes(10));
+    return results;
+}
+```
+
+Los resultados de búsqueda admiten el filtrado por fuentes confiables, mostrando solo fuentes de habilidades que el usuario confía. Consultas semilla preestablecidas se usan para inicializar el catálogo, como "popular", "recent", etc., para que los usuarios puedan ver habilidades populares recomendadas cuando lo abran por primera vez. Después de todo, la primera impresión es importante.
+
+## Función principal 3: recomendación inteligente
+
+La recomendación inteligente es la función más compleja del sistema, puede recomendar automáticamente las habilidades más apropiadas según la situación actual del proyecto del usuario. Es compleja, pero vale la pena desarrollarla.
+
+### Proceso de recomendación
+
+Todo el proceso de recomendación se divide en cinco etapas:
+
+```
+1. Construir contexto del proyecto
+   ↓
+2. AI genera consultas de búsqueda
+   ↓
+3. Búsqueda paralela del catálogo en línea
+   ↓
+4. AI clasifica los candidatos
+   ↓
+5. Devolver lista de recomendaciones
+```
+
+Primero, el sistema analiza características como el stack tecnológico del proyecto, el lenguaje de programación, la estructura de dominio, etc., para construir un "perfil del proyecto". Este perfil, como el currículum de una persona, registra todas las características.
+
+Luego, se usa un AI Grain para generar consultas de búsqueda específicas. El diseño aquí es bastante interesante: no se le pregunta directamente a la IA "qué habilidades recomendar", sino que se le hace pensar primero "qué términos de búsqueda pueden encontrar habilidades relevantes". Después de todo, a veces la forma de hacer la pregunta es más importante que la respuesta misma:
+
+```csharp
+var queryGeneration = await aiGrain.GenerateSkillRecommendationQueriesAsync(
+    projectContext,      // contexto del proyecto
+    locale,              // preferencia de idioma del usuario
+    maxQueries,           // número máximo de consultas
+    effectiveSearchHero); // selección del modelo AI
+```
+
+A continuación, se ejecutan estas consultas de búsqueda en paralelo para obtener una lista de habilidades candidatas. El procesamiento paralelo, en el fondo, también es para ahorrar tiempo.
+
+Finalmente, se usa otro AI Grain para clasificar las habilidades candidatas. Este paso considera factores como la relevancia de la habilidad con el proyecto, el estado de confianza, las preferencias históricas del usuario, etc.:
+
+```csharp
+var ranking = await aiGrain.RankSkillRecommendationsAsync(
+    projectContext,
+    candidates,
+    installedSkillNames,
+    locale,
+    maxRecommendations,
+    effectiveRankingHero);
+
+response.Items = MergeRecommendations(projectContext, candidates, ranking, maxRecommendations);
+```
+
+### Mecanismo de respaldo
+
+Los modelos AI pueden tener respuestas lentas o estar temporalmente no disponibles. Después de todo, incluso el mejor sistema a veces falla. Para esto, el sistema diseñó un mecanismo de respaldo determinista: cuando el servicio AI no está disponible, se usan algoritmos heurísticos basados en reglas para generar recomendaciones, como inferir habilidades posiblemente necesarias según las dependencias en package.json.
+
+Este mecanismo de respaldo, dicho claramente, simplemente le deja una salida al sistema.
+
+## Función principal 4: gestión de proveedores confiables
+
+La gestión de proveedores confiables permite a los usuarios controlar qué fuentes de habilidades son confiables. Después de todo, la confianza es algo que uno debe controlar.
+
+### Reglas de coincidencia
+
+Los proveedores confiables admiten dos reglas de coincidencia: **coincidencia exacta** (exact) y **coincidencia de prefijo** (prefix).
+
+```csharp
+public static TrustedSkillProviderResolutionSnapshot Resolve(
+    TrustedSkillProviderSnapshot snapshot,
+    string source)
+{
+    var normalizedSource = Normalize(source);
+
+    foreach (var entry in snapshot.Entries.OrderBy(e => e.SortOrder))
+    {
+        if (!entry.IsEnabled) continue;
+
+        foreach (var rule in entry.MatchRules)
+        {
+            bool isMatch = rule.MatchType switch
+            {
+                TrustedSkillProviderMatchRuleType.Exact
+                    => string.Equals(normalizedSource, Normalize(rule.Value),
+                        StringComparison.OrdinalIgnoreCase),
+                TrustedSkillProviderMatchRuleType.Prefix
+                    => normalizedSource.StartsWith(Normalize(rule.Value) + "/",
+                        StringComparison.OrdinalIgnoreCase),
+                _ => false
+            };
+
+            if (isMatch)
+                return new TrustedSkillProviderResolutionSnapshot
+                {
+                    IsTrustedSource = true,
+                    ProviderId = entry.ProviderId,
+                    DisplayName = entry.DisplayName
+                };
+        }
+    }
+
+    return new TrustedSkillProviderResolutionSnapshot { IsTrustedSource = false };
+}
+```
+
+Los proveedores confiables preestablecidos incluyen organizaciones y proyectos conocidos como Vercel, Azure, anthropics, Microsoft, browser-use, etc. Los proveedores personalizados se pueden agregar a través del archivo de configuración, especificando el ID del proveedor, nombre para mostrar, etiqueta de insignia, reglas de coincidencia, etc. Después de todo, el mundo es grande, no pueden ser confiables solo unas pocas empresas.
+
+### Implementación de persistencia
+
+La configuración de confianza usa el almacenamiento persistente de Orleans Grain:
+
+```csharp
+public class TrustedSkillProviderGrain : Grain<TrustedSkillProviderState>,
+    ITrustedSkillProviderGrain
+{
+    public async Task UpdateConfigurationAsync(TrustedSkillProviderSnapshot snapshot)
+    {
+        State.Snapshot = snapshot;
+        await WriteStateAsync();
+    }
+
+    public Task<TrustedSkillProviderSnapshot> GetConfigurationAsync()
+    {
+        return Task.FromResult(State.Snapshot);
+    }
+}
+```
+
+El beneficio de este enfoque es que los cambios de configuración se sincronizan automáticamente con todos los nodos, sin necesidad de actualizar manualmente el caché. Después de todo, la automatización, en el fondo, también es para que la gente se preocupe menos.
+
+## Diseños técnicos clave
+
+### Patrón adaptador de ejecución de comandos
+
+El sistema Skill necesita ejecutar varios comandos npx, si esta lógica se dispersa por todas partes, el código se vuelve difícil de mantener. Por lo tanto, diseñamos una interfaz de adaptador. Los patrones de diseño, en el fondo, también son para hacer que el código sea más mantenible:
+
+```csharp
+public interface ISkillInstallCommandRunner
+{
+    Task<SkillInstallCommandExecutionResult> ExecuteAsync(
+        SkillInstallCommandExecutionRequest request,
+        CancellationToken cancellationToken = default);
+}
+```
+
+Diferentes comandos tienen implementaciones de ejecutor diferentes, todas implementan la misma interfaz, facilitando las pruebas y el reemplazo.
+
+### Salida en streaming SSE
+
+El progreso de instalación se envía en tiempo real al frontend a través de Server-Sent Events:
+
+```csharp
+public async Task InstallWithProgressAsync(
+    SkillInstallRequestDto request,
+    IServerStreamWriter<SkillInstallProgressEventDto> stream,
+    CancellationToken cancellationToken)
+{
+    var process = new Process
+    {
+        StartInfo = new ProcessStartInfo
+        {
+            FileName = "npx",
+            Arguments = $"skills add {request.FullReference} -g -y",
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false
+        }
+    };
+
+    process.OutputDataReceived += async (sender, e) =>
+    {
+        await stream.WriteAsync(new SkillInstallProgressEventDto
+        {
+            EventType = "output",
+            Data = e.Data ?? string.Empty
+        });
+    };
+
+    process.Start();
+    process.BeginOutputReadLine();
+    await process.WaitForExitAsync(cancellationToken);
+}
+```
+
+Los usuarios pueden ver la salida en tiempo real similar a una terminal en el frontend, la experiencia es muy intuitiva. Después de todo, el反馈 en tiempo tiempo da tranquilidad.
+
+## Guía práctica
+
+### Instalar habilidades de la comunidad
+
+Tomando la instalación de la habilidad `pua` como ejemplo (esta es una habilidad popular de la comunidad):
+
+1. Abra el cajón de Skills, cambie a la pestaña "Skill Gallery"
+2. Ingrese "pua" para buscar
+3. Haga clic en el resultado de búsqueda para ver detalles de la habilidad
+4. Haga clic en el botón "Install" para instalar
+5. Cambie a la pestaña "Local Skills" para confirmar que la instalación fue exitosa
+
+El comando de instalación es `npx skills add tanweai/pua -g -y`, el sistema maneja automáticamente todos los detalles. En realidad no hay tantos pasos, simplemente tómalo paso a paso.
+
+### Agregar fuentes confiables personalizadas
+
+Si tu equipo tiene su propio repositorio de habilidades, puedes agregarlo como fuente confiable:
+
+```yaml
+providerId: "my-team"
+displayName: "My Team Skills"
+badgeLabel: "MyTeam"
+isEnabled: true
+sortOrder: 100
+matchRules:
+  - matchType: "prefix"
+    value: "my-team/"
+  - matchType: "exact"
+    value: "my-team/special-skill"
+```
+
+Así todas las habilidades de tu team mostrarán la insignia de confianza, y los usuarios pueden instalarlas con más confianza. Después de todo, las cosas marcadas siempre dan más tranquilidad.
+
+### Fundamentos de desarrollo de habilidades
+
+Para crear habilidades personalizadas necesitas seguir la siguiente estructura:
+
+```
+my-skill/
+├── SKILL.md          # metadatos de habilidad (YAML front matter)
+├── index.ts          # entrada de habilidad
+├── agents/           # configuraciones de agentes compatibles
+└── references/       # recursos de referencia
+```
+
+Ejemplo de formato de `SKILL.md`:
+
+```yaml
+---
+name: my-skill
+description: A brief description of what this skill does
+---
+
+# My Skill
+
+Detailed documentation...
+```
+
+## Consideraciones
+
+1. **Requisitos de red**: la búsqueda e instalación de habilidades requiere acceso a `api.hagicode.com` y el registro npm
+2. **Versión de Node.js**: se recomienda usar Node.js 18 o superior
+3. **Requisitos de permisos**: se necesitan permisos de instalación global npm
+4. **Control de concurrencia**: solo una operación de instalación o desinstalación puede ejecutarse al mismo tiempo para la misma habilidad
+5. **Configuración de tiempo de espera**: el tiempo de espera predeterminado para operaciones de instalación es de 4 minutos, escenarios complejos pueden necesitar ajustes
+
+Estas consideraciones, en el fondo, también son para que las cosas transcurran sin problemas.
+
+## Resumen
+
+Este artículo presenta la implementación completa del sistema de gestión de habilidades en el proyecto HagiCode. Este sistema, a través de medios técnicos como la arquitectura de separación frontend-backend, el patrón adaptador y la gestión de estado distribuido de Orleans, implementa:
+
+- **Gestión local global**: a través del encapsulamiento del comando npx skills, proporciona una interfaz unificada de gestión de habilidades
+- **Búsqueda en el mercado**: usando API en línea y mecanismos de caché, descubre rápidamente habilidades de la comunidad
+- **Recomendación inteligente**: combinando capacidades AI, recomienda las habilidades más apropiadas según el contexto del proyecto
+- **Gestión de confianza**: un sistema de configuración flexible que permite a los usuarios controlar los límites de confianza
+
+Esta idea de diseño no solo es aplicable a la gestión de habilidades, para cualquier escenario que necesite integrar herramientas de línea de comandos y equilibrar almacenamiento local y servicios en línea, tiene valor de referencia.
+
+Si este artículo te ayuda, bienvenido a dar una estrella en GitHub: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site). También puedes visitar el sitio oficial para más información: [hagicode.com](https://hagicode.com).
+
+Quizás también consideres que este sistema está bien diseñado, quizás no. Pero eso es todo, después de todo, el código está escrito, alguien lo usará y alguien no lo usará...
+
+## Materiales de referencia
+
+- Dirección del proyecto HagiCode: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Sitio oficial de HagiCode: [hagicode.com](https://hagicode.com)
+- Documentación oficial de habilidades de Claude Code: [docs.anthropic.com](https://docs.anthropic.com)
+- Documentación del framework Orleans: [dotnet.github.io/orleans](https://dotnet.github.io/orleans)
+- TanStack Start: [tanstack.com/start](https://tanstack.com/start)
+
+## Aviso de derechos de autor
+
+Gracias por leer, si considera que este artículo es útil, bienvenido a darle me gusta, guardarlo y compartirlo para apoyarlo.
+Este contenido usa colaboración asistida por inteligencia artificial, el contenido final es revisado y confirmado por el autor.
+- Autor del artículo: [newbe36524](https://www.newbe.pro)
+- Enlace original: [https://docs.hagicode.com/blog/2026-03-24-hagicode-skill-system-technical-analysis/](https://docs.hagicode.com/blog/2026-03-24-hagicode-skill-system-technical-analysis/)
+- Aviso de derechos de autor: Excepto declaración especial, todos los artículos de este blog usan el acuerdo de licencia BY-NC-SA. Indique la fuente al republicar.

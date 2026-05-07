@@ -1,0 +1,300 @@
+---
+title: Comment implémenter la réessai automatique pour les Agent CLI comme Claude Code et Codex
+date: 2026-04-18
+tags: [Agent CLI, Claude Code, Codex, réessai automatique, HagiCode]
+description: "Le réessai automatique peut sembler être un simple interrupteur, mais une fois sur le terrain de l'ingénierie, c'est une toute autre histoire. Bonjour à tous les producteurs, je suis Yu Kun, producteur de HagiCode. Aujourd'hui, nous ne parlerons pas de vains mots, mais de la manière de mettre en œuvre le réessai automatique"
+---
+
+## Comment implémenter la réessai automatique pour les Agent CLI comme Claude Code et Codex
+
+> Le réessai automatique peut sembler être un simple interrupteur, mais une fois sur le terrain de l'ingénierie, c'est une toute autre histoire. Bonjour à tous les producteurs, je suis Yu Kun, producteur de HagiCode. Aujourd'hui, nous ne parlerons pas de vains mots, mais de la manière de mettre en œuvre correctement le réessai automatique pour les Agent CLI comme Claude Code et Codex, afin de pouvoir à la fois gérer les exceptions et ne pas entraîner le système dans des exécutions répétées sans fin.
+
+## Contexte
+
+Si vous travaillez également sur la programmation IA récemment, vous avez probablement déjà rencontré ce type de problème : la tâche ne tombe pas en panne dès le début, mais s'arrête à mi-parcours.
+
+Pour les requêtes HTTP ordinaires, il suffit souvent de renvoyer la requête, éventuellement avec un backoff exponentiel. Mais les Agent CLI sont différents. Des outils comme Claude Code et Codex sont généralement exécutés en streaming, la sortie est poussée par segments, et au cours du processus, des thread, session ou resume token sont liés. En d'autres termes, il ne s'agit pas de savoir si "cette requête a échoué", mais plutôt :
+
+- Le contenu déjà émis est-il toujours valide
+- Le contexte actuel peut-il continuer à s'exécuter
+- Cet échec doit-il être récupéré automatiquement
+- Si une récupération est nécessaire, après combien de temps réessayer, quoi envoyer lors de la réessai, et faut-il réutiliser le contexte d'origine
+
+Beaucoup d'équipes, lorsqu'elles abordent cela pour la première fois, écriront inconsciemment la version la plus basique : si une erreur se produit, on réessaie. Cette idée est très naturelle, mais une fois dans le projet, les problèmes surgissent les uns après les autres.
+
+- Certaines erreurs qui sont clairement des pannes temporaires sont traitées comme des échecs finaux
+- Certaines erreurs qui ne méritent pas d'être réessayées sont répétées par le système
+- Les requêtes avec thread et les requêtes sans thread sont traitées de manière identique
+- Les stratégies de backoff n'ont pas de limites, les requêtes en arrière-plan s'autodétruisent
+
+HagiCode a également rencontré ces pièges lors de l'intégration de plusieurs Agent CLI. Surtout du côté de Codex, le problème initial était que certains messages de reconnect n'étaient pas reconnus comme un état terminal réessayable, de sorte que les mécanismes de récupération existants n'avaient aucune chance de s'activer. En clair, ce n'est pas que le système n'avait pas de réessai automatique, c'est que le système n'a pas reconnu que "cette tentative vaut la peine d'être réessayée".
+
+Ainsi, le point central que cet article souhaite expliquer est très clair : **le réessai automatique n'est pas un bouton, mais un design en couches.**
+
+## À propos de HagiCode
+
+La solution partagée dans cet article provient de notre pratique réelle dans le projet [HagiCode](https://hagicode.com). Ce que HagiCode cherche à faire, ce n'est pas simplement connecter un modèle et terminer, mais unifier les messages streaming, les appels d'outils, la récupération des échecs et le contexte de session de plusieurs Agent CLI en un modèle d'exécution qui peut être maintenu à long terme.
+
+L'une des choses qui me tient le plus à cœur, c'est de faire en sorte que la programmation IA soit vraiment appliquée sur le terrain de l'ingénierie. Il n'est pas difficile d'écrire des démos, ce qui est difficile, c'est transformer une démo en quelque chose que l'équipe est vraiment prête à utiliser à long terme. HagiCode prend le réessai automatique au sérieux, non pas parce que cette fonctionnalité semble avancée, mais parce que si l'exécution CLI longue, streaming et résiliable n'est pas stable, ce que les utilisateurs voient n'est pas un assistant intelligent, mais un enveloppeur de commandes qui se déconnecte à mi-chemin.
+
+Si vous voulez d'abord voir les points d'entrée du projet, en voici deux :
+
+- GitHub : [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Site officiel : [hagicode.com](https://hagicode.com)
+
+Un peu plus loin, HagiCode est maintenant disponible sur Steam, les amis qui ont Steam peuvent d'abord ajouter à leur liste de souhaits :
+
+- [Page du magasin Steam (ajouter à la liste de souhaits / voir les détails)](https://store.steampowered.com/app/4625540/Hagicode/)
+
+## Pourquoi le réessai automatique des Agent CLI est-il plus difficile que le réessai ordinaire
+
+Cette question est très pertinente, allons directement à la conclusion : la difficulté du réessai automatique des Agent CLI ne réside pas dans "réessayer après quelques secondes", mais dans "pouvoir continuer dans le contexte d'origine".
+
+Vous pouvez le comprendre comme une longue conversation. Le réessai d'API ordinaire ressemble plus à rappeler quand la ligne est occupée ; tandis que le réessai d'Agent CLI ressemble plus au cas où l'interlocuteur est coupé en plein milieu d'une phrase, vous devez d'abord juger s'il faut rappeler, après rappel s'il faut recommencer du début, et si l'autre se souvient de l'endroit où il s'était arrêté. Qui dit que ces deux choses sont les mêmes ? Ce ne sont tout simplement pas le même problème d'ingénierie.
+
+Plus précisément, il y a quatre difficultés typiques.
+
+### 1. C'est du streaming
+
+Une fois que la sortie a déjà été envoyée à l'utilisateur, vous ne pouvez pas comme traiter une requête ordinaire, avaler secrètement l'échec et recommencer tranquillement. Comme la partie précédente a déjà été vue, lors de la réexécution si la stratégie n'est pas correcte, le frontend verra facilement du texte dupliqué, des états incohérents, et le cycle de vie des appels d'outils sera également désorganisé. Ce n'est pas de la magie, c'est de l'ingénierie.
+
+### 2. Il lie généralement le contexte de session
+
+Les providers comme Codex lient des thread, les implémentations comme Claude Code ont également des continuation target ou un contexte de résiliation équivalent. La véritable condition préalable au réessai automatique n'est pas seulement que "cette erreur ressemble à une panne temporaire", mais aussi que "cette exécution a-t-elle encore un support pour continuer".
+
+### 3. Toutes les erreurs ne méritent pas d'être réessayées
+
+Les fluctuations réseau, les SSE idle timeout, les pannes temporaires en amont, celles-ci peuvent généralement être essayées. Mais si vous rencontrez un échec d'authentification, le contexte est déjà perdu, ou le provider n'a tout simplement pas la capacité de resume, continuer à réessayer n'est pas une récupération, mais créer du bruit.
+
+### 4. Il a besoin de limites
+
+Le réessai automatique infini est presque toujours faux. Les tendances technologiques peuvent être animées pendant un certain temps, les lois de l'ingénierie restent souvent stables pendant de nombreuses années, dont l'une est : la récupération des échecs doit avoir des limites. Le système doit savoir combien de fois essayer au maximum, combien de temps attendre entre chaque essai, et quand s'arrêter et admettre que cette fois ça ne marchera vraiment pas.
+
+C'est précisément à cause de ces caractéristiques que HagiCode n'a finalement pas écrit le réessai automatique comme quelques lignes de `try/catch` dans un provider, mais l'a extrait en une capacité partagée. En fin de compte, les problèmes d'ingénierie doivent revenir aux méthodes d'ingénierie pour être résolus.
+
+## L'approche de HagiCode : sortir le réessai du Provider
+
+L'implémentation réelle actuelle de HagiCode peut se résumer en une phrase :
+
+**La couche partagée gère uniformément le processus de réessai, le Provider spécifique ne répond qu'à deux questions : cet état terminal vaut-il la peine d'être réessayé ? Le contexte actuel peut-il continuer ?**
+
+Cette chose n'est pas compliquée, mais très critique. Car une fois les responsabilités séparées, Claude Code, Codex, et même d'autres Agent CLI peuvent tous réutiliser le même squelette. Les modèles changent, les outils changent, les workflows évoluent, mais la base de l'ingénierie reste toujours là.
+
+### Première couche : utiliser un coordinateur unifié pour gérer la boucle de réessai
+
+Le fragment d'implémentation principale dans le projet est à peu près comme ceci :
+
+```csharp
+internal static class ProviderErrorAutoRetryCoordinator
+{
+    public static async IAsyncEnumerable<CliMessage> ExecuteAsync(
+        string prompt,
+        ProviderErrorAutoRetrySettings? settings,
+        Func<string, IAsyncEnumerable<CliMessage>> executeAttemptAsync,
+        Func<bool> canRetryInSameContext,
+        Func<TimeSpan, CancellationToken, Task> delayAsync,
+        Func<CliMessage, bool> isRetryableTerminalMessage,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        var normalizedSettings = ProviderErrorAutoRetrySettings.Normalize(settings);
+        var retrySchedule = normalizedSettings.Enabled
+            ? normalizedSettings.GetRetrySchedule()
+            : [];
+
+        for (var attempt = 0; ; attempt++)
+        {
+            var attemptPrompt = attempt == 0
+                ? prompt
+                : ProviderErrorAutoRetrySettings.ContinuationPrompt;
+
+            CliMessage? terminalFailure = null;
+
+            await foreach (var message in executeAttemptAsync(attemptPrompt)
+                               .WithCancellation(cancellationToken))
+            {
+                if (isRetryableTerminalMessage(message))
+                {
+                    terminalFailure = message;
+                    break;
+                }
+
+                yield return message;
+            }
+
+            if (terminalFailure is null)
+            {
+                yield break;
+            }
+
+            if (attempt >= retrySchedule.Count || !canRetryInSameContext())
+            {
+                yield return terminalFailure;
+                yield break;
+            }
+
+            await delayAsync(retrySchedule[attempt], cancellationToken);
+        }
+    }
+}
+```
+
+Ce que fait ce code est en fait très simple, mais très puissant.
+
+- Les échecs intermédiaires ne sont pas directement transmis, le coordinateur juge d'abord si la récupération est possible
+- Seulement lorsque le budget de réessai est épuisé, l'échec final remonte vraiment à la couche supérieure
+- À partir du deuxième tour, le prompt original n'est plus envoyé, mais un continuation prompt unifié est envoyé
+
+C'est pourquoi j'ai souligné plus haut que le réessai automatique n'est pas simplement "requérir à nouveau". Il ne complète pas une branche d'exception, mais gère un cycle de vie d'exécution. Ça ressemble un peu à un produit manager, mais en ingénierie c'est vraiment le cas.
+
+### Deuxième couche : prendre un snapshot de la stratégie de réessai
+
+Un autre problème facilement ignoré est : qui décide si cette requête active le réessai automatique ?
+
+La réponse de HagiCode est de ne pas dépendre d'une "configuration globale actuelle", mais de faire un snapshot de la stratégie, qui accompagne cette requête. Ainsi, la file d'attente de session, la persistance des messages, le transfert d'exécution, l'adaptation du provider, ne perdront pas la stratégie. Un succès ne fait pas un système, un succès continu fait un système.
+
+La structure de base peut être simplifiée comme ceci :
+
+```csharp
+public sealed record ProviderErrorAutoRetrySnapshot
+{
+    public const string DefaultStrategy = "default";
+
+    public bool Enabled { get; init; }
+
+    public string Strategy { get; init; } = DefaultStrategy;
+
+    public static ProviderErrorAutoRetrySnapshot Normalize(bool? enabled, string? strategy)
+    {
+        return new ProviderErrorAutoRetrySnapshot
+        {
+            Enabled = enabled ?? true,
+            Strategy = string.IsNullOrWhiteSpace(strategy)
+                ? DefaultStrategy
+                : strategy.Trim()
+        };
+    }
+}
+```
+
+Puis sur le côté exécution, mappez-le à l'objet de paramètres réellement consommé par le provider. La valeur de cette approche est très directe :
+
+- La couche métier décide "si réessayer"
+- Le runtime décide "comment réessayer"
+
+Chaque côté gère son propre domaine, sans conflit. Beaucoup de problèmes ne sont pas impossibles à faire, mais le coût n'a pas été calculé clairement. Faire un snapshot de la stratégie, c'est essentiellement calculer le coût à l'avance.
+
+### Troisième couche : Le Provider ne fait que la détermination d'état terminal et de contexte
+
+Pour un provider spécifique comme Claude Code ou Codex, les responsabilités sont ici très fines. Vous pouvez le comprendre comme une amélioration, ne le confondez pas avec un remplacement.
+
+Prenons Codex comme exemple, lorsqu'il s'intègre finalement au coordinateur partagé, il doit essentiellement fournir trois choses :
+
+```csharp
+await foreach (var message in ProviderErrorAutoRetryCoordinator.ExecuteAsync(
+                   prompt,
+                   options.ProviderErrorAutoRetry,
+                   retryPrompt => ExecuteCodexAttemptAsync(...),
+                   () => !string.IsNullOrWhiteSpace(resolvedThreadId),
+                   DelayAsync,
+                   IsRetryableTerminalFailure,
+                   cancellationToken))
+{
+    yield return message;
+}
+```
+
+Vous découvrirez que les jugements qui appartiennent vraiment au Provider lui-même sont seulement deux :
+
+- `IsRetryableTerminalFailure`
+- `canRetryInSameContext`
+
+Codex regarde si le thread peut encore continuer, Claude Code regarde si la continuation target est toujours là. La stratégie de backoff, le nombre de réessais, les prompts suivants, tout cela ne devrait pas être réinventé par le Provider lui-même.
+
+Après avoir séparé cette couche, le coût pour HagiCode d'intégrer plus de CLI est beaucoup plus faible. Vous n'avez pas besoin de copier toute la machine d'état de réessai, il suffit d'intégrer les "conditions limites de ce provider". Écrire vite ne signifie pas écrire stable ; pouvoir accepter ne signifie pas bien accepter ; pouvoir fonctionner ne signifie pas pouvoir être maintenu à long terme.
+
+## Un point facile à faire mal : ne traitez pas toutes les erreurs comme réessayables
+
+Dans cette analyse, je pense que ce qui vaut la peine d'être discuté séparément n'est pas "comment implémenter le réessai", mais "comment d'éviter les mauvais réessais".
+
+Le point d'entrée initial du problème était que Codex ne reconnaissait pas un message de reconnect. Par intuition, beaucoup choisiraient la correction minimale : ajouter un autre préfixe de chaîne à la liste blanche. Cette idée n'est pas fausse, mais elle ressemble plus à une solution de la période Démo, pas vraiment à une solution de maintenance à long terme.
+
+Du point de vue de l'implémentation actuelle de HagiCode, le système a déjà fait un pas dans une direction plus stable. Il ne se concentre plus sur une certaine chaîne littérale, mais confie uniformément les états terminaux récupérables au coordinateur partagé. Les avantages de cette approche sont évidents :
+
+- Il n'est pas facile d'échouer complètement à cause d'un petit changement de texte
+- La couverture de test peut être organisée autour de "l'enveloppe d'état terminal" plutôt que d'un seul texte codé en dur
+- La logique de réessai du même provider sera plus cohérente
+
+Bien sûr, il faut établir une limite ici : plus générique ne signifie pas plus souple. **Tant que le contexte actuel ne peut pas continuer, même si l'erreur ressemble à une panne temporaire, il ne faut pas aveuglément rejouer.**
+
+Ce point est très critique. Ce qui rassure vraiment, ce n'est pas qu'il fonctionne occasionnellement, mais qu'il est fiable la plupart du temps. Si un processus ne peut être maintenu que par des experts, il est encore loin d'être largement adopté.
+
+## Trois expériences les plus dignes d'être conservées dans la pratique
+
+À ce point de l'article, nous pouvons commencer à conclure au niveau de la pratique. Si vous préparez la mise en œuvre de capacités similaires dans votre projet, je vous recommande le plus de respecter d'abord les trois points suivants.
+
+### 1. Le budget de réessai doit avoir des limites
+
+Le rythme de backoff par défaut actuel de HagiCode est :
+
+- 10 secondes
+- 20 secondes
+- 60 secondes
+
+Ce rythme ne convient pas nécessairement à tous les systèmes, mais le fait "d'avoir des limites" doit être conservé. Sinon, le réessai automatique passera rapidement d'un mécanisme de récupération à un amplificateur d'accidents. Ne vous pressez pas de donner un nom trop grand, d'abord voyez si cette chose peut survivre à deux itérations dans l'équipe.
+
+### 2. Le continuation prompt doit être unifié
+
+Le projet utilise un continuation prompt fixe, permettant aux tentatives ultérieures de suivre clairement le chemin "continuer le contexte actuel" plutôt que de relancer une requête complète. Cette capacité n'est pas flashy, mais vous ne pouvez pas vous en passer lorsque vous faites vraiment un projet. Beaucoup de capacités ressemblent à de la magie, une fois démontées elles ne sont qu'un processus d'ingénierie affiné.
+
+### 3. La bibliothèque partagée et la couche d'adaptation doivent toutes deux avoir des tests miroir
+
+Je voudrais en dire un peu plus à ce sujet. Beaucoup d'équipes écriront une couche de tests dans le runtime partagé, puis penseront que c'est suffisant. En fait, ce n'est pas assez.
+
+Ce qui me rassure avec HagiCode, c'est que les deux couches ont des tests :
+
+- Le Provider partagé teste "si la reprise automatique s'est vraiment produite"
+- La couche d'adaptation teste "si l'erreur finale et les messages streaming n'ont pas été corrompus"
+
+J'ai également exécuté deux groupes de tests connexes, les résultats sont que 31 cas de test ont tous passé. Ce résultat en lui-même ne prouve pas que la conception est parfaite, mais il peut au moins prouver une chose : l'ensemble actuel de réessai automatique n'est pas une solution sur papier, mais une capacité déjà contrainte par le code et les tests. Talk is cheap. Show me the code. C'est parfaitement adapté ici.
+
+## Conclusion
+
+Si nous comprimons tout l'article en une phrase, c'est :
+
+**Le réessai automatique des Agent CLI comme Claude Code, Codex, etc., ne devrait pas être fait comme une astuce locale dans un Provider, mais comme une combinaison de coordinateur partagé + snapshot de stratégie + détermination de contexte + tests miroirs.**
+
+Les bénéfices de cette approche sont en fait très concrets :
+
+- La logique n'est écrite qu'une fois, plusieurs Providers peuvent la réutiliser
+- Si la requête permet le réessai peut suivre stablement le chemin d'exécution
+- Continuer à exécuter quand il y a du contexte, s'arrêter à temps quand il n'y a pas de contexte
+- Le frontend voit finalement un état de complétion stable ou un état d'échec, plutôt qu'un tas de bruits intermédiaires abandonnés à mi-chemin
+
+Cette solution a été affinée peu à peu par HagiCode dans le processus d'intégration réelle de plusieurs Agent CLI. Qui dit que la programmation assistée par IA n'est pas le pair programming de la nouvelle ère ? Le modèle vous aide à démarrer, compléter, diverger, mais ce qui détermine vraiment la limite de l'expérience, c'est souvent le contexte, le processus et les contraintes.
+
+Si cet article vous aide, vous êtes également invité à jeter un coup d'œil aux entrées publiques de HagiCode :
+
+- GitHub : [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Site officiel : [hagicode.com](https://hagicode.com)
+- Démonstration pratique de 30 minutes : [www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)
+- Point d'installation Desktop : [hagicode.com/desktop/](https://hagicode.com/desktop/)
+- Steam : [Page du magasin Steam (ajouter à la liste de souhaits / voir les détails)](https://store.steampowered.com/app/4625540/Hagicode/)
+
+HagiCode est maintenant disponible sur Steam, ce n'est pas de la fausse promesse, je vous ai aussi mis le lien ici. Les amis qui ont Steam peuvent d'abord ajouter à leur liste de souhaits, cliquer pour voir par eux-mêmes, c'est plus direct que moi de dire dix phrases ici.
+
+Arrêtons-nous ici pour le moment, la suite se passe dans des projets réels.
+
+## Références
+
+- Page d'accueil du projet HagiCode : [https://hagicode.com](https://hagicode.com)
+- Dépôt GitHub HagiCode : [https://github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Vidéo de démonstration officielle : [https://www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)
+- Instructions d'installation Desktop : [https://hagicode.com/desktop/](https://hagicode.com/desktop/)
+
+## Notice de droit d'auteur
+
+Merci de votre lecture, si vous trouvez cet article utile, n'hésitez pas à aimer,收藏 et partager pour soutenir.
+Ce contenu utilise une collaboration assistée par l'intelligence artificielle, le contenu final est examiné et confirmé par l'auteur.
+- Auteur de l'article : [newbe36524](https://www.newbe.pro)
+- Lien vers l'article original : [https://docs.hagicode.com/blog/2026-02-11-agent-cli-automatic-retry/](https://docs.hagicode.com/blog/2026-02-11-agent-cli-automatic-retry/)
+- Déclaration de droit d'auteur : Sauf indication contraire, tous les articles de ce blog sont sous licence BY-NC-SA. Veuillez indiquer la source pour toute réimpression !

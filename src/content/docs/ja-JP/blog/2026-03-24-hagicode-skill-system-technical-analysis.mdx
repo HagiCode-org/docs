@@ -1,0 +1,423 @@
+---
+title: HagiCode Skill システム技術解析：スケーラブルな AI スキル管理プラットフォームの構築方法
+date: 2026-03-24
+tags: [HagiCode, Skill, AI, Orleans, TanStack, 技術アーキテクチャ]
+description: "この記事では、HagiCode プロジェクトにおける Skill（スキル）管理システムのアーキテクチャ設計と実装について詳しく解説します。ローカルグローバル管理、マーケットプレイス検索、インテリジェント推奨、信認済みプロバイダー管理という 4 つのコア機能の技術実装の詳細をカバーします。"
+---
+
+## HagiCode Skill システム技術解析：スケーラブルな AI スキル管理プラットフォームの構築方法
+
+> この記事では、HagiCode プロジェクトにおける Skill（スキル）管理システムのアーキテクチャ設計と実装について詳しく解説します。ローカルグローバル管理、マーケットプレイス検索、インテリジェント推奨、信認済みプロバイダー管理という 4 つのコア機能の技術実装の詳細をカバーします。
+
+## 背景
+
+AI コードアシスタントの分野において、AI の能力の境界をどのように拡張するかは、常に核心的な課題です。Claude Code 自体のコード補助能力は非常に強力ですが、異なる開発チームや異なる技術スタックでは、特定のシナリオに特化した専門的な能力が必要になることがよくあります——例えば Docker デプロイの処理、データベースの最適化、フロントエンドコンポーネントの生成など。そのような場合、Skill（スキル）システムが特に重要になります。
+
+HagiCode プロジェクトでも、開発プロセスで同様の課題に直面しました：Claude Code が人間のように新しい専門スキルを「学習」できるようにしつつ、良好なユーザー体験とエンジニアリングの保守性を維持するにはどうすればよいのでしょうか？この問題は、難しく言えば難しく、簡単と言えば簡単です。この問題を中心に、私たちは完全な Skill 管理システムを設計・実装しました。
+
+この記事では、このシステムの技術アーキテクチャとコア実装について詳しく解説します。AI の拡張性やコマンドラインツールの統合に興味がある開発者に適した内容です。役に立つかもしれないし、そうでないかもしれませんが、とにかく書き出しました。
+
+## HagiCode について
+
+この記事で共有するソリューションは、[HagiCode](https://hagicode.com) プロジェクトでの実践的な経験から来ています。HagiCode はオープンソースの AI コードアシスタントプロジェクトで、開発チームの研发効率向上を支援することを目的としています。プロジェクトの技術スタックには、ASP.NET Core、Orleans 分散フレームワーク、TanStack Start + React フロントエンド、そしてこの記事で紹介する Skill 管理サブシステムが含まれます。
+
+プロジェクトの GitHub アドレスは [HagiCode-org/site](https://github.com/HagiCode-org/site) です。もしこの記事で紹介する技術ソリューションに価値を感じていただけたなら、ぜひ Star をお願いします。Star が増えると、気分も良くなりますから。
+
+## システムアーキテクチャ概要
+
+Skill システムはフロントエンドとバックエンドを分離したアーキテクチャ設計を採用しており、特に変わったことはありません。
+
+**フロントエンド部分**は TanStack Start + React を使用してユーザーインターフェースを構築し、Redux Toolkit で状態を管理します。4 つの主要機能はそれぞれ 4 つの Tab コンポーネントに対応しています：ローカルスキル、マーケットギャラリー、インテリジェント推奨、信認済みプロバイダー。この設計は、実際にはユーザー体験のためです。
+
+**バックエンド部分**は ASP.NET Core + ABP Framework をベースとし、Orleans Grain を使用して分散状態管理を実現します。オンライン API クライアントは `IOnlineApiClient` インターフェースをカプセル化し、リモートスキルカタログサービスと通信するために使用されます。
+
+アーキテクチャ全体の設計原則は「コマンド実行とビジネスロジックの分離」であり、アダプターパターンを通じて npm/npx コマンド実行の詳細を独立したモジュールに隠蔽しています。結局のところ、誰がコードのあちこちに散らばったコマンドラインを見たいと思うでしょう？
+
+## コア機能 1：ローカルグローバル管理
+
+ローカルグローバル管理は最も基本的な機能モジュールで、インストール済みのスキルを一覧表示し、アンインストール操作をサポートします。複雑なことはなく、ただ仕事をしっかりとこなすだけです。
+
+### 技術ソリューション
+
+実装位置は `LocalSkillsTab.tsx` と `LocalSkillCommandAdapter.cs` です。コアのアイデアは `npx skills` コマンドをカプセル化し、その JSON 出力を解析して、内部データ構造に変換することです。言うのは簡単ですが、実際にやるのも簡単です。
+
+```csharp
+public async Task<IReadOnlyList<LocalSkillInventoryResponseDto>> GetLocalSkillsAsync(
+    CancellationToken cancellationToken = default)
+{
+    var result = await _commandAdapter.ListGlobalSkillsAsync(cancellationToken);
+    return result.Skills.Select(skill => new LocalSkillInventoryResponseDto
+    {
+        Name = skill.Name,
+        Version = skill.Version,
+        Source = skill.Source,
+        InstalledPath = skill.InstalledPath,
+        Description = skill.Description
+    }).ToList();
+}
+```
+
+データフローは非常に明確です：フロントエンドがリクエストを開始 → SkillGalleryAppService が受信 → LocalSkillCommandAdapter が npx コマンドを実行 → JSON 結果を解析 → DTO オブジェクトを返す。一環が一環を繋いでおり、特に言うことはありません。
+
+スキルのアンインストールには `npx skills remove -g <skillName> -y` コマンドを使用し、システムは依存関係とクリーンアップ作業を自動的に処理します。インストールメタデータはスキルディレクトリの `managed-install.json` に保存され、インストール時間、ソースバージョンなどの情報を記録し、後続の更新と監査に役立ちます。結局のところ、何かを記録しておくことは常に良いことです。
+
+### インストールフローの詳細
+
+スキルのインストールは複数のステップの調整に関わりますが、どういうわけか、実際にはそれほど複雑ではありません：
+
+```csharp
+public async Task<SkillInstallResultDto> InstallAsync(
+    SkillInstallRequestDto request,
+    CancellationToken cancellationToken = default)
+{
+    // 1. インストール参照を正規化
+    var normalized = _referenceNormalizer.Normalize(
+        request.SkillId,
+        request.Source,
+        request.SkillSlug,
+        request.Version);
+
+    // 2. 前提条件をチェック
+    await _prerequisiteChecker.CheckAsync(cancellationToken);
+
+    // 3. インストールロックを取得
+    using var installLock = await _lockProvider.AcquireAsync(normalized.SkillId);
+
+    // 4. インストールコマンドを実行
+    var result = await _installCommandRunner.ExecuteAsync(
+        new SkillInstallCommandExecutionRequest
+        {
+            Command = $"npx skills add {normalized.FullReference} -g -y",
+            Timeout = TimeSpan.FromMinutes(4)
+        },
+        cancellationToken);
+
+    // 5. インストールメタデータを永続化
+    await _metadataStore.WriteAsync(normalized.SkillPath, request);
+
+    return new SkillInstallResultDto { Success = result.Success };
+}
+```
+
+ここではいくつかの重要なデザインパターンが使用されています：**参照正規化ツール**は、さまざまな入力形式（`tanweai/pua`、`@opencode/docker-skill` など）を統一された内部表現に変換する責務を持ちます；**インストールロックメカニズム**は、同じスキルに対して同時に 1 つのインストール操作しか行われないことを保証します；**ストリーミング出力**は Server-Sent Events を通じてフロントエンドにインストールの進行状況をリアルタイムでプッシュし、ユーザーは端末のようなリアルタイムログを見ることができます。
+
+これらのデザインパターンは、結局のところ、物事を単純にするためだけのものです。
+
+## コア機能 2：マーケットプレイス検索
+
+マーケットプレイス検索により、ユーザーはコミュニティからのスキルを発見してインストールできます。結局のところ、一人の能力には限界がありますが、衆人の知恵は無限です。
+
+### 技術ソリューション
+
+検索機能はオンライン API `https://api.hagicode.com/v1/skills/search` に依存しています。応答速度を向上させるために、システムはキャッシュメカニズムを実装しています。キャッシュというのは、記憶のようなもので、何かを覚えておけば、次にわざわざ考え直す必要がありません。
+
+```csharp
+private async Task<IReadOnlyList<SkillGallerySkillDto>> SearchCatalogAsync(
+    string query,
+    CancellationToken cancellationToken,
+    IReadOnlySet<string>? allowedSources = null)
+{
+    var cacheKey = $"skill_search:{query}:{string.Join(",", allowedSources ?? Array.Empty<string>())}";
+
+    if (_memoryCache.TryGetValue(cacheKey, out var cached))
+        return (IReadOnlyList<SkillGallerySkillDto>)cached!;
+
+    var response = await _onlineApiClient.SearchAsync(
+        new SearchSkillsRequest
+        {
+            Query = query,
+            Limit = _options.LimitPerQuery,
+        },
+        cancellationToken);
+
+    var results = response.Skills
+        .Where(skill => allowedSources is null || allowedSources.Contains(skill.Source))
+        .Select(skill => new SkillGallerySkillDto { ... })
+        .ToList();
+
+    _memoryCache.Set(cacheKey, results, TimeSpan.FromMinutes(10));
+    return results;
+}
+```
+
+検索結果は信認済みソースによるフィルタリングをサポートしており、ユーザーが信頼するスキルソースのみを表示します。プリセットのシードクエリはカタログの初期化に使用され、「popular」、「recent」などがあり、ユーザーが初めて開いたときにおすすめの人気スキルを見ることができます。結局のところ、第一印象は重要です。
+
+## コア機能 3：インテリジェント推奨
+
+インテリジェント推奨はシステムで最も複雑な機能で、ユーザーの現在のプロジェクトの状況に基づいて、最適なスキルを自動的に推奨できます。複雑ではありますが、作り上げる価値はあります。
+
+### 推奨フロー
+
+推奨プロセス全体は 5 つの段階に分かれています：
+
+```
+1. プロジェクトコンテキストを構築
+   ↓
+2. AI が検索クエリを生成
+   ↓
+3. オンラインカタログを並列検索
+   ↓
+4. AI が候補をランキング
+   ↓
+5. 推奨リストを返す
+```
+
+まず、システムはプロジェクトの技術スタック、プログラミング言語、ドメイン構造などの特徴を分析し、「プロジェクトプロフィール」を構築します。このプロフィールは、人の履歴書のように、すべての特徴を記録しています。
+
+次に、AI Grain を使用して的を絞った検索クエリを生成します。ここでの設計は実際に興味深いものです——AI に直接「どのスキルを推奨するか」を尋ねるのではなく、「どのような検索語が関連スキルを見つけられるか」をまず考えさせるのです。結局のところ、問いかけ方そのものが答えよりも重要な場合があります：
+
+```csharp
+var queryGeneration = await aiGrain.GenerateSkillRecommendationQueriesAsync(
+    projectContext,      // プロジェクトコンテキスト
+    locale,              // ユーザーの言語設定
+    maxQueries,           // 最大クエリ数
+    effectiveSearchHero); // AI モデル選択
+```
+
+次に、これらの検索クエリを並列実行し、候補スキルリストを取得します。並列処理は、結局のところ時間を節約するためです。
+
+最後に、別の AI Grain を使用して候補スキルをランキングします。このステップでは、スキルとプロジェクトの関連性、信認状態、ユーザーの履歴設定などの要素を総合的に考慮します：
+
+```csharp
+var ranking = await aiGrain.RankSkillRecommendationsAsync(
+    projectContext,
+    candidates,
+    installedSkillNames,
+    locale,
+    maxRecommendations,
+    effectiveRankingHero);
+
+response.Items = MergeRecommendations(projectContext, candidates, ranking, maxRecommendations);
+```
+
+### フォールバックメカニズム
+
+AI モデルは応答が遅くなったり一時的に利用できなくなったりする場合があります。結局のところ、どんなに良いシステムでも、失敗することはあります。そのため、システムは決定論的なフォールバックメカニズムを設計しました：AI サービスが利用できない場合、ルールベースのヒューリスティックアルゴリズムを使用して推奨を生成します。例えば、package.json の依存関係に基づいて必要な可能性のあるスキルを推測します。
+
+このフォールバックメカニズムは、要するにシステムに逃げ道を残しているだけです。
+
+## コア機能 4：信認済みプロバイダー管理
+
+信認済みプロバイダー管理により、ユーザーはどのスキルソースが信頼できるかを制御できます。結局のところ、信頼というのは自分で握るべきものです。
+
+### マッチングルール
+
+信認済みプロバイダーは 2 種類のマッチングルールをサポートしています：**完全一致**（exact）と**プレフィックス一致**（prefix）。
+
+```csharp
+public static TrustedSkillProviderResolutionSnapshot Resolve(
+    TrustedSkillProviderSnapshot snapshot,
+    string source)
+{
+    var normalizedSource = Normalize(source);
+
+    foreach (var entry in snapshot.Entries.OrderBy(e => e.SortOrder))
+    {
+        if (!entry.IsEnabled) continue;
+
+        foreach (var rule in entry.MatchRules)
+        {
+            bool isMatch = rule.MatchType switch
+            {
+                TrustedSkillProviderMatchRuleType.Exact
+                    => string.Equals(normalizedSource, Normalize(rule.Value),
+                        StringComparison.OrdinalIgnoreCase),
+                TrustedSkillProviderMatchRuleType.Prefix
+                    => normalizedSource.StartsWith(Normalize(rule.Value) + "/",
+                        StringComparison.OrdinalIgnoreCase),
+                _ => false
+            };
+
+            if (isMatch)
+                return new TrustedSkillProviderResolutionSnapshot
+                {
+                    IsTrustedSource = true,
+                    ProviderId = entry.ProviderId,
+                    DisplayName = entry.DisplayName
+                };
+        }
+    }
+
+    return new TrustedSkillProviderResolutionSnapshot { IsTrustedSource = false };
+}
+```
+
+プリセットの信認済みプロバイダーには、Vercel、Azure、anthropics、Microsoft、browser-use などの有名な組織やプロジェクトが含まれます。カスタムプロバイダーは設定ファイルを通じて追加でき、プロバイダー ID、表示名、バッジラベル、マッチングルールなどを指定できます。結局のところ、世界は広く、信頼できるのは数社だけではありません。
+
+### 永続化の実装
+
+信認設定は Orleans Grain を使用して永続化されます：
+
+```csharp
+public class TrustedSkillProviderGrain : Grain<TrustedSkillProviderState>,
+    ITrustedSkillProviderGrain
+{
+    public async Task UpdateConfigurationAsync(TrustedSkillProviderSnapshot snapshot)
+    {
+        State.Snapshot = snapshot;
+        await WriteStateAsync();
+    }
+
+    public Task<TrustedSkillProviderSnapshot> GetConfigurationAsync()
+    {
+        return Task.FromResult(State.Snapshot);
+    }
+}
+```
+
+この方法の利点は、設定の変更がすべてのノードに自動的に同期され、キャッシュの手動更新が不要になることです。結局のところ、自動化というのは、人が心配しなくて済むようにするためです。
+
+## 重要な技術設計
+
+### コマンド実行アダプターパターン
+
+Skill システムはさまざまな npx コマンドを実行する必要がありますが、これらのロジックをあちこちに散らばらせると、コードの保守が困難になります。そのため、アダプターインターフェースを設計しました。デザインパターンというのは、結局のところ、コードをより保守しやすくするためのものです：
+
+```csharp
+public interface ISkillInstallCommandRunner
+{
+    Task<SkillInstallCommandExecutionResult> ExecuteAsync(
+        SkillInstallCommandExecutionRequest request,
+        CancellationToken cancellationToken = default);
+}
+```
+
+異なるコマンドには異なるエグゼキューター実装があり、すべて同じインターフェースを実装しているため、テストと置換が容易です。
+
+### SSE ストリーミング出力
+
+インストールの進行状況は Server-Sent Events を通じてリアルタイムでフロントエンドにプッシュされます：
+
+```csharp
+public async Task InstallWithProgressAsync(
+    SkillInstallRequestDto request,
+    IServerStreamWriter<SkillInstallProgressEventDto> stream,
+    CancellationToken cancellationToken)
+{
+    var process = new Process
+    {
+        StartInfo = new ProcessStartInfo
+        {
+            FileName = "npx",
+            Arguments = $"skills add {request.FullReference} -g -y",
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false
+        }
+    };
+
+    process.OutputDataReceived += async (sender, e) =>
+    {
+        await stream.WriteAsync(new SkillInstallProgressEventDto
+        {
+            EventType = "output",
+            Data = e.Data ?? string.Empty
+        });
+    };
+
+    process.Start();
+    process.BeginOutputReadLine();
+    await process.WaitForExitAsync(cancellationToken);
+}
+```
+
+ユーザーはフロントエンドで端末のようなリアルタイム出力を見ることができ、体験は非常に直感的です。結局のところ、リアルタイムフィードバックは安心感を与えます。
+
+## 実践ガイド
+
+### コミュニティスキルのインストール
+
+`pua` スキルのインストールを例に挙げます（これは人気のあるコミュニティスキルです）：
+
+1. Skills ドロワーを開き、「Skill Gallery」タブに切り替えます
+2. 「pua」と入力して検索します
+3. 検索結果をクリックしてスキルの詳細を確認します
+4. 「Install」ボタンをクリックしてインストールします
+5. 「Local Skills」タブに切り替えてインストール成功を確認します
+
+インストールコマンドは `npx skills add tanweai/pua -g -y` で、システムがすべての詳細を自動的に処理します。実際にはそれほど多くのステップはなく、一歩一歩進むだけです。
+
+### カスタム信認済みソースの追加
+
+チームに独自のスキルリポジトリがある場合は、信認済みソースとして追加できます：
+
+```yaml
+providerId: "my-team"
+displayName: "My Team Skills"
+badgeLabel: "MyTeam"
+isEnabled: true
+sortOrder: 100
+matchRules:
+  - matchType: "prefix"
+    value: "my-team/"
+  - matchType: "exact"
+    value: "my-team/special-skill"
+```
+
+これにより、チームのすべてのスキルに信認済みバッジが表示され、ユーザーはより安心してインストールできます。結局のところ、マークが付いているものは、安心感を与えます。
+
+### スキル開発の基礎
+
+カスタムスキルを作成するには、以下の構造に従う必要があります：
+
+```
+my-skill/
+├── SKILL.md          # スキルメタデータ（YAML front matter）
+├── index.ts          # スキルエントリポイント
+├── agents/           # サポートされるエージェント設定
+└── references/       # 参考リソース
+```
+
+`SKILL.md` の形式の例：
+
+```yaml
+---
+name: my-skill
+description: A brief description of what this skill does
+---
+
+# My Skill
+
+Detailed documentation...
+```
+
+## 注意事項
+
+1. **ネットワーク要件**：スキルの検索とインストールには `api.hagicode.com` と npm registry にアクセスできる必要があります
+2. **Node.js バージョン**：Node.js 18 以上の使用をお勧めします
+3. **権限要件**：グローバル npm インストール権限が必要です
+4. **並行制御**：同じスキルに対して同時に 1 つのインストールまたはアンインストール操作しか実行できません
+5. **タイムアウト設定**：インストール操作のデフォルトのタイムアウト時間は 4 分で、複雑なシナリオでは調整が必要な場合があります
+
+これらの注意事項は、結局のところ、物事が円滑に進むためです。
+
+## まとめ
+
+この記事では、HagiCode プロジェクトにおける Skill 管理システムの完全な実装を紹介しました。このシステムは、フロントエンドとバックエンドを分離したアーキテクチャ、アダプターパターン、Orleans 分散状態管理などの技術的手段を通じて、以下を実現しています：
+
+- **ローカルグローバル管理**：npx skills コマンドをカプセル化することで、統一されたスキル管理インターフェースを提供
+- **マーケットプレイス検索**：オンライン API とキャッシュメカニズムを活用し、コミュニティスキルを迅速に発見
+- **インテリジェント推奨**：AI 能力と組み合わせることで、プロジェクトコンテキストに基づいて最適なスキルを推奨
+- **信認管理**：柔軟な設定システムにより、ユーザーが信頼の境界を制御
+
+この設計アプローチは Skill 管理だけでなく、コマンドラインツールの統合、ローカルストレージとオンラインサービスの両立が必要なあらゆるシナリオに参考価値があります。
+
+もしこの記事がお役に立てたなら、ぜひ GitHub で Star をお願いします：[github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)。公式サイトにアクセスして詳細をご確認いただくこともできます：[hagicode.com](https://hagicode.com)。
+
+このシステムの設計は悪くないと思うかもしれませんし、そう思わないかもしれません。しかし、それはさておき、結局のところ、コードは書かれれば使う人もいれば、使わない人もいます......
+
+## 参考資料
+
+- HagiCode プロジェクトアドレス：[github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- HagiCode 公式サイト：[hagicode.com](https://hagicode.com)
+- Claude Code 公式スキルドキュメント：[docs.anthropic.com](https://docs.anthropic.com)
+- Orleans フレームワークドキュメント：[dotnet.github.io/orleans](https://dotnet.github.io/orleans)
+- TanStack Start：[tanstack.com/start](https://tanstack.com/start)
+
+## 著作権について
+
+お読みいただきありがとうございます。もしこの記事がお役に立てたなら、ぜひいいね、保存、共有でサポートをお願いします。
+この内容は AI による支援協力を採用しており、最終的な内容は著者によって審査・確認されています。
+- 著者: [newbe36524](https://www.newbe.pro)
+- 原文リンク: [https://docs.hagicode.com/blog/2026-03-24-hagicode-skill-system-technical-analysis/](https://docs.hagicode.com/blog/2026-03-24-hagicode-skill-system-technical-analysis/)
+- 著作権宣言: このブログのすべての記事は特別な声明を除き、BY-NC-SA ライセンス契約を採用しています。転載する場合は出典を明記してください！

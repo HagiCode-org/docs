@@ -1,0 +1,1128 @@
+---
+title: Solución de Implementación de Cambio e Interoperabilidad Multi-Proveedor de IA de Hagicode
+date: 2026-03-09
+tags: [HagiCode, AI Provider, Claude, Codex, Architecture, Interoperability]
+description: "En el ecosistema moderno de herramientas de desarrollo, los desarrolladores a menudo necesitan usar diferentes asistentes de codificación con IA para辅助 el trabajo de desarrollo. El CLI de Claude Code de Anthropic y el Codex de OpenAI"
+---
+
+## Solución de Implementación de Cambio e Interoperabilidad Multi-Proveedor de IA de Hagicode
+
+En el ecosistema moderno de herramientas de desarrollo, los desarrolladores a menudo necesitan usar diferentes asistentes de codificación con IA para辅助 el trabajo de desarrollo. El CLI de Claude Code de Anthropic y el CLI de Codex de OpenAI tienen sus propias ventajas: Claude es conocido por su excelente capacidad de comprensión de código y procesamiento de contexto largo, mientras que Codex destaca en la generación de código y el uso de herramientas.
+
+Este artículo analizará en profundidad cómo el proyecto hagicode implementa el cambio sin interrupciones y la interoperabilidad entre múltiples proveedores de IA, incluyendo el diseño de arquitectura central, detalles clave de implementación y consideraciones prácticas.
+
+## Antecedentes
+
+### Dominio del Problema
+
+El desafío central que enfrenta el proyecto hagicode es admitir múltiples CLI de IA en la misma plataforma, permitiendo que los usuarios:
+
+1. Cambien flexiblemente entre diferentes proveedores de IA según sus necesidades
+2. Mantengan la continuidad del estado de la sesión durante el proceso de cambio
+3. Unifiquen las diferencias de API entre diferentes CLI mediante abstracción
+4. Reserven espacio de extensión para agregar nuevos proveedores de IA en el futuro
+
+### Desafíos Técnicos
+
+1. **Unificación de diferencias de interfaz**: Claude Code CLI se invoca a través de línea de comandos, Codex CLI usa flujos de eventos JSON
+2. **Procesamiento de respuestas en streaming**: Ambos proveedores admiten respuestas en streaming, pero los formatos de datos son diferentes
+3. **Semántica de invocación de herramientas**: Claude y Codex tienen diferentes representaciones y gestión del ciclo de vida para las invocaciones de herramientas
+4. **Ciclo de vida de la sesión**: Necesidad de gestionar correctamente la creación, recuperación y terminación de sesiones para cada proveedor
+
+## Análisis
+
+### Ideas de Diseño de Arquitectura
+
+hagicode adopta el **Patrón de Proveedor (Provider Pattern)** combinado con el **Patrón de Fábrica** para abstraer las invocaciones de servicios de IA. La idea central de este diseño es:
+
+1. **Abstracción de interfaz unificada**: Definir la interfaz `IAIProvider` como abstracción unificada para todos los proveedores de IA
+2. **Creación de instancias mediante fábrica**: Crear dinámicamente instancias de proveedores correspondientes según el tipo a través de `AIProviderFactory`
+3. **Lógica de selección inteligente**: Usar `AIProviderSelector` para seleccionar automáticamente el proveedor más adecuado según el escenario y la configuración
+4. **Gestión del estado de la sesión**: Persistir la relación de vinculación entre sesiones e hilos de CLI a través de base de datos
+
+### Componentes Clave
+
+| Componente | Responsabilidad | Lenguaje |
+|------|--------|------|
+| `IAIProvider` | Interfaz de proveedor unificada | C# |
+| `AIProviderFactory` | Crear y gestionar instancias de proveedores | C# |
+| `AIProviderSelector` | Selección inteligente de proveedores | C# |
+| `ClaudeCodeCliProvider` | Implementación de Claude Code CLI | C# |
+| `CodexCliProvider` | Implementación de Codex CLI | C# |
+| `AgentCliManager` | Gestión de CLI en escritorio | TypeScript |
+
+## Solución
+
+### 1. Diseño de Interfaz Central
+
+La interfaz **IAIProvider** define la abstracción unificada del proveedor:
+
+```csharp
+public interface IAIProvider
+{
+    /// <summary>
+    /// Nombre para mostrar del proveedor
+    /// </summary>
+    string Name { get; }
+
+    /// <summary>
+    /// Si admite respuestas en streaming
+    /// </summary>
+    bool SupportsStreaming { get; }
+
+    /// <summary>
+    /// Descripción de capacidades del proveedor
+    /// </summary>
+    ProviderCapabilities Capabilities { get; }
+
+    /// <summary>
+    /// Ejecutar una solicitud de IA individual
+    /// </summary>
+    Task<AIResponse> ExecuteAsync(AIRequest request, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Ejecutar solicitud de IA en streaming
+    /// </summary>
+    IAsyncEnumerable<AIStreamingChunk> StreamAsync(AIRequest request, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Verificar conectividad y velocidad de respuesta del proveedor
+    /// </summary>
+    Task<ProviderTestResult> PingAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Enviar mensaje con comando incrustado
+    /// </summary>
+    IAsyncEnumerable<AIStreamingChunk> SendMessageAsync(
+        AIRequest request,
+        string? embeddedCommandPrompt = null,
+        CancellationToken cancellationToken = default);
+}
+```
+
+Características clave del diseño de la interfaz:
+- **Modelo de solicitud/respuesta unificado**: Todos los proveedores usan los mismos tipos `AIRequest` y `AIResponse`
+- **Soporte de streaming**: Unifica la salida en streaming a través de `IAsyncEnumerable<AIStreamingChunk>`
+- **Descripción de capacidades**: `ProviderCapabilities` describe las funcionalidades admitidas por el proveedor (streaming, herramientas, tokens máximos, etc.)
+- **Comandos incrustados**: `SendMessageAsync` admite incrustar comandos OpenSpec en el prompt
+
+### 2. Enumeración de Tipos de Proveedores
+
+```csharp
+public enum AIProviderType
+{
+    ClaudeCodeCli,   // Anthropic Claude Code
+    OpenCodeCli,     // Otros CLI (extensible)
+    GitHubCopilot,    // GitHub Copilot
+    CodebuddyCli,    // Codebuddy
+    CodexCli         // OpenAI Codex
+}
+```
+
+Esta enumeración proporciona una representación con seguridad de tipos para todos los proveedores admitidos por el sistema.
+
+### 3. Implementación del Patrón de Fábrica
+
+**AIProviderFactory** es responsable de crear y gestionar instancias de proveedores:
+
+```csharp
+public class AIProviderFactory : IAIProviderFactory
+{
+    private readonly ConcurrentDictionary<AIProviderType, IAIProvider> _cache;
+    private readonly IOptions<AIProviderOptions> _options;
+    private readonly IServiceProvider _serviceProvider;
+
+    public Task<IAIProvider?> GetProviderAsync(AIProviderType providerType)
+    {
+        // Usar caché para evitar creación repetida
+        if (_cache.TryGetValue(providerType, out var cached))
+            return Task.FromResult<IAIProvider?>(cached);
+
+        // Obtener configuración del proveedor desde configuración
+        var aiOptions = _options.Value;
+        if (!aiOptions.Providers.TryGetValue(providerType, out var config))
+        {
+            _logger.LogWarning("Provider '{ProviderType}' not found in configuration", providerType);
+            return Task.FromResult<IAIProvider?>(null);
+        }
+
+        // Crear proveedor según tipo
+        var provider = providerType switch
+        {
+            AIProviderType.ClaudeCodeCli =>
+                _serviceProvider.GetService(typeof(ClaudeCodeCliProvider)) as IAIProvider,
+            AIProviderType.CodexCli =>
+                _serviceProvider.GetService(typeof(CodexCliProvider)) as IAIProvider,
+            AIProviderType.GitHubCopilot =>
+                _serviceProvider.GetService(typeof(CopilotAIProvider)) as IAIProvider,
+            _ => null
+        };
+
+        if (provider != null)
+        {
+            _cache[providerType] = provider;
+        }
+
+        return Task.FromResult<IAIProvider?>(provider);
+    }
+}
+```
+
+Ventajas del patrón de fábrica:
+- **Caché de instancias**: Evita la creación repetida de proveedores del mismo tipo
+- **Inyección de dependencias**: Crea instancias a través de `IServiceProvider`, admite inyección de dependencias
+- **Impulsado por configuración**: Lee configuración de proveedores desde archivo de configuración
+- **Manejo de excepciones**: Retorna null cuando falla la creación, facilitando el manejo en capas superiores
+
+### 4. Selector Inteligente
+
+**AIProviderSelector** implementa la estrategia de selección de proveedores:
+
+```csharp
+public class AIProviderSelector : IAIProviderSelector
+{
+    private readonly BusinessLayerConfiguration _configuration;
+    private readonly IAIProviderFactory _providerFactory;
+    private readonly IMemoryCache _cache;
+
+    public async Task<AIProviderType> SelectProviderAsync(
+        BusinessScenario scenario,
+        CancellationToken cancellationToken = default)
+    {
+        // 1. Intentar obtener proveedor desde mapeo de escenarios
+        if (_configuration.ScenarioProviderMapping.TryGetValue(scenario, out var providerType))
+        {
+            if (await IsProviderAvailableAsync(providerType, cancellationToken))
+            {
+                _logger.LogDebug("Selected provider '{Provider}' for scenario '{Scenario}'",
+                    providerType, scenario);
+                return providerType;
+            }
+
+            _logger.LogWarning("Configured provider '{Provider}' for scenario '{Scenario}' is not available",
+                providerType, scenario);
+        }
+
+        // 2. Intentar usar proveedor predeterminado
+        if (await IsProviderAvailableAsync(_configuration.DefaultProvider, cancellationToken))
+        {
+            _logger.LogDebug("Using default provider '{Provider}' for scenario '{Scenario}'",
+                _configuration.DefaultProvider, scenario);
+            return _configuration.DefaultProvider;
+        }
+
+        // 3. Intentar cadena de respaldo
+        foreach (var fallbackProvider in _configuration.FallbackChain)
+        {
+            if (await IsProviderAvailableAsync(fallbackProvider, cancellationToken))
+            {
+                _logger.LogInformation("Using fallback provider '{Provider}' for scenario '{Scenario}'",
+                    fallbackProvider, scenario);
+                return fallbackProvider;
+            }
+        }
+
+        // 4. No se puede encontrar proveedor disponible
+        throw new InvalidOperationException(
+            $"No available AI provider found for scenario '{scenario}'");
+    }
+
+    public async Task<bool> IsProviderAvailableAsync(
+        AIProviderType providerType,
+        CancellationToken cancellationToken = default)
+    {
+        var cacheKey = $"provider_available_{providerType}";
+
+        // Usar caché para reducir llamadas Ping
+        if (_configuration.EnableCache &&
+            _cache.TryGetValue<bool>(cacheKey, out var cached))
+        {
+            return cached;
+        }
+
+        var provider = await _providerFactory.GetProviderAsync(providerType);
+        var isAvailable = provider != null;
+
+        if (_configuration.EnableCache && isAvailable)
+        {
+            _cache.Set(cacheKey, isAvailable,
+                TimeSpan.FromSeconds(_configuration.CacheExpirationSeconds));
+        }
+
+        return isAvailable;
+    }
+}
+```
+
+Estrategia del selector:
+- **Prioridad de mapeo de escenarios**: Primero verifica si el escenario de negocio tiene un mapeo de proveedor específico
+- **Respaldo a proveedor predeterminado**: Usa el proveedor predeterminado cuando falla el mapeo de escenarios
+- **Cadena de respaldo como respaldo final**: Intenta proveedores en la cadena de respaldo uno por uno
+- **Caché de disponibilidad**: Almacena en caché los resultados de verificación de disponibilidad del proveedor, reduciendo llamadas Ping
+
+### 5. Implementación del Proveedor Claude Code CLI
+
+```csharp
+public class ClaudeCodeCliProvider : IAIProvider
+{
+    private readonly ILogger<ClaudeCodeCliProvider> _logger;
+    private readonly IClaudeStreamManager _streamManager;
+    private readonly ProviderConfiguration _config;
+
+    public string Name => "ClaudeCodeCli";
+    public bool SupportsStreaming => true;
+
+    public ProviderCapabilities Capabilities { get; }
+
+    public async Task<AIResponse> ExecuteAsync(AIRequest request, CancellationToken cancellationToken = default)
+    {
+        _logger.LogInformation("Executing AI request with provider: {Provider}", Name);
+
+        var sessionOptions = ClaudeRequestMapper.MapToSessionOptions(request, _config);
+
+        var messages = _streamManager.SendMessageAsync(request.Prompt, sessionOptions, cancellationToken);
+
+        var responseBuilder = new StringBuilder();
+        ResultMessage? finalResult = null;
+
+        await foreach (var streamMessage in messages)
+        {
+            switch (streamMessage.Message)
+            {
+                case ResultMessage result:
+                    finalResult = result;
+                    responseBuilder.Append(result.Result);
+                    break;
+            }
+        }
+
+        if (finalResult != null)
+        {
+            return ClaudeResponseMapper.MapToAIResponse(finalResult, Name);
+        }
+
+        return new AIResponse
+        {
+            Content = responseBuilder.ToString(),
+            FinishReason = FinishReason.Unknown,
+            Provider = Name
+        };
+    }
+}
+```
+
+Características del proveedor Claude Code CLI:
+- **Integración con gestor de streaming**: Usa `IClaudeStreamManager` para comunicarse con Claude CLI
+- **Aislamiento de sesión con CessionId**: Usa `CessionId` como identificador único de sesión, distinguiéndolo del sessionId del sistema
+- **Configuración de directorio de trabajo**: Admite configurar directorio de trabajo, modo de permisos, etc.
+- **Soporte de herramientas**: Admite configuraciones de permisos de herramientas como AllowedTools, DisallowedTools
+
+### 6. Implementación del Proveedor Codex CLI
+
+```csharp
+public class CodexCliProvider : IAIProvider
+{
+    private readonly ILogger<CodexCliProvider> _logger;
+    private readonly CodexSettings _settings;
+    private readonly ConcurrentDictionary<string, string> _sessionThreadBindings;
+
+    public string Name => "CodexCli";
+    public bool SupportsStreaming => true;
+
+    public ProviderCapabilities Capabilities { get; }
+
+    public async IAsyncEnumerable<AIStreamingChunk> StreamAsync(
+        AIRequest request,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        _logger.LogInformation("Executing streaming AI request with provider: {Provider}", Name);
+
+        var codex = CreateCodexClient();
+        var thread = ResolveThread(codex, request);
+
+        var currentTurn = 0;
+        var activeToolCalls = new Dictionary<string, AIToolCallDelta>();
+
+        await foreach (var threadEvent in thread.RunStreamedAsync(BuildPrompt(request), cancellationToken))
+        {
+            if (threadEvent is TurnStartedEvent)
+            {
+                currentTurn++;
+            }
+
+            switch (threadEvent)
+            {
+                case ItemCompletedEvent { Item: AgentMessageItem message }:
+                    var messageText = message.Text ?? string.Empty;
+                    yield return new AIStreamingChunk
+                    {
+                        Content = messageText,
+                        Type = StreamingChunkType.ContentDelta,
+                        IsComplete = false
+                    };
+                    break;
+
+                case ItemStartedEvent or ItemUpdatedEvent or ItemCompletedEvent:
+                    var toolChunk = BuildToolChunk(threadEvent, currentTurn);
+                    if (toolChunk?.ToolCallDelta != null)
+                    {
+                        yield return toolChunk;
+                    }
+                    break;
+
+                case TurnCompletedEvent turnCompleted:
+                    activeToolCalls.Clear();
+                    yield return new AIStreamingChunk
+                    {
+                        Content = string.Empty,
+                        Type = StreamingChunkType.Metadata,
+                        IsComplete = true,
+                        Usage = MapUsage(turnCompleted.Usage)
+                    };
+                    break;
+            }
+        }
+
+        BindSessionThread(request.SessionId, thread.Id);
+    }
+
+    private CodexThread ResolveThread(Codex codex, AIRequest request)
+    {
+        var sessionId = request.SessionId;
+
+        // Verificar si ya hay un hilo vinculado
+        if (!string.IsNullOrWhiteSpace(sessionId) &&
+            _sessionThreadBindings.TryGetValue(sessionId, out var threadId) &&
+            !string.IsNullOrWhiteSpace(threadId))
+        {
+            _logger.LogInformation("Resuming Codex thread {ThreadId} for session {SessionId}", threadId, sessionId);
+            return codex.ResumeThread(threadId, threadOptions);
+        }
+
+        _logger.LogInformation("Starting new Codex thread for session {SessionId}", sessionId ?? "(none)");
+        return codex.StartThread(threadOptions);
+    }
+}
+```
+
+Características del proveedor Codex CLI:
+- **Procesamiento de flujo de eventos JSON**: Analiza el flujo de eventos JSON de Codex (TurnStarted, ItemStarted, TurnCompleted, etc.)
+- **Vinculación de sesión-hilo**: Persiste la relación de vinculación entre sesiones e hilos mediante base de datos SQLite
+- **Reutilización de hilos**: Admite reanudar hilos existentes, manteniendo continuidad de sesión
+- **Seguimiento de invocaciones de herramientas**: Rastrea el estado de invocaciones de herramientas activas, manejando correctamente el ciclo de vida de herramientas
+
+### 7. Mecanismo de Vinculación de Sesión-Hilo
+
+Codex CLI usa base de datos SQLite para persistir la vinculación entre sesiones e hilos:
+
+```csharp
+public class CodexCliProvider : IAIProvider
+{
+    private const int SessionThreadBindingRetentionDays = 30;
+    private readonly ConcurrentDictionary<string, string> _sessionThreadBindings;
+    private readonly string _sessionThreadBindingDatabaseConnectionString;
+    private readonly string _sessionThreadBindingDatabasePath;
+
+    private void BindSessionThread(string? sessionId, string? threadId)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId) || string.IsNullOrWhiteSpace(threadId))
+        {
+            return;
+        }
+
+        // Caché en memoria
+        _sessionThreadBindings.AddOrUpdate(sessionId, threadId, (_, _) => threadId);
+
+        // Persistir a SQLite
+        PersistSessionThreadBinding(sessionId, threadId);
+    }
+
+    private void PersistSessionThreadBinding(string sessionId, string threadId)
+    {
+        try
+        {
+            using var connection = new SqliteConnection(_sessionThreadBindingDatabaseConnectionString);
+            connection.Open();
+
+            using var upsertCommand = connection.CreateCommand();
+            upsertCommand.CommandText =
+                """
+                INSERT INTO SessionThreadBindings (SessionId, ThreadId, CreatedAtUtc, UpdatedAtUtc)
+                VALUES ($sessionId, $threadId, $createdAtUtc, $updatedAtUtc)
+                ON CONFLICT(SessionId) DO UPDATE SET
+                    ThreadId = excluded.ThreadId,
+                    UpdatedAtUtc = excluded.UpdatedAtUtc;
+                """;
+            var nowUtc = DateTimeOffset.UtcNow.ToString("O");
+            upsertCommand.Parameters.AddWithValue("$sessionId", sessionId);
+            upsertCommand.Parameters.AddWithValue("$threadId", threadId);
+            upsertCommand.Parameters.AddWithValue("$createdAtUtc", nowUtc);
+            upsertCommand.Parameters.AddWithValue("$updatedAtUtc", nowUtc);
+            upsertCommand.ExecuteNonQuery();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "Failed to persist Codex session-thread binding for session {SessionId} to {DatabasePath}",
+                sessionId,
+                _sessionThreadBindingDatabasePath);
+        }
+    }
+
+    private void LoadPersistedSessionThreadBindings()
+    {
+        using var connection = new SqliteConnection(_sessionThreadBindingDatabaseConnectionString);
+        connection.Open();
+
+        using var loadCommand = connection.CreateCommand();
+        loadCommand.CommandText = "SELECT SessionId, ThreadId FROM SessionThreadBindings;";
+        using var reader = loadCommand.ExecuteReader();
+        while (reader.Read())
+        {
+            var sessionId = reader.GetString(0);
+            var threadId = reader.GetString(1);
+            _sessionThreadBindings[sessionId] = threadId;
+        }
+    }
+}
+```
+
+Ventajas de la vinculación de sesión-hilo:
+- **Recuperación de sesión**: Puede recuperarse sesiones anteriores después de reiniciar el sistema
+- **Reutilización de hilos**: La misma sesión puede reutilizar hilos Codex existentes
+- **Limpieza automática**: Vinculaciones de más de 30 días se limpian automáticamente
+
+### 8. Gestión de CLI en Escritorio
+
+hagicode-desktop gestiona la selección de CLI a través de `AgentCliManager`:
+
+```typescript
+export enum AgentCliType {
+  ClaudeCode = 'claude-code',
+  Codex = 'codex',
+  // Futuro extensible: Aider, Cursor u otros CLI
+}
+
+export class AgentCliManager {
+  private static readonly STORE_KEY = 'agentCliSelection';
+  private static readonly EXECUTOR_TYPE_MAP: Record<AgentCliType, string> = {
+    [AgentCliType.ClaudeCode]: 'ClaudeCodeCli',
+    [AgentCliType.Codex]: 'CodexCli',
+  };
+
+  constructor(private store: any) {}
+
+  async saveSelection(cliType: AgentCliType): Promise<void> {
+    const selection: StoredAgentCliSelection = {
+      cliType,
+      isSkipped: false,
+      selectedAt: new Date().toISOString(),
+    };
+
+    this.store.set(AgentCliManager.STORE_KEY, selection);
+  }
+
+  loadSelection(): StoredAgentCliSelection {
+    return this.store.get(AgentCliManager.STORE_KEY, {
+      cliType: null,
+      isSkipped: false,
+      selectedAt: null,
+    });
+  }
+
+  getCommandName(cliType: AgentCliType): string {
+    switch (cliType) {
+      case AgentCliType.ClaudeCode:
+        return 'claude';
+      case AgentCliType.Codex:
+        return 'codex';
+      default:
+        return 'claude';
+    }
+  }
+
+  getExecutorType(cliType: AgentCliType | null): string {
+    if (!cliType) return 'ClaudeCodeCli';
+    return this.EXECUTOR_TYPE_MAP[cliType] || 'ClaudeCodeCli';
+  }
+}
+```
+
+Ejemplo de procesador IPC en escritorio:
+
+```typescript
+ipcMain.handle('llm:call-api', async (event, manifestPath, region) => {
+  if (!state.llmInstallationManager) {
+    return { success: false, error: 'LLM Installation Manager not initialized' };
+  }
+
+  try {
+    const prompt = await state.llmInstallationManager.loadPrompt(manifestPath, region);
+
+    // Determinar comando CLI según selección del usuario
+    let commandName = 'claude';
+    if (state.agentCliManager) {
+      const selectedCliType = state.agentCliManager.getSelectedCliType();
+      if (selectedCliType) {
+        commandName = state.agentCliManager.getCommandName(selectedCliType);
+      }
+    }
+
+    // Ejecutar usando el CLI correspondiente
+    const result = await state.llmInstallationManager.callApi(
+      prompt.filePath,
+      event.sender,
+      commandName
+    );
+
+    return result;
+  } catch (error) {
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error'
+    };
+  }
+});
+```
+
+### 9. Sistema de Proveedores de Modelo Interno de Codex
+
+Codex también admite múltiples proveedores de modelo, a través de configuración `ModelProviderInfo`:
+
+```rust
+pub const OPENAI_PROVIDER_NAME: &str = "OpenAI";
+pub const OLLAMA_OSS_PROVIDER_ID: &str = "ollama";
+pub const LMSTUDIO_OSS_PROVIDER_ID: &str = "lmstudio";
+
+pub fn built_in_model_providers() -> HashMap<String, ModelProviderInfo> {
+    use ModelProviderInfo as P;
+
+    [
+        ("openai", P::create_openai_provider()),
+        (OLLAMA_OSS_PROVIDER_ID, create_oss_provider(DEFAULT_OLLAMA_PORT, WireApi::Responses)),
+        (LMSTUDIO_OSS_PROVIDER_ID, create_oss_provider(DEFAULT_LMSTUDIO_PORT, WireApi::Responses)),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v))
+    .collect()
+}
+
+pub struct ModelProviderInfo {
+    pub name: String,
+    pub base_url: Option<String>,
+    pub env_key: Option<String>,
+    pub query_params: Option<HashMap<String, String>>,
+    pub http_headers: Option<HashMap<String, String>>,
+    pub request_max_retries: Option<u64>,
+    pub stream_max_retries: Option<u64>,
+    pub stream_idle_timeout_ms: Option<u64>,
+    pub requires_openai_auth: bool,
+    pub supports_websockets: bool,
+}
+```
+
+Soporte de proveedores de modelo de Codex:
+- **Proveedores integrados**: OpenAI, Ollama, LM Studio
+- **Proveedores personalizados**: Los usuarios pueden agregar proveedores personalizados en config.toml
+- **Estrategia de reintento**: Puede configurar el número de reintentos para solicitudes y streaming
+- **Soporte de WebSocket**: Algunos proveedores admiten transmisión por WebSocket
+
+## Práctica
+
+### Ejemplo de Configuración
+
+Configuración **appsettings.json** para múltiples proveedores:
+
+```json
+{
+  "AI": {
+    "Providers": {
+      "DefaultProvider": "ClaudeCodeCli",
+      "Providers": {
+        "ClaudeCodeCli": {
+          "Type": "ClaudeCodeCli",
+          "Model": "claude-sonnet-4-20250514",
+          "WorkingDirectory": "/path/to/workspace",
+          "PermissionMode": "acceptEdits",
+          "AllowedTools": ["file-edit", "command-run", "bash"]
+        },
+        "CodexCli": {
+          "Type": "CodexCli",
+          "Model": "gpt-4.1",
+          "ExecutablePath": "codex",
+          "SandboxMode": "enabled",
+          "WebSearchMode": "auto",
+          "NetworkAccessEnabled": false
+        }
+      },
+      "ScenarioProviderMapping": {
+        "CodeAnalysis": "ClaudeCodeCli",
+        "CodeGeneration": "CodexCli",
+        "Refactoring": "ClaudeCodeCli",
+        "Debugging": "CodexCli"
+      },
+      "FallbackChain": ["CodexCli", "ClaudeCodeCli"]
+    },
+    "Selector": {
+      "EnableCache": true,
+      "CacheExpirationSeconds": 300
+    }
+  }
+}
+```
+
+### Ejemplo de Uso - Servicio Backend
+
+```csharp
+public class AIOrchestrator
+{
+    private readonly IAIProviderFactory _providerFactory;
+    private readonly IAIProviderSelector _providerSelector;
+    private readonly ILogger<AIOrchestrator> _logger;
+
+    public AIOrchestrator(
+        IAIProviderFactory providerFactory,
+        IAIProviderSelector providerSelector,
+        ILogger<AIOrchestrator> logger)
+    {
+        _providerFactory = providerFactory;
+        _providerSelector = providerSelector;
+        _logger = logger;
+    }
+
+    public async Task<AIResponse> ProcessRequestAsync(
+        AIRequest request,
+        BusinessScenario scenario)
+    {
+        _logger.LogInformation("Processing request for scenario: {Scenario}", scenario);
+
+        try
+        {
+            // Seleccionar proveedor inteligentemente
+            var providerType = await _providerSelector.SelectProviderAsync(scenario, request.CancellationToken);
+
+            // Obtener instancia del proveedor
+            var provider = await _providerFactory.GetProviderAsync(providerType);
+            if (provider == null)
+            {
+                throw new InvalidOperationException($"Provider {providerType} not available");
+            }
+
+            _logger.LogInformation("Using provider: {Provider} for request", provider.Name);
+
+            // Ejecutar solicitud
+            var response = await provider.ExecuteAsync(request, request.CancellationToken);
+
+            _logger.LogInformation("Request completed with provider: {Provider}, tokens used: {Tokens}",
+                provider.Name,
+                response.Usage?.TotalTokens ?? 0);
+
+            return response;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to process request for scenario: {Scenario}", scenario);
+            throw;
+        }
+    }
+}
+```
+
+### Ejemplo de Uso - Respuesta en Streaming
+
+```csharp
+public async IAsyncEnumerable<AIStreamingChunk> StreamResponseAsync(
+    AIRequest request,
+    BusinessScenario scenario)
+{
+    var providerType = await _providerSelector.SelectProviderAsync(scenario);
+    var provider = await _providerFactory.GetProviderAsync(providerType);
+
+    if (provider == null)
+    {
+        throw new InvalidOperationException($"Provider {providerType} not available");
+    }
+
+    await foreach (var chunk in provider.StreamAsync(request))
+    {
+        // Procesar chunk de streaming
+        switch (chunk.Type)
+        {
+            case StreamingChunkType.ContentDelta:
+                // Mostrar contenido de texto en tiempo real
+                await SendToClientAsync(chunk.Content);
+                break;
+
+            case StreamingChunkType.ToolCallDelta:
+                // Procesar invocación de herramienta
+                await HandleToolCallAsync(chunk.ToolCallDelta);
+                break;
+
+            case StreamingChunkType.Metadata:
+                // Procesar evento de finalización y estadísticas
+                if (chunk.IsComplete)
+                {
+                    _logger.LogInformation("Stream completed, usage: {@Usage}", chunk.Usage);
+                }
+                break;
+
+            case StreamingChunkType.Error:
+                // Procesar error
+                _logger.LogError("Stream error: {Error}", chunk.ErrorMessage);
+                throw new InvalidOperationException(chunk.ErrorMessage);
+        }
+    }
+}
+```
+
+### Ejemplo de Uso - Comandos OpenSpec
+
+```csharp
+public async Task<string> ExecuteOpenSpecCommandAsync(
+    string command,
+    string arguments,
+    BusinessScenario scenario)
+{
+    var providerType = await _providerSelector.SelectProviderAsync(scenario);
+    var provider = await _providerFactory.GetProviderAsync(providerType);
+
+    // Construir prompt de comando incrustado
+    var commandPrompt = $"""
+        Execute the following OpenSpec command:
+        Command: {command}
+        Arguments: {arguments}
+
+        Please execute this command and return the results.
+        """;
+
+    var request = new AIRequest
+    {
+        Prompt = "Process this command request",
+        EmbeddedCommandPrompt = commandPrompt,
+        WorkingDirectory = Directory.GetCurrentDirectory()
+    };
+
+    var response = await provider.SendMessageAsync(request, commandPrompt);
+
+    return response.Content;
+}
+```
+
+## Consideraciones
+
+### 1. Verificación de Salud del Proveedor
+
+Antes de cambiar de proveedor, se recomienda llamar `PingAsync` para asegurar que el proveedor objetivo esté disponible:
+
+```csharp
+public async Task<bool> IsProviderHealthyAsync(AIProviderType providerType)
+{
+    var provider = await _providerFactory.GetProviderAsync(providerType);
+    if (provider == null) return false;
+
+    var testResult = await provider.PingAsync();
+
+    return testResult.Success &&
+           testResult.ResponseTimeMs < 5000; // Respuesta dentro de 5 segundos se considera saludable
+}
+```
+
+### 2. Aislamiento de Sesión
+
+Use `CessionId` (Claude) o `ThreadId` (Codex) para asegurar aislamiento de sesión:
+
+- Claude Code CLI: Usa `CessionId` como identificador único de sesión
+- Codex CLI: Usa `ThreadId` como identificador de sesión
+
+```csharp
+// Opciones de sesión de Claude Code CLI
+var claudeSessionOptions = new ClaudeSessionOptions
+{
+    CessionId = CessionId.New(),  // Generar ID único
+    WorkingDirectory = workspacePath,
+    AllowedTools = allowedTools,
+    PermissionMode = PermissionMode.acceptEdits
+};
+
+// Opciones de hilo de Codex
+var codexThreadOptions = new ThreadOptions
+{
+    Model = "gpt-4.1",
+    SandboxMode = "enabled",
+    WorkingDirectory = workspacePath
+};
+```
+
+### 3. Manejo de Errores
+
+El mecanismo de respaldo cuando el proveedor no está disponible debe ser robusto, asegurando al menos un proveedor disponible:
+
+```csharp
+public async Task<AIResponse> ExecuteWithFallbackAsync(
+    AIRequest request,
+    List<AIProviderType> preferredProviders)
+{
+    Exception? lastException = null;
+
+    foreach (var providerType in preferredProviders)
+    {
+        try
+        {
+            var provider = await _providerFactory.GetProviderAsync(providerType);
+            if (provider == null) continue;
+
+            // Intentar ejecutar
+            return await provider.ExecuteAsync(request);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Provider {ProviderType} failed, trying next", providerType);
+            lastException = ex;
+        }
+    }
+
+    // Todos los proveedores fallaron
+    throw new InvalidOperationException(
+        "All preferred providers failed. Last error: " + lastException?.Message,
+        lastException);
+}
+```
+
+### 4. Validación de Configuración
+
+Valide todas las configuraciones de proveedores al inicio, evitando errores en tiempo de ejecución:
+
+```csharp
+public void ValidateConfiguration(AIProviderOptions options)
+{
+    foreach (var (providerType, config) in options.Providers)
+    {
+        // Validar ruta de ejecutable (proveedores tipo CLI)
+        if (IsCliBasedProvider(providerType))
+        {
+            if (string.IsNullOrWhiteSpace(config.ExecutablePath))
+            {
+                throw new ConfigurationException(
+                    $"Provider {providerType} requires ExecutablePath");
+            }
+
+            if (!File.Exists(config.ExecutablePath))
+            {
+                throw new ConfigurationException(
+                    $"Executable not found for {providerType}: {config.ExecutablePath}");
+            }
+        }
+
+        // Validar clave API (proveedores tipo API)
+        if (IsApiBasedProvider(providerType))
+        {
+            if (string.IsNullOrWhiteSpace(config.ApiKey))
+            {
+                throw new ConfigurationException(
+                    $"Provider {providerType} requires ApiKey");
+            }
+        }
+
+        // Validar nombre del modelo
+        if (string.IsNullOrWhiteSpace(config.Model))
+        {
+            _logger.LogWarning("No model configured for {ProviderType}, using default", providerType);
+        }
+    }
+}
+```
+
+### 5. Gestión de Caché
+
+Las instancias de proveedores se almacenan en caché, preste atención a la gestión del ciclo de vida y uso de memoria:
+
+```csharp
+// Limpiar caché periódicamente
+public void ClearInactiveProviders(TimeSpan inactiveThreshold)
+{
+    var now = DateTimeOffset.UtcNow;
+    var keysToRemove = new List<AIProviderType>();
+
+    foreach (var (type, instance) in _cache)
+    {
+        // Asumiendo que el proveedor tiene propiedad LastUsedTime
+        if (instance.LastUsedTime.HasValue &&
+            now - instance.LastUsedTime.Value > inactiveThreshold)
+        {
+            keysToRemove.Add(type);
+        }
+    }
+
+    foreach (var key in keysToRemove)
+    {
+        _cache.TryRemove(key, out _);
+        _logger.LogInformation("Cleared inactive provider: {Provider}", key);
+    }
+}
+```
+
+### 6. Registro de Logs
+
+Registre en detalle el proceso de selección, cambio y ejecución de proveedores, facilitando la depuración:
+
+```csharp
+public class AIProviderLogging
+{
+    private readonly ILogger _logger;
+
+    public void LogProviderSelection(
+        BusinessScenario scenario,
+        AIProviderType selectedProvider,
+        SelectionReason reason)
+    {
+        _logger.LogInformation(
+            "[ProviderSelection] Scenario={Scenario}, Provider={Provider}, Reason={Reason}",
+            scenario,
+            selectedProvider,
+            reason);
+    }
+
+    public void LogProviderSwitch(
+        AIProviderType fromProvider,
+        AIProviderType toProvider,
+        string reason)
+    {
+        _logger.LogWarning(
+            "[ProviderSwitch] From={FromProvider} To={ToProvider}, Reason={Reason}",
+            fromProvider,
+            toProvider,
+            reason);
+    }
+
+    public void LogProviderError(
+        AIProviderType provider,
+        Exception error,
+        AIRequest request)
+    {
+        _logger.LogError(error,
+            "[ProviderError] Provider={Provider}, RequestLength={Length}, Error={Message}",
+            provider,
+            request.Prompt.Length,
+            error.Message);
+    }
+}
+```
+
+### 7. Seguridad de Hilos
+
+El uso de colecciones concurrentes como `ConcurrentDictionary` asegura seguridad de hilos:
+
+```csharp
+public class ThreadSafeProviderCache
+{
+    private readonly ConcurrentDictionary<AIProviderType, IAIProvider> _cache;
+    private readonly ReaderWriterLockSlim _lock = new();
+
+    public IAIProvider? GetProvider(AIProviderType type)
+    {
+        // Operaciones de lectura no necesitan bloqueo
+        if (_cache.TryGetValue(type, out var provider))
+            return provider;
+
+        // Creación necesita bloqueo de escritura
+        _lock.EnterWriteLock();
+        try
+        {
+            // Doble verificación
+            if (_cache.TryGetValue(type, out provider))
+                return provider;
+
+            var newProvider = CreateProvider(type);
+            if (newProvider != null)
+            {
+                _cache[type] = newProvider;
+            }
+            return newProvider;
+        }
+        finally
+        {
+            _lock.ExitWriteLock();
+        }
+    }
+}
+```
+
+### 8. Migración de Base de Datos
+
+Cuando cambie la estructura de la base de datos de vinculación sesión-hilo, considere la migración de datos:
+
+```csharp
+public class SessionThreadMigration
+{
+    public async Task MigrateAsync(string dbPath)
+    {
+        var version = await GetSchemaVersionAsync(dbPath);
+
+        if (version >= 2) return; // Ya es la última versión
+
+        using var connection = new SqliteConnection(dbPath);
+        connection.Open();
+
+        // Migrar a v2: agregar columna CreatedAtUtc
+        if (version < 2)
+        {
+            _logger.LogInformation("Migrating SessionThreadBindings to v2...");
+
+            using var addColumnCommand = connection.CreateCommand();
+            addColumnCommand.CommandText = "ALTER TABLE SessionThreadBindings ADD COLUMN CreatedAtUtc TEXT;";
+            addColumnCommand.ExecuteNonQuery();
+
+            using var backfillCommand = connection.CreateCommand();
+            backfillCommand.CommandText =
+                """
+                UPDATE SessionThreadBindings
+                SET CreatedAtUtc = COALESCE(NULLIF(UpdatedAtUtc, ''), $nowUtc)
+                WHERE CreatedAtUtc IS NULL OR CreatedAtUtc = '';
+                """;
+            backfillCommand.Parameters.AddWithValue("$nowUtc", DateTimeOffset.UtcNow.ToString("O"));
+            backfillCommand.ExecuteNonQuery();
+        }
+
+        await UpdateSchemaVersionAsync(dbPath, 2);
+        _logger.LogInformation("Migration to v2 completed");
+    }
+}
+```
+
+## Resumen
+
+hagicode implementa una arquitectura de proveedores de IA múltiple flexible y extensible a través de la combinación del patrón de proveedor, patrón de fábrica y patrón de selector:
+
+- **Abstracción de interfaz unificada**: La interfaz `IAIProvider` abstrae las diferencias entre diferentes CLI
+- **Creación dinámica de instancias**: `AIProviderFactory` admite creación de instancias de proveedores en tiempo de ejecución
+- **Estrategia de selección inteligente**: `AIProviderSelector` implementa selección de proveedores impulsada por escenarios
+- **Persistencia del estado de sesión**: Asegura continuidad de sesión a través de vinculación de base de datos
+- **Integración de escritorio**: `AgentCliManager` admite selección y configuración por parte del usuario
+
+Las ventajas de este diseño de arquitectura son:
+1. **Escalabilidad**: Agregar nuevos proveedores de IA solo requiere implementar la interfaz `IAIProvider`
+2. **Comprobabilidad**: Los proveedores pueden probarse y simularse independientemente
+3. **Mantenibilidad**: La implementación de cada proveedor es independiente, con responsabilidad única
+4. **Amigable para el usuario**: Admite selección automática por escenario y cambio manual
+
+A través de este diseño, hagicode logra con éxito el cambio sin interrupciones y la interoperabilidad entre Claude Code CLI y Codex CLI, proporcionando a los desarrolladores una experiencia de asistente de codificación con IA flexible y potente.
+
+## Referencias
+
+- Dirección del proyecto HagiCode: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Sitio oficial de HagiCode: [hagicode.com](https://hagicode.com)
+- Documentación oficial de Claude Code: [docs.anthropic.com](https://docs.anthropic.com)
+- Documentación de OpenAI Codex: [platform.openai.com](https://platform.openai.com)
+- Repositorio oficial de Codex SDK: [github.com/openai/codex](https://github.com/openai/codex)
+- Soporte multiplataforma CLI de HagiCode: [https://docs.hagicode.com/blog/hagicode-ai-cli-multi-platform-support/](https://docs.hagicode.com/blog/hagicode-ai-cli-multi-platform-support/)
+
+---
+
+Gracias por leer. Si encuentra útil este artículo, haga clic en el botón de Me gusta abajo 👍 para que más personas lo vean.
+
+Este contenido fue creado con colaboración de inteligencia artificial y revisado por mí, cumpliendo con mis puntos de vista y posición.
+
+- Autor del artículo: [newbe36524](https://www.newbe.pro)
+- Enlace del artículo: [https://docs.hagicode.com/blog/2026-03-09-hagicode-multi-ai-provider-switching-interop/](https://docs.hagicode.com/blog/2026-03-09-hagicode-multi-ai-provider-switching-interop/)
+- Aviso de derechos de autor: Todos los artículos de este blog, excepto los declarados expresamente, están licenciados bajo BY-NC-SA. Indique la fuente al reimpresión!

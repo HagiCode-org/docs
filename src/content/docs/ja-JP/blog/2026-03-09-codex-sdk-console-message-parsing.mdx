@@ -1,0 +1,512 @@
+---
+title: Codex SDK コンソールメッセージ解析完全ガイド
+date: 2026-03-10
+tags: [Codex SDK, TypeScript, AI Executor, Event Stream]
+description: "この記事では、Codex SDK のイベントストリーム仕組み、メッセージタイプの解析、そして実際のプロジェクトにおけるベストプラクティスを詳しく解説し、開発者が AI 実行サービスのコアスキルを素早く習得できるようにします。"
+---
+
+## Codex SDK コンソールメッセージ解析完全ガイド
+
+> この記事では、Codex SDK のイベントストリーム仕組み、メッセージタイプの解析、そして実際のプロジェクトにおけるベストプラクティスを詳しく解説し、開発者が AI 実行サービスのコアスキルを素早く習得できるようにします。
+
+## 背景
+
+実は、Codex SDK ベースの AI 実行サービスを構築する際、私たちは这样一个问题に直面せざるを得ませんでした：Codex が返すストリーミングイベントメッセージをどう処理するか。これらのメッセージには実行状態、出力内容、エラー情報といった重要な情報が隠されており、青春の中の言えない感情のように、じっくりと解読する必要があります。
+
+HagiCode プロジェクトの一環として、私たちは AI コードアシスタントシーンで信頼できるエグゼキューターを実装する必要がありました。これが私たちが Codex SDK のイベントストリーム仕組みを深く研究することに決めた理由でしょう——結局のところ、低層メッセージがどう動作するかを理解してこそ、真にエンタープライズ級の AI 実行プラットフォームを構築できるのです。これは恋愛と同じで、相手の気持ちを理解しないと、どうやって進んでいけますか？
+
+Codex SDK は OpenAI が提供するプログラミング補助ツール SDK であり、イベントストリーム（Event Stream）方式で実行結果を返します。従来のリクエスト-レスポンスモードとは少し異なり、Codex はストリーミングイベントを使用し、私たちが以下のことを可能にします：
+
+- 実行進捗のリアルタイム取得
+- エラー状況のタイムリーな処理
+- 詳細な token 使用統計の取得
+- 長時間実行される複雑なタスクのサポート
+
+これらのイベントタイプを理解し、正しく解析することは、機能的に完全な AI エグゼキューターを実現するために、やはり重要です。結局、誰もブラックボックスに直面したくないでしょう？
+
+## HagiCode について
+
+この記事で共有しているソリューションは、私たちが [HagiCode](https://hagicode.com) プロジェクトでの実践経験から来ています。HagiCode はオープンソースの AI コードアシスタントプロジェクトであり、開発者にインテリジェントなコード補助機能を提供することに尽力しています。開発プロセスにおいて、私たちはユーザーのコード実行リクエストを処理するための信頼できる AI 実行サービスを構築する必要があり、これが私たちが Codex SDK を導入した直接の理由です。
+
+AI コードアシスタントとして、HagiCode はさまざまな複雑なコード実行シナリオを処理する必要があります：実行進捗のリアルタイム取得、エラー状況のタイムリーな処理、詳細な token 使用統計の取得など。Codex SDK のイベントストリーム仕組みを深く理解することで、本番環境の要件を満たすエグゼキューターを構築できます。結局のところ、コードも人生も、少しの蓄積と沉淀が必要です。
+
+## イベントストリーム仕組み
+
+### 基本概念
+
+Codex SDK は `thread.runStreamed()` メソッドを使用して非同期イベントイテレーターを返します：
+
+```typescript
+import { Codex } from '@openai/codex-sdk';
+
+const client = new Codex({
+  apiKey: process.env.CODEX_API_KEY,
+  baseUrl: process.env.CODEX_BASE_URL,
+});
+
+const thread = client.startThread({
+  workingDirectory: '/path/to/project',
+  skipGitRepoCheck: false,
+});
+
+const { events } = await thread.runStreamed('your prompt here', {
+  outputSchema: {
+    type: 'object',
+    properties: {
+      output: { type: 'string' },
+      status: { type: 'string', enum: ['ok', 'action_required'] },
+    },
+    required: ['output', 'status'],
+  },
+});
+
+for await (const event of events) {
+  // 各イベントを処理
+}
+```
+
+### イベントタイプ詳解
+
+| イベントタイプ | 説明 | キーデータ |
+|---------|------|----------|
+| `thread.started` | スレッド起動成功 | `thread_id` |
+| `item.updated` | メッセージ内容更新 | `item.text` |
+| `item.completed` | メッセージ完了 | `item.text` |
+| `turn.completed` | 実行完了 | `usage` (token 使用量) |
+| `turn.failed` | 実行失敗 | `error.message` |
+| `error` | エラーイベント | `message` |
+
+実際のプロジェクトでは、HagiCode のエグゼキューターコンポーネントはまさにこれらのイベントタイプに基づいて構築されています。ユーザー体験の円滑性を確保するために、各イベントタイプを細かく処理する必要があります。これは感情を扱うのと同じで、各詳細を心を込めて扱う必要があります。そうしないと、どうして良い結果が得られますか？
+
+## メッセージ解析実装
+
+### メッセージ内容の抽出
+
+メッセージ内容はイベント処理関数によって抽出されます：
+
+```typescript
+private handleThreadEvent(event: ThreadEvent, onMessage: (content: string) => void): void {
+  // メッセージ更新と完了イベントのみを処理
+  if (event.type !== 'item.updated' && event.type !== 'item.completed') {
+    return;
+  }
+
+  // エージェントメッセージタイプのみを処理
+  if (event.item.type !== 'agent_message') {
+    return;
+  }
+
+  // テキスト内容を抽出
+  onMessage(event.item.text);
+}
+```
+
+重要な点：
+- `item.updated` と `item.completed` イベントのみを処理
+- `agent_message` タイプのコンテンツのみを処理
+- メッセージ内容は `event.item.text` フィールドにあります
+
+### 構造化出力の解析
+
+Codex は JSON 構造化出力をサポートしており、`outputSchema` パラメータで返却フォーマットを指定します：
+
+```typescript
+const DEFAULT_OUTPUT_SCHEMA = {
+  type: 'object',
+  properties: {
+    output: { type: 'string' },
+    status: { type: 'string', enum: ['ok', 'action_required'] },
+  },
+  required: ['output', 'status'],
+  additionalProperties: false,
+} as const;
+```
+
+解析関数は JSON の解析を試み、失敗した場合は元のテキストを返します——これは人生と同じで、完璧な答えを求めても、現実はしばしば曖昧な応答を与え、自分でゆっくり消化するしかないのです。
+
+```typescript
+function toStructuredOutput(raw: string): StructuredOutput {
+  try {
+    const parsed = JSON.parse(raw) as Partial<StructuredOutput>;
+    if (typeof parsed.output === 'string') {
+      return {
+        output: parsed.output,
+        status: parsed.status === 'action_required' ? 'action_required' : 'ok',
+      };
+    }
+  } catch {
+    // JSON 解析失敗、元のテキストにフォールバック
+  }
+
+  return {
+    output: raw,
+    status: 'ok',
+  };
+}
+```
+
+### 完全なイベント処理フロー
+
+```typescript
+private async runWithStreaming(
+  thread: Thread,
+  input: CodexStageExecutionInput
+): Promise<{ output: string; usage: Usage | null }> {
+  const abortController = new AbortController();
+  const timeoutHandle = setTimeout(() => {
+    abortController.abort();
+  }, Math.max(1000, input.timeoutMs));
+
+  let latestMessage = '';
+  let usage: Usage | null = null;
+  let emittedLength = 0;
+
+  try {
+    const { events } = await thread.runStreamed(input.prompt, {
+      outputSchema: DEFAULT_OUTPUT_SCHEMA,
+      signal: abortController.signal,
+    });
+
+    for await (const event of events) {
+      // メッセージ内容を処理
+      this.handleThreadEvent(event, (nextContent) => {
+        const delta = nextContent.slice(emittedLength);
+        if (delta.length > 0) {
+          emittedLength = nextContent.length;
+          input.callbacks?.onChunk?.(delta);  // ストリーミングコールバック
+        }
+        latestMessage = nextContent;
+      });
+
+      // イベントタイプに基づいて異なるデータを処理
+      if (event.type === 'thread.started') {
+        this.threadId = event.thread_id;
+      } else if (event.type === 'turn.completed') {
+        usage = event.usage;
+      } else if (event.type === 'turn.failed') {
+        throw new CodexExecutorError('gateway_unavailable', event.error.message, true);
+      } else if (event.type === 'error') {
+        throw new CodexExecutorError('gateway_unavailable', event.message, true);
+      }
+    }
+  } catch (error) {
+    if (abortController.signal.aborted) {
+      throw new CodexExecutorError(
+        'upstream_timeout',
+        `Codex stage timed out after ${input.timeoutMs}ms`,
+        true
+      );
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutHandle);
+  }
+
+  const structured = toStructuredOutput(latestMessage);
+  return { output: structured.output, usage };
+}
+```
+
+## エラー処理戦略
+
+### エラーコードマッピング
+
+エラーの特徴に基づいて具体的なエラーコードにマッピングし、上位層での処理を容易にします：
+
+```typescript
+function mapError(error: unknown): CodexExecutorError {
+  if (error instanceof CodexExecutorError) {
+    return error;
+  }
+
+  const message = error instanceof Error ? error.message : String(error);
+  const normalized = message.toLowerCase();
+
+  // 認証エラー - 再試行不可
+  if (normalized.includes('401') ||
+      normalized.includes('403') ||
+      normalized.includes('api key') ||
+      normalized.includes('auth')) {
+    return new CodexExecutorError('auth_invalid', message, false);
+  }
+
+  // レート制限 - 再試行可能
+  if (normalized.includes('429') || normalized.includes('rate limit')) {
+    return new CodexExecutorError('rate_limited', message, true);
+  }
+
+  // タイムアウトエラー - 再試行可能
+  if (normalized.includes('timeout') || normalized.includes('aborted')) {
+    return new CodexExecutorError('upstream_timeout', message, true);
+  }
+
+  // デフォルトエラー
+  return new CodexExecutorError('gateway_unavailable', message, true);
+}
+```
+
+### エラータイプ定義
+
+```typescript
+export type CodexErrorCode =
+  | 'auth_invalid'      // 認証失敗
+  | 'upstream_timeout'  // 上流タイムアウト
+  | 'rate_limited'      // レート制限
+  | 'gateway_unavailable'; // ゲートウェイ利用不可
+
+export class CodexExecutorError extends Error {
+  readonly code: CodexErrorCode;
+  readonly retryable: boolean;
+
+  constructor(code: CodexErrorCode, message: string, retryable: boolean) {
+    super(message);
+    this.name = 'CodexExecutorError';
+    this.code = code;
+    this.retryable = retryable;
+  }
+}
+```
+
+## 作業ディレクトリと環境設定
+
+### 作業ディレクトリの検証
+
+Codex SDK は作業ディレクトリが有効な Git リポジトリである必要があります——これは人間としてと同じで、必ず根と出身が必要で、そうでないとどうして安心できますか？
+
+```typescript
+export function validateWorkingDirectory(
+  workingDirectory: string,
+  skipGitRepoCheck: boolean
+): void {
+  const resolvedWorkingDirectory = path.resolve(workingDirectory);
+
+  if (!existsSync(resolvedWorkingDirectory)) {
+    throw new CodexExecutorError(
+      'gateway_unavailable',
+      'Working directory does not exist.',
+      false
+    );
+  }
+
+  if (!statSync(resolvedWorkingDirectory).isDirectory()) {
+    throw new CodexExecutorError(
+      'gateway_unavailable',
+      'Working directory is not a directory.',
+      false
+    );
+  }
+
+  if (skipGitRepoCheck) {
+    return;
+  }
+
+  const gitDir = path.join(resolvedWorkingDirectory, '.git');
+  if (!existsSync(gitDir)) {
+    throw new CodexExecutorError(
+      'gateway_unavailable',
+      'Working directory is not a git repository.',
+      false
+    );
+  }
+}
+```
+
+### 環境変数のロード
+
+Codex SDK はログインシェルから環境変数をロードする必要があり、AI エージェントがシステムコマンドにアクセスできるようにします：
+
+```typescript
+function parseEnvironmentOutput(output: Buffer): Record<string, string> {
+  const parsed: Record<string, string> = {};
+
+  for (const entry of output.toString('utf8').split('\0')) {
+    if (!entry) continue;
+
+    const separatorIndex = entry.indexOf('=');
+    if (separatorIndex <= 0) continue;
+
+    const key = entry.slice(0, separatorIndex);
+    const value = entry.slice(separatorIndex + 1);
+    if (key.length > 0) {
+      parsed[key] = value;
+    }
+  }
+
+  return parsed;
+}
+
+function tryLoadEnvironmentFromShell(shellPath: string): Record<string, string> | null {
+  const result = spawnSync(shellPath, ['-ilc', 'env -0'], {
+    env: process.env,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: 5000,
+  });
+
+  if (result.error || result.status !== 0) {
+    return null;
+  }
+
+  return parseEnvironmentOutput(result.stdout);
+}
+
+export function createExecutorEnvironment(
+  envOverrides: Record<string, string> = {}
+): Record<string, string> {
+  // ログインシェル環境変数をロード
+  const consoleEnv = loadConsoleEnvironmentFromShell();
+
+  return {
+    ...process.env,
+    ...consoleEnv,
+    ...envOverrides,
+  };
+}
+```
+
+## 完全な使用例
+
+### 基本的な使い方
+
+HagiCode プロジェクトでは、以下の方法で Codex クライアントを初期化し、タスクを実行します：
+
+```typescript
+import { Codex } from '@openai/codex-sdk';
+
+async function executeWithCodex(prompt: string, workingDir: string) {
+  const client = new Codex({
+    apiKey: process.env.CODEX_API_KEY,
+    env: { PATH: process.env.PATH },
+  });
+
+  const thread = client.startThread({
+    workingDirectory: workingDir,
+  });
+
+  const { events } = await thread.runStreamed(prompt);
+
+  let result = '';
+  for await (const event of events) {
+    if (event.type === 'item.updated' && event.item.type === 'agent_message') {
+      result = event.item.text;
+    }
+    if (event.type === 'turn.completed') {
+      console.log('Token usage:', event.usage);
+    }
+  }
+
+  // JSON 出力の解析を試みる
+  try {
+    const parsed = JSON.parse(result);
+    return parsed.output;
+  } catch {
+    return result;
+  }
+}
+```
+
+### 再試行メカニズム付きの完全な実装
+
+```typescript
+export class CodexSdkExecutor {
+  private readonly config: CodexRuntimeConfig;
+  private readonly client: Codex;
+  private threadId: string | null = null;
+
+  async executeStage(input: CodexStageExecutionInput): Promise<CodexStageExecutionResult> {
+    const maxAttempts = Math.max(1, this.config.retryCount + 1);
+    let attempt = 0;
+    let lastError: CodexExecutorError | null = null;
+
+    while (attempt < maxAttempts) {
+      attempt += 1;
+
+      try {
+        const thread = this.getThread(input.workingDirectory);
+        const { output, usage } = await this.runWithStreaming(thread, input);
+
+        return {
+          output,
+          usage,
+          threadId: this.threadId!,
+          attempts: attempt,
+          latencyMs: Date.now() - startedAt,
+        };
+      } catch (error) {
+        const mappedError = mapError(error);
+        lastError = mappedError;
+
+        // 再試行不可エラーまたは最大再試行回数に達した場合
+        if (!mappedError.retryable || attempt >= maxAttempts) {
+          throw mappedError;
+        }
+
+        // 待機後に再試行
+        await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+      }
+    }
+
+    throw lastError!;
+  }
+}
+```
+
+## ベストプラクティス
+
+### 1. 作業ディレクトリの要件
+
+- 作業ディレクトリが有効な Git リポジトリであることを確認
+- `PROJECT_ROOT` 環境変数を使用して明示的に指定
+- 開発デバッグ時は `CODEX_SKIP_GIT_REPO_CHECK=true` を設定してチェックをスキップ
+
+### 2. 環境変数設定
+
+- ホワイトリストメカニズムを通じて必要な環境変数を渡す
+- ログインシェルを使用して完全な環境をロード
+- 機密情報の渡しを避ける
+
+### 3. タイムアウトと再試行
+
+- タスクの複雑さに応じて合理的なタイムアウト時間を設定
+- 再試行可能なエラーに対して指数バックオフを実装
+- 再試行回数と理由を記録
+
+### 4. エラー処理
+
+- 再試行可能と再試行不可能なエラーを区別
+- 明確なエラー情報と提案を提供
+- 上位層での処理を容易にするための統一エラーコード
+
+### 5. ストリーミング出力
+
+- 増分出力コールバックを実装し、ユーザー体験を向上
+- メッセージの増分更新を正しく処理
+- コスト分析用の token 使用量を記録
+
+HagiCode プロジェクトの実際の本番環境では、上記のベストプラクティスの有効性をすでに検証しています。このソリューションは、私たちが安定した信頼できる AI 実行サービスを構築するのに役立ちました。結局、実践こそが真理を検証する唯一の基準であり、机上の空論は結局役に立ちません。
+
+## まとめ
+
+Codex SDK のイベントストリーム仕組みは、AI 実行サービスの構築に強力な機能を提供します。各種イベントを正しく解析することで、以下のことが可能になります：
+
+- 実行状態と出力のリアルタイム取得
+- 信頼できるエラー処理と再試行メカニズムの実装
+- 詳細な実行統計情報の取得
+- 機能的に完全な AI 実行プラットフォームの構築
+
+この記事で紹介したコア概念とコード例は、実際のプロジェクトに直接適用でき、開発者が Codex SDK の統合作業を素早く始めるのに役立ちます。もしこのソリューションに価値を感じるなら、HagiCode のエンジニアリング実践は悪くないことになります——では、HagiCode 自体も注目に値するでしょう。結局、あるものは、逃したら残念です。
+
+## 参考資料
+
+- [Codex SDK 公式ドキュメント](https://platform.openai.com/docs/codex)
+- [HagiCode GitHub リポジトリ](https://github.com/HagiCode-org/site)
+- [HagiCode 公式サイト](https://hagicode.com)
+
+---
+
+ご読感ありがとうございます。もしこの記事が役に立ったと思ったら、下のいいねボタン👍をクリックして、より多くの人にこの記事を見ていただければ幸いです。
+
+本内容は人工知能補助协作を採用し、本人が審査し、本人の観点と立場に合致しています。
+
+- 本文作者: [newbe36524](https://www.newbe.pro)
+- 本文リンク: [https://docs.hagicode.com/blog/2026-03-09-codex-sdk-console-message-parsing/](https://docs.hagicode.com/blog/2026-03-09-codex-sdk-console-message-parsing/)
+- 著作権声明: 本ブログのすべての記事は特別な声明を除き、BY-NC-SA ライセンス契約を採用しています。転載の出典を明記してください！

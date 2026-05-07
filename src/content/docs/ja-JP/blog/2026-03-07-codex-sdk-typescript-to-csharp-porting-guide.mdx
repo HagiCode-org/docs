@@ -1,0 +1,296 @@
+---
+title: "TypeScript から C# へ：Codex SDK のクロス言語移移植実践"
+date: 2026-03-07
+tags: ["C#", TypeScript, SDK, Codex, クロス言語, 移植]
+description: "まあ、この記事も一つの子供のようなもので、公式の TypeScript Codex SDK を完全に C# に移植した全過程を記録しています。\"移植\"と言っても、実際には長い冒険のようで、毕竟二つの"
+---
+
+## TypeScript から C# へ：Codex SDK のクロス言語移移植実践
+
+> まあ、この記事も一つの子供のようなもので、公式の TypeScript Codex SDK を完全に C# に移植した全過程を記録しています。「移植」と言っても、実際には長い冒険のようで、二つの言語の性格があまり違うので、何とか仲良く付き合っていく方法を見つける必要があります。
+
+## 背景
+
+Codex というものは、OpenAI が発売した AI Agent CLI ツールで、確かにとても強力です。公式側が TypeScript SDK を提供していて、`@openai/codex` というパッケージに入っています。これは `codex exec --experimental-json` コマンドを呼び出して Codex CLI と対話し、JSONL 形式のイベントストリームを解析します。
+
+しかし、我々は HagiCode プロジェクトで、純粋な .NET 環境でそれを使用する必要があります。具体的には、C# バックエンドサービスとデスクトップアプリケーションです。你说这事闹的、CLI ツールを一つ呼び出すために .NET プロジェクトに Node.js ランタイムを導入するなんて、それは大変すぎます。
+
+そこで我々の前にあるのは二つの道：一是複雑な Node.js ブリッジ層を維持する、二是自分で手を動かって衣食足り、ネイティブ C# SDK を実現する。
+
+我々は後者を選択しました。
+
+## HagiCode について
+
+実はこの文も我々が [HagiCode](https://hagicode.com) プロジェクトで得た実践経験から来ています。HagiCode はオープンソースの AI コードアシスタントプロジェクトで、听起来挺高大上的ですが、说白了就是同時にフロントエンド VSCode 拡張、バックエンド AI サービス、クロスプラットフォームデスクトップクライアントなどの複数のコンポーネントを維持しています。このような多言語、多プラットフォームの複雑さこそ、我々がネイティブ C# SDK を必要とする直接の理由です——总不能真的在 .NET 项目里跑个 Node.js 吧？那也太魔幻了。
+
+もしこの記事が少しでも役に立つと思うなら、GitHub で Star をください：[github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)、公式サイトにもぜひアクセスしてください：[hagicode.com](https://hagicode.com)。毕竟一个人品无限的项目能得到支持，也是件开心的事。
+
+## コア内容
+
+### アーキテクチャ設計の対比
+
+コードレベルの変換を始める前に、まず二つの SDK のアーキテクチャ設計を理解する必要があります。毕竟知己知彼，百战不殆嘛。
+
+TypeScript SDK のコアアーキテクチャ是这样的：
+
+```
+Codex (入口クラス)
+  └── CodexExec (エグゼキューター、サブプロセスを管理)
+      └── Thread (対話スレッド)
+          ├── run() / runStreamed() (同期/非同期実行)
+          └── イベントストリーム解析
+```
+
+C# SDK は、同じアーキテクチャ階層を維持していますが、実装の詳細で適合を行いました。全体のアイデアは：API の一貫性を維持しつつ、具体的な実装では C# 言語特性を最大限に活用すること。毕竟言語が違えば、やはり区別が必要です。
+
+### タイプシステムの変換
+
+这是最基础也是最重要的工作。毕竟万丈高楼平地起、基础打不好、后面全是麻烦。
+
+TypeScript のタイプシステムは C# よりも柔軟で、这是事实。我々は適切なマッピング方法を見つける必要があります：
+
+| TypeScript | C# | 説明 |
+|------------|-----|------|
+| `interface` / `type` | `record` | C# は record を使用して不変データ構造を実現 |
+| `string \| null` | `string?` | null許容参照タイプ |
+| `boolean \| undefined` | `bool?` | null許容ブール値 |
+| `AsyncGenerator` | `IAsyncEnumerable` | 非同期イテレータ |
+
+**イベントタイプシステム**は典型的な例です。TypeScript はユニオンタイプを使用してイベントを定義します：
+
+```typescript
+export type ThreadEvent =
+  | ThreadStartedEvent
+  | TurnStartedEvent
+  | TurnCompletedEvent
+  | ...
+```
+
+C# では、我々は継承階層とパターンマッチングを使用して同様の効果を実現します：
+
+```csharp
+public abstract record ThreadEvent(string Type);
+
+public sealed record ThreadStartedEvent(string ThreadId) : ThreadEvent("thread.started");
+public sealed record TurnStartedEvent() : ThreadEvent("turn.started");
+public sealed record TurnCompletedEvent(Usage Usage) : ThreadEvent("turn.completed");
+// ...
+```
+
+`record` を使用するのは `class` ではなく、イベントオブジェクトは不変であるべきだからで、これは TypeScript で普通のオブジェクトを使用するのと同じ道理です。そして `sealed` キーワードは余分なサブクラスが継承しないことを保証し、コンパイラは最適化を行うことができます。其实也就那么回事、习惯就好了。
+
+### コア変換点
+
+#### 1. イベントパーサー
+
+イベント解析は SDK 全体のコアで、毕竟这决定了我们能否正确理解 Codex CLI 返回的每一条信息。解析错了、后面全是白忙活。
+
+TypeScript バージョンは `JSON.parse()` を使用して各行の JSON を解析します：
+
+```typescript
+export function parseEvent(line: string): ThreadEvent {
+  const data = JSON.parse(line);
+  // 各种のイベントタイプを処理...
+}
+```
+
+C# バージョンは `System.Text.Json.JsonDocument` を使用します：
+
+```csharp
+public static ThreadEvent Parse(string line)
+{
+    using var document = JsonDocument.Parse(line);
+    var root = document.RootElement;
+    var type = GetRequiredString(root, "type", "event.type");
+
+    return type switch
+    {
+        "thread.started" => new ThreadStartedEvent(GetRequiredString(root, "thread_id", ...)),
+        "turn.started" => new TurnStartedEvent(),
+        "turn.completed" => new TurnCompletedEvent(ParseUsage(...)),
+        // ...
+        _ => new UnknownThreadEvent(type, root.Clone()),
+    };
+}
+```
+
+这里有一个小技巧：`root.Clone()` は必要で、因为 `JsonDocument` の要素はドキュメント解放後に失效し、我々は未知のイベントタイプのためにコピーを保留する必要があります。这也是没办法的事、毕竟 C# の JSON 处理和 JavaScript 不太一样。
+
+#### 2. プロセス管理の違い
+
+这是两个 SDK 差异最大的地方。毕竟 Node.js 和 .NET 的脾性不太一样、总得适应适应。
+
+TypeScript は Node.js の `spawn()` 関数を使用します：
+
+```typescript
+const child = spawn(this.executablePath, commandArgs, { env, signal });
+```
+
+C# は .NET の `System.Diagnostics.Process` を使用します：
+
+```csharp
+using var process = new Process { StartInfo = startInfo };
+process.Start();
+
+// stdin/stdout/stderr を手動で管理する必要がある
+```
+
+具体的には、C# バージョンはこのようにプロセスを設定する必要があります：
+
+```csharp
+var startInfo = new ProcessStartInfo
+{
+    FileName = _executablePath,
+    RedirectStandardInput = true,
+    RedirectStandardOutput = true,
+    RedirectStandardError = true,
+    UseShellExecute = false,
+    CreateNoWindow = true,
+};
+```
+
+最大の違いはキャンセルメカニズムです。TypeScript は `AbortSignal` を使用し、这是 Web API の一部で、用起来挺顺手的：
+
+```typescript
+const child = spawn(cmd, args, { signal: cancellationSignal });
+```
+
+C# は `CancellationToken` を使用します：
+
+```csharp
+public async IAsyncEnumerable<string> RunAsync(
+    CodexExecArgs args,
+    [EnumeratorCancellation] CancellationToken cancellationToken = default)
+{
+    // ループ内でキャンセル状態をチェック
+    while (!cancellationToken.IsCancellationRequested)
+    {
+        // 出力を処理...
+    }
+
+    // キャンセル時にプロセスを終了
+    if (cancellationToken.IsCancellationRequested)
+    {
+        try { process.Kill(entireProcessTree: true); } catch { }
+    }
+}
+```
+
+这其中的区别、大概就是Web API と .NET 生态の差异吧、说到底也就是那么回事。
+
+#### 3. 設定シリアライゼーションの維持
+
+両方の SDK は JSON 設定を TOML 設定に変換するロジックを実現しており、Codex CLI は TOML 形式の設定上書きを受け入れるためです。この部分のロジックは完全に一貫性を維持する必要があり、さもなくば同じ設定が二つの SDK で異なる動作を生成します。
+
+这叫什么？这就叫工匠精神嘛。毕竟细节决定成败、有些事不能将就。
+
+### 実装の詳細
+
+#### プロジェクト構造
+
+我々はこのようなプロジェクト構造を作成しました：
+
+```
+CodexSdk/
+├── CodexSdk.csproj
+├── Codex.cs           # 入口クラス
+├── CodexThread.cs     # 対話スレッド
+├── CodexExec.cs       # エグゼキューター
+├── Events.cs          # イベントタイプ定義
+├── Items.cs           # プロジェクトタイプ定義
+├── EventParser.cs     # イベントパーサー
+├── OutputSchemaTempFile.cs  # 一時ファイル管理
+└── ...
+```
+
+看起来也挺整齐的、不是吗？
+
+#### 使用例
+
+基本的な使用方法は TypeScript SDK と一貫性を維持します：
+
+```csharp
+using CodexSdk;
+
+// Codex インスタンスを作成
+var codex = new Codex();
+var thread = codex.StartThread();
+
+// クエリを実行
+var result = await thread.RunAsync("Summarize this repository.");
+Console.WriteLine(result.FinalResponse);
+```
+
+ストリーミングイベント処理は C# のパターンマッチング能力を活用します：
+
+```csharp
+await foreach (var @event in thread.RunStreamedAsync("Analyze the code."))
+{
+    switch (@event)
+    {
+        case ItemCompletedEvent itemCompleted
+            when itemCompleted.Item is AgentMessageItem msg:
+            Console.WriteLine($"Assistant: {msg.Text}");
+            break;
+        case TurnCompletedEvent completed:
+            Console.WriteLine($"Tokens: in={completed.Usage.InputTokens}");
+            break;
+        case CommandExecutionItem command:
+            Console.WriteLine($"Command: {command.Command}");
+            break;
+    }
+}
+```
+
+### 注意事項
+
+実装過程で、我々も白忙活ではありません、总结经验如下：
+
+1. **プロセス管理**：C# バージョンはプロセスのライフサイクルを手動で管理する必要があり、キャンセル時のプロセス終了を含みます。`Kill(entireProcessTree: true)` を使用して子プロセスも確実にクリーンアップします。这叫什么？这就叫有始有终。
+
+2. **エラー処理**：我々は `InvalidOperationException` を使用して解析エラーをスローし、TypeScript SDK と同様のエラー処理方法を維持します。毕竟エラー処理这事儿、不能太随意。
+
+3. **リソースクリーニング**：`OutputSchemaTempFile` は `IAsyncDisposable` を実現し、一時ファイルが正しくクリーンアップされることを保証します。这也是没办法的事、资源不清理干净、总会有问题。
+
+4. **環境変数**：C# バージョンは `CodexOptions.Env` を通じてプロセス環境変数を完全に上書きすることをサポートします。这功能虽然小、但挺实用的。
+
+5. **プラットフォームの違い**：C# バージョンは TypeScript バージョンで npm パッケージ内のバイナリファイルを自動的に検索するロジックを含みません。これは .NET プロジェクトが通常 npm に依存しないため、`CODEX_EXECUTABLE` 環境変数または `CodexPathOverride` を通じて codex 実行ファイルパスを指定する必要があります。这叫什么？这就叫因地制宜。
+
+## まとめ
+
+成熟した TypeScript SDK を C# に移植することは、単に構文レベルの変換だけでなく、二つの言語の設計哲学に対する理解でもあります。TypeScript の柔軟性と JavaScript エコシステム特性（AbortSignal など）は C# で対応する代替案を見つける必要があります。这其中的酸甜苦辣、大概也只有真正做过的人才能体会。
+
+キーの体会は：**API の一貫性を維持することは実装の詳細の一貫性を維持することよりも重要**です。ユーザーが気にするのはインターフェースが使いやすいかどうかで、内部実装が同じかどうかではありません。这话听起来简单、但做起来需要取舍。
+
+もしあなたも同様のクロス言語移植作業をしているなら、我々の経験は：まず元の SDK のアーキテクチャ設計を完全に理解し、そしてモジュールごとに変換を行い、最後に完全なテストケースを通じて動作の一貫性を保証することです。毕竟急不得、一口吃不成胖子。
+
+すべては良くなる、すべてはある......
+
+---
+
+## 参考資料
+
+- 公式 TypeScript SDK：[github.com/openai/codex](https://github.com/openai/codex)
+- C# SDK ソースコード：[github.com/HagiCode-org/site/tree/main/repos/playground/CodexDotnet](https://github.com/HagiCode-org/site/tree/main/repos/playground/CodexDotnet)
+- Codex 公式ドキュメント：[codex.docs.anysphere.co](https://codex.docs.anysphere.co)
+
+---
+
+**もしこの記事があなたに役に立つなら**：
+
+- GitHub で Star をください：[github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- 公式サイトにアクセスして詳細を確認してください：[hagicode.com](https://hagicode.com)
+- 30 分間の実戦デモを見る：[www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)
+- ワンクリックインストール体験：[docs.hagicode.com/installation/docker-compose](https://docs.hagicode.com/installation/docker-compose)
+- Desktop デスクトップ版クイックインストール：[hagicode.com/desktop/](https://hagicode.com/desktop/)
+- ベータテストが開始されました、インストールして体験してください
+
+---
+
+ご読感ありがとうございます。もしこの記事が役に立つと思うなら、下のいいねボタン👍をクリックして、より多くの人にこの記事を見てもらいましょう。
+
+本内容は人工知能支援協力を採用し、本人が審査し、本人の観点と立場に合致します。
+
+- 本文の作者: [newbe36524](https://www.newbe.pro)
+- 本文のリンク: [https://docs.hagicode.com/blog/2026-03-07-codex-sdk-typescript-to-csharp-porting-guide/](https://docs.hagicode.com/blog/2026-03-07-codex-sdk-typescript-to-csharp-porting-guide/)
+- 著作権宣言: 本ブログのすべての記事は特別な宣言を除き、BY-NC-SA ライセンス協定を採用します。転載は出所を明記してください！

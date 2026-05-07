@@ -1,0 +1,373 @@
+---
+title: HagiCode 平台的多 AI Provider 架構實踐
+date: 2026-03-11
+tags: [Orleans, AI, 架構設計, WebSocket, HTTP, ACP, HagiCode]
+description: "本文分享了在 Orleans Grain 架構下，如何通過統一的 IAIProvider 接口集成 iflow 和 OpenCode 兩個 AI 工具的技術方案，並詳細"
+---
+
+## HagiCode 平台的多 AI Provider 架構實踐
+
+> 本文分享了在 Orleans Grain 架構下，如何通過統一的 IAIProvider 接口集成 iflow 和 OpenCode 兩個 AI 工具的技術方案，並詳細對比了 WebSocket 和 HTTP 兩種通信方式的實現差異。
+
+:::note[時間語境說明]
+本文記錄的是發布當時的 provider 架構實踐。當前常駐支援範圍請以 [AI Agent CLI 安裝](/related-software-installation/ai-agent-cli/) 與 [安裝指南](/installation) 為準；`IFlowCli` 現僅保留為歷史兼容值，不屬於當前活躍支援範圍。
+:::
+
+## 背景
+
+其實也沒什麼特別的，就是做 HagiCode 的時候遇到了個挺實際的問題——用戶想用不同的 AI 工具，這倒也不奇怪，畢竟每個人都有自己的習慣。有的喜歡 Claude Code，有的鐘愛 GitHub Copilot，還有些團隊用自己開發的工具。
+
+最開始的方案也挺簡單粗暴的，就是給每個 AI 工具寫專門的對接代碼。可後來問題就來了——代碼裡全是 if-else，改一個地方要到處測試，新工具接入還得重新寫一堆邏輯，想想都覺得累。
+
+後來我想明白了，不如做一個統一的 IAIProvider 接口，把所有 AI 提供者的能力都抽象出來。這樣，不管底層用的是哪個工具，對上層來說都是一樣的調用方式，豈不美哉？
+
+最近項目要接入兩個新工具：iflow 和 OpenCode。這兩個都支援 ACP 協議，但通信方式不太一樣——iflow 用 WebSocket，OpenCode 用 HTTP API。這也算是種考驗吧，要在統一的接口下適配兩種不同的通信模式，不過想想也挺有意思的。
+
+## 關於 HagiCode
+
+本文分享的方案來自我們在 [HagiCode](https://hagicode.com) 項目中的實踐經驗。HagiCode 是一個基於 Orleans Grain 架構的 AI 輔助開發平台，通過統一的 IAIProvider 接口與不同的 AI 提供者集成，讓用戶可以靈活選擇自己喜歡的 AI 工具。
+
+## 架構設計
+
+### 統一的接口抽象
+
+首先，定義了 IAIProvider 接口，把所有 AI 提供者需要實現的能力都抽象出來：
+
+```csharp
+public interface IAIProvider
+{
+    string Name { get; }
+    bool SupportsStreaming { get; }
+    ProviderCapabilities Capabilities { get; }
+
+    Task<AIResponse> ExecuteAsync(AIRequest request, CancellationToken cancellationToken = default);
+    IAsyncEnumerable<AIStreamingChunk> StreamAsync(AIRequest request, CancellationToken cancellationToken = default);
+    Task<ProviderTestResult> PingAsync(CancellationToken cancellationToken = default);
+    IAsyncEnumerable<AIStreamingChunk> SendMessageAsync(AIRequest request, string? embeddedCommandPrompt = null, CancellationToken cancellationToken = default);
+}
+```
+
+這個接口有幾個關鍵方法：
+- ExecuteAsync：執行一次性的 AI 請求
+- StreamAsync：流式獲取響應，支援即時展示
+- PingAsync：健康檢查，驗證 provider 是否可用
+- SendMessageAsync：發送消息，支援嵌入式命令
+
+### IFlowCliProvider：基於 WebSocket 的實現
+
+iflow 使用 WebSocket 進行 ACP 通信，整體架構是這樣的：
+
+```
+IFlowCliProvider → ACPSessionManager → WebSocketAcpTransport → iflow CLI
+                ↓
+         動態端口分配 + 進程管理
+```
+
+核心流程也挺簡單：
+1. ACPSessionManager 負責創建和管理 ACP 會話
+2. WebSocketAcpTransport 處理 WebSocket 通信
+3. 動態分配一個端口，用 iflow --experimental-acp --port  啟動 iflow 進程
+4. 通過 IAIRequestToAcpMapper 和 IAcpToAIResponseMapper 做請求/響應的轉換
+
+來看看核心代碼：
+
+```csharp
+private async IAsyncEnumerable<AIStreamingChunk> StreamCoreAsync(
+    AIRequest request,
+    string? embeddedCommandPrompt,
+    [EnumeratorCancellation] CancellationToken cancellationToken)
+{
+    // 解析工作目錄
+    var resolvedWorkingDirectory = ResolveWorkingDirectory(request);
+    var effectiveRequest = ApplyEmbeddedCommandPrompt(request, embeddedCommandPrompt);
+
+    // 創建 ACP 會話
+    await using var session = await _sessionManager.CreateSessionAsync(
+        Name,
+        resolvedWorkingDirectory,
+        cancellationToken,
+        request.SessionId);
+
+    // 發送提示詞
+    var prompt = _requestMapper.ToPromptString(effectiveRequest);
+    var promptResponse = await session.SendPromptAsync(prompt, cancellationToken);
+
+    // 接收流式響應
+    await foreach (var notification in session.ReceiveUpdatesAsync(cancellationToken))
+    {
+        if (_responseMapper.TryConvertToStreamingChunk(notification, out var chunk))
+        {
+            if (chunk.Type == StreamingChunkType.Metadata && chunk.IsComplete)
+            {
+                yield return chunk;
+                yield break;
+            }
+            yield return chunk;
+        }
+    }
+}
+```
+
+這裡有幾個設計上的注意點，也算是一些小心得：
+- 用 await using 確保會話正確釋放，避免資源泄漏，畢竟資源這東西，不用了就該放歸自然
+- 流式響應通過 IAsyncEnumerable 返回，天然支援異步流
+- Metadata 類型的 chunk 判斷是否完成，確保完整接收響應
+
+### OpenCodeCliProvider：基於 HTTP API 的實現
+
+OpenCode 用 HTTP API 方式提供服務，架構略有不同：
+
+```plaintext
+OpenCodeCliProvider → OpenCodeRuntimeManager → OpenCodeClient → OpenCode HTTP API
+                      ↓
+                OpenCodeProcessManager → opencode 進程管理
+```
+
+OpenCode 的特點是用 SQLite 數據庫持久化會話綁定關係，這樣可以支援會話恢復和提示詞響應恢復，這倒挺貼心的設計：
+
+```csharp
+private async Task<OpenCodePromptExecutionResult> ExecutePromptAsync(
+    AIRequest request,
+    string? embeddedCommandPrompt,
+    CancellationToken cancellationToken)
+{
+    var prompt = BuildPrompt(request, embeddedCommandPrompt);
+    var resolvedWorkingDirectory = ResolveWorkingDirectory(request.WorkingDirectory);
+    var client = await _runtimeManager.GetClientAsync(resolvedWorkingDirectory, cancellationToken);
+    var bindingSessionId = request.SessionId;
+    var boundSession = TryGetBinding(bindingSessionId, resolvedWorkingDirectory);
+
+    // 嘗試使用已綁定的會話
+    if (boundSession is not null)
+    {
+        try
+        {
+            return await PromptSessionAsync(
+                client,
+                boundSession,
+                BuildPromptRequest(request, prompt, CreatePromptMessageId()),
+                request.Model ?? _settings.Model,
+                cancellationToken);
+        }
+        catch (OpenCodeApiException ex) when (IsStaleBinding(ex))
+        {
+            // 會話已過期，移除綁定
+            RemoveBinding(bindingSessionId);
+        }
+    }
+
+    // 創建新會話
+    var session = await client.Session.CreateAsync(new OpenCodeSessionCreateRequest
+    {
+        Title = BuildSessionTitle(request)
+    }, cancellationToken);
+
+    BindSession(bindingSessionId, session.Id, resolvedWorkingDirectory);
+    return await PromptSessionAsync(client, session.Id, ...);
+}
+```
+
+這個實現有幾個亮點，或者說幾個有趣的地方：
+- 會話綁定機制：同一個 SessionId 會復用 OpenCode 會話，避免重複創建，省得浪費資源
+- 過期處理：檢測到會話過期時自動清理綁定，舊的不去，新的不來
+- 數據庫持久化：通過 SQLite 存儲綁定關係，重啟後仍然有效，有些東西記住了就是記住了
+
+### 兩種方式的對比
+
+| 方面 | IFlowCliProvider | OpenCodeCliProvider |
+|------|-----------------|---------------------|
+| 通信方式 | WebSocket (ACP) | HTTP API |
+| 進程管理 | ACPSessionManager | OpenCodeProcessManager |
+| 端口分配 | 動態端口 | 無端口（使用 HTTP） |
+| 會話管理 | ACPSession | OpenCodeSession |
+| 持久化 | 內存緩存 | SQLite 數據庫 |
+| 啟動命令 | iflow --experimental-acp --port  | opencode |
+| 延遲 | 更低（長連接） | 相對較高（HTTP 請求） |
+
+選擇哪種方式主要看你的需求：WebSocket 適合即時性要求高的場景，HTTP API 則更簡單、更容易調試。這就像選路一樣，有的路快一點，有的路好走一點罷了。
+
+## 實踐指南
+
+### 配置 Provider
+
+先在配置文件裡啟用這兩個 provider：
+
+```yaml
+AI:
+  Providers:
+    IFlowCli:
+      Type: "IFlowCli"
+      Enabled: true
+      ExecutablePath: "iflow"
+      Model: null
+      WorkingDirectory: null
+    OpenCodeCli:
+      Type: "OpenCodeCli"
+      Enabled: true
+      ExecutablePath: "opencode"
+      Model: "anthropic/claude-sonnet-4"
+      WorkingDirectory: null
+
+OpenCode:
+  Enabled: true
+  BaseUrl: "http://localhost:38376"
+  ExecutablePath: "opencode"
+  StartupTimeoutSeconds: 30
+  RequestTimeoutSeconds: 120
+```
+
+### 使用 IFlowCliProvider
+
+```csharp
+// 通過 Factory 獲取 provider
+var provider = await _providerFactory.GetProviderAsync(AIProviderType.IFlowCli);
+
+// 執行 AI 請求
+var request = new AIRequest
+{
+    Prompt = "請幫我重構這個函數",
+    WorkingDirectory = "/path/to/project",
+    Model = "claude-sonnet-4"
+};
+
+// 獲取完整響應
+var response = await provider.ExecuteAsync(request, cancellationToken);
+Console.WriteLine(response.Content);
+
+// 或者用流式響應
+await foreach (var chunk in provider.StreamAsync(request, cancellationToken))
+{
+    if (chunk.Type == StreamingChunkType.ContentDelta)
+    {
+        Console.Write(chunk.Content);
+    }
+}
+```
+
+### 使用 OpenCodeCliProvider
+
+```csharp
+// 通過 Factory 獲取 provider
+var provider = await _providerFactory.GetProviderAsync(AIProviderType.OpenCodeCli);
+
+var request = new AIRequest
+{
+    Prompt = "請幫我分析這個錯誤",
+    WorkingDirectory = "/path/to/project",
+    Model = "anthropic/claude-sonnet-4"
+};
+
+var response = await provider.ExecuteAsync(request, cancellationToken);
+Console.WriteLine(response.Content);
+```
+
+### 健康檢查
+
+在啟動或使用前，可以先檢查 provider 是否可用：
+
+```csharp
+var iflowResult = await iflowProvider.PingAsync(cancellationToken);
+if (!iflowResult.Success)
+{
+    Console.WriteLine($"IFlow 不可用: {iflowResult.ErrorMessage}");
+    return;
+}
+
+var openCodeResult = await openCodeProvider.PingAsync(cancellationToken);
+if (!openCodeResult.Success)
+{
+    Console.WriteLine($"OpenCode 不可用: {openCodeResult.ErrorMessage}");
+    return;
+}
+```
+
+### 嵌入式命令支援
+
+兩個 provider 都支援嵌入式命令，比如 /file:xxx 這樣的命令：
+
+```csharp
+var request = new AIRequest
+{
+    Prompt = "分析這個文件的問題",
+    SystemMessage = "你是一個代碼分析專家"
+};
+
+await foreach (var chunk in provider.SendMessageAsync(
+    request,
+    embeddedCommandPrompt: "/file:src/main.cs",
+    cancellationToken))
+{
+    Console.Write(chunk.Content);
+}
+```
+
+## 注意事項和最佳實踐
+
+### 資源管理
+
+IFlow 用 WebSocket 長連接，所以資源管理要特別注意：
+- 用 await using 確保會話正確釋放，不用了就放手
+- 取消操作會觸發進程清理
+- ACPSessionManager 支援最大會話數限制
+
+OpenCode 的進程管理相對簡單，OpenCodeRuntimeManager 會自動處理，省心不少。
+
+### 錯誤處理
+
+兩個 provider 都有完善的錯誤處理：
+- IFlow 的錯誤通過 ACP 會話更新傳播
+- OpenCode 的錯誤通過 OpenCodeApiException 拋出
+- 建議在調用方捕獲並處理這些異常，畢竟錯誤總會發生的
+
+### 性能考慮
+
+- IFlow 的 WebSocket 通信比 HTTP 有更低的延遲
+- OpenCode 的會話復用可以減少 HTTP 請求開銷
+- Factory 的緩存機制可以避免重複創建 provider
+- 高併發場景下，要關注進程數和連接數的限制，別到時候撐不住了
+
+### 配置驗證
+
+啟動時會驗證可執行文件路徑，但運行時也可能出問題。PingAsync 是個好工具，可以驗證配置是否正確：
+
+```csharp
+// 啟動時檢查
+var provider = await _providerFactory.GetProviderAsync(providerType);
+var result = await provider.PingAsync(cancellationToken);
+if (!result.Success)
+{
+    _logger.LogError("Provider {ProviderType} 不可用: {Error}", providerType, result.ErrorMessage);
+}
+```
+
+## 總結
+
+本文分享了 HagiCode 平台在集成 iflow 和 OpenCode 兩個 AI 工具時的技術方案。通過統一的 IAIProvider 接口，實現了對不同通信方式（WebSocket 和 HTTP）的適配，同時保持了上層調用的一致性。
+
+核心思路其實挺簡單的：
+1. 定義統一的接口抽象
+2. 對不同實現做適配層
+3. 通過工廠模式統一管理
+
+這樣擴展性就很好，以後有新的 AI 工具要接入，只需要實現 IAIProvider 接口就行，不用改動太多現有代碼。想想也挺合理的，就像搭積木一樣，有統一的接口，想怎麼拼都行。
+
+如果你也在做多 AI 工具的集成，希望本文對你有幫助。不過話說回來，技術這東西，能幫到人就好，其他的也不必太在意......
+
+## 參考資料
+
+- HagiCode GitHub: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- HagiCode 官網: [hagicode.com](https://hagicode.com)
+- HagiCode 安裝指南: [docs.hagicode.com/installation](https://docs.hagicode.com/installation)
+- ACP 協議規範: [github.com/modelcontextprotocol/specification](https://github.com/modelcontextprotocol/specification)
+- Orleans 文檔: [learn.microsoft.com/dotnet/orleans](https://learn.microsoft.com/dotnet/orleans)
+
+---
+
+如果本文對你有幫助：
+- 點個讚讓更多人看到
+- 來 GitHub 給個 Star：[github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- 訪問官網了解更多：[hagicode.com](https://hagicode.com)
+- 觀看 30 分鐘實戰演示：[www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)
+- 一鍵安裝體驗：[docs.hagicode.com/installation/docker-compose](https://docs.hagicode.com/installation/docker-compose)
+- Desktop 桌面端快速安裝：[hagicode.com/desktop/](https://hagicode.com/desktop/)
+- 公測已開始，歡迎安裝體驗

@@ -1,0 +1,395 @@
+---
+title: CLI呼び出しからSDK統合へ：.NETプロジェクトにおけるGitHub Copilotのベストプラクティス
+date: 2026-04-03
+tags: [GitHub Copilot, .NET, AI統合, Orleans, SDK統合]
+description: "コマンドライン呼び出しから公式SDK統合へのアップグレード道程は、ある意味一つの経験でした。本日はHagiCodeプロジェクトで踏んだ坑と学んだことを共有します。"
+---
+
+## CLI呼び出しからSDK統合へ：.NETプロジェクトにおけるGitHub Copilotのベストプラクティス
+
+> コマンドライン呼び出しから公式SDK統合へのアップグレード道程は、ある意味一つの経験でした。本日はHagiCodeプロジェクトで踏んだ坑と学んだことを共有します。
+
+## 背景
+
+GitHub Copilot SDKが2025年に正式リリースされた後、私たちはそれをAI能力レイヤーに統合し始めました。それ以前は、プロジェクトは主にCopilot CLIコマンドラインツールを直接呼び出してGitHub Copilotの能力を使用していましたが、この方式には実はいくつかの明らかな問題がありました：
+
+- **プロセス管理が複雑**：CLIプロセスのライフサイクル、起動タイムアウト、プロセスクリーンアップを手動で管理する必要があります——結局プロセスってものは、クラッシュするときはクラッシュするし、前兆もないものです
+- **イベント処理が不完全**：生のCLI呼び出しではモデル推論プロセスとツール実行の細粒度なイベントをキャプチャするのが難しく、結果しか見えず、思考プロセスが見えないようなものです
+- **セッション管理が困難**：有効なセッション再利用と復元メカニズムが欠けており、毎回最初からやり直す必要があり、考えてみるのもかなり疲れます
+- **互換性の問題**：CLIパラメータの更新が頻繁で、パラメータ互換性ロジックを継続的にメンテナンスする必要があり、これは風車と戦うようなものです
+
+これらの問題は日常開発で徐々に顕在化し、特にモデル推論プロセス（thinking）とツール実行ステータスをリアルタイムで追跡する必要がある場合、CLI呼び出しの制約が特に顕著になりました。私たちもようやく理解しました。より低レベルで、より完全な統合方式が必要です——結局のところ、ローマに通じる道はいろいろありますが、歩きやすい道もあれば、少し曲折した道もあるだけです。
+
+## HagiCodeについて
+
+本文で共有するソリューションは、[HagiCode](https://hagicode.com)プロジェクトでの実践経験から来ています。HagiCodeはオープンソースのAIコードアシスタントプロジェクトであり、開発プロセスでGitHub Copilotの各種能力を深く統合する必要があります——基本的なコード補完から複雑なマルチターン対話やツール呼び出しまで。これらの実際のニーズが私たちをCLI呼び出しから公式SDK統合へと押し上げました。
+
+もしこの実践ソリューションに興味があるなら、私たちのエンジニアリング実践があなたに役立つかもしれません——ではHagiCodeプロジェクト自体も注目に値するでしょう。もしかすると、記事の末尾でプロジェクトに関する詳細情報とリンクが見つかるかもしれません、誰に分かりますね......
+
+## アーキテクチャ設計
+
+プロジェクトはCLI呼び出しの問題を解決するために階層アーキテクチャを採用しています：
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  hagicode-core (Orleans Grains + AI Provider Layer)    │
+│  - CopilotAIProvider: AIRequestをCopilotOptionsに変換   │
+│  - GitHubCopilotGrain: Orleans分散実行インターフェース   │
+└─────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────┐
+│  HagiCode.Libs (Shared Provider Layer)                 │
+│  - CopilotProvider: CLI Providerインターフェース実装     │
+│  - ICopilotSdkGateway: SDK呼び出し抽象                  │
+│  - GitHubCopilotSdkGateway: SDKセッション管理とイベント配信│
+└─────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────┐
+│  GitHub Copilot SDK (Official .NET SDK)                │
+│  - CopilotClient: SDKクライアント                       │
+│  - CopilotSession: セッション管理                       │
+│  - SessionEvent: イベントストリーム                     │
+└─────────────────────────────────────────────────────────┘
+```
+
+この階層設計がもたらす技術的利点は、実用的です：
+
+1. **関心の分離**：コアビジネスロジックとSDK実装詳細のデカップリング——結局、どの層が何をするか、井水は河水を犯さず
+2. **テスト可能性**：`ICopilotSdkGateway`インターフェースを通じて簡単に単体テストができ、テストもそれほど苦労しません
+3. **再利用性**：HagiCode.Libsは複数のプロジェクトから参照でき、一度書けば、多所で使える
+4. **保守性**：SDKアップグレードはGateway層のみを修正すればよく、上のコードは触る必要がなく、とても美しい
+
+## コア実装
+
+### 認証フロー
+
+認証はSDK統合の第一歩であり、最も重要な一歩です——結局、門も入れなければ、後のことは話になりません。私たちは柔軟な認証設定を設計し、複数の認証ソースをサポートします：
+
+```csharp
+// CopilotProvider.cs - 認証ソース設定
+public class CopilotOptions
+{
+    public bool UseLoggedInUser { get; set; } = true;
+    public string? GitHubToken { get; set; }
+    public string? CliUrl { get; set; }
+}
+
+// SDKリクエストに変換
+return new CopilotSdkRequest(
+    GitHubToken: options.AuthSource == CopilotAuthSource.GitHubToken
+        ? options.GitHubToken
+        : null,
+    UseLoggedInUser: options.AuthSource != CopilotAuthSource.GitHubToken
+);
+```
+
+この設計の利点は、実のところ明らかです：
+
+- ログインユーザーモード（token不要）をサポートし、デスクトップシナリオに適しています——ユーザーは自分のアカウントでログインすればOK
+- GitHub Tokenモードをサポートし、サーバーサイドデプロイに適しています——統一管理も便利
+- Copilot CLI URLのオーバーライドをサポートし、企業プロキシ設定に便利——企業環境嘛、常に特殊なルールがあるものです
+
+実際の使用では、この柔軟な認証方式は異なるデプロイシナリオの設定作業を大幅に簡素化します。デスクトップ端末はユーザー自身のCopilotログイン状態を使用でき、サーバー側はTokenを通じて統一管理できます。どうと言うでしょう、各々所需を得るだけです。
+
+### イベントストリーム処理
+
+SDKの最も強力な能力の一つは、完全なイベントストリームのキャプチャでしょう。私たちはリアルタイムで各種SDKイベントを処理できるイベント配信システムを実装しました——結局、プロセスを知っているのと結果しか知らないのでは、感じが違います：
+
+```csharp
+// GitHubCopilotSdkGateway.cs - イベント配信コアロジック
+internal static SessionEventDispatchResult DispatchSessionEvent(
+    SessionEvent evt, bool sawDelta)
+{
+    switch (evt)
+    {
+        case AssistantReasoningEvent reasoningEvent:
+            // モデル推論プロセスをキャプチャ
+            events.Add(new CopilotSdkStreamEvent(
+                CopilotSdkStreamEventType.ReasoningDelta,
+                Content: reasoningEvent.Data.Content));
+            break;
+
+        case ToolExecutionStartEvent toolStartEvent:
+            // ツール呼び出し開始をキャプチャ
+            events.Add(new CopilotSdkStreamEvent(
+                CopilotSdkStreamEventType.ToolExecutionStart,
+                ToolName: toolStartEvent.Data.ToolName,
+                ToolCallId: toolStartEvent.Data.ToolCallId));
+            break;
+
+        case ToolExecutionCompleteEvent toolCompleteEvent:
+            // ツール呼び出し完了と結果をキャプチャ
+            events.Add(new CopilotSdkStreamEvent(
+                CopilotSdkStreamEventType.ToolExecutionEnd,
+                Content: ExtractToolExecutionContent(toolCompleteEvent)));
+            break;
+
+        default:
+            // 未処理イベントはRawEventとして保持
+            events.Add(new CopilotSdkStreamEvent(
+                CopilotSdkStreamEventType.RawEvent,
+                RawEventType: evt.GetType().Name));
+            break;
+    }
+}
+```
+
+この実装がもたらす価値は、どう言うでしょう：
+
+- **完全なモデル推論プロセス（thinking）のキャプチャ**：ユーザーはAIの思考プロセスを見ることができ、単なる最終結果だけではありません——答えを知るのではなく、どう思考して出したかを知るようなものです
+- **リアルタイムのツール実行ステータス追跡**：どのツールが実行中か、いつ完了したか、どんな結果を返したかを知る
+- **ゼロイベントロス**：RawEventメカニズムへのfallbackにより、すべてのイベントが記録されることを保証し、何も漏らさない
+
+HagiCodeの実際の使用では、これらの細粒度のイベントにより、ユーザーはAIの作業プロセスをより深く理解できるようになり、特に複雑なタスクのデバッグ時に役立ちます——これはやはり少し役に立ちます。
+
+### CLI互換性処理
+
+CLI呼び出しからSDKへの移行後、私たちは一部の既存のCLIパラメータがSDKでは適用されないことを発見しました。後方互換性を維持するために、パラメータフィルタリングシステムを実装しました——結局、古い設定が使えないのは、かなり頭痛の種です：
+
+```csharp
+// CopilotCliCompatibility.cs - パラメータフィルタリング
+private static readonly Dictionary<string, string> RejectedFlags = new()
+{
+    ["--headless"] = "サポートされていない起動パラメータ",
+    ["--model"] = "SDKネイティブフィールド経由で渡す",
+    ["--prompt"] = "SDKネイティブフィールド経由で渡す",
+    ["--interactive"] = "providerがインタラクションを管理",
+};
+
+public static CopilotCliArgumentBuildResult BuildCliArgs(CopilotOptions options)
+{
+    // サポートされていないパラメータをフィルタリングし、互換パラメータを保持
+    // 診断情報を生成
+}
+```
+
+这样做的好处：
+
+- 互換性のないCLIパラメータを自動フィルタリングし、実行時エラーを回避——プログラムクラッシュは冗談ではありません
+- 明確なエラー診断情報を生成し、開発者が問題を素早く特定するのに役立つ
+- SDKの安定性を保証し、CLIパラメータの変化による影響を受けない
+
+アップグレードプロセスで、この互換性処理メカニズムは私たちのスムーズな移行を助けました。古い設定ファイルはまだ使用でき、診断情報に基づいて段階的に調整するだけです——漸進的なプロセスと言えるでしょう。
+
+### ランタイムプーリング
+
+Copilot SDKのセッション作成コストは高く、頻繁なセッションの作成と破棄はパフォーマンスに影響します。私たちはセッションプール管理システムを実装しました——プールの中の水のように、使い果たしたらまた入れるのではなく、次回使い続けるために残しておくようなものです：
+
+```csharp
+// CopilotProvider.cs - セッションプール管理
+await using var lease = await _poolCoordinator.AcquireCopilotRuntimeAsync(
+    request,
+    async ct => await _gateway.CreateRuntimeAsync(sdkRequest, ct),
+    cancellationToken);
+
+if (lease.IsWarmLease)
+{
+    // 既存セッションを再利用
+    yield return CreateSessionReusedMessage();
+}
+
+await foreach (var eventData in lease.Entry.Resource.SendPromptAsync(...))
+{
+    yield return MapEvent(eventData);
+}
+```
+
+セッションプーリングの利点：
+
+- **セッション再利用**：同じsessionIdのリクエストは既存セッションを再利用でき、起動オーバーヘッドを削減
+- **セッション復元をサポート**：ネットワーク中断後に以前のセッション状態を復元可能——結局ネットワークってもの、誰も常に安定だとは保証できない
+- **自動プール管理**：期限切れセッションを自動クリーンアップし、リソースリークを回避
+
+HagiCodeの実際の使用では、セッションプーリングは応答速度を大幅に向上させ、特に連続対話処理時に効果が顕著です——この向上はやはり感じられます。
+
+### Orleans統合
+
+HagiCodeはOrleansを分散フレームワークとして使用し、私たちはCopilot SDKをOrleans Grainに統合しました——分散ってものは、言うのは複雑ですが、使うのはやはり順手です：
+
+```csharp
+// GitHubCopilotGrain.cs - 分散実行
+public async IAsyncEnumerable<GitHubCopilotResponse> ExecuteCommandStreamAsync(
+    string command,
+    CancellationToken token = default)
+{
+    var provider = await aiProviderFactory.GetProviderAsync(AIProviderType.GitHubCopilot);
+
+    await foreach (var chunk in provider.SendMessageAsync(request, null, token))
+    {
+        // 統一応答フォーマットにマッピング
+        yield return BuildChunkResponse(chunk, startedAt);
+    }
+}
+```
+
+Orleans統合がもたらす利点：
+
+- **統一AI Provider抽象**：異なるAIプロバイダーを簡単に切り替え可能——今日はこれ、明日はあれ、也挺灵活
+- **マルチテナント分離**：異なるユーザーのCopilotセッションは相互に分離され、井水は河水を犯さず
+- **永続化セッション状態**：セッション状態はサーバー再起動をまたいで復元可能、再起動してもデータ損失を恐れない
+
+大量の同時リクエストを処理する必要があるシナリオでは、Orleansの分散能力は良い拡張性を提供します——結局、単独では耐えられない時は、分散に頼るしかありません。
+
+## 実践ガイド
+
+### 設定例
+
+以下は完全な設定例です——コピーペーストして変更すればそのまま使えます：
+
+```json
+{
+  "AI": {
+    "Providers": {
+      "Providers": {
+        "GitHubCopilot": {
+          "Enabled": true,
+          "ExecutablePath": "copilot",
+          "Model": "gpt-5",
+          "WorkingDirectory": "/path/to/project",
+          "Timeout": 7200,
+          "StartupTimeout": 30,
+          "UseLoggedInUser": true,
+          "NoAskUser": true,
+          "Permissions": {
+            "AllowAllTools": false,
+            "AllowedTools": ["Read", "Bash", "Grep"],
+            "DeniedTools": ["Edit"]
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+### 使用時の注意点
+
+実際の使用で、私たちは注意すべき点をいくつかまとめました——一部は坑を踏んで得た経験です：
+
+**起動タイムアウト設定**：Copilot CLIの初回起動には長い時間がかかるため、`StartupTimeout`を少なくとも30秒に設定することをお勧めします。初回ログインの場合、さらに時間がかかるかもしれません——結局初回ログインは必ず検証が必要で、これも仕方がありません。
+
+**権限管理**：本番環境では`AllowAllTools: true`の使用を避けてください。`AllowedTools`ホワイトリストを使用して利用可能なツールを制御し、`DeniedTools`ブラックリストを使用して危険な操作を禁止します。これにより、AIが危険なコマンドを実行するのを効果的に防げます——安全ってもの、慎重にするに越したことはありません。
+
+**セッション管理**：同じ`sessionId`のリクエストは自動的にセッションを再利用します。セッション状態は`ProviderSessionId`を通じて永続化されます。キャンセル操作は`CancellationTokenSource`を通じて渡されます——セッション管理が良ければ、体験も自然と良くなります。
+
+**診断出力**：互換性のないCLIパラメータは`diagnostic`タイプメッセージを生成します。生のSDKイベントは`event.raw`タイプとして保持されます。エラー情報には分類（起動タイムアウト、パラメータ互換性なし等）が含まれ、問題のトラブルシューティングに便利です——問題が出た時に素早く特定できるのも、一種の慰めです。
+
+### ベストプラクティス
+
+私たちの実際の経験に基づき、いくつかのベストプラクティスを共有します——ある種のまとめです：
+
+**1. ツールホワイトリストを使用する**
+
+```csharp
+var request = new AIRequest
+{
+    Prompt = "このファイルを分析",
+    AllowedTools = new[] { "Read", "Grep", "Bash(git:*)" }
+};
+```
+
+ホワイトリストを通じて許可されたツールを明確に指定し、AIが予期しない操作を実行するのを防ぎます。特に書き込み権限を持つツール（Editなど）については、格外に慎重にする必要があります——結局データベース削除なんてこと、誰も経験したくないでしょう。
+
+**2. 適切なタイムアウトを設定する**
+
+```csharp
+options.Timeout = 3600;  // 1時間
+options.StartupTimeout = 60;  // 1分
+```
+
+タスクの複雑さに応じて適切なタイムアウト時間を設定します。短すぎるとタスクが中断する可能性があり、長すぎると無応答のリクエストを待つリソースの浪費になる可能性があります——凡事适度、過ぎたるは及ばざるが如しです。
+
+**3. セッション再利用を有効にする**
+
+```csharp
+options.SessionId = "my-session-123";
+```
+
+関連タスクに同じsessionIdを設定すると、以前のセッションコンテキストを再利用でき、応答速度が向上します——コンテキストってもの、時にはやはり重要です。
+
+**4. ストリーミング応答を処理する**
+
+```csharp
+await foreach (var chunk in provider.StreamAsync(request))
+{
+    switch (chunk.Type)
+    {
+        case StreamingChunkType.ThinkingDelta:
+            // 推論プロセスを処理
+            break;
+        case StreamingChunkType.ToolCallDelta:
+            // ツール呼び出しを処理
+            break;
+        case StreamingChunkType.ContentDelta:
+            // テキスト出力を処理
+            break;
+    }
+}
+```
+
+ストリーミング応答はAIの処理進行状況をリアルタイムで表示でき、ユーザー体験を向上させます。特に時間のかかるタスクでは、リアルタイムフィードバックが非常に重要です——プログレスバーを見ている方が、ただ待っているより強いです。
+
+**5. エラー処理とリトライ**
+
+```csharp
+try
+{
+    await foreach (var chunk in provider.StreamAsync(request))
+    {
+        // 応答を処理
+    }
+}
+catch (CopilotSessionException ex)
+{
+    // セッション例外を処理
+    logger.LogError(ex, "Copilot session failed");
+    // 例外タイプに基づいてリトライするかどうかを決定
+}
+```
+
+適切なエラー処理とリトライメカニズムはシステムの安定性を向上させます——誰もプログラムが永遠にエラーを出さないとは保証できません、エラーが出た時に適切に処理すればいいのです。
+
+## まとめ
+
+CLI呼び出しからSDK統合へのアップグレードは、HagiCodeプロジェクトに顕著な価値をもたらしました——どう言うでしょう、今回のアップグレードはやはり価値がありました：
+
+- **安定性向上**：SDKはより安定したインターフェースを提供し、CLIバージョンの変化による影響を受けません——バージョンアップデートを毎日心配する必要がなくなりました
+- **機能完全性**：推論プロセスとツール実行ステータスを含む完全なイベントストリームをキャプチャできます——プロセスも結果も見えます
+- **開発効率**：タイプセーフなSDKインターフェースにより開発がより効率的になり、実行時エラーが削減されます——タイプチェックがあれば、安心です
+- **ユーザー体験**：リアルタイムのイベントフィードバックにより、ユーザーはAIの作業プロセスをより明確に理解できます——何を考えているかを知っている方が、何も知らないより強いです
+
+今回のアップグレードは単なる技術ソリューションの置き換えではなく、AI能力レイヤーアーキテクチャ全体の最適化でもあります。階層設計と抽象インターフェースを通じて、私たちはより良い保守性と拡張性を得ました——アーキテクチャが良ければ、後のことは簡単です。
+
+もしあなたが.NETプロジェクトにGitHub Copilotを統合することを検討中なら、本文の実践経験があなたの遠回りを減らす助けになることを願っています。公式SDKはCLI呼び出しよりも確かに安定して完全で、理解と習得に時間を費やす価値があります——結局、正しいツールは事を倍にし、この言葉も道理がありません。
+
+## 参考資料
+
+- [GitHub Copilot SDK 公式ドキュメント](https://docs.github.com/en/copilot)
+- [Orleans 分散フレームワーク](https://learn.microsoft.com/en-us/dotnet/orleans/)
+- [HagiCode プロジェクト GitHub リポジトリ](https://github.com/HagiCode-org/site)
+- [HagiCode 公式ドキュメント](https://docs.hagicode.com)
+- [.NET 依存性注入ベストプラクティス](https://docs.microsoft.com/en-us/dotnet/core/extensions/dependency-injection-guidelines)
+
+---
+
+もしこの記事があなたに役立ったなら：
+
+- いいねを押してより多くの人に見てもらいましょう——あなたのサポートは、私たちにとって重要です
+- GitHubにStarを付けてください：[github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- 公式サイトにアクセスして詳細を確認：[hagicode.com](https://hagicode.com)
+- 30分間の実戦デモをご覧ください：[www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)
+- ワンクリックインストールで体験：[docs.hagicode.com/installation/docker-compose](https://docs.hagicode.com/installation/docker-compose)
+- Desktop デスクトップ端末クイックインストール：[hagicode.com/desktop/](https://hagicode.com/desktop/)
+- ベータテストが開始されました、インストール体験を歓迎します
+
+---
+
+ここまで書いてもだいたい十分です。技術記事嘛、いつまでも書ききれません、結局技術は発展し続け、私たちも学び続けています。もしHagiCodeの使用中に何か問題や提案があれば、いつでもお気軽にご連絡ください。では、これで終わります......
+
+## 著作権説明
+
+お読みいただきありがとうございます。もしこの内容が役に立ったと思ったら、いいね、收藏、シェアでサポートをお願いします。
+本内容は人工知能補助協力を採用し、最終内容は著者が审核し確認しました。
+- 本文著者: [newbe36524](https://www.newbe.pro)
+- 原文リンク: [https://docs.hagicode.com/blog/2026-04-03-github-copilot-sdk-integration/](https://docs.hagicode.com/blog/2026-04-03-github-copilot-sdk-integration/)
+- 著作権宣言: 本ブログのすべての記事は特別な宣言を除き、BY-NC-SAライセンス契約を採用します。転載は出典を明記してください！

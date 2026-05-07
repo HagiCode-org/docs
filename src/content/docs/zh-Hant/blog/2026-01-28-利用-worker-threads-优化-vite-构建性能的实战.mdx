@@ -1,0 +1,353 @@
+---
+title: "利用 Worker Threads 優化 Vite 構建性能的實戰"
+date: 2026-01-28
+truncate: true
+tags: [Vite, Worker Threads, 構建性能, Node.js, 前端工程化]
+description: "在處理大型前端項目時,生產環境的代碼構建往往讓人望眼欲穿。本文分享如何通過 Node.js Worker Threads 將 Vite 構建中的代碼混淆環節耗時從 12"
+---
+
+## 120秒到45秒：利用 Worker Threads 優化 Vite 構建性能的實戰
+
+> 在處理大型前端項目時，生產環境的代碼構建往往讓人望眼欲穿。本文分享如何通過 Node.js Worker Threads 將 Vite 構建中的代碼混淆環節耗時從 120 秒降低至 45 秒，並詳細介紹 HagiCode 項目中的實施細節與踩坑經驗。
+
+## 背景
+
+在我們的前端工程化實踐中，隨著項目規模的擴大，構建效率問題逐漸凸顯。特別是在生產環境構建流程中，為了保護源碼邏輯，我們通常會引入 JavaScript 混淆工具（如 `javascript-obfuscator`）。這一步雖然必要，但計算量巨大，極其消耗 CPU 資源。
+
+在**HagiCode**項目的早期開發階段，我們遇到了一個非常棘手的性能瓶頸：生產構建時間隨著代碼量的增加迅速惡化。
+
+**具體痛點如下**：
+- 單線程串行執行混淆任務，CPU 單核跑滿，其他核心閒置
+- 構建時間從最初的 30 秒飆升至 110-120 秒
+- 每次修改代碼後的構建驗證流程極其漫長，嚴重拖慢了開發迭代效率
+- CI/CD 流水線中，構建環節成為最耗時的部分
+
+**為什麼 HagiCode 會有這個需求？**
+HagiCode 是一款 AI 驅動的代碼智能助手，其前端架構包含複雜的業務邏輯和 AI 交互模塊。為了確保核心代碼的安全性，我們在生產發布時強制開啟了高強度混淆。面對長達兩分鐘的構建等待，我們決定對構建系統進行一次深度的性能優化。
+
+## 關於 HagiCode
+
+> 既然提到了這個項目，不妨多介紹兩句。
+
+如果你在開發中遇到過這些煩惱：
+- 多項目、多技術棧，構建腳本維護成本高
+- CI/CD 流水線配置繁瑣，每次改都要查文檔
+- 跨平台兼容性問題層出不窮
+- 想讓 AI 幫忙寫代碼，但現有工具不夠智能
+
+那麼我們正在做的 **HagiCode** 可能你會感興趣。
+
+**HagiCode 是什麼？**
+- 一款 AI 驅動的代碼智能助手
+- 支持多語言、跨平台的代碼生成與優化
+- 內置遊戲化機制，讓編碼不再枯燥
+
+**為什麼在這裡提它？**
+本文分享的 **JavaScript 並行混淆方案**，正是我們在開發 HagiCode 過程中實踐總結出來的。如果你覺得這套工程化方案有價值，說明我們的技術品味還不錯——那麼 HagiCode 本身也值得關注一下。
+
+**想了解更多？**
+- GitHub: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)（求 Star）
+- 官網: [hagicode.com](https://hagicode.com)
+- 視頻演示: [www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)（30 分鐘實戰演示）
+- 安裝指南: [hagicode.com/installation/docker-compose](https://hagicode.com/installation/docker-compose)
+- 公測已開始：現在安裝即可參與公測
+
+---
+
+## 分析：尋找性能瓶頸的突破口
+
+在著手解決性能問題之前，我們需要先理清思路，確定最優的技術方案。
+
+### 核心決策：為什麼選擇 Worker Threads？
+
+Node.js 環境下實現並行計算主要有三種方案：
+1. **child_process**：創建獨立的子進程
+2. **Web Workers**：主要用於瀏覽器端
+3. **worker_threads**：Node.js 原生多線程支持
+
+經過對比分析，HagiCode 最終選擇了 **Worker Threads**，原因如下：
+- **零序列化開銷**：Worker Threads 位於同一進程，可以通過 `SharedArrayBuffer` 或轉移控制權的方式共享內存，避免了進程間通信的大額序列化成本。
+- **原生支持**：Node.js 12+ 版本內置支持，無需引入額外的重依賴。
+- **上下文統一**：調試和日誌記錄比子進程更方便。
+
+### 任務粒度：如何拆分混淆任務？
+
+混淆一個巨大的 JS Bundle 文件很難並行（因為代碼有依賴關係），但 Vite 的構建產物是由多個 **Chunk** 組成的。這給了我們一個天然的並行邊界：
+
+- **獨立性**：Vite 打包後的不同 Chunk 之間依賴關係已解耦，可以安全地並行處理。
+- **粒度適中**：通常項目會有 10-30 個 Chunk，這個數量級非常適合並行調度。
+- **易於集成**：Vite 插件的 `generateBundle` 鉤子允許我們在文件生成前攔截並處理這些 Chunk。
+
+### 架構設計
+
+我們設計了一個包含四個核心組件的並行處理系統：
+
+1. **Task Splitter**：遍歷 Vite 的 bundle 對象，過濾不需要混淆的文件（如 vendor），生成任務隊列。
+2. **Worker Pool Manager**：管理 Worker 的生命週期，負責任務的分發、回收和錯誤重試。
+3. **Progress Reporter**：實時輸出構建進度，消除用戶的等待焦慮。
+4. **ObfuscationWorker**：實際執行混淆邏輯的工作線程。
+
+## 解決：實戰編碼與實施
+
+基於上述分析，我們開始動手實現這套並行混淆系統。
+
+### 1. 配置 Vite 插件
+
+首先，我們在 `vite.config.ts` 中集成並行混淆插件。配置非常直觀，只需指定 Worker 數量和混淆規則。
+
+```typescript
+import { defineConfig } from 'vite'
+import { parallelJavascriptObfuscator } from './buildTools/plugin'
+
+export default defineConfig(({ mode }) => {
+  const isProduction = mode === 'production'
+  
+  return {
+    build: {
+      rollupOptions: {
+        ...(isProduction
+          ? {
+              plugins: [
+                parallelJavascriptObfuscator({
+                  enabled: true,
+                  // 根據 CPU 核心數自動調整，建議留出一個核心給主線程
+                  workerCount: 4, 
+                  retryAttempts: 3,
+                  fallbackToMainThread: true, // 出錯時自動降級為單線程
+                  // 過濾掉 vendor chunk，通常不需要混淆第三方庫
+                  isVendorChunk: (fileName: string) => fileName.includes('vendor-'),
+                  obfuscationConfig: {
+                    compact: true,
+                    controlFlowFlattening: true,
+                    deadCodeInjection: true,
+                    disableConsoleOutput: true,
+                    // ... 更多混淆選項
+                  },
+                }),
+              ],
+            }
+          : {}),
+      },
+    },
+  }
+})
+```
+
+### 2. 實現 Worker 邏輯
+
+Worker 是執行任務的單元。我們需要定義好輸入和輸出的數據結構。
+
+**注意**：這裡的代碼雖然簡單，但有幾個坑點需要注意。比如 `parentPort` 的空值檢查，以及錯誤處理。在 HagiCode 的實踐中，我們發現有些特殊的 ES6 語法可能會導致混淆器崩潰，所以加上了 `try-catch` 保護。
+
+```typescript
+import { parentPort } from 'worker_threads'
+import javascriptObfuscator from 'javascript-obfuscator'
+
+export interface ObfuscationTask {
+  chunkId: string
+  code: string
+  config: any
+}
+
+export interface ObfuscationResult {
+  chunkId: string
+  obfuscatedCode: string
+  error?: string
+}
+
+// 監聽主線程發來的任務
+if (parentPort) {
+  parentPort.on('message', async (task: ObfuscationTask) => {
+    try {
+      // 執行混淆
+      const obfuscated = javascriptObfuscator.obfuscate(task.code, task.config)
+      const result: ObfuscationResult = {
+        chunkId: task.chunkId,
+        obfuscatedCode: obfuscated.getObfuscatedCode(),
+      }
+      // 將結果發回主線程
+      parentPort?.postMessage(result)
+    } catch (error) {
+      // 處理異常，確保單個 Worker 崩潰不會阻塞整個構建
+      const result: ObfuscationResult = {
+        chunkId: task.chunkId,
+        obfuscatedCode: '',
+        error: error instanceof Error ? error.message : 'Unknown error',
+      }
+      parentPort?.postMessage(result)
+    }
+  })
+}
+```
+
+### 3. Worker 池管理器
+
+這是整個方案的核心。我們需要維護一個固定大小的 Worker 池，採用 **FIFO（先進先出）** 策略調度任務。
+
+```typescript
+import { Worker } from 'worker_threads'
+import os from 'os'
+
+export class WorkerPool {
+  private workers: Worker[] = []
+  private taskQueue: Array<{
+    task: ObfuscationTask
+    resolve: (result: ObfuscationResult) => void
+    reject: (error: Error) => void
+  }> = []
+  
+  constructor(options: WorkerPoolOptions = {}) {
+    // 默認為核心數 - 1，給主線程留一點喘息的空間
+    const workerCount = options.workerCount ?? Math.max(1, (os.cpus().length || 4) - 1)
+    
+    for (let i = 0; i < workerCount; i++) {
+      this.createWorker()
+    }
+  }
+
+  private createWorker() {
+    const worker = new Worker('./worker.ts')
+    
+    worker.on('message', (result) => {
+      // 任務完成後，從隊列中取出下一個任務
+      const nextTask = this.taskQueue.shift()
+      if (nextTask) {
+        this.dispatchTask(worker, nextTask)
+      } else {
+        // 如果沒有待處理任務，標記 Worker 為空閒
+        this.activeWorkers.delete(worker)
+      }
+    })
+    
+    this.workers.push(worker)
+  }
+
+  // 提交任務到池中
+  public runTask(task: ObfuscationTask): Promise<ObfuscationResult> {
+    return new Promise((resolve, reject) => {
+      const job = { task, resolve, reject }
+      const idleWorker = this.workers.find(w => !this.activeWorkers.has(w))
+      
+      if (idleWorker) {
+        this.dispatchTask(idleWorker, job)
+      } else {
+        this.taskQueue.push(job)
+      }
+    })
+  }
+
+  private dispatchTask(worker: Worker, job: any) {
+    this.activeWorkers.set(worker, job.task)
+    worker.postMessage(job.task)
+  }
+}
+```
+
+### 4. 進度報告
+
+等待是痛苦的，尤其是不知道還要等多久。我們增加了一個簡單的進度報告器，實時反饋當前狀態。
+
+```typescript
+export class ProgressReporter {
+  private completed = 0
+  private readonly total: number
+  private readonly startTime: number
+
+  constructor(total: number) {
+    this.total = total
+    this.startTime = Date.now()
+  }
+
+  increment(): void {
+    this.completed++
+    this.report()
+  }
+
+  private report(): void {
+    const now = Date.now()
+    const elapsed = now - this.startTime
+    const percentage = (this.completed / this.total) * 100
+    
+    // 簡單的 ETA 估算
+    const avgTimePerChunk = elapsed / this.completed
+    const remaining = (this.total - this.completed) * avgTimePerChunk
+
+    console.log(
+      `[Parallel Obfuscation] ${this.completed}/${this.total} chunks completed (${percentage.toFixed(1)}%) | ETA: ${(remaining / 1000).toFixed(1)}s`
+    )
+  }
+}
+```
+
+## 實踐：效果與踩坑
+
+部署這套方案後，HagiCode 項目的構建性能有了立竿見影的提升。
+
+### 性能基準數據
+
+我們在以下環境進行了測試：
+- CPU：Intel Core i7-12700K (12 cores / 20 threads)
+- RAM：32GB DDR4
+- Node.js：v18.17.0
+- OS：Ubuntu 22.04
+
+**結果對比**：
+- **單線程（優化前）**：118 秒
+- **4 Workers**：55 秒（提升 **53%**）
+- **8 Workers**：48 秒（提升 **60%**）
+- **12 Workers**：45 秒（提升 **62%**）
+
+可以看出，收益並不是線性的。當 Worker 數量超過 8 個後，提升幅度變小。這主要受限於任務分配的均勻度和內存帶寬瓶頸。
+
+### 常見問題與解決方案
+
+在 HagiCode 的實際使用中，我們也遇到了一些坑，這裡分享給大家：
+
+**Q1: 構建時間沒有明顯減少，反而變慢了？**
+- **原因**：Worker 創建本身有開銷，或者 Worker 數量設置過多導致上下文切換頻繁。
+- **解決**：建議 Worker 數量設置為 `CPU 核心數 - 1`。同時檢查是否有單個 Chunk 特別大（例如 > 5MB），這種"巨無霸"文件會成為短板，可以考慮優化代碼分割策略。
+
+**Q2: 偶爾出現 Worker 崩潰，構建失敗？**
+- **原因**：某些特殊的代碼語法可能會導致混淆器內部報錯。
+- **解決**：我們實現了 **自動降級機制**。當 Worker 連續失敗次數達到閾值時，插件會自動回退到單線程模式，確保構建不中斷。同時記錄下錯誤的文件名，方便後續針對性修復。
+
+**Q3: 內存占用過高（OOM）？**
+- **原因**：每個 Worker 都需要獨立內存空間來加載混淆器和解析 AST。
+- **解決**：
+  - 減少 Worker 數量。
+  - 增加 Node.js 的內存限制：`NODE_OPTIONS="--max-old-space-size=4096" npm run build`。
+  - 確保不在 Worker 內部持有不必要的大對象引用。
+
+## 總結
+
+通過引入 Node.js Worker Threads，我們成功將 HagiCode 項目的生產構建時間從 120 秒降低到了 45 秒左右，極大提升了開發體驗和 CI/CD 效率。
+
+這套方案的核心在於：
+1. **合理拆分任務**：利用 Vite 的 Chunk 作為並行單元。
+2. **資源控制**：使用 Worker 池避免資源耗盡。
+3. **容錯設計**：自動降級機制確保構建穩定性。
+
+如果你也在為前端構建效率發愁，或者你的項目也在做重度代碼處理，不妨試試這套方案。當然，更推薦你直接關注我們的 HagiCode 項目，這些工程化的細節都已經集成在裡面了。
+
+如果本文對你有幫助，歡迎來 GitHub 給個 Star，或者參與公測體驗一下～
+
+## 參考資料
+
+- Node.js Worker Threads 官方文檔: [nodejs.org/api/worker_threads.html](https://nodejs.org/api/worker_threads.html)
+- javascript-obfuscator 文檔: [github.com/javascript-obfuscator/javascript-obfuscator](https://github.com/javascript-obfuscator/javascript-obfuscator)
+- Vite 插件開發指南: [vitejs.dev/guide/api-plugin.html](https://vitejs.dev/guide/api-plugin.html)
+- **HagiCode GitHub**: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- **HagiCode 官網**: [hagicode.com](https://hagicode.com)
+- **安裝指南**: [hagicode.com/installation/docker-compose](https://hagicode.com/installation/docker-compose)
+
+
+
+---
+
+感謝您的閱讀,如果您覺得本文有用,快點擊下方點讚按鈕👍,讓更多的人看到本文。
+
+本內容採用人工智能協作,經本人審核,符合本人觀點與立場。
+
+- **本文作者:** [newbe36524](https://www.newbe.pro)
+- **本文鏈接:** [https://hagicode.com/blog/2026/01/27/optimizing-vite-build-with-worker-threads](https://hagicode.com/blog/2026/01/27/optimizing-vite-build-with-worker-threads)
+- **版權聲明:** 本博客所有文章除特別聲明外,均採用 BY-NC-SA 許可協議。轉載請註明出處!

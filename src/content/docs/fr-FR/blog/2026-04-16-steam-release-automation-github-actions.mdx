@@ -1,0 +1,378 @@
+---
+title: Comment réaliser la publication automatisée sur Steam avec GitHub Actions
+date: 2026-04-16
+tags: [GitHub Actions, Steam, Publication automatisée, DevOps, CI/CD]
+description: "Cet article partage la solution complète pour la publication automatisée sur Steam dans le projet HagiCode Desktop, du pipeline d'automatisation complet de GitHub Release à la plateforme Steam, y compris"
+---
+
+## Comment réaliser la publication automatisée sur Steam avec GitHub Actions
+
+> Cet article partage la solution complète pour la publication automatisée sur Steam dans le projet HagiCode Desktop, du pipeline d'automatisation complet de GitHub Release à la plateforme Steam, y compris l'authentification Steam Guard, le téléchargement multi-plateforme Depot et d'autres détails techniques clés.
+
+## Contexte
+
+Le processus de publication sur la plateforme Steam est en fait assez différent des méthodes traditionnelles de distribution d'applications. Steam possède son propre système complet de distribution de mises à jour, les développeurs doivent télécharger les artefacts de build sur le réseau CDN de Steam via l'outil SteamCMD, au lieu de simplement jeter un lien de téléchargement comme sur les autres plateformes.
+
+Le projet HagiCode Desktop prévoit de lancer sur la plateforme Steam, ce qui a également apporté quelques nouveaux défis à notre processus de publication :
+
+1. Besoin de convertir les artefacts de build existants en un format compatible Steam
+2. Doit télécharger sur la plateforme Steam via l'outil SteamCMD
+3. Doit également gérer l'authentification Steam Guard
+4. Besoin de prendre en charge le téléchargement Depot multi-plateforme (Linux, Windows, macOS)
+5. Doit également réaliser le flux automatisé de GitHub Release à Steam
+
+Le projet avait précédemment implémenté le "mode version portable" (portable version mode), permettant à l'application de détecter les charges de service fixes empaquetées dans le répertoire extra. Notre objectif est en fait de permettre une intégration transparente entre ce mode version portable et la distribution Steam.
+
+## À propos de HagiCode
+
+La solution partagée dans cet article provient de notre expérience pratique dans le projet [HagiCode](https://hagicode.com). HagiCode est un projet d'assistant de code IA qui prend en charge l'exécution sur le bureau, nous faisons progresser le travail de lancement sur la plateforme Steam, c'est pourquoi nous devons établir un processus de publication automatisé fiable.
+
+## Conception de l'architecture
+
+Le cœur de l'ensemble du processus de publication Steam est un workflow GitHub Actions qui divise le processus en trois principales étapes :
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ GitHub Actions Workflow (Steam Release)                      │
+├─────────────────────────────────────────────────────────────┤
+│ 1. Phase de préparation:                                   │
+│    - Extraire le code portable-version                      │
+│    - Télécharger les artefacts de build depuis GitHub Release│
+│    - Décompresser et préparer le répertoire de contenu Steam │
+│                                                             │
+│ 2. Configuration SteamCMD:                                  │
+│    - Installer/réutiliser SteamCMD                          │
+│    - S'authentifier avec Steam Guard                        │
+│                                                             │
+│ 3. Phase de publication:                                    │
+│    - Générer les fichiers de configuration Depot VDF        │
+│    - Générer les fichiers de configuration App Build VDF    │
+│    - Appeler SteamCMD pour télécharger sur Steam            │
+└─────────────────────────────────────────────────────────────┘
+```
+
+Les avantages de cette conception, comment dire :
+- Réutiliser les artefacts GitHub Release existants pour éviter les builds répétitifs, après tout qui veut faire du travail répétitif
+- Réaliser une isolation de sécurité via des runners auto-hébergés, une couche de protection supplémentaire est toujours bonne
+- Prendre en charge le basculement entre le mode aperçu et la branche de publication officielle, un peu plus flexible
+- Gestion complète des erreurs et journalisation, pas trop perdu en cas de problème
+
+## Implémentation du workflow
+
+### Conception des paramètres de déclenchement
+
+Notre workflow prend en charge les paramètres clés suivants :
+
+```yaml
+inputs:
+  release:           # Étiquette de publication Portable Version
+    description: 'Étiquette de version à publier (comme v1.0.0)'
+    required: true
+  steam_preview:     # S'il faut générer un build d'aperçu
+    description: 'Mode aperçu'
+    required: false
+    default: 'false'
+  steam_branch:      # Définir comme branche Steam live
+    description: 'Branche Steam cible'
+    required: false
+    default: 'preview'
+  steam_description: # Remplacement de la description du build
+    description: 'Description du build'
+    required: false
+```
+
+### Configuration du runner auto-hébergé
+
+Pour des raisons de sécurité, nous utilisons des runners auto-hébergés avec l'étiquette steam :
+
+```yaml
+runs-on:
+  - self-hosted
+  - Linux
+  - X64
+  - steam
+```
+
+Cela garantit que la publication Steam s'exécute sur un runner dédié, maintenant une isolation sécurisée des informations d'identification sensibles. Après tout, en matière de sécurité, faire un peu plus attention est toujours une bonne chose.
+
+### Contrôle de la concurrence
+
+Pour éviter que les publications de la même version ne s'interfèrent, nous avons configuré un contrôle de concurrence :
+
+```yaml
+concurrency:
+  group: portable-version-steam-${{ github.event.inputs.release }}
+  cancel-in-progress: false
+```
+
+Notez ici que nous définissons `cancel-in-progress: false`, car le processus de publication Steam peut être long, et nous ne voulons pas annuler une publication en cours à cause d'un nouveau déclenchement. Après tout, publier une version n'est pas facile, il faut la laisser se terminer.
+
+## Implémentation des scripts principaux
+
+### Préparation des entrées de publication
+
+Le script `prepare-steam-release-input.mjs` est responsable de la préparation des entrées nécessaires à la publication :
+
+```javascript
+// Télécharger le manifeste de build et l'inventaire des artefacts de GitHub Release
+const buildManifest = await downloadBuildManifest(releaseTag);
+const artifactInventory = await downloadArtifactInventory(releaseTag);
+
+// Télécharger les archives de chaque plateforme
+for (const platform of ['linux-x64', 'win-x64', 'osx-universal']) {
+  const artifactUrl = getArtifactUrl(artifactInventory, platform);
+  await downloadArtifact(artifactUrl, platform);
+}
+
+// Extraire dans la structure de répertoire de contenu Steam
+await extractToSteamContent(sources, contentRoot);
+```
+
+### Authentification Steam Guard
+
+Steam exige d'utiliser Steam Guard pour protéger les comptes, nous avons implémenté un algorithme de génération de code basé sur une clé partagée :
+
+```javascript
+function generateSteamGuardCode(sharedSecret, timestamp = Date.now()) {
+  const secret = decodeSharedSecret(sharedSecret);
+  const time = Math.floor(timestamp / 1000 / 30);
+
+  const timeBuffer = Buffer.alloc(8);
+  timeBuffer.writeBigUInt64BE(BigInt(time));
+
+  // Utiliser HMAC-SHA1 pour générer un code à usage unique basé sur le temps
+  const hash = crypto.createHmac('sha1', secret)
+    .update(timeBuffer)
+    .digest();
+
+  // Convertir en code Steam Guard de 5 caractères
+  const code = steamGuardCode(hash);
+  return code;
+}
+```
+
+Cette implémentation est basée sur le mécanisme TOTP (Time-based One-Time Password) de Steam Guard, générant un nouveau code de vérification toutes les 30 secondes. Après tout, pour la sécurité, il faut utiliser une méthode fiable.
+
+### Génération de configuration VDF
+
+VDF (Valve Data Format) est le format de configuration utilisé par Steam, nous devons générer deux types de fichiers VDF :
+
+**Depot VDF** pour configurer le contenu de chaque plateforme :
+
+```javascript
+function buildDepotVdf(depotId, contentRoot) {
+  return [
+    '"DepotBuildConfig"',
+    '{',
+    `  "DepotID" "${escapeVdf(depotId)}"`,
+    `  "ContentRoot" "${escapeVdf(contentRoot)}"`,
+    '  "FileMapping"',
+    '  {',
+    '    "LocalPath" "*"',
+    '    "DepotPath" "."',
+    '    "recursive" "1"',
+    '  }',
+    '}'
+  ].join('\n');
+}
+```
+
+**App Build VDF** pour configurer l'ensemble du build de l'application :
+
+```javascript
+function buildAppBuildVdf(appId, depotBuilds, description, setLive) {
+  const vdf = [
+    '"appbuild"',
+    '{',
+    `  "appid" "${appId}"`,
+    `  "desc" "${escapeVdf(description)}"`,
+    `  "contentroot" "${escapeVdf(contentRoot)}"`,
+    '  "buildoutput" "build_output"',
+    '  "depots"',
+    '  {'
+  ];
+
+  for (const [depotId, depotVdfPath] of Object.entries(depotBuilds)) {
+    vdf.push(`    "${depotId}" "${depotVdfPath}"`);
+  }
+
+  if (setLive) {
+    vdf.push(`  }`);
+    vdf.push(`  "setlive" "${setLive}"`);
+  }
+
+  vdf.push('}');
+  return vdf.join('\n');
+}
+```
+
+### Appel SteamCMD
+
+Enfin, en appelant SteamCMD pour exécuter le téléchargement :
+
+```javascript
+await runCommand(steamcmdPath, [
+  '+login', steamUsername, steamPassword, steamGuardCode,
+  '+run_app_build', appBuildPath,
+  '+quit'
+]);
+```
+
+Cette étape est le dernier saut de l'ensemble du processus, une fois franchi, c'est terminé...
+
+## Traitement multi-plateforme Depot
+
+Steam utilise le système Depot pour gérer le contenu de différentes plateformes, nous prenons en charge trois Depots principaux :
+
+| Plateforme | Identifiant Depot | Support d'architecture |
+|------------|-------------------|------------------------|
+| Linux | `linux-x64` | x64_64 |
+| Windows | `win-x64` | x64_64 |
+| macOS | `osx-universal` | universal, x64_64, arm64 |
+
+Chaque Depot a un répertoire de contenu indépendant et un fichier de configuration VDF, ce qui garantit que les utilisateurs de différentes plateformes ne téléchargent que le contenu dont ils ont besoin. Après tout, le trafic coûte de l'argent, économiser un peu, c'est toujours ça de pris.
+
+## Processus de publication
+
+### Étape 1 : Préparer GitHub Release
+
+D'abord, il faut créer une GitHub Release dans le dépôt portable-version, comprenant :
+- Les archives de chaque plateforme
+- Le manifeste de build (`{tag}.build-manifest.json`)
+- L'inventaire des artefacts (`{tag}.artifact-inventory.json`)
+
+### Étape 2 : Déclencher le workflow de publication Steam
+
+Déclencher manuellement le workflow via GitHub Actions, en remplissant les paramètres nécessaires :
+- `release` : L'étiquette de version à publier (comme v1.0.0)
+- `steam_branch` : Branche cible (comme `preview` ou `public`)
+- `steam_preview` : Mode aperçu ou non
+
+### Étape 3 : Exécuter automatiquement le processus de publication
+
+Le workflow exécutera automatiquement les étapes suivantes :
+
+1. Télécharger et décompresser les artefacts GitHub Release
+2. Installer/mettre à jour SteamCMD
+3. Générer les fichiers de configuration Steam VDF
+4. S'authentifier avec Steam Guard
+5. Télécharger le contenu sur le CDN Steam
+6. Définir la branche spécifiée comme live
+
+Une fois ce processus terminé, tout ce qui devait être fait est fait.
+
+## Guide de configuration
+
+### Configuration des Secrets requises
+
+Configurez les clés suivantes dans les paramètres du dépôt GitHub :
+
+| Nom du Secret | Description |
+|---------------|-------------|
+| `STEAM_USERNAME` | Nom d'utilisateur du compte Steam |
+| `STEAM_PASSWORD` | Mot de passe du compte Steam |
+| `STEAM_SHARED_SECRET` | Clé partagée Steam Guard (optionnel) |
+| `STEAM_GUARD_CODE` | Code Steam Guard (optionnel) |
+| `STEAM_APP_ID` | ID de l'application Steam |
+| `STEAM_DEPOT_ID_LINUX` | ID du Depot Linux |
+| `STEAM_DEPOT_ID_WINDOWS` | ID du Depot Windows |
+| `STEAM_DEPOT_ID_MACOS` | ID du Depot macOS |
+
+Ces éléments de configuration, en fait, n'ont rien de spécial, il faut juste avoir ce qui doit être là.
+
+### Configuration des variables d'environnement
+
+| Nom de la variable | Description | Valeur par défaut |
+|--------------------|-------------|-------------------|
+| `PORTABLE_VERSION_STEAMCMD_ROOT` | Répertoire d'installation SteamCMD | `~/.local/share/portable-version/steamcmd` |
+
+## Meilleures pratiques
+
+### Gestion de l'authentification Steam Guard
+
+La première exécution nécessite de saisir manuellement le code Steam Guard, ensuite il est recommandé de configurer une clé partagée pour générer automatiquement le code. Cela évite d'avoir à intervenir manuellement à chaque publication, après tout personne ne veut répéter la même opération à chaque fois.
+
+SteamCMD enregistrera le jeton de connexion, qui pourra être réutilisé par la suite. Mais attention à la validité du jeton, après expiration il faudra se réauthentifier, cela ne peut être évité.
+
+### Structure du répertoire de contenu
+
+Assurez-vous que la structure du répertoire de contenu Steam est correcte :
+
+```
+steam-content/
+├── linux-x64/     # Contenu de la plateforme Linux
+├── win-x64/       # Contenu de la plateforme Windows
+└── osx-universal/ # Contenu binaire universel macOS
+```
+
+Chaque répertoire devrait contenir les fichiers d'application complets de la plateforme correspondante. Ce point n'a rien de spécial à dire, il faut faire ce qui doit être fait.
+
+### Utilisation du mode aperçu
+
+Le mode aperçu ne définira aucune branche comme live, convient pour les tests de vérification :
+
+```yaml
+if [ "$STEAM_PREVIEW_INPUT" = 'true' ]; then
+  cmd+=(--preview)
+fi
+```
+
+Cela permet de télécharger d'abord sur la plateforme Steam pour vérification, puis de basculer vers la branche officielle après confirmation. Une couche de vérification supplémentaire est toujours bonne.
+
+### Gestion des erreurs et journalisation
+
+Les scripts incluent une gestion complète des erreurs et la journalisation :
+- Vérifier l'existence de GitHub Release
+- Vérifier les fichiers de métadonnées requis
+- S'assurer que le contenu de la plateforme existe
+- Générer un rapport résumé GitHub Actions
+
+Ces informations sont très précieuses pour le débogage et l'audit, après tout en cas de problème avoir une piste est mieux que d'être dans le brouillard.
+
+### Gestion des artefacts
+
+Le workflow génère deux types d'artefacts :
+- `portable-steam-release-preparation-{tag}` : Métadonnées de préparation de publication
+- `portable-steam-build-metadata-{tag}` : Métadonnées de build Steam
+
+Ces artefacts peuvent être utilisés pour l'audit et le débogage ultérieurs, il est recommandé de définir la durée de conservation à 30 jours. De toute façon, cela ne prend pas beaucoup de place, les garder ne fait pas de mal.
+
+## Application pratique
+
+Dans le projet HagiCode, ce processus de publication automatisée a fonctionné avec succès pour plusieurs versions. L'ensemble du pipeline de GitHub Release à la plateforme Steam est entièrement automatisé, sans intervention humaine.
+
+Cela a considérablement amélioré notre efficacité et notre fiabilité de publication. Auparavant, la publication manuelle d'une version prenait plus de 30 minutes, maintenant il ne faut que quelques minutes pour terminer l'ensemble du processus. Le temps, économisé est toujours une bonne chose.
+
+Plus important encore, le processus automatisé réduit la possibilité d'erreurs humaines, chaque publication suit un processus standardisé, et les résultats sont plus prévisibles. Après tout, laissez les machines faire les tâches répétitives, les gens seront aussi plus détendus.
+
+## Résumé
+
+Grâce à la solution partagée dans cet article, nous avons réalisé :
+1. Une automatisation complète de GitHub Release à la plateforme Steam
+2. La prise en charge du téléchargement Depot multi-plateforme
+3. L'authentification sécurisée basée sur Steam Guard
+4. Le basculement flexible entre le mode aperçu et la publication officielle
+5. Une gestion complète des erreurs et la journalisation
+
+Cette solution s'applique non seulement au projet HagiCode, mais peut également servir de référence à d'autres projets prévoyant de lancer sur la plateforme Steam. Si vous envisagez également une publication automatisée sur Steam, j'espère que la pratique partagée dans cet article pourra vous aider.
+
+En fait, la technologie, c'est compliqué et simple en même temps. La clé est de trouver la méthode qui nous convient.
+
+Si cet article vous aide, n'hésitez pas à donner une étoile au dépôt GitHub de HagiCode, ou visitez le site officiel pour plus d'informations.
+
+## Références
+
+- [SteamCMD Documentation](https://developer.valvesoftware.com/wiki/SteamCMD)
+- [Steamworks SDK](https://partner.steamgames.com/)
+- [Adresse du projet HagiCode](https://github.com/HagiCode-org/site)
+- [Site officiel HagiCode](https://hagicode.com)
+- [Guide d'installation HagiCode](https://docs.hagicode.com/installation/docker-compose)
+- [HagiCode Desktop Bureau](https://hagicode.com/desktop/)
+
+## Notice de copyright
+
+Merci pour votre lecture, si vous trouvez cet article utile, n'hésitez pas à liker, mettre en favoris et partager pour soutenir.
+Ce contenu est réalisé avec une collaboration assistée par l'intelligence artificielle, le contenu final est examiné et confirmé par l'auteur.
+- Auteur de l'article : [newbe36524](https://www.newbe.pro)
+- Lien vers l'article original : [https://docs.hagicode.com/blog/2026-04-16-steam-release-automation-github-actions/](https://docs.hagicode.com/blog/2026-04-16-steam-release-automation-github-actions/)
+- Déclaration de copyright : Sauf indication contraire, tous les articles de ce blog sont sous licence BY-NC-SA. Veuillez indiquer la source pour toute réimpression !

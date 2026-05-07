@@ -1,0 +1,353 @@
+---
+title: "Optimización del Rendimiento de Construcción de Vite con Worker Threads: Una Experiencia Práctica"
+date: 2026-01-28
+truncate: true
+tags: [Vite, Worker Threads, Rendimiento de Construcción, Node.js, Ingeniería Frontend]
+description: "Al procesar proyectos frontend grandes, la construcción de código en producción a menudo hace que la gente espere ansiosamente. Este artículo comparte cómo reducir el tiempo de ofuscación de código en la construcción de Vite de 120"
+---
+
+## De 120 segundos a 45 segundos: Optimización del Rendimiento de Construcción de Vite con Worker Threads
+
+> Al procesar proyectos frontend grandes, la construcción de código en producción a menudo hace que la gente espere ansiosamente. Este artículo comparte cómo reducir el tiempo del proceso de ofuscación de código en la construcción de Vite de 120 segundos a 45 segundos a través de Node.js Worker Threads, y presenta en detalle los detalles de implementación y experiencias de troubleshooting en el proyecto HagiCode.
+
+## Antecedentes
+
+En nuestra práctica de ingeniería frontend, a medida que la escala del proyecto aumenta, los problemas de eficiencia de construcción se vuelven gradualmente prominentes. Especialmente en el proceso de construcción en producción, para proteger la lógica del código fuente, usualmente introducimos herramientas de ofuscación de JavaScript (como `javascript-obfuscator`). Aunque este paso es necesario, la cantidad de cálculo es enorme y consume extremadamente recursos de CPU.
+
+En las primeras etapas de desarrollo del proyecto **HagiCode**, encontramos un cuello de botella de rendimiento muy problemático: el tiempo de construcción en producción se deterioraba rápidamente con el aumento de la cantidad de código.
+
+**Los puntos de dolor específicos son los siguientes**:
+- Ejecución en serie de un solo hilo para tareas de ofuscación, un solo núcleo de CPU al máximo, otros núcleos inactivos
+- El tiempo de construcción aumentó de los 30 segundos iniciales a 110-120 segundos
+- El proceso de verificación de construcción después de cada modificación de código es extremadamente largo, arrastrando seriamente la eficiencia de iteración de desarrollo
+- En los pipelines de CI/CD, el enlace de construcción se convirtió en la parte más que consume tiempo
+
+**¿Por qué HagiCode tiene esta necesidad?**
+HagiCode es un asistente de inteligencia de código impulsado por IA, cuya arquitectura frontend contiene lógica de negocio compleja y módulos de interacción con IA. Para asegurar la seguridad del código central, habilitamos obligatoriamente la ofuscación de alta intensidad en el lanzamiento en producción. Ante una espera de construcción de hasta dos minutos, decidimos realizar una optimización profunda del rendimiento del sistema de construcción.
+
+## Sobre HagiCode
+
+> Ya que mencionamos este proyecto,不妨多介绍两句。
+
+Si encuentras estas molestias en el desarrollo:
+- Múltiples proyectos, múltiples stacks tecnológicos, alto costo de mantenimiento de scripts de construcción
+- Configuración complicada de pipelines de CI/CD, cada cambio requiere consultar documentación
+- Problemas de compatibilidad multiplataforma surgen uno tras otro
+- Quieres que la IA ayude a escribir código, pero las herramientas existentes no son lo suficientemente inteligentes
+
+Entonces **HagiCode**, en lo que estamos trabajando, podría interesarte.
+
+**¿Qué es HagiCode?**
+- Un asistente de inteligencia de código impulsado por IA
+- Soporta generación y optimización de código multiidioma y multiplataforma
+- Mecanismos de gamificación integrados, haciendo que la codificación ya no sea aburrida
+
+**¿Por qué mencionarlo aquí?**
+El **esquema de ofuscación paralela de JavaScript** compartido en este artículo es precisamente lo que practicamos y resumimos durante el desarrollo de HagiCode. Si crees que este esquema de ingeniería tiene valor, significa que nuestro gusto técnico no está mal—entonces HagiCode mismo también vale la pena prestarle atención.
+
+**¿Quieres saber más?**
+- GitHub: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)（pide Star）
+- Sitio web oficial: [hagicode.com](https://hagicode.com)
+- Demostración de video: [www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)（demostración práctica de 30 minutos）
+- Guía de instalación: [hagicode.com/installation/docker-compose](https://hagicode.com/installation/docker-compose)
+- La beta pública ya ha comenzado: instálalo ahora para participar en la beta pública
+
+---
+
+## Análisis: Encontrando el punto de ruptura del cuello de botella de rendimiento
+
+Antes de comenzar a resolver el problema de rendimiento, necesitamos aclarar nuestras ideas y determinar la solución técnica óptima.
+
+### Decisión central: ¿Por qué elegir Worker Threads?
+
+En el entorno de Node.js, hay principalmente tres esquemas para implementar computación paralela:
+1. **child_process**: crear subprocesos independientes
+2. **Web Workers**: utilizado principalmente para el lado del navegador
+3. **worker_threads**: soporte nativo multihilo de Node.js
+
+Después de un análisis comparativo, HagiCode finalmente eligió **Worker Threads** por las siguientes razones:
+- **Sobrecarga cero de serialización**: Worker Threads se encuentra en el mismo proceso y puede compartir memoria a través de `SharedArrayBuffer` o transferir control, evitando los grandes costos de serialización en la comunicación entre procesos.
+- **Soporte nativo**: Node.js versión 12+ tiene soporte integrado, sin necesidad de introducir dependencias pesadas adicionales.
+- **Contexto unificado**: la depuración y el registro de registros son más convenientes que los subprocesos.
+
+### Granularidad de tareas: ¿Cómo dividir las tareas de ofuscación?
+
+Es difícil paralelizar la ofuscación de un archivo JS Bundle enorme (porque el código tiene relaciones de dependencia), pero los productos de construcción de Vite están compuestos por múltiples **Chunk**. Esto nos da una frontera de paralelización natural:
+
+- **Independencia**: las dependencias entre diferentes Chunks después del empaquetado de Vite se han desacoplado, pueden procesarse en paralelo de manera segura.
+- **Granularidad adecuada**: usualmente los proyectos tendrán 10-30 Chunks, este orden de magnitud es muy adecuado para la programación paralela.
+- **Fácil de integrar**: el gancho `generateBundle` del complemento Vite nos permite interceptar y procesar estos Chunks antes de que se generen los archivos.
+
+### Diseño de arquitectura
+
+Diseñamos un sistema de procesamiento paralelo que contiene cuatro componentes principales:
+
+1. **Task Splitter**: recorre el objeto bundle de Vite, filtra los archivos que no necesitan ofuscación (como vendor), genera la cola de tareas.
+2. **Worker Pool Manager**: gestiona el ciclo de vida de los Workers, responsable de la distribución, recuperación y reintento de errores de las tareas.
+3. **Progress Reporter**: salida en tiempo real del progreso de construcción, eliminando la ansiedad de espera del usuario.
+4. **ObfuscationWorker**: hilos de trabajo que ejecutan la lógica de ofuscación real.
+
+## Solución: Codificación práctica e implementación
+
+Basados en el análisis anterior, comenzamos a implementar este sistema de ofuscación paralela.
+
+### 1. Configurar el complemento Vite
+
+Primero, integramos el complemento de ofuscación paralela en `vite.config.ts`. La configuración es muy intuitiva, solo necesitas especificar el número de Workers y las reglas de ofuscación.
+
+```typescript
+import { defineConfig } from 'vite'
+import { parallelJavascriptObfuscator } from './buildTools/plugin'
+
+export default defineConfig(({ mode }) => {
+  const isProduction = mode === 'production'
+  
+  return {
+    build: {
+      rollupOptions: {
+        ...(isProduction
+          ? {
+              plugins: [
+                parallelJavascriptObfuscator({
+                  enabled: true,
+                  // Ajusta automáticamente según el número de núcleos de CPU, se recomienda dejar un núcleo para el hilo principal
+                  workerCount: 4, 
+                  retryAttempts: 3,
+                  fallbackToMainThread: true, // Degradar automáticamente a un solo hilo cuando ocurre un error
+                  // Filtra el vendor chunk, usualmente no es necesario ofuscar bibliotecas de terceros
+                  isVendorChunk: (fileName: string) => fileName.includes('vendor-'),
+                  obfuscationConfig: {
+                    compact: true,
+                    controlFlowFlattening: true,
+                    deadCodeInjection: true,
+                    disableConsoleOutput: true,
+                    // ... más opciones de ofuscación
+                  },
+                }),
+              ],
+            }
+          : {}),
+      },
+    },
+  }
+})
+```
+
+### 2. Implementar la lógica del Worker
+
+El Worker es la unidad que ejecuta las tareas. Necesitamos definir bien las estructuras de datos de entrada y salida.
+
+**Nota**: aunque el código aquí es simple, hay varios puntos a tener en cuenta. Por ejemplo, la verificación de nulos de `parentPort`, y el manejo de errores. En la práctica de HagiCode, descubrimos que algunas sintaxis especiales de ES6 pueden causar que el ofuscador se bloquee, así que agregamos protección `try-catch`.
+
+```typescript
+import { parentPort } from 'worker_threads'
+import javascriptObfuscator from 'javascript-obfuscator'
+
+export interface ObfuscationTask {
+  chunkId: string
+  code: string
+  config: any
+}
+
+export interface ObfuscationResult {
+  chunkId: string
+  obfuscatedCode: string
+  error?: string
+}
+
+// Escuchar tareas enviadas desde el hilo principal
+if (parentPort) {
+  parentPort.on('message', async (task: ObfuscationTask) => {
+    try {
+      // Ejecutar ofuscación
+      const obfuscated = javascriptObfuscator.obfuscate(task.code, task.config)
+      const result: ObfuscationResult = {
+        chunkId: task.chunkId,
+        obfuscatedCode: obfuscated.getObfuscatedCode(),
+      }
+      // Enviar el resultado de vuelta al hilo principal
+      parentPort?.postMessage(result)
+    } catch (error) {
+      // Manejar excepciones, asegurando que un solo Worker bloqueado no bloquee toda la construcción
+      const result: ObfuscationResult = {
+        chunkId: task.chunkId,
+        obfuscatedCode: '',
+        error: error instanceof Error ? error.message : 'Unknown error',
+      }
+      parentPort?.postMessage(result)
+    }
+  })
+}
+```
+
+### 3. Gestor del grupo de Workers
+
+Este es el núcleo de todo el esquema. Necesitamos mantener un grupo de Workers de tamaño fijo, adoptando la estrategia **FIFO (primero en entrar, primero en salir)** para programar tareas.
+
+```typescript
+import { Worker } from 'worker_threads'
+import os from 'os'
+
+export class WorkerPool {
+  private workers: Worker[] = []
+  private taskQueue: Array<{
+    task: ObfuscationTask
+    resolve: (result: ObfuscationResult) => void
+    reject: (error: Error) => void
+  }> = []
+  
+  constructor(options: WorkerPoolOptions = {}) {
+    // El valor predeterminado es número de núcleos - 1, dejando un poco de espacio para que el hilo principal respire
+    const workerCount = options.workerCount ?? Math.max(1, (os.cpus().length || 4) - 1)
+    
+    for (let i = 0; i < workerCount; i++) {
+      this.createWorker()
+    }
+  }
+
+  private createWorker() {
+    const worker = new Worker('./worker.ts')
+    
+    worker.on('message', (result) => {
+      // Después de completar la tarea, sacar la siguiente tarea de la cola
+      const nextTask = this.taskQueue.shift()
+      if (nextTask) {
+        this.dispatchTask(worker, nextTask)
+      } else {
+        // Si no hay tareas pendientes, marcar el Worker como inactivo
+        this.activeWorkers.delete(worker)
+      }
+    })
+    
+    this.workers.push(worker)
+  }
+
+  // Enviar tarea al grupo
+  public runTask(task: ObfuscationTask): Promise<ObfuscationResult> {
+    return new Promise((resolve, reject) => {
+      const job = { task, resolve, reject }
+      const idleWorker = this.workers.find(w => !this.activeWorkers.has(w))
+      
+      if (idleWorker) {
+        this.dispatchTask(idleWorker, job)
+      } else {
+        this.taskQueue.push(job)
+      }
+    })
+  }
+
+  private dispatchTask(worker: Worker, job: any) {
+    this.activeWorkers.set(worker, job.task)
+    worker.postMessage(job.task)
+  }
+}
+```
+
+### 4. Reporte de progreso
+
+Esperar es doloroso, especialmente cuando no sabes cuánto tiempo más esperar. Añadimos un reportero de progreso simple que retroalimenta el estado actual en tiempo real.
+
+```typescript
+export class ProgressReporter {
+  private completed = 0
+  private readonly total: number
+  private readonly startTime: number
+
+  constructor(total: number) {
+    this.total = total
+    this.startTime = Date.now()
+  }
+
+  increment(): void {
+    this.completed++
+    this.report()
+  }
+
+  private report(): void {
+    const now = Date.now()
+    const elapsed = now - this.startTime
+    const percentage = (this.completed / this.total) * 100
+    
+    // Estimación simple de ETA
+    const avgTimePerChunk = elapsed / this.completed
+    const remaining = (this.total - this.completed) * avgTimePerChunk
+
+    console.log(
+      `[Parallel Obfuscation] ${this.completed}/${this.total} chunks completed (${percentage.toFixed(1)}%) | ETA: ${(remaining / 1000).toFixed(1)}s`
+    )
+  }
+}
+```
+
+## Práctica: Efectos y problemas encontrados
+
+Después de desplegar este esquema, el rendimiento de construcción del proyecto HagiCode tuvo una mejora inmediata.
+
+### Datos de referencia de rendimiento
+
+Realizamos pruebas en el siguiente entorno:
+- CPU：Intel Core i7-12700K (12 núcleos / 20 hilos)
+- RAM：32GB DDR4
+- Node.js：v18.17.0
+- OS：Ubuntu 22.04
+
+**Comparación de resultados**：
+- **Un solo hilo (antes de la optimización)**：118 segundos
+- **4 Workers**：55 segundos（mejora del **53%**）
+- **8 Workers**：48 segundos（mejora del **60%**）
+- **12 Workers**：45 segundos（mejora del **62%**）
+
+Se puede ver que los beneficios no son lineales. Cuando el número de Workers excede 8, la magnitud de la mejora se reduce. Esto se limita principalmente por la uniformidad de la distribución de tareas y el cuello de botella del ancho de banda de memoria.
+
+### Problemas comunes y soluciones
+
+En el uso real de HagiCode, también encontramos algunos problemas, aquí los compartimos con todos:
+
+**P1: El tiempo de construcción no se reduce significativamente, sino que se vuelve más lento?**
+- **Causa**: la creación de Workers en sí tiene sobrecarga, o el número de Workers se establece demasiado alto causando cambios de contexto frecuentes.
+- **Solución**: se recomienda establecer el número de Workers en `número de núcleos de CPU - 1`. Al mismo tiempo, verifica si hay un solo Chunk particularmente grande (por ejemplo > 5MB), este archivo "gigante" se convertirá en un punto débil,可以考虑 optimizar la estrategia de división de código.
+
+**P2: Ocasionalmente el Worker se bloquea, la construcción falla?**
+- **Causa**: cierta sintaxis de código especial puede causar errores internos del ofuscador.
+- **Solución**: implementamos un **mecanismo de degradación automática**. Cuando el número de fallos consecutivos del Worker alcanza el umbral, el complemento volverá automáticamente al modo de un solo hilo, asegurando que la construcción no se interrumpa. Al mismo tiempo, registra el nombre del archivo con error, facilitando reparaciones específicas posteriores.
+
+**P3: Uso de memoria demasiado alto (OOM)?**
+- **Causa**: cada Worker necesita espacio de memoria independiente para cargar el ofuscador y analizar el AST.
+- **Solución**:
+  - Reduce el número de Workers.
+  - Aumenta el límite de memoria de Node.js: `NODE_OPTIONS="--max-old-space-size=4096" npm run build`.
+  - Asegúrate de no mantener referencias a objetos grandes innecesarios dentro del Worker.
+
+## Resumen
+
+Al introducir Node.js Worker Threads, logramos reducir con éxito el tiempo de construcción en producción del proyecto HagiCode de 120 segundos a alrededor de 45 segundos, mejorando enormemente la experiencia de desarrollo y la eficiencia de CI/CD.
+
+El núcleo de este esquema reside en:
+1. **División razonable de tareas**: utilizar los Chunks de Vite como unidades paralelas.
+2. **Control de recursos**: usar el grupo de Workers para evitar el agotamiento de recursos.
+3. **Diseño tolerante a fallos**: el mecanismo de degradación automática asegura la estabilidad de la construcción.
+
+Si también estás preocupado por la eficiencia de construcción frontend, o tu proyecto también está haciendo procesamiento pesado de código, prueba este esquema. Por supuesto, se recomienda más directamente que prestes atención a nuestro proyecto HagiCode, estos detalles de ingeniería ya están integrados en él.
+
+Si este artículo te ayuda, bienvenido a GitHub a darnos una Star, o participar en la beta pública para experimentarlo～
+
+## Materiales de referencia
+
+- Documentación oficial de Node.js Worker Threads: [nodejs.org/api/worker_threads.html](https://nodejs.org/api/worker_threads.html)
+- Documentación de javascript-obfuscator: [github.com/javascript-obfuscator/javascript-obfuscator](https://github.com/javascript-obfuscator/javascript-obfuscator)
+- Guía de desarrollo de complementos Vite: [vitejs.dev/guide/api-plugin.html](https://vitejs.dev/guide/api-plugin.html)
+- **HagiCode GitHub**: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- **Sitio web oficial de HagiCode**: [hagicode.com](https://hagicode.com)
+- **Guía de instalación**: [hagicode.com/installation/docker-compose](https://hagicode.com/installation/docker-compose)
+
+
+
+---
+
+Gracias por leer, si crees que este artículo es útil, haz clic en el botón de Me gusta abajo👍, para que más personas vean este artículo.
+
+Este contenido utiliza colaboración asistida por inteligencia artificial, revisado por mí, conforme a mis puntos de vista y posición.
+
+- **Autor de este artículo:** [newbe36524](https://www.newbe.pro)
+- **Enlace de este artículo:** [https://hagicode.com/blog/2026/01/27/optimizing-vite-build-with-worker-threads](https://hagicode.com/blog/2026/01/27/optimizing-vite-build-with-worker-threads)
+- **Aviso de derechos de autor:** Excepto donde se indique lo contrario, todos los artículos de este blog adoptan el acuerdo de licencia BY-NC-SA. Indique la fuente para la reimpresión!

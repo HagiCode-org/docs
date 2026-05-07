@@ -1,0 +1,353 @@
+---
+title: "Worker Threads を活用した Vite ビルドパフォーマンスの最適化実践"
+date: 2026-01-28
+truncate: true
+tags: [Vite, Worker Threads, ビルドパフォーマンス, Node.js, フロントエンドエンジニアリング]
+description: "大規模なフロントエンドプロジェクトでは、本番環境のコードビルドに待ち時間が長くなりがちです。本記事では、Node.js Worker Threads を活用して Vite ビルドのコード難読化処理時間を 12"
+---
+
+## 120秒から45秒へ：Worker Threads を活用した Vite ビルドパフォーマンス最適化の実践
+
+> 大規模なフロントエンドプロジェクトでは、本番環境のコードビルドに待ち時間が長くなりがちです。本記事では、Node.js Worker Threads を活用して Vite ビルドのコード難読化処理時間を 120 秒から 45 秒に短縮する方法を紹介し、HagiCode プロジェクトでの実装詳細とトラブルシューティングの経験を詳しく解説します。
+
+## 背景
+
+フロントエンドエンジニアリングの実践において、プロジェクト規模の拡大に伴い、ビルド効率の問題が徐々に顕著になってきます。特に本番環境ビルドプロセスでは、ソースコードのロジックを保護するために JavaScript 難読化ツール（`javascript-obfuscator` など）を導入することが一般的です。このステップは必要ですが、計算量が膨大で、CPU リソースを大量に消費します。
+
+**HagiCode** プロジェクトの初期開発段階では、非常に厄介なパフォーマンスボトルネックに直面しました。本番ビルド時間がコード量の増加に伴って急速に悪化していきました。
+
+**具体的な課題は以下の通りです**：
+- シングルスレッドで直列実行される難読化タスクにより、CPU の 1 コアが飽和状態になり、他のコアがアイドル状態になる
+- ビルド時間が当初の 30 秒から 110-120 秒に急増
+- コード変更後のビルド検証プロセスが極めて長く、開発イテレーションの効率が著しく低下
+- CI/CD パイプラインにおいて、ビルド工程が最も時間のかかる部分になる
+
+**なぜ HagiCode にこのニーズがあるのか？**
+HagiCode は AI 駆動のコードインテリジェントアシスタントであり、そのフロントエンドアーキテクチャには複雑なビジネスロジックと AI インタラクションモジュールが含まれています。コアコードのセキュリティを確保するため、本番リリース時に高強度の難読化を強制的に有効にしています。2 分にも及ぶビルド待ち時間に直面し、私たちはビルドシステムの深いパフォーマンス最適化に取り組むことを決めました。
+
+## HagiCode について
+
+> プロジェクトに触れたので、少し紹介させてください。
+
+開発中に以下のような悩みに直面したことはありませんか？
+- 複数のプロジェクト、複数の技術スタックで、ビルドスクリプトの保守コストが高い
+- CI/CD パイプラインの設定が煩雑で、変更のたびにドキュメントを調べる必要がある
+- クロスプラットフォーム互換性の問題が頻発する
+- AI にコード作成を手伝ってもらいたいが、既存のツールが十分ではない
+
+それなら、私たちが開発中の **HagiCode** に興味を持っていただけるかもしれません。
+
+**HagiCode とは？**
+- AI 駆動のコードインテリジェントアシスタント
+- マルチ言語・クロスプラットフォーム対応のコード生成と最適化をサポート
+- ゲーム化メカニズムを内蔵し、コーディングを退屈なものにしない
+
+**なぜここで紹介するのか？**
+本記事で共有する **JavaScript 並列難読化ソリューション**は、HagiCode の開発過程で実践し、まとめたものです。もしこのエンジニアリングソリューションに価値を感じていただけたなら、私たちの技術的センスは悪くないということです——なら、HagiCode 自体も worth checking です。
+
+**詳しく知りたい方へ**
+- GitHub: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)（Star お願いします）
+- 公式サイト: [hagicode.com](https://hagicode.com)
+- 動画デモ: [www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)（30 分の実践デモ）
+- インストールガイド: [hagicode.com/installation/docker-compose](https://hagicode.com/installation/docker-compose)
+- ベータテスト開始済み：今すぐインストールしてベータテストにご参加ください
+
+---
+
+## 分析：パフォーマンスボトルネックの突破口を見つける
+
+パフォーマンス問題の解決に取り掛かる前に、まず考えを整理し、最適な技術ソリューションを確定する必要があります。
+
+### コア决策：なぜ Worker Threads を選択したのか？
+
+Node.js 環境で並列計算を実現する主なソリューションは 3 つあります：
+1. **child_process**：独立した子プロセスを作成
+2. **Web Workers**：主にブラウザ側で使用
+3. **worker_threads**：Node.js ネイティブマルチスレッドサポート
+
+比較分析の結果、HagiCode は最終的に **Worker Threads** を選択しました。理由は以下の通りです：
+- **ゼロシリアライゼーションオーバーヘッド**：Worker Threads は同一プロセス内にあるため、`SharedArrayBuffer` や制御権の転送によってメモリを共有でき、プロセス間通信の大規模なシリアライゼーションコストを回避できます。
+- **ネイティブサポート**：Node.js 12+ バージョンで組み込みサポートされており、追加の重い依存関係を導入する必要がありません。
+- **コンテキストの統一**：デバッグとログ記録が子プロセスよりも便利です。
+
+### タスク粒度：難読化タスクをどう分割するか？
+
+巨大な JS Bundle ファイルを 1 つ難読化することは並列化が困難ですが（コードに依存関係があるため）、Vite のビルド成果物は複数の **Chunk** で構成されています。これが私たちに自然な並列化の境界を与えてくれます：
+
+- **独立性**：Vite でバンドルされた異なる Chunk 間の依存関係は既に分離されており、安全に並列処理できます。
+- **粒度が適切**：通常、プロジェクトには 10〜30 個の Chunk があり、この数は並列スケジューリングに非常に適しています。
+- **統合が容易**：Vite プラグインの `generateBundle` フックにより、ファイル生成前にこれらの Chunk をインターセプトして処理できます。
+
+### アーキテクチャ設計
+
+私たちは 4 つのコアコンポーネントを含む並列処理システムを設計しました：
+
+1. **Task Splitter**：Vite の bundle オブジェクトを走査し、難読化が不要なファイル（vendor など）をフィルタリングし、タスクキューを生成します。
+2. **Worker Pool Manager**：Worker のライフサイクルを管理し、タスクのディスパッチ、回収、エラー時のリトライを担当します。
+3. **Progress Reporter**：ビルド進捗をリアルタイムに出力し、ユーザーの待ち時間の不安を解消します。
+4. **ObfuscationWorker**：実際に難読化ロジックを実行するワーカースレッド。
+
+## 解決：実践的なコーディングと実装
+
+上記の分析に基づき、私たちはこの並列難読化システムの実装に取り掛かりました。
+
+### 1. Vite プラグインの設定
+
+まず、`vite.config.ts` で並列難読化プラグインを統合します。設定は非常に直感的で、Worker 数と難読化ルールを指定するだけです。
+
+```typescript
+import { defineConfig } from 'vite'
+import { parallelJavascriptObfuscator } from './buildTools/plugin'
+
+export default defineConfig(({ mode }) => {
+  const isProduction = mode === 'production'
+  
+  return {
+    build: {
+      rollupOptions: {
+        ...(isProduction
+          ? {
+              plugins: [
+                parallelJavascriptObfuscator({
+                  enabled: true,
+                  // CPU コア数に応じて自動調整、メインスレッドのために 1 コア空けておくことを推奨
+                  workerCount: 4, 
+                  retryAttempts: 3,
+                  fallbackToMainThread: true, // エラー時に自動的にシングルスレッドにフォールバック
+                  // vendor chunk をフィルタリング。通常、サードパーティライブラリは難読化不要
+                  isVendorChunk: (fileName: string) => fileName.includes('vendor-'),
+                  obfuscationConfig: {
+                    compact: true,
+                    controlFlowFlattening: true,
+                    deadCodeInjection: true,
+                    disableConsoleOutput: true,
+                    // ... その他の難読化オプション
+                  },
+                }),
+              ],
+            }
+          : {}),
+      },
+    },
+  }
+})
+```
+
+### 2. Worker ロジックの実装
+
+Worker はタスクを実行する単位です。入力と出力のデータ構造を適切に定義する必要があります。
+
+**注意**：ここでのコードは単純ですが、いくつかの落とし穴に注意が必要です。例えば、`parentPort` の null チェックやエラー処理です。HagiCode の実践では、一部の特殊な ES6 構文が難読化器をクラッシュさせる可能性があることが判明したため、`try-catch` 保護を追加しました。
+
+```typescript
+import { parentPort } from 'worker_threads'
+import javascriptObfuscator from 'javascript-obfuscator'
+
+export interface ObfuscationTask {
+  chunkId: string
+  code: string
+  config: any
+}
+
+export interface ObfuscationResult {
+  chunkId: string
+  obfuscatedCode: string
+  error?: string
+}
+
+// メインスレッドからのタスクを監視
+if (parentPort) {
+  parentPort.on('message', async (task: ObfuscationTask) => {
+    try {
+      // 難読化を実行
+      const obfuscated = javascriptObfuscator.obfuscate(task.code, task.config)
+      const result: ObfuscationResult = {
+        chunkId: task.chunkId,
+        obfuscatedCode: obfuscated.getObfuscatedCode(),
+      }
+      // 結果をメインスレッドに送り返す
+      parentPort?.postMessage(result)
+    } catch (error) {
+      // 例外を処理し、単一の Worker クラッシュがビルド全体をブロックしないようにする
+      const result: ObfuscationResult = {
+        chunkId: task.chunkId,
+        obfuscatedCode: '',
+        error: error instanceof Error ? error.message : 'Unknown error',
+      }
+      parentPort?.postMessage(result)
+    }
+  })
+}
+```
+
+### 3. Worker プールマネージャー
+
+これがソリューション全体の中核です。固定サイズの Worker プールを維持し、**FIFO（先入れ先出し）**戦略でタスクをスケジュールする必要があります。
+
+```typescript
+import { Worker } from 'worker_threads'
+import os from 'os'
+
+export class WorkerPool {
+  private workers: Worker[] = []
+  private taskQueue: Array<{
+    task: ObfuscationTask
+    resolve: (result: ObfuscationResult) => void
+    reject: (error: Error) => void
+  }> = []
+  
+  constructor(options: WorkerPoolOptions = {}) {
+    // デフォルトはコア数 - 1、メインスレッドに少し余裕を持たせる
+    const workerCount = options.workerCount ?? Math.max(1, (os.cpus().length || 4) - 1)
+    
+    for (let i = 0; i < workerCount; i++) {
+      this.createWorker()
+    }
+  }
+
+  private createWorker() {
+    const worker = new Worker('./worker.ts')
+    
+    worker.on('message', (result) => {
+      // タスク完了後、キューから次のタスクを取り出す
+      const nextTask = this.taskQueue.shift()
+      if (nextTask) {
+        this.dispatchTask(worker, nextTask)
+      } else {
+        // 処理待ちタスクがない場合、Worker をアイドル状態としてマーク
+        this.activeWorkers.delete(worker)
+      }
+    })
+    
+    this.workers.push(worker)
+  }
+
+  // プールにタスクを提出
+  public runTask(task: ObfuscationTask): Promise<ObfuscationResult> {
+    return new Promise((resolve, reject) => {
+      const job = { task, resolve, reject }
+      const idleWorker = this.workers.find(w => !this.activeWorkers.has(w))
+      
+      if (idleWorker) {
+        this.dispatchTask(idleWorker, job)
+      } else {
+        this.taskQueue.push(job)
+      }
+    })
+  }
+
+  private dispatchTask(worker: Worker, job: any) {
+    this.activeWorkers.set(worker, job.task)
+    worker.postMessage(job.task)
+  }
+}
+```
+
+### 4. 進捗報告
+
+待機は苦痛です。特に、あとどれくらい待てばいいのか分からない場合は尚更です。私たちはシンプルな進捗レポーターを追加し、現在の状態をリアルタイムでフィードバックするようにしました。
+
+```typescript
+export class ProgressReporter {
+  private completed = 0
+  private readonly total: number
+  private readonly startTime: number
+
+  constructor(total: number) {
+    this.total = total
+    this.startTime = Date.now()
+  }
+
+  increment(): void {
+    this.completed++
+    this.report()
+  }
+
+  private report(): void {
+    const now = Date.now()
+    const elapsed = now - this.startTime
+    const percentage = (this.completed / this.total) * 100
+    
+    // シンプルな ETA 推定
+    const avgTimePerChunk = elapsed / this.completed
+    const remaining = (this.total - this.completed) * avgTimePerChunk
+
+    console.log(
+      `[Parallel Obfuscation] ${this.completed}/${this.total} chunks completed (${percentage.toFixed(1)}%) | ETA: ${(remaining / 1000).toFixed(1)}s`
+    )
+  }
+}
+```
+
+## 実践：効果とトラブルシューティング
+
+このソリューションを導入後、HagiCode プロジェクトのビルドパフォーマンスは劇的に向上しました。
+
+### パフォーマンスベンチマークデータ
+
+私たちは以下の環境でテストを行いました：
+- CPU：Intel Core i7-12700K (12 cores / 20 threads)
+- RAM：32GB DDR4
+- Node.js：v18.17.0
+- OS：Ubuntu 22.04
+
+**結果の比較**：
+- **シングルスレッド（最適化前）**：118 秒
+- **4 Workers**：55 秒（**53%** 向上）
+- **8 Workers**：48 秒（**60%** 向上）
+- **12 Workers**：45 秒（**62%** 向上）
+
+利得は線形ではないことが分かります。Worker 数が 8 を超えると、向上幅は小さくなります。これは主にタスク割り当ての均一性とメモリ帯域幅のボトルネックに制限されます。
+
+### よある問題と解決策
+
+HagiCode の実際の使用では、いくつかの落とし穴にも遭遇しました。ここで共有します：
+
+**Q1: ビルド時間が明らかに減少せず、むしろ遅くなった？**
+- **原因**：Worker 作成自体にオーバーヘッドがある、または Worker 数が多すぎてコンテキストスイッチが頻繁に発生している。
+- **解決策**：Worker 数を `CPU コア数 - 1` に設定することを推奨します。また、特定の Chunk が特に大きい（例 > 5MB）かどうかを確認してください。このような「巨大な」ファイルはボトルネックになる可能性があるため、コード分割戦略の最適化を検討できます。
+
+**Q2: 時々 Worker がクラッシュし、ビルドが失敗する？**
+- **原因**：特定のコード構文により難読化器内部でエラーが発生する可能性がある。
+- **解決策**：私たちは **自動フォールバックメカニズム** を実装しました。Worker の連続失敗回数が閾値に達すると、プラグインは自動的にシングルスレッドモードにフォールバックし、ビルドが中断されないようにします。同時に、エラーが発生したファイル名を記録し、後で特定の修正を行いやすくします。
+
+**Q3: メモリ使用量が高すぎる（OOM）？**
+- **原因**：各 Worker は難読化器をロードし、AST を解析するために独立したメモリ空間を必要とする。
+- **解決策**：
+  - Worker 数を減らす。
+  - Node.js のメモリ制限を増やす：`NODE_OPTIONS="--max-old-space-size=4096" npm run build`。
+  - Worker 内部で不必要な大規模オブジェクト参照を保持しないようにする。
+
+## まとめ
+
+Node.js Worker Threads を導入することで、HagiCode プロジェクトの本番ビルド時間を 120 秒から約 45 秒に短縮し、開発体験と CI/CD 効率を大幅に向上させることに成功しました。
+
+このソリューションの要点は以下の通りです：
+1. **適切なタスク分割**：Vite の Chunk を並列処理単位として活用する。
+2. **リソース制御**：Worker プールを使用してリソース枯渇を防ぐ。
+3. **フォールトトレラント設計**：自動フォールバックメカニズムでビルドの安定性を確保する。
+
+フロントエンドビルド効率に悩んでいる方や、プロジェクトで重度のコード処理を行っている方は、このソリューションを試してみてはいかがでしょうか。もちろん、HagiCode プロジェクトを直接チェックしていただくことをもっと推奨します。これらのエンジニアリングの詳細は既に統合されています。
+
+本記事がお役に立てば、GitHub で Star をいただいたり、ベータテストに参加して体験してみてください～
+
+## 参考資料
+
+- Node.js Worker Threads 公式ドキュメント: [nodejs.org/api/worker_threads.html](https://nodejs.org/api/worker_threads.html)
+- javascript-obfuscator ドキュメント: [github.com/javascript-obfuscator/javascript-obfuscator](https://github.com/javascript-obfuscator/javascript-obfuscator)
+- Vite プラグイン開発ガイド: [vitejs.dev/guide/api-plugin.html](https://vitejs.dev/guide/api-plugin.html)
+- **HagiCode GitHub**: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- **HagiCode 公式サイト**: [hagicode.com](https://hagicode.com)
+- **インストールガイド**: [hagicode.com/installation/docker-compose](https://hagicode.com/installation/docker-compose)
+
+
+
+---
+
+お読みいただきありがとうございます。本記事が役に立ったと思ったら、下のいいねボタン👍をクリックして、より多くの人にこの記事を見ていただければ幸いです。
+
+本内容は人工知能による支援を受け作成され、筆者が確認し、筆者の見解と立場に合致することを確認済みです。
+
+- **筆者:** [newbe36524](https://www.newbe.pro)
+- **記事リンク:** [https://hagicode.com/blog/2026/01/27/optimizing-vite-build-with-worker-threads](https://hagicode.com/blog/2026/01/27/optimizing-vite-build-with-worker-threads)
+- **著作権:** 本ブログの記事は特別な声明を除き、BY-NC-SA ライセンス契約に従います。転載する場合は出典を明記してください！

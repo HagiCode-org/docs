@@ -1,0 +1,1128 @@
+---
+title: HagiCode 多 AI 提供者切換與互操作實現方案
+date: 2026-03-09
+tags: [HagiCode, AI Provider, Claude, Codex, Architecture, Interoperability]
+description: "在現代開發工具生態中，開發者經常需要使用不同的 AI 編碼助手來輔助開發工作。Anthropic 的 Claude Code CLI 和 OpenAI 的 Codex"
+---
+
+## HagiCode 多 AI 提供者切換與互操作實現方案
+
+在現代開發工具生態中，開發者經常需要使用不同的 AI 編碼助手來輔助開發工作。Anthropic 的 Claude Code CLI 和 OpenAI 的 Codex CLI 各有其優勢：Claude 以出色的代碼理解和長上下文處理能力著稱，而 Codex 在代碼生成和工具使用方面表現優異。
+
+本文將深入分析 hagicode 項目如何實現多個 AI 提供者的無縫切換與互操作，包括核心架構設計、關鍵實現細節以及實踐中的注意事項。
+
+## 背景
+
+### 問題域
+
+hagicode 項目面臨的核心挑戰是在同一平台中支持多種 AI CLI，讓用戶能夠：
+
+1. 根據需求靈活切換不同的 AI 提供者
+2. 在切換過程中保持會話狀態的連續性
+3. 統一抽象不同 CLI 的 API 差異
+4. 為未來添加新的 AI 提供者預留擴展空間
+
+### 技術挑戰
+
+1. **接口差異統一**：Claude Code CLI 通過命令行調用，Codex CLI 使用 JSON 事件流
+2. **流式響應處理**：兩種提供者都支持流式響應，但數據格式不同
+3. **工具調用語義**：Claude 和 Codex 對工具調用的表示和生命週期管理不同
+4. **會話生命週期**：需要正確管理每個提供者的會話創建、恢復和終止
+
+## 分析
+
+### 架構設計思路
+
+hagicode 採用了**提供者模式（Provider Pattern）**結合**工廠模式**來抽象 AI 服務的調用。這種設計的核心思想是：
+
+1. **統一接口抽象**：定義 `IAIProvider` 接口作為所有 AI 提供者的統一抽象
+2. **工廠創建實例**：通過 `AIProviderFactory` 根據類型動態創建對應的提供者實例
+3. **智能選擇邏輯**：使用 `AIProviderSelector` 根據場景和配置自動選擇最合適的提供者
+4. **會話狀態管理**：通過數據庫持久化會話與 CLI 線程的綁定關係
+
+### 關鍵組件
+
+| 組件 | 職責 | 語言 |
+|------|--------|------|
+| `IAIProvider` | 統一提供者接口 | C# |
+| `AIProviderFactory` | 創建和管理提供者實例 | C# |
+| `AIProviderSelector` | 智能選擇提供者 | C# |
+| `ClaudeCodeCliProvider` | Claude Code CLI 實現 | C# |
+| `CodexCliProvider` | Codex CLI 實現 | C# |
+| `AgentCliManager` | 桌面端 CLI 管理 | TypeScript |
+
+## 解決
+
+### 1. 核心接口設計
+
+**IAIProvider 接口** 定義了統一的提供者抽象：
+
+```csharp
+public interface IAIProvider
+{
+    /// <summary>
+    /// 提供者顯示名稱
+    /// </summary>
+    string Name { get; }
+
+    /// <summary>
+    /// 是否支持流式響應
+    /// </summary>
+    bool SupportsStreaming { get; }
+
+    /// <summary>
+    /// 提供者能力描述
+    /// </summary>
+    ProviderCapabilities Capabilities { get; }
+
+    /// <summary>
+    /// 執行單個 AI 請求
+    /// </summary>
+    Task<AIResponse> ExecuteAsync(AIRequest request, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// 執行流式 AI 請求
+    /// </summary>
+    IAsyncEnumerable<AIStreamingChunk> StreamAsync(AIRequest request, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// 檢查提供者連接性和響應速度
+    /// </summary>
+    Task<ProviderTestResult> PingAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// 發送帶嵌入式命令的消息
+    /// </summary>
+    IAsyncEnumerable<AIStreamingChunk> SendMessageAsync(
+        AIRequest request,
+        string? embeddedCommandPrompt = null,
+        CancellationToken cancellationToken = default);
+}
+```
+
+接口設計的關鍵特性：
+- **統一的請求/響應模型**：所有提供者使用相同的 `AIRequest` 和 `AIResponse` 類型
+- **流式支持**：通過 `IAsyncEnumerable<AIStreamingChunk>` 統一流式輸出
+- **能力描述**：`ProviderCapabilities` 描述提供者支持的功能（流式、工具、最大 token 等）
+- **嵌入式命令**：`SendMessageAsync` 支持將 OpenSpec 命令嵌入到提示中
+
+### 2. 提供者類型枚舉
+
+```csharp
+public enum AIProviderType
+{
+    ClaudeCodeCli,   // Anthropic Claude Code
+    OpenCodeCli,     // 其他 CLI（可擴展）
+    GitHubCopilot,    // GitHub Copilot
+    CodebuddyCli,    // Codebuddy
+    CodexCli         // OpenAI Codex
+}
+```
+
+這個枚舉為系統支持的所有提供者提供了類型安全的表示。
+
+### 3. 工廠模式實現
+
+**AIProviderFactory** 負責創建和管理提供者實例：
+
+```csharp
+public class AIProviderFactory : IAIProviderFactory
+{
+    private readonly ConcurrentDictionary<AIProviderType, IAIProvider> _cache;
+    private readonly IOptions<AIProviderOptions> _options;
+    private readonly IServiceProvider _serviceProvider;
+
+    public Task<IAIProvider?> GetProviderAsync(AIProviderType providerType)
+    {
+        // 使用緩存避免重複創建
+        if (_cache.TryGetValue(providerType, out var cached))
+            return Task.FromResult<IAIProvider?>(cached);
+
+        // 從配置中獲取提供者配置
+        var aiOptions = _options.Value;
+        if (!aiOptions.Providers.TryGetValue(providerType, out var config))
+        {
+            _logger.LogWarning("Provider '{ProviderType}' not found in configuration", providerType);
+            return Task.FromResult<IAIProvider?>(null);
+        }
+
+        // 根據類型創建提供者
+        var provider = providerType switch
+        {
+            AIProviderType.ClaudeCodeCli =>
+                _serviceProvider.GetService(typeof(ClaudeCodeCliProvider)) as IAIProvider,
+            AIProviderType.CodexCli =>
+                _serviceProvider.GetService(typeof(CodexCliProvider)) as IAIProvider,
+            AIProviderType.GitHubCopilot =>
+                _serviceProvider.GetService(typeof(CopilotAIProvider)) as IAIProvider,
+            _ => null
+        };
+
+        if (provider != null)
+        {
+            _cache[providerType] = provider;
+        }
+
+        return Task.FromResult<IAIProvider?>(provider);
+    }
+}
+```
+
+工廠模式的優勢：
+- **實例緩存**：避免重複創建相同類型的提供者
+- **依賴注入**：通過 `IServiceProvider` 創建實例，支持依賴注入
+- **配置驅動**：從配置文件讀取提供者配置
+- **異常處理**：創建失敗時返回 null，便於上層處理
+
+### 4. 智能選擇器
+
+**AIProviderSelector** 實現提供者選擇策略：
+
+```csharp
+public class AIProviderSelector : IAIProviderSelector
+{
+    private readonly BusinessLayerConfiguration _configuration;
+    private readonly IAIProviderFactory _providerFactory;
+    private readonly IMemoryCache _cache;
+
+    public async Task<AIProviderType> SelectProviderAsync(
+        BusinessScenario scenario,
+        CancellationToken cancellationToken = default)
+    {
+        // 1. 嘗試從場景映射獲取提供者
+        if (_configuration.ScenarioProviderMapping.TryGetValue(scenario, out var providerType))
+        {
+            if (await IsProviderAvailableAsync(providerType, cancellationToken))
+            {
+                _logger.LogDebug("Selected provider '{Provider}' for scenario '{Scenario}'",
+                    providerType, scenario);
+                return providerType;
+            }
+
+            _logger.LogWarning("Configured provider '{Provider}' for scenario '{Scenario}' is not available",
+                providerType, scenario);
+        }
+
+        // 2. 嘗試使用默認提供者
+        if (await IsProviderAvailableAsync(_configuration.DefaultProvider, cancellationToken))
+        {
+            _logger.LogDebug("Using default provider '{Provider}' for scenario '{Scenario}'",
+                _configuration.DefaultProvider, scenario);
+            return _configuration.DefaultProvider;
+        }
+
+        // 3. 嘗試回退鏈
+        foreach (var fallbackProvider in _configuration.FallbackChain)
+        {
+            if (await IsProviderAvailableAsync(fallbackProvider, cancellationToken))
+            {
+                _logger.LogInformation("Using fallback provider '{Provider}' for scenario '{Scenario}'",
+                    fallbackProvider, scenario);
+                return fallbackProvider;
+            }
+        }
+
+        // 4. 無法找到可用提供者
+        throw new InvalidOperationException(
+            $"No available AI provider found for scenario '{scenario}'");
+    }
+
+    public async Task<bool> IsProviderAvailableAsync(
+        AIProviderType providerType,
+        CancellationToken cancellationToken = default)
+    {
+        var cacheKey = $"provider_available_{providerType}";
+
+        // 使用緩存減少 Ping 調用
+        if (_configuration.EnableCache &&
+            _cache.TryGetValue<bool>(cacheKey, out var cached))
+        {
+            return cached;
+        }
+
+        var provider = await _providerFactory.GetProviderAsync(providerType);
+        var isAvailable = provider != null;
+
+        if (_configuration.EnableCache && isAvailable)
+        {
+            _cache.Set(cacheKey, isAvailable,
+                TimeSpan.FromSeconds(_configuration.CacheExpirationSeconds));
+        }
+
+        return isAvailable;
+    }
+}
+```
+
+選擇器策略：
+- **場景映射優先**：首先檢查業務場景是否有特定的提供者映射
+- **默認提供者回退**：場景映射失敗時使用默認提供者
+- **回退鏈兜底**：逐個嘗試回退鏈中的提供者
+- **可用性緩存**：緩存提供者可用性檢查結果，減少 Ping 調用
+
+### 5. Claude Code CLI 提供者實現
+
+```csharp
+public class ClaudeCodeCliProvider : IAIProvider
+{
+    private readonly ILogger<ClaudeCodeCliProvider> _logger;
+    private readonly IClaudeStreamManager _streamManager;
+    private readonly ProviderConfiguration _config;
+
+    public string Name => "ClaudeCodeCli";
+    public bool SupportsStreaming => true;
+
+    public ProviderCapabilities Capabilities { get; }
+
+    public async Task<AIResponse> ExecuteAsync(AIRequest request, CancellationToken cancellationToken = default)
+    {
+        _logger.LogInformation("Executing AI request with provider: {Provider}", Name);
+
+        var sessionOptions = ClaudeRequestMapper.MapToSessionOptions(request, _config);
+
+        var messages = _streamManager.SendMessageAsync(request.Prompt, sessionOptions, cancellationToken);
+
+        var responseBuilder = new StringBuilder();
+        ResultMessage? finalResult = null;
+
+        await foreach (var streamMessage in messages)
+        {
+            switch (streamMessage.Message)
+            {
+                case ResultMessage result:
+                    finalResult = result;
+                    responseBuilder.Append(result.Result);
+                    break;
+            }
+        }
+
+        if (finalResult != null)
+        {
+            return ClaudeResponseMapper.MapToAIResponse(finalResult, Name);
+        }
+
+        return new AIResponse
+        {
+            Content = responseBuilder.ToString(),
+            FinishReason = FinishReason.Unknown,
+            Provider = Name
+        };
+    }
+}
+```
+
+Claude Code CLI 提供者的特點：
+- **流式管理器集成**：使用 `IClaudeStreamManager` 與 Claude CLI 通信
+- **CessionId 會話隔離**：使用 `CessionId` 作為會話唯一標識，與系統 sessionId 區分
+- **工作目錄配置**：支持配置工作目錄、權限模式等
+- **工具支持**：支持 AllowedTools、DisallowedTools 等工具權限配置
+
+### 6. Codex CLI 提供者實現
+
+```csharp
+public class CodexCliProvider : IAIProvider
+{
+    private readonly ILogger<CodexCliProvider> _logger;
+    private readonly CodexSettings _settings;
+    private readonly ConcurrentDictionary<string, string> _sessionThreadBindings;
+
+    public string Name => "CodexCli";
+    public bool SupportsStreaming => true;
+
+    public ProviderCapabilities Capabilities { get; }
+
+    public async IAsyncEnumerable<AIStreamingChunk> StreamAsync(
+        AIRequest request,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        _logger.LogInformation("Executing streaming AI request with provider: {Provider}", Name);
+
+        var codex = CreateCodexClient();
+        var thread = ResolveThread(codex, request);
+
+        var currentTurn = 0;
+        var activeToolCalls = new Dictionary<string, AIToolCallDelta>();
+
+        await foreach (var threadEvent in thread.RunStreamedAsync(BuildPrompt(request), cancellationToken))
+        {
+            if (threadEvent is TurnStartedEvent)
+            {
+                currentTurn++;
+            }
+
+            switch (threadEvent)
+            {
+                case ItemCompletedEvent { Item: AgentMessageItem message }:
+                    var messageText = message.Text ?? string.Empty;
+                    yield return new AIStreamingChunk
+                    {
+                        Content = messageText,
+                        Type = StreamingChunkType.ContentDelta,
+                        IsComplete = false
+                    };
+                    break;
+
+                case ItemStartedEvent or ItemUpdatedEvent or ItemCompletedEvent:
+                    var toolChunk = BuildToolChunk(threadEvent, currentTurn);
+                    if (toolChunk?.ToolCallDelta != null)
+                    {
+                        yield return toolChunk;
+                    }
+                    break;
+
+                case TurnCompletedEvent turnCompleted:
+                    activeToolCalls.Clear();
+                    yield return new AIStreamingChunk
+                    {
+                        Content = string.Empty,
+                        Type = StreamingChunkType.Metadata,
+                        IsComplete = true,
+                        Usage = MapUsage(turnCompleted.Usage)
+                    };
+                    break;
+            }
+        }
+
+        BindSessionThread(request.SessionId, thread.Id);
+    }
+
+    private CodexThread ResolveThread(Codex codex, AIRequest request)
+    {
+        var sessionId = request.SessionId;
+
+        // 檢查是否已有綁定的線程
+        if (!string.IsNullOrWhiteSpace(sessionId) &&
+            _sessionThreadBindings.TryGetValue(sessionId, out var threadId) &&
+            !string.IsNullOrWhiteSpace(threadId))
+        {
+            _logger.LogInformation("Resuming Codex thread {ThreadId} for session {SessionId}", threadId, sessionId);
+            return codex.ResumeThread(threadId, threadOptions);
+        }
+
+        _logger.LogInformation("Starting new Codex thread for session {SessionId}", sessionId ?? "(none)");
+        return codex.StartThread(threadOptions);
+    }
+}
+```
+
+Codex CLI 提供者的特點：
+- **JSON 事件流處理**：解析 Codex 的 JSON 事件流（TurnStarted、ItemStarted、TurnCompleted 等）
+- **會話線程綁定**：使用 SQLite 數據庫持久化會話與線程的綁定關係
+- **線程復用**：支持恢復已有線程，保持會話連續性
+- **工具調用追蹤**：追蹤活動工具調用狀態，正確處理工具生命週期
+
+### 7. 會話線程綁定機制
+
+Codex CLI 使用 SQLite 數據庫持久化會話與線程的綁定：
+
+```csharp
+public class CodexCliProvider : IAIProvider
+{
+    private const int SessionThreadBindingRetentionDays = 30;
+    private readonly ConcurrentDictionary<string, string> _sessionThreadBindings;
+    private readonly string _sessionThreadBindingDatabaseConnectionString;
+    private readonly string _sessionThreadBindingDatabasePath;
+
+    private void BindSessionThread(string? sessionId, string? threadId)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId) || string.IsNullOrWhiteSpace(threadId))
+        {
+            return;
+        }
+
+        // 內存緩存
+        _sessionThreadBindings.AddOrUpdate(sessionId, threadId, (_, _) => threadId);
+
+        // 持久化到 SQLite
+        PersistSessionThreadBinding(sessionId, threadId);
+    }
+
+    private void PersistSessionThreadBinding(string sessionId, string threadId)
+    {
+        try
+        {
+            using var connection = new SqliteConnection(_sessionThreadBindingDatabaseConnectionString);
+            connection.Open();
+
+            using var upsertCommand = connection.CreateCommand();
+            upsertCommand.CommandText =
+                """
+                INSERT INTO SessionThreadBindings (SessionId, ThreadId, CreatedAtUtc, UpdatedAtUtc)
+                VALUES ($sessionId, $threadId, $createdAtUtc, $updatedAtUtc)
+                ON CONFLICT(SessionId) DO UPDATE SET
+                    ThreadId = excluded.ThreadId,
+                    UpdatedAtUtc = excluded.UpdatedAtUtc;
+                """;
+            var nowUtc = DateTimeOffset.UtcNow.ToString("O");
+            upsertCommand.Parameters.AddWithValue("$sessionId", sessionId);
+            upsertCommand.Parameters.AddWithValue("$threadId", threadId);
+            upsertCommand.Parameters.AddWithValue("$createdAtUtc", nowUtc);
+            upsertCommand.Parameters.AddWithValue("$updatedAtUtc", nowUtc);
+            upsertCommand.ExecuteNonQuery();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "Failed to persist Codex session-thread binding for session {SessionId} to {DatabasePath}",
+                sessionId,
+                _sessionThreadBindingDatabasePath);
+        }
+    }
+
+    private void LoadPersistedSessionThreadBindings()
+    {
+        using var connection = new SqliteConnection(_sessionThreadBindingDatabaseConnectionString);
+        connection.Open();
+
+        using var loadCommand = connection.CreateCommand();
+        loadCommand.CommandText = "SELECT SessionId, ThreadId FROM SessionThreadBindings;";
+        using var reader = loadCommand.ExecuteReader();
+        while (reader.Read())
+        {
+            var sessionId = reader.GetString(0);
+            var threadId = reader.GetString(1);
+            _sessionThreadBindings[sessionId] = threadId;
+        }
+    }
+}
+```
+
+會話線程綁定的優勢：
+- **會話恢復**：系統重啟後可以恢復之前的會話
+- **線程復用**：同一會話可以復用已有的 Codex 線程
+- **自動清理**：超過 30 天的綁定會被自動清理
+
+### 8. 桌面端 CLI 管理
+
+hagicode-desktop 通過 `AgentCliManager` 管理 CLI 選擇：
+
+```typescript
+export enum AgentCliType {
+  ClaudeCode = 'claude-code',
+  Codex = 'codex',
+  // 未來可擴展: Aider, Cursor 等其他 CLI
+}
+
+export class AgentCliManager {
+  private static readonly STORE_KEY = 'agentCliSelection';
+  private static readonly EXECUTOR_TYPE_MAP: Record<AgentCliType, string> = {
+    [AgentCliType.ClaudeCode]: 'ClaudeCodeCli',
+    [AgentCliType.Codex]: 'CodexCli',
+  };
+
+  constructor(private store: any) {}
+
+  async saveSelection(cliType: AgentCliType): Promise<void> {
+    const selection: StoredAgentCliSelection = {
+      cliType,
+      isSkipped: false,
+      selectedAt: new Date().toISOString(),
+    };
+
+    this.store.set(AgentCliManager.STORE_KEY, selection);
+  }
+
+  loadSelection(): StoredAgentCliSelection {
+    return this.store.get(AgentCliManager.STORE_KEY, {
+      cliType: null,
+      isSkipped: false,
+      selectedAt: null,
+    });
+  }
+
+  getCommandName(cliType: AgentCliType): string {
+    switch (cliType) {
+      case AgentCliType.ClaudeCode:
+        return 'claude';
+      case AgentCliType.Codex:
+        return 'codex';
+      default:
+        return 'claude';
+    }
+  }
+
+  getExecutorType(cliType: AgentCliType | null): string {
+    if (!cliType) return 'ClaudeCodeCli';
+    return this.EXECUTOR_TYPE_MAP[cliType] || 'ClaudeCodeCli';
+  }
+}
+```
+
+桌面端 IPC 處理器示例：
+
+```typescript
+ipcMain.handle('llm:call-api', async (event, manifestPath, region) => {
+  if (!state.llmInstallationManager) {
+    return { success: false, error: 'LLM Installation Manager not initialized' };
+  }
+
+  try {
+    const prompt = await state.llmInstallationManager.loadPrompt(manifestPath, region);
+
+    // 根據用戶選擇確定 CLI 命令
+    let commandName = 'claude';
+    if (state.agentCliManager) {
+      const selectedCliType = state.agentCliManager.getSelectedCliType();
+      if (selectedCliType) {
+        commandName = state.agentCliManager.getCommandName(selectedCliType);
+      }
+    }
+
+    // 使用對應的 CLI 執行
+    const result = await state.llmInstallationManager.callApi(
+      prompt.filePath,
+      event.sender,
+      commandName
+    );
+
+    return result;
+  } catch (error) {
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error'
+    };
+  }
+});
+```
+
+### 9. Codex 內部的模型提供者系統
+
+Codex 本身也支持多種模型提供者，通過 `ModelProviderInfo` 配置：
+
+```rust
+pub const OPENAI_PROVIDER_NAME: &str = "OpenAI";
+pub const OLLAMA_OSS_PROVIDER_ID: &str = "ollama";
+pub const LMSTUDIO_OSS_PROVIDER_ID: &str = "lmstudio";
+
+pub fn built_in_model_providers() -> HashMap<String, ModelProviderInfo> {
+    use ModelProviderInfo as P;
+
+    [
+        ("openai", P::create_openai_provider()),
+        (OLLAMA_OSS_PROVIDER_ID, create_oss_provider(DEFAULT_OLLAMA_PORT, WireApi::Responses)),
+        (LMSTUDIO_OSS_PROVIDER_ID, create_oss_provider(DEFAULT_LMSTUDIO_PORT, WireApi::Responses)),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v))
+    .collect()
+}
+
+pub struct ModelProviderInfo {
+    pub name: String,
+    pub base_url: Option<String>,
+    pub env_key: Option<String>,
+    pub query_params: Option<HashMap<String, String>>,
+    pub http_headers: Option<HashMap<String, String>>,
+    pub request_max_retries: Option<u64>,
+    pub stream_max_retries: Option<u64>,
+    pub stream_idle_timeout_ms: Option<u64>,
+    pub requires_openai_auth: bool,
+    pub supports_websockets: bool,
+}
+```
+
+Codex 的模型提供者支持：
+- **內置提供者**：OpenAI、Ollama、LM Studio
+- **自定義提供者**：用戶可在 config.toml 中添加自定義提供者
+- **重試策略**：可配置請求和流的重試次數
+- **WebSocket 支持**：部分提供者支持 WebSocket 傳輸
+
+## 實踐
+
+### 配置示例
+
+**appsettings.json** 配置多個提供者：
+
+```json
+{
+  "AI": {
+    "Providers": {
+      "DefaultProvider": "ClaudeCodeCli",
+      "Providers": {
+        "ClaudeCodeCli": {
+          "Type": "ClaudeCodeCli",
+          "Model": "claude-sonnet-4-20250514",
+          "WorkingDirectory": "/path/to/workspace",
+          "PermissionMode": "acceptEdits",
+          "AllowedTools": ["file-edit", "command-run", "bash"]
+        },
+        "CodexCli": {
+          "Type": "CodexCli",
+          "Model": "gpt-4.1",
+          "ExecutablePath": "codex",
+          "SandboxMode": "enabled",
+          "WebSearchMode": "auto",
+          "NetworkAccessEnabled": false
+        }
+      },
+      "ScenarioProviderMapping": {
+        "CodeAnalysis": "ClaudeCodeCli",
+        "CodeGeneration": "CodexCli",
+        "Refactoring": "ClaudeCodeCli",
+        "Debugging": "CodexCli"
+      },
+      "FallbackChain": ["CodexCli", "ClaudeCodeCli"]
+    },
+    "Selector": {
+      "EnableCache": true,
+      "CacheExpirationSeconds": 300
+    }
+  }
+}
+```
+
+### 使用示例 - 後端服務
+
+```csharp
+public class AIOrchestrator
+{
+    private readonly IAIProviderFactory _providerFactory;
+    private readonly IAIProviderSelector _providerSelector;
+    private readonly ILogger<AIOrchestrator> _logger;
+
+    public AIOrchestrator(
+        IAIProviderFactory providerFactory,
+        IAIProviderSelector providerSelector,
+        ILogger<AIOrchestrator> logger)
+    {
+        _providerFactory = providerFactory;
+        _providerSelector = providerSelector;
+        _logger = logger;
+    }
+
+    public async Task<AIResponse> ProcessRequestAsync(
+        AIRequest request,
+        BusinessScenario scenario)
+    {
+        _logger.LogInformation("Processing request for scenario: {Scenario}", scenario);
+
+        try
+        {
+            // 智能選擇提供者
+            var providerType = await _providerSelector.SelectProviderAsync(scenario, request.CancellationToken);
+
+            // 獲取提供者實例
+            var provider = await _providerFactory.GetProviderAsync(providerType);
+            if (provider == null)
+            {
+                throw new InvalidOperationException($"Provider {providerType} not available");
+            }
+
+            _logger.LogInformation("Using provider: {Provider} for request", provider.Name);
+
+            // 執行請求
+            var response = await provider.ExecuteAsync(request, request.CancellationToken);
+
+            _logger.LogInformation("Request completed with provider: {Provider}, tokens used: {Tokens}",
+                provider.Name,
+                response.Usage?.TotalTokens ?? 0);
+
+            return response;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to process request for scenario: {Scenario}", scenario);
+            throw;
+        }
+    }
+}
+```
+
+### 使用示例 - 流式響應
+
+```csharp
+public async IAsyncEnumerable<AIStreamingChunk> StreamResponseAsync(
+    AIRequest request,
+    BusinessScenario scenario)
+{
+    var providerType = await _providerSelector.SelectProviderAsync(scenario);
+    var provider = await _providerFactory.GetProviderAsync(providerType);
+
+    if (provider == null)
+    {
+        throw new InvalidOperationException($"Provider {providerType} not available");
+    }
+
+    await foreach (var chunk in provider.StreamAsync(request))
+    {
+        // 處理流式塊
+        switch (chunk.Type)
+        {
+            case StreamingChunkType.ContentDelta:
+                // 實時顯示文本內容
+                await SendToClientAsync(chunk.Content);
+                break;
+
+            case StreamingChunkType.ToolCallDelta:
+                // 處理工具調用
+                await HandleToolCallAsync(chunk.ToolCallDelta);
+                break;
+
+            case StreamingChunkType.Metadata:
+                // 處理完成事件和統計
+                if (chunk.IsComplete)
+                {
+                    _logger.LogInformation("Stream completed, usage: {@Usage}", chunk.Usage);
+                }
+                break;
+
+            case StreamingChunkType.Error:
+                // 處理錯誤
+                _logger.LogError("Stream error: {Error}", chunk.ErrorMessage);
+                throw new InvalidOperationException(chunk.ErrorMessage);
+        }
+    }
+}
+```
+
+### 使用示例 - OpenSpec 命令
+
+```csharp
+public async Task<string> ExecuteOpenSpecCommandAsync(
+    string command,
+    string arguments,
+    BusinessScenario scenario)
+{
+    var providerType = await _providerSelector.SelectProviderAsync(scenario);
+    var provider = await _providerFactory.GetProviderAsync(providerType);
+
+    // 構建嵌入式命令提示
+    var commandPrompt = $"""
+        Execute the following OpenSpec command:
+        Command: {command}
+        Arguments: {arguments}
+
+        Please execute this command and return the results.
+        """;
+
+    var request = new AIRequest
+    {
+        Prompt = "Process this command request",
+        EmbeddedCommandPrompt = commandPrompt,
+        WorkingDirectory = Directory.GetCurrentDirectory()
+    };
+
+    var response = await provider.SendMessageAsync(request, commandPrompt);
+
+    return response.Content;
+}
+```
+
+## 注意事項
+
+### 1. 提供者健康檢查
+
+在切換提供者前，建議先調用 `PingAsync` 確保目標提供者可用：
+
+```csharp
+public async Task<bool> IsProviderHealthyAsync(AIProviderType providerType)
+{
+    var provider = await _providerFactory.GetProviderAsync(providerType);
+    if (provider == null) return false;
+
+    var testResult = await provider.PingAsync();
+
+    return testResult.Success &&
+           testResult.ResponseTimeMs < 5000; // 5 秒內響應視為健康
+}
+```
+
+### 2. 會話隔離
+
+使用 `CessionId`（Claude）或 `ThreadId`（Codex）確保會話隔離：
+
+- Claude Code CLI：使用 `CessionId` 作為會話唯一標識
+- Codex CLI：使用 `ThreadId` 作為會話標識
+
+```csharp
+// Claude Code CLI 會話選項
+var claudeSessionOptions = new ClaudeSessionOptions
+{
+    CessionId = CessionId.New(),  // 生成唯一 ID
+    WorkingDirectory = workspacePath,
+    AllowedTools = allowedTools,
+    PermissionMode = PermissionMode.acceptEdits
+};
+
+// Codex 線程選項
+var codexThreadOptions = new ThreadOptions
+{
+    Model = "gpt-4.1",
+    SandboxMode = "enabled",
+    WorkingDirectory = workspacePath
+};
+```
+
+### 3. 錯誤處理
+
+提供者不可用時的回退機制要健壯，確保至少有一個可用提供者：
+
+```csharp
+public async Task<AIResponse> ExecuteWithFallbackAsync(
+    AIRequest request,
+    List<AIProviderType> preferredProviders)
+{
+    Exception? lastException = null;
+
+    foreach (var providerType in preferredProviders)
+    {
+        try
+        {
+            var provider = await _providerFactory.GetProviderAsync(providerType);
+            if (provider == null) continue;
+
+            // 嘗試執行
+            return await provider.ExecuteAsync(request);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Provider {ProviderType} failed, trying next", providerType);
+            lastException = ex;
+        }
+    }
+
+    // 所有提供者都失敗
+    throw new InvalidOperationException(
+        "All preferred providers failed. Last error: " + lastException?.Message,
+        lastException);
+}
+```
+
+### 4. 配置驗證
+
+啟動時驗證所有配置的提供者設置，避免運行時錯誤：
+
+```csharp
+public void ValidateConfiguration(AIProviderOptions options)
+{
+    foreach (var (providerType, config) in options.Providers)
+    {
+        // 驗證可執行文件路徑（CLI 類型提供者）
+        if (IsCliBasedProvider(providerType))
+        {
+            if (string.IsNullOrWhiteSpace(config.ExecutablePath))
+            {
+                throw new ConfigurationException(
+                    $"Provider {providerType} requires ExecutablePath");
+            }
+
+            if (!File.Exists(config.ExecutablePath))
+            {
+                throw new ConfigurationException(
+                    $"Executable not found for {providerType}: {config.ExecutablePath}");
+            }
+        }
+
+        // 驗證 API 密鑰（API 類型提供者）
+        if (IsApiBasedProvider(providerType))
+        {
+            if (string.IsNullOrWhiteSpace(config.ApiKey))
+            {
+                throw new ConfigurationException(
+                    $"Provider {providerType} requires ApiKey");
+            }
+        }
+
+        // 驗證模型名稱
+        if (string.IsNullOrWhiteSpace(config.Model))
+        {
+            _logger.LogWarning("No model configured for {ProviderType}, using default", providerType);
+        }
+    }
+}
+```
+
+### 5. 緩存管理
+
+提供者實例會被緩存，注意生命週期管理和內存使用：
+
+```csharp
+// 定期清理緩存
+public void ClearInactiveProviders(TimeSpan inactiveThreshold)
+{
+    var now = DateTimeOffset.UtcNow;
+    var keysToRemove = new List<AIProviderType>();
+
+    foreach (var (type, instance) in _cache)
+    {
+        // 假設提供者有 LastUsedTime 屬性
+        if (instance.LastUsedTime.HasValue &&
+            now - instance.LastUsedTime.Value > inactiveThreshold)
+        {
+            keysToRemove.Add(type);
+        }
+    }
+
+    foreach (var key in keysToRemove)
+    {
+        _cache.TryRemove(key, out _);
+        _logger.LogInformation("Cleared inactive provider: {Provider}", key);
+    }
+}
+```
+
+### 6. 日誌記錄
+
+詳細記錄提供者選擇、切換和執行過程，便於調試：
+
+```csharp
+public class AIProviderLogging
+{
+    private readonly ILogger _logger;
+
+    public void LogProviderSelection(
+        BusinessScenario scenario,
+        AIProviderType selectedProvider,
+        SelectionReason reason)
+    {
+        _logger.LogInformation(
+            "[ProviderSelection] Scenario={Scenario}, Provider={Provider}, Reason={Reason}",
+            scenario,
+            selectedProvider,
+            reason);
+    }
+
+    public void LogProviderSwitch(
+        AIProviderType fromProvider,
+        AIProviderType toProvider,
+        string reason)
+    {
+        _logger.LogWarning(
+            "[ProviderSwitch] From={FromProvider} To={ToProvider}, Reason={Reason}",
+            fromProvider,
+            toProvider,
+            reason);
+    }
+
+    public void LogProviderError(
+        AIProviderType provider,
+        Exception error,
+        AIRequest request)
+    {
+        _logger.LogError(error,
+            "[ProviderError] Provider={Provider}, RequestLength={Length}, Error={Message}",
+            provider,
+            request.Prompt.Length,
+            error.Message);
+    }
+}
+```
+
+### 7. 線程安全
+
+`ConcurrentDictionary` 等並發集合的使用確保線程安全：
+
+```csharp
+public class ThreadSafeProviderCache
+{
+    private readonly ConcurrentDictionary<AIProviderType, IAIProvider> _cache;
+    private readonly ReaderWriterLockSlim _lock = new();
+
+    public IAIProvider? GetProvider(AIProviderType type)
+    {
+        // 讀取操作無需鎖
+        if (_cache.TryGetValue(type, out var provider))
+            return provider;
+
+        // 創建需要寫鎖
+        _lock.EnterWriteLock();
+        try
+        {
+            // 雙重檢查
+            if (_cache.TryGetValue(type, out provider))
+                return provider;
+
+            var newProvider = CreateProvider(type);
+            if (newProvider != null)
+            {
+                _cache[type] = newProvider;
+            }
+            return newProvider;
+        }
+        finally
+        {
+            _lock.ExitWriteLock();
+        }
+    }
+}
+```
+
+### 8. 數據庫遷移
+
+會話線程綁定數據庫結構變更時需要考慮數據遷移：
+
+```csharp
+public class SessionThreadMigration
+{
+    public async Task MigrateAsync(string dbPath)
+    {
+        var version = await GetSchemaVersionAsync(dbPath);
+
+        if (version >= 2) return; // 已是最新版本
+
+        using var connection = new SqliteConnection(dbPath);
+        connection.Open();
+
+        // 遷移到 v2：添加 CreatedAtUtc 列
+        if (version < 2)
+        {
+            _logger.LogInformation("Migrating SessionThreadBindings to v2...");
+
+            using var addColumnCommand = connection.CreateCommand();
+            addColumnCommand.CommandText = "ALTER TABLE SessionThreadBindings ADD COLUMN CreatedAtUtc TEXT;";
+            addColumnCommand.ExecuteNonQuery();
+
+            using var backfillCommand = connection.CreateCommand();
+            backfillCommand.CommandText =
+                """
+                UPDATE SessionThreadBindings
+                SET CreatedAtUtc = COALESCE(NULLIF(UpdatedAtUtc, ''), $nowUtc)
+                WHERE CreatedAtUtc IS NULL OR CreatedAtUtc = '';
+                """;
+            backfillCommand.Parameters.AddWithValue("$nowUtc", DateTimeOffset.UtcNow.ToString("O"));
+            backfillCommand.ExecuteNonQuery();
+        }
+
+        await UpdateSchemaVersionAsync(dbPath, 2);
+        _logger.LogInformation("Migration to v2 completed");
+    }
+}
+```
+
+## 總結
+
+hagicode 通過提供者模式、工廠模式和選擇器模式的組合，實現了一個靈活、可擴展的多 AI 提供者架構：
+
+- **統一接口抽象**：`IAIProvider` 接口屏蔽了不同 CLI 的差異
+- **動態實例創建**：`AIProviderFactory` 支持運行時創建提供者實例
+- **智能選擇策略**：`AIProviderSelector` 實現場景驅動的提供者選擇
+- **會話狀態持久化**：通過數據庫綁定確保會話連續性
+- **桌面端集成**：`AgentCliManager` 支持用戶選擇和配置
+
+這種架構設計的優勢在於：
+1. **可擴展性**：添加新的 AI 提供者只需實現 `IAIProvider` 接口
+2. **可測試性**：提供者可以獨立測試和模擬
+3. **可維護性**：每個提供者的實現獨立，職責單一
+4. **用戶友好**：支持場景自動選擇和手動切換
+
+通過這種設計，hagicode 成功實現了 Claude Code CLI 和 Codex CLI 的無縫切換與互操作，為開發者提供了靈活、強大的 AI 編碼助手體驗。
+
+## 參考資料
+
+- HagiCode 項目地址：[github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- HagiCode 官網：[hagicode.com](https://hagicode.com)
+- Claude Code 官方文檔：[docs.anthropic.com](https://docs.anthropic.com)
+- OpenAI Codex 文檔：[platform.openai.com](https://platform.openai.com)
+- Codex SDK 官方倉庫：[github.com/openai/codex](https://github.com/openai/codex)
+- HagiCode 多平台 CLI 支持：[https://docs.hagicode.com/blog/hagicode-ai-cli-multi-platform-support/](https://docs.hagicode.com/blog/hagicode-ai-cli-multi-platform-support/)
+
+---
+
+感謝您的閱讀,如果您覺得本文有用,快點擊下方點贊按鈕👍,讓更多的人看到本文。
+
+本內容採用人工智能協作,經本人審核,符合本人觀點與立場。
+
+- 本文作者: [newbe36524](https://www.newbe.pro)
+- 本文鏈接: [https://docs.hagicode.com/blog/2026-03-09-hagicode-multi-ai-provider-switching-interop/](https://docs.hagicode.com/blog/2026-03-09-hagicode-multi-ai-provider-switching-interop/)
+- 版權聲明: 本博客所有文章除特別聲明外,均採用 BY-NC-SA 許可協議。轉載時請註明出處!

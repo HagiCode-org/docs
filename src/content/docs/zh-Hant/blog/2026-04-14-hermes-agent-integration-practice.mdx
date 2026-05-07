@@ -1,0 +1,419 @@
+---
+title: Hermes Agent 整合實踐：從協議到生產
+date: 2026-04-14
+tags: [Hermes, ACP, Agent, Integration, Orleans]
+description: "分享 HagiCode 整合 Hermes Agent 的完整實踐，包括 ACP 協議適配、會話池管理、前後端契約同步等核心經驗。"
+---
+
+## Hermes Agent 整合實踐：從協議到生產
+
+> 分享 HagiCode 整合 Hermes Agent 的完整實踐，包括 ACP 協議適配、會話池管理、前後端契約同步等核心經驗。
+
+## 背景
+
+在構建 AI 輔助編碼平台 HagiCode 的過程中，團隊需要整合一個既能在本地運行又能擴展到雲端的 Agent 框架。經過調研，Nous Research 的 Hermes Agent 被選為綜合 Agent 的底層引擎。
+
+其實選型這事兒，說難也不難，說簡單也不簡單。畢竟市面上能打的 Agent 框架也不少，只是 Hermes 那個 ACP 協議和工具系統確實有點東西，剛好契合 HagiCode "既要又要"的需求場景——本地開發、團隊協作和雲端擴展。但要把 Hermes 真正融入生產系統，還需要解決一系列工程問題，這可不是鬧著玩的。
+
+HagiCode 的技術棧基於 Orleans 構建分佈式系統，前端使用 React + TypeScript。整合 Hermes 需要在保持現有架構統一性的前提下，讓 Hermes 成為與 ClaudeCode、OpenCode 等並行的"一等公民"執行器。說起來容易，做起來嘛，也就那樣吧。
+
+本文分享我們在 HagiCode 項目中整合 Hermes Agent 的實踐經驗，希望能給面臨類似需求的團隊提供參考。畢竟，踩過的坑，沒必要讓別人再踩一遍。
+
+## 關於 HagiCode
+
+本文分享的方案來自我們在 [HagiCode](https://hagicode.com) 項目中的實踐經驗。HagiCode 是一個 AI 驅動的編碼輔助平台，支持多種 AI Provider 的統一接入和管理。在整合 Hermes Agent 的過程中，我們設計了一套通用的 Provider 抽象層，使得新的 Agent 類型可以無縫接入現有系統。
+
+如果你對 HagiCode 感興趣，歡迎訪問 [GitHub](https://github.com/HagiCode-org/site) 了解更多。多個人看，多份力量罷了。
+
+## 架構設計
+
+### 分層設計思路
+
+HagiCode 的 Hermes 整合採用了清晰的分層架構，每層各司其職：
+
+**後端核心層**
+- `HermesCliProvider`: 實現 `IAIProvider` 接口，作為統一的 AI Provider 入口
+- `HermesPlatformConfiguration`: 管理 Hermes 可執行文件路徑、參數、認證等配置
+- `ICliProvider<HermesOptions>`: HagiCode.Libs 提供的底層 CLI 抽象，處理子進程生命週期
+
+**傳輸層**
+- `StdioAcpTransport`: 通過標準輸入輸出與 Hermes ACP 子進程通信
+- ACP 協議方法：`initialize`、`authenticate`、`session/new`、`session/prompt`
+
+**運行時層**
+- `HermesGrain`: Orleans Grain 實現，處理分佈式會話執行
+- `CliAcpSessionPool`: 會話池，復用 ACP 子進程，避免頻繁啟動開銷
+
+**前端層**
+- `ExecutorAvatar`: Hermes 視覺標識和圖標
+- `executorTypeAdapter`: Provider 類型映射邏輯
+- SignalR 實時消息傳遞：保持 Hermes 身份在消息流中的一致性
+
+這種分層設計使得各層可以獨立演進，比如未來要添加新的傳輸方式（如 WebSocket），只需修改傳輸層即可。畢竟，誰願意因為改一個傳輸方式就把整個系統都翻一遍呢？多累啊。
+
+### 統一接口抽象
+
+所有 AI Provider 都實現 `IAIProvider` 接口，這是 HagiCode 架構的核心設計：
+
+```csharp
+public interface IAIProvider
+{
+    string Name { get; }
+    ProviderCapabilities Capabilities { get; }
+
+    IAsyncEnumerable<AIStreamingChunk> StreamAsync(
+        AIRequest request,
+        CancellationToken cancellationToken = default);
+
+    Task<AIResponse> ExecuteAsync(
+        AIRequest request,
+        CancellationToken cancellationToken = default);
+}
+```
+
+`HermesCliProvider` 實現了這個接口，與 `ClaudeCodeProvider`、`OpenCodeProvider` 等處於平等地位。這種設計帶來的好處：
+
+1. **可替換性**: 切換 Provider 不影響上層業務邏輯
+2. **可測試性**: 可以輕鬆 Mock Provider 進行單元測試
+3. **可擴展性**: 新增 Provider 只需實現接口即可
+
+說到底，接口這東西，就像規矩一樣。有了規矩，大家才能和諧共處，各自發揮所長，互不干擾。這難道不是一種美嗎？
+
+## 核心實現
+
+### Provider 層實現
+
+`HermesCliProvider` 是整個整合的核心，它負責協調各個組件完成一次 AI 調用：
+
+```csharp
+public sealed class HermesCliProvider : IAIProvider, IVersionedAIProvider
+{
+    private readonly ICliProvider<LibsHermesOptions> _provider;
+    private readonly ConcurrentDictionary<string, string> _sessionBindings;
+
+    public ProviderCapabilities Capabilities { get; } = new()
+    {
+        SupportsStreaming = true,
+        SupportsTools = true,
+        SupportsSystemMessages = true,
+        SupportsArtifacts = false
+    };
+
+    public async IAsyncEnumerable<AIStreamingChunk> StreamAsync(
+        AIRequest request,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        // 1. 解析會話綁定 key
+        var bindingKey = ResolveBindingKey(request.CessionId);
+
+        // 2. 通過會話池獲取或創建 Hermes 會話
+        var options = new HermesOptions
+        {
+            ExecutablePath = _platformConfiguration.ExecutablePath,
+            Arguments = _platformConfiguration.Arguments,
+            SessionId = _sessionBindings.TryGetValue(bindingKey, out var sessionId) ? sessionId : null,
+            WorkingDirectory = request.WorkingDirectory,
+            Model = request.Model
+        };
+
+        // 3. 執行並收集流式響應
+        await foreach (var message in _provider.ExecuteAsync(options, request.Prompt, cancellationToken))
+        {
+            // 4. 映射 ACP 消息到 AIStreamingChunk
+            if (_responseMapper.TryConvertToStreamingChunk(message, out var chunk))
+            {
+                yield return chunk;
+            }
+        }
+    }
+}
+```
+
+這裡有幾個關鍵設計點：
+
+1. **會話綁定**: 通過 `CessionId` 將多個請求綁定到同一個 Hermes 子進程，實現多輪對話的上下文連續性
+2. **響應映射**: 將 Hermes ACP 消息格式轉換為統一的 `AIStreamingChunk` 格式
+3. **流式處理**: 使用 `IAsyncEnumerable` 支持真正的流式響應
+
+其實會話綁定這事兒，就像人和人之間的關係一樣。一旦建立了聯繫，後續的交流就有了上下文，不用每次都從頭開始。只是這關係要維護好，不然斷了就斷了。
+
+### ACP 協議適配
+
+Hermes 使用 ACP（Agent Communication Protocol）協議，與傳統的 HTTP API 不同。ACP 是基於標準輸入輸出的協議，有幾個特點：
+
+1. **啟動標記**: Hermes 進程啟動後會輸出 `//ready` 標記
+2. **動態認證**: 認證方法不是固定的，需要通過協議協商
+3. **會話復用**: 通過 `SessionId` 復用已建立的會話
+4. **響應分散**: 完整響應可能分散在多個 `session/update` 通知中
+
+HagiCode 通過 `StdioAcpTransport` 處理這些特性：
+
+```csharp
+public class StdioAcpTransport
+{
+    public async Task InitializeAsync(CancellationToken cancellationToken)
+    {
+        // 等待 //ready 標記
+        var readyLine = await _outputReader.ReadLineAsync(cancellationToken);
+        if (readyLine != "//ready")
+        {
+            throw new InvalidOperationException("Hermes did not send ready signal");
+        }
+
+        // 發送 initialize 請求
+        await SendRequestAsync(new
+        {
+            jsonrpc = "2.0",
+            id = 1,
+            method = "initialize",
+            @params = new
+            {
+                protocolVersion = "2024-11-05",
+                capabilities = new { },
+                clientInfo = new { name = "HagiCode", version = "1.0.0" }
+            }
+        }, cancellationToken);
+    }
+}
+```
+
+協議這東西，就像人與人之間的默契。有了默契，交流就會順暢很多。只是建立默契需要時間，磨合嘛，誰都免不了。
+
+### 會話池管理
+
+頻繁啟動 Hermes 子進程的開銷很大，因此我們實現了會話池機制：
+
+```csharp
+services.AddSingleton(static _ =>
+{
+    var registry = new CliProviderPoolConfigurationRegistry();
+    registry.Register("hermes", new CliPoolSettings
+    {
+        MaxActiveSessions = 50,
+        IdleTimeout = TimeSpan.FromMinutes(10)
+    });
+    return registry;
+});
+```
+
+會話池的關鍵參數：
+- `MaxActiveSessions`: 控制並發上限，避免資源耗盡
+- `IdleTimeout`: 空閒超時，平衡啟動成本和內存佔用
+
+實踐中我們發現：
+1. 空閒超時設置太短會導致頻繁重啟，設置太長會佔用內存
+2. 並發上限需要根據實際負載調整，過大可能導致系統卡頓
+3. 需要監控會話池的使用情況，以便及時調整參數
+
+這就好比人生中的許多選擇，太激進容易出問題，太保守又錯失機會。找個平衡點罷了。
+
+## 前端整合
+
+### 類型映射
+
+前端需要正確識別 Hermes Provider 並顯示對應的視覺元素：
+
+```typescript
+// executorTypeAdapter.ts
+export const resolveExecutorVisualTypeFromProviderType = (
+  providerType: PCode_Models_AIProviderType | null | undefined
+): ExecutorVisualType => {
+  switch (providerType) {
+    case PCode_Models_AIProviderType.HERMES_CLI:
+      return 'Hermes';
+    default:
+      return 'Unknown';
+  }
+};
+```
+
+### 視覺呈現
+
+Hermes 有專屬的圖標和顏色標識：
+
+```typescript
+// ExecutorAvatar.tsx
+const renderExecutorGlyph = (executorType: ExecutorVisualType, iconSize: number) => {
+  switch (executorType) {
+    case 'Hermes':
+      return (
+        <svg viewBox="0 0 24 24" fill="none" className="h-4 w-4">
+          <rect x="4" y="4" width="16" height="16" rx="4" fill="currentColor" opacity="0.16" />
+          <path d="M8 7v10M16 7v10M8 12h8" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+        </svg>
+      );
+    default:
+      return <DefaultAvatar />;
+  }
+};
+```
+
+畢竟，美的東西也要有美的呈現。只是這美要被人看見，還得靠前端同學的努力。
+
+### 契約同步
+
+前後端通過 OpenAPI 生成保持契約一致。後端定義了 `AIProviderType` 枚舉：
+
+```csharp
+public enum AIProviderType
+{
+    Unknown,
+    ClaudeCode,
+    OpenCode,
+    HermesCli  // 新增
+}
+```
+
+前端通過 OpenAPI 生成對應的 TypeScript 類型，確保枚舉值一致。這是避免前端顯示 "Unknown" 的關鍵。
+
+契約這東西，就像承諾一樣。說好了就要做到，不然就會出現"Unknown"這種尷尬的局面。
+
+## 配置管理
+
+Hermes 的配置通過 `appsettings.json` 管理：
+
+```json
+{
+  "Providers": {
+    "HermesCli": {
+      "ExecutablePath": "hermes",
+      "Arguments": "acp",
+      "StartupTimeoutMs": 10000,
+      "ClientName": "HagiCode",
+      "Authentication": {
+        "PreferredMethodId": "api-key",
+        "MethodInfo": {
+          "api-key": "your-api-key-here"
+        }
+      },
+      "SessionDefaults": {
+        "Model": "claude-sonnet-4-20250514",
+        "ModeId": "default"
+      }
+    }
+  }
+}
+```
+
+這種配置驅動的設計帶來了靈活性：
+- 可以覆蓋可執行文件路徑，方便開發測試
+- 可以自定義啟動參數，適配不同版本的 Hermes
+- 可以配置認證信息，支持多種認證方式
+
+配置這東西，就像人生的選擇題。給足了選項，總能找到適合自己的那一個。只是有時候選項太多，也會讓人犯選擇困難症。
+
+## 實踐經驗
+
+### 健康檢查
+
+實現一個可靠的 Provider 需要完善的健康檢查：
+
+```csharp
+public async Task<ProviderTestResult> PingAsync(CancellationToken cancellationToken = default)
+{
+    var response = await ExecuteAsync(new AIRequest
+    {
+        Prompt = "Reply with exactly PONG.",
+        CessionId = null,
+        AllowedTools = Array.Empty<string>(),
+        WorkingDirectory = ResolveWorkingDirectory(null)
+    }, cancellationToken);
+
+    var success = string.Equals(response.Content.Trim(), "PONG", StringComparison.OrdinalIgnoreCase);
+    return new ProviderTestResult
+    {
+        ProviderName = Name,
+        Success = success,
+        ResponseTimeMs = stopwatch.ElapsedMilliseconds,
+        ErrorMessage = success ? null : $"Unexpected Hermes ping response: '{response.Content}'."
+    };
+}
+```
+
+健康檢查需要注意：
+1. 使用簡單的測試用例，避免複雜場景
+2. 設置合理的超時時間
+3. 記錄響應時間，便於性能分析
+
+就像人需要體檢一樣，系統也需要健康檢查。早發現早治療，省得到時候出大問題。
+
+### 驗證工具
+
+HagiCode 提供專用控制台用於驗證 Hermes 整合：
+
+```bash
+# 基礎驗證
+HagiCode.Libs.Hermes.Console --test-provider
+
+# 完整套件（含倉庫分析）
+HagiCode.Libs.Hermes.Console --test-provider-full --repo .
+
+# 自定義可執行文件
+HagiCode.Libs.Hermes.Console --test-provider-full --executable /path/to/hermes
+```
+
+這個工具在開發過程中非常有用，可以快速驗證整合是否正確。畢竟，誰願意在發現問題的時候才想起來去測試呢？
+
+### 常見問題處理
+
+**認證失敗**
+- 檢查 `Authentication.PreferredMethodId` 與 Hermes 實際支持的認證方法是否匹配
+- 確認認證信息格式正確（API Key、Bearer Token 等）
+
+**會話超時**
+- 增加 `StartupTimeoutMs` 值
+- 檢查 MCP 服務器可达性
+- 查看系統資源使用情況
+
+**響應不完整**
+- 確保正確聚合 `session/update` 通知和最終結果
+- 檢查流式處理的取消邏輯
+- 驗證錯誤處理是否完整
+
+**前端顯示 Unknown**
+- 確認 OpenAPI 生成已包含 `HermesCli` 枚舉值
+- 檢查類型映射是否正確
+- 清除瀏覽器緩存重新生成類型
+
+問題嘛，總會有的。只是遇到問題的時候，別慌，慢慢找原因，總能解決的。畢竟，辦法總比困難多。
+
+### 性能優化建議
+
+1. **使用會話池**: 復用 ACP 子進程，減少啟動開銷
+2. **合理設置超時**: 平衡內存和啟動成本
+3. **復用會話 ID**: 批量任務使用同一個 `CessionId`
+4. **按需配置 MCP**: 避免不必要的工具調用
+
+性能這東西，就像生活中的效率。做對了，事半功倍；做錯了，事倍功半。只是找到那個"對"的點，需要經驗和運氣。
+
+## 總結
+
+整合 Hermes Agent 到生產系統需要考慮多個層面的問題：
+
+1. **架構層面**: 設計統一的 Provider 接口，實現可替換的組件架構
+2. **協議層面**: 正確處理 ACP 協議的特殊性，如啟動標記、動態認證等
+3. **性能層面**: 通過會話池復用資源，平衡啟動成本和內存佔用
+4. **前端層面**: 確保契約同步，提供一致的視覺體驗
+
+HagiCode 的實踐表明，通過良好的分層設計和配置驅動，可以將複雜的 Agent 系統無縫整合到現有架構中。
+
+其實這些道理說起來都挺簡單的，只是真正做起來的時候，總會遇到各種各樣的問題。不過沒關係，問題解決了就是經驗，解決不了就是教訓，都是有價值的東西。
+
+美的事物或人，不一定要佔有，只要她還是美的，自己好好看著她的美就好了。技術也是如此，只要能讓系統變得更好，用什麼框架、什麼協議，其實都沒那麼重要......
+
+## 參考資料
+
+- [HagiCode 項目地址](https://github.com/HagiCode-org/site)
+- [HagiCode 官網](https://hagicode.com)
+- [Hermes Agent 文檔](https://hermes.nousresearch.com/)
+- [ACP 協議規範](https://github.com/NousResearch/Hermes/blob/main/docs/acp.md)
+- [HagiCode 安裝指南](https://docs.hagicode.com/installation/docker-compose)
+- [HagiCode Desktop](https://hagicode.com/desktop/)
+
+## 版權說明
+
+感謝您的閱讀,如果您覺得本文有用,歡迎點贊、收藏和分享支持。
+本內容採用人工智能輔助協作,最終內容由作者審核並確認。
+- 本文作者: [newbe36524](https://www.newbe.pro)
+- 原文鏈接: [https://docs.hagicode.com/blog/2026-04-14-hermes-agent-integration-practice/](https://docs.hagicode.com/blog/2026-04-14-hermes-agent-integration-practice/)
+- 版權聲明: 本博客所有文章除特別聲明外,均採用 BY-NC-SA 許可協議。轉載請註明出處!

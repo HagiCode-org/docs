@@ -1,0 +1,227 @@
+---
+title: ".NET Core 雙資料庫實戰：優雅融合 PostgreSQL 與 SQLite 的最佳實踐"
+date: 2026-02-01
+tags: [ASP.NET Core, PostgreSQL, SQLite, 資料庫架構, Orleans]
+description: "在構建現代化應用時，我們經常面臨這樣的抉擇：開發環境渴望輕量便捷，而生產環境則需要高並發與高可用。本文將分享如何在 .NET Core 專案中優雅地同時支援 Postg"
+---
+
+## .NET Core 雙資料庫實戰：讓 PostgreSQL 與 SQLite 和平共處
+
+> 在構建現代化應用時，我們經常面臨這樣的抉擇：開發環境渴望輕量便捷，而生產環境則需要高並發與高可用。本文將分享如何在 .NET Core 專案中優雅地同時支援 PostgreSQL 和 SQLite，實現「開發用 SQLite，生產用 PG」的最佳實踐。
+
+
+## 背景
+
+在軟體開發中，環境差異化一直是困擾開發團隊的難題之一。以我們正在構建的 **HagiCode** 平台為例，這是一個基於 ASP.NET Core 10 和 React 的 AI 輔助開發系統，內部集成了 Orleans 進行分散式狀態管理，技術棧相當現代且複雜。
+
+在專案初期，我們遇到了一個典型的工程痛點：開發人員希望本地環境能夠「開箱即用」，不希望安裝和配置繁重的 PostgreSQL 資料庫；但在生產環境中，我們需要處理高並發寫入和複雜的 JSON 查詢，這時輕量級的 SQLite 又顯得力不從心。
+
+如何在保持程式碼庫統一的前提下，讓應用既能像客戶端軟體一樣利用 SQLite 的便攜性，又能像企業級服務一樣發揮 PostgreSQL 的強悍效能？這就是本文要探討的核心問題。
+
+## 關於 HagiCode
+
+本文分享的雙資料庫適配方案，直接來源於我們在 **HagiCode** 專案中的實戰經驗。HagiCode 是一個集成了 AI 提示詞管理和 OpenSpec 工作流程的下一代開發平台。正是為了兼顧開發者的體驗和生產環境的穩定性，我們探索出了這套行之有效的架構模式。
+
+歡迎訪問我們的 GitHub 倉庫了解專案全貌：[HagiCode-org/site](https://github.com/HagiCode-org/site)。
+
+## 核心內容一：架構設計與統一抽象
+
+要在 .NET Core 中實現雙資料庫支援，核心思想是「依賴抽象而非具體實現」。我們需要把資料庫的選擇權從業務程式碼中剝離出來，交給配置層決定。
+
+### 設計思路
+
+1.  **統一介面**：所有的業務邏輯都應依賴於 `DbContext` 基類或自訂的介面，而不是具體的 `PostgreSqlDbContext`。
+2.  **配置驅動**：透過 `appsettings.json` 中的配置項，在應用啟動時動態決定載入哪個資料庫提供程式。
+3.  **特性隔離**：針對 PostgreSQL 特有的功能（如 JSONB）進行適配處理，確保在 SQLite 中也能降級執行。
+
+### 程式碼實作：動態上下文配置
+
+在 ASP.NET Core 的 `Program.cs` 中，我們不應硬編碼 `UseNpgsql` 或 `UseSqlite`。相反，我們應該讀取配置來動態決定。
+
+首先，定義配置類別：
+
+```csharp
+public class DatabaseSettings
+{
+    public const string SectionName = "Database";
+    
+    // 資料庫類型：PostgreSQL 或 SQLite
+    public string DbType { get; set; } = "PostgreSQL"; 
+    
+    // 連線字串
+    public string ConnectionString { get; set; } = string.Empty;
+}
+```
+
+然後，在 `Program.cs` 中根據配置註冊服務：
+
+```csharp
+// 讀取配置
+var databaseSettings = builder.Configuration.GetSection(DatabaseSettings.SectionName).Get<DatabaseSettings>();
+
+// 註冊 DbContext
+builder.Services.AddDbContext<ApplicationDbContext>(options =>
+{
+    if (databaseSettings?.DbType?.ToLower() == "sqlite")
+    {
+        // SQLite 配置
+        options.UseSqlite(databaseSettings.ConnectionString);
+        
+        // SQLite 的並發寫入限制處理
+        // 注意：在生產環境中建議開啟 WAL 模式以提高並發效能
+    }
+    else
+    {
+        // PostgreSQL 配置（預設）
+        options.UseNpgsql(databaseSettings.ConnectionString, npgsqlOptions =>
+        {
+            // 開啟 JSONB 支援，這在處理 AI 對話記錄時非常有用
+            npgsqlOptions.UseJsonNet(); 
+        });
+        
+        // 配置連線池重連策略
+        options.EnableRetryOnFailure(3);
+    }
+});
+```
+
+## 核心內容二：處理差異性與遷移策略
+
+PostgreSQL 和 SQLite 雖然都支援 SQL 標準，但在具體特性和行為上存在顯著差異。如果不處理好這些差異，很可能會出現「本地跑得通，上線就報錯」的尷尬情況。
+
+### 1. JSON 類型的處理
+
+在 HagiCode 中，我們需要儲存大量的提示詞和 AI 元資料，這通常涉及 JSON 欄位。
+- **PostgreSQL**：擁有原生的 `JSONB` 類型，查詢效能極佳。
+- **SQLite**：沒有原生的 JSON 類型（新版本有 JSON1 擴充功能，但在物件對應上仍有差異），通常儲存為 TEXT。
+
+**解決方案**：
+在 EF Core 的實體對應中，我們將其配置為可轉換的類型。
+
+```csharp
+protected override void OnModelCreating(ModelBuilder modelBuilder)
+{
+    base.OnModelCreating(modelBuilder);
+
+    // 配置實體
+    modelBuilder.Entity<PromptTemplate>(entity => 
+    {
+        entity.Property(e => e.Metadata)
+              .HasColumnType("jsonb") // PG 使用 jsonb
+              .HasConversion(
+                  v => JsonSerializer.Serialize(v, (JsonSerializerOptions)null),
+                  v => JsonSerializer.Deserialize<Dictionary<string, object>>(v, (JsonSerializerOptions)null)
+              ); 
+    });
+}
+```
+
+當使用 SQLite 時，雖然 `HasColumnType("jsonb")` 會被忽略或產生警告，但由於配置了 `HasConversion`，資料會被正確地序列化和反序列化為字串存入 TEXT 欄位，從而保證了相容性。
+
+### 2. 遷移策略的分離
+
+絕對不要試圖讓同一套 Migration 腳本同時適配 PG 和 SQLite。由於主鍵生成策略、索引語法等的不同，這必然會導致失敗。
+
+**推薦實踐**：
+維護兩個遷移分支或專案。在 HagiCode 的開發流程中，我們是這樣處理的：
+
+1.  **開發階段**：主要在 SQLite 下工作。使用 `Add-Migration Init_Sqlite -OutputDir Migrations/Sqlite`。
+2.  **適配階段**：開發完一段功能後，切換連線字串指向 PostgreSQL，執行 `Add-Migration Init_Postgres -OutputDir Migrations/Postgres`。
+3.  **自動化腳本**：編寫一個簡單的 PowerShell 或 Bash 腳本，根據目前環境變數自動套用對應的遷移。
+
+```bash
+# 簡單的部署邏輯虛擬碼
+if [ "$DATABASE_PROVIDER" = "PostgreSQL" ]; then
+    dotnet ef database update --project Migrations.Postgres
+else
+    dotnet ef database update --project Migrations.Sqlite
+fi
+```
+
+## 核心內容三：HagiCode 的實戰經驗總結
+
+在將 **HagiCode** 從單一資料庫重構為雙資料庫支援的過程中，我們踩過一些坑，也總結了一些關鍵的經驗，希望能給大家避坑。
+
+### 1. 並發與事務的區別
+
+PostgreSQL 是伺服器端-客戶端架構，支援高並發寫入，交易隔離級別非常強大。而 SQLite 是檔案鎖機制，寫入操作會鎖定整個資料庫檔案（除非開啟 WAL 模式）。
+
+**建議**：
+在編寫涉及頻繁寫入的業務邏輯時（例如即時儲存使用者的編輯狀態），一定要考慮到 SQLite 的鎖機制。在設計 **HagiCode** 的 OpenSpec 協作模組時，我們引入了「寫前合併」機制，減少資料庫的直接寫入頻率，從而在兩種資料庫下都能保持高效能。
+
+### 2. 連線字串的生命週期管理
+
+PostgreSQL 的連線建立成本較高，依賴連線池。而 SQLite 連線非常輕量，但如果不即時釋放，檔案鎖可能會導致後續操作逾時。
+
+在 `Program.cs` 中，我們可以針對不同資料庫做精細化調整：
+
+```csharp
+if (databaseSettings?.DbType?.ToLower() == "sqlite")
+{
+    // SQLite：保持連線開啟能提升效能，但要注意檔案鎖
+    options.UseSqlite(connectionString, sqliteOptions =>
+    {
+        // 設定指令逾時時間
+        sqliteOptions.CommandTimeout(30);
+    });
+}
+else
+{
+    // PG：利用連線池
+    options.UseNpgsql(connectionString, npgsqlOptions =>
+    {
+        npgsqlOptions.MaxBatchSize(100);
+        npgsqlOptions.CommandTimeout(30);
+    });
+}
+```
+
+### 3. 測試覆蓋的重要性
+
+很多開發者（包括我們團隊早期的成員）容易犯一個錯誤：只在開發環境（通常是 SQLite）跑單元測試。
+
+我們在 HagiCode 的 CI/CD 流水線中強制加入了 GitHub Action 步驟，確保每次 Pull Request 都要跑過 PostgreSQL 的整合測試。
+
+```yaml
+# .github/workflows/test.yml 範例片段
+- name: Run Integration Tests (PostgreSQL)
+  run: |
+    docker-compose up -d db_postgres
+    dotnet test --filter "Category=Integration"
+```
+
+這幫我們攔截了無數次關於 SQL 語法差異、大小寫敏感性的 Bug。
+
+## 總結
+
+透過引入抽象層和配置驅動的相依性注入，我們在 **HagiCode** 專案中成功實現了 PostgreSQL 和 SQLite 的「雙軌制」執行。這不僅極大降低了新開發者的上手門檻（不需要裝 PG），也為生產環境提供了堅實的效能保障。
+
+回顧一下關鍵點：
+1.  **抽象至上**：業務程式碼不依賴具體資料庫實作。
+2.  **配置分離**：開發和生產使用不同的 `appsettings.json`。
+3.  **遷移分離**：不要嘗試一套 Migration 走天下。
+4.  **特性降級**：在 SQLite 中以相容性優先，在 PostgreSQL 中以效能優先。
+
+這種架構模式不僅適用於 HagiCode，也適用於任何需要在輕量級開發和重量級生產之間尋找平衡的 .NET 專案。
+
+---
+
+如果本文對你有幫助，歡迎來 GitHub 給個 Star，或者直接體驗 **HagiCode** 帶來的高效開發流程：
+- 來 GitHub 給個 Star：[github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- 訪問官網了解更多：[hagicode.com](https://hagicode.com)
+- 觀看 30 分鐘實戰演示：[www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)
+- 一鍵安裝體驗：[hagicode.com/installation/docker-compose](https://hagicode.com/installation/docker-compose)
+
+公測已開始，歡迎安裝體驗！
+
+
+
+---
+
+感謝您的閱讀，如果您覺得本文有用，快點擊下方按讚按鈕👍，讓更多的人看到本文。
+
+本內容採用人工智慧輔助協作，經本人審核，符合本人觀點與立場。
+
+- **本文作者:** [newbe36524](https://www.newbe.pro)
+- **本文連結:** [https://hagicode.com/blog/2026-02-01-dotnet-core-dual-database-postgresql-sqlite/](https://hagicode.com/blog/2026-02-01-dotnet-core-dual-database-postgresql-sqlite/)
+- **版權聲明:** 本部落格所有文章除特別聲明外，均採用 BY-NC-SA 許可協議。轉載請註明出處！

@@ -1,0 +1,302 @@
+---
+title: Claude Code や Codex などの Agent CLI の自動リトライを実装する方法
+date: 2026-04-18
+tags: [Agent CLI, Claude Code, Codex, 自動リトライ, HagiCode]
+description: "自動リトライという言葉は、小さなスイッチのように見えますが、実際のエンジニアリング現場に持ち込むと、まったく話が違ってきます。皆さんこんにちは、HagiCode の製作者である俞坤（ユー・クン）です。今日の記事では、はったりは抜きにして、Claude"
+---
+
+## Claude Code や Codex などの Agent CLI の自動リトライを実装する方法
+
+> 自動リトライという言葉は、小さなスイッチのように見えますが、実際のエンジニアリング現場に持ち込むと、まったく話が違ってきます。皆さんこんにちは、HagiCode の製作者である俞坤（ユー・クン）です。今日の記事では、はったりは抜きにして、Claude Code や Codex といった Agent CLI の自動リトライをどう実装すべきか、例外を適切に処理しつつ、システムを無限ループの繰り返し実行に陥らせない方法についてお話しします。
+
+## 背景
+
+もし最近 AI プログラミングに取り組んでいるなら、この種の問題にすでに遭遇しているでしょう：タスクは最初から失敗するのではなく、途中で中断されます。
+
+これは通常の HTTP リクエストであれば、再送するだけで済み、多くの場合指数バックオフを追加すれば十分です。しかし Agent CLI は異なります。Claude Code や Codex などのツールは通常ストリーミング実行され、出力は断片的にプッシュされ、その過程で thread、session、または resume token がバインドされます。言い換えれば、「このリクエストが失敗したかどうか」ではなく：
+
+- すでに出力された内容は有効か
+- 現在のコンテキストを継続して実行できるか
+- この失敗は自動復旧すべきか
+- 復旧する場合、いつ再試行し、何を送信し、元のコンテキストを再利用するか
+
+多くのチームが最初にここに取り組むとき、最も単純なバージョンを書きたくなります：エラーが出たらもう一度試す。この考えは自然ですが、実際のプロジェクトに入ると、問題が次々と浮かび上がってきます。
+
+- 一時的な障害であるにもかかわらず、最終的な失敗として扱われるエラー
+- リトライに値しないエラーが、システムによって繰り返し再生される
+- thread を持つリクエストと持たないリクエストが、同じように扱われる
+- バックオフ戦略に境界がなく、バックグラウンドリクエストが自己破壊する
+
+HagiCode も複数の Agent CLI を統合する過程で、これらの落とし穴を踏みました。特に Codex 側では、当初ある種の reconnect メッセージがリトライ可能な終了状態として認識されず、既存の復旧メカニズムが発動しない問題が暴露されました。つまり、システムに自動リトライがないのではなく、「今回リトライに値する」を認識できていなかったのです。
+
+したがって、この記事で伝えたい核心は明確です：**自動リトライはボタンではなく、階層的な設計です。**
+
+## HagiCode について
+
+この記事で共有するソリューションは、[HagiCode](https://hagicode.com) プロジェクトでの実際の実践から来ています。HagiCode の目的は、単一のモデルを接続して終わりではなく、複数の Agent CLI のストリーミングメッセージ、ツール呼び出し、失敗復旧、セッションコンテキストを、長期保守可能な統一された実行モデルにすることです。
+
+私が普段最に関心を持っていることの一つは、AI プログラミングを実際のエンジニアリング現場に落とし込む方法です。デモを書くのは難しくありませんが、デモをチームが長期的に使いたいと思うものにするのは難しいです。HagiCode が真剣に自動リトライに取り組むのは、この機能が高級に見えるからではなく、長いチェーン、ストリーミング、継続可能な CLI 実行が安定していない場合、ユーザーが見るのはインテリジェントアシスタントではなく、途中で頻繁に切断されるコマンドラッパーになるからです。
+
+まずプロジェクトのエントリを確認したい場合は、ここに 2 つ置いておきます：
+
+- GitHub: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- 公式サイト: [hagicode.com](https://hagicode.com)
+
+さらに一歩進んで、HagiCode はすでに Steam に上架されています。Steam をお持ちの方は、まずウィッシュリストに追加してください：
+
+- [Steam ストアページ（ウィッシュリスト追加 / 詳細表示）](https://store.steampowered.com/app/4625540/Hagicode/)
+
+## なぜ Agent CLI の自動リトライは通常のリトライよりも難しいのか
+
+この質問は非常に実用的です。結論から言います：Agent CLI の自動リトライの難しさは「数秒後にもう一度試す」ことではなく、「元のコンテキストで継続できるか」にあります。
+
+これを長い会話として理解してください。通常の API リトライは、電話が話中でかけ直すようなものですが、Agent CLI のリトライは、相手が話し半ばで信号が切れた場合に、かけ直すべきか、かけ直したら最初から言うべきか、相手がどこまで話していたか覚えているかを判断しなければならないようなものです。誰がこれらが同じ問題だと言ったのでしょうか？ これらは根本的に異なるエンジニアリング問題です。
+
+具体的には、4 つの典型的な難点があります。
+
+### 1. ストリーミングである
+
+一度出力がユーザーに送信されると、通常のリクエストのように失敗をこっそり飲み込んで静かに再試行することはできません。前の部分の内容がすでに見られているため、再試行時に戦略が間違っていると、フロントエンドは重複したテキスト、乱れた状態を簡単に見つけ、ツール呼び出しライフサイクルも一緒に乱れてしまいます。これはオカルトではなく、エンジニアリングです。
+
+### 2. 通常セッションコンテキストにバインドされる
+
+Codex などのプロバイダーは thread をバインドし、Claude Code などの実装には continuation target または同等の継続コンテキストがあります。自動リトライが可能になる前提は、「このエラーが一時的な障害に見える」だけでなく、「この実行に継続するキャリアがあるか」も含まれます。
+
+### 3. すべてのエラーがリトライに値するわけではない
+
+ネットワークの不安定性、SSE idle timeout、アップストリームの一時的な障害は、通常試す価値があります。しかし、認証失敗、コンテキストがすでに失われている、またはプロバイダーが resume 能力を持っていない場合、リトライを続けても復旧ではなくノイズを生成しているだけです。
+
+### 4. 境界が必要
+
+無限の自動リトライはほぼ常に間違いです。技術トレンドは一時的に盛り上がるかもしれませんが、エンジニアリングの法則は何年も安定しており、その一つは：失敗復旧には必ず境界が必要です。システムは、最大で何回試すか、毎回どれくらい待つか、いつ諦めて今回本当に無理だと認めるべきかを知る必要があります。
+
+まさにこれらの特性により、HagiCode は自動リトライを特定のプロバイダーの数行の `try/catch` として書くのではなく、共有機能として抽出しました。結局のところ、エンジニアリング問題はエンジニアリング手法に戻って解決すべきです。
+
+## HagiCode のアプローチ：リトライをプロバイダーから取り出す
+
+HagiCode の現在の実際の実装は、一言に圧縮できます：
+
+**共有層がリトライフローを統一管理し、特定のプロバイダーは 2 つの質問に答えるだけです：この終了状態はリトライに値するか？現在のコンテキストを継続できるか？**
+
+これは複雑ではありませんが、非常に重要です。責任を分割すれば、Claude Code、Codex、その他の Agent CLI が同じ骨格を再利用できます。モデルは変わり、ツールは変わり、ワークフローはアップグレードされますが、エンジニアリングの基本盤は常にそこにあります。
+
+### 第一層：統一コーディネーターでリトライループを管理
+
+プロジェクトのコア実装スニペットは、おおよそ以下のようになります：
+
+```csharp
+internal static class ProviderErrorAutoRetryCoordinator
+{
+    public static async IAsyncEnumerable<CliMessage> ExecuteAsync(
+        string prompt,
+        ProviderErrorAutoRetrySettings? settings,
+        Func<string, IAsyncEnumerable<CliMessage>> executeAttemptAsync,
+        Func<bool> canRetryInSameContext,
+        Func<TimeSpan, CancellationToken, Task> delayAsync,
+        Func<CliMessage, bool> isRetryableTerminalMessage,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        var normalizedSettings = ProviderErrorAutoRetrySettings.Normalize(settings);
+        var retrySchedule = normalizedSettings.Enabled
+            ? normalizedSettings.GetRetrySchedule()
+            : [];
+
+        for (var attempt = 0; ; attempt++)
+        {
+            var attemptPrompt = attempt == 0
+                ? prompt
+                : ProviderErrorAutoRetrySettings.ContinuationPrompt;
+
+            CliMessage? terminalFailure = null;
+
+            await foreach (var message in executeAttemptAsync(attemptPrompt)
+                               .WithCancellation(cancellationToken))
+            {
+                if (isRetryableTerminalMessage(message))
+                {
+                    terminalFailure = message;
+                    break;
+                }
+
+                yield return message;
+            }
+
+            if (terminalFailure is null)
+            {
+                yield break;
+            }
+
+            if (attempt >= retrySchedule.Count || !canRetryInSameContext())
+            {
+                yield return terminalFailure;
+                yield break;
+            }
+
+            await delayAsync(retrySchedule[attempt], cancellationToken);
+        }
+    }
+}
+```
+
+このコードがやっていることは非常にシンプルですが、非常に強力です。
+
+- 中間失敗は直接透過せず、コーディネーターが最初に復旧可能か判断する
+- リトライ予算が尽きた場合のみ、最終的な失敗が上層に戻る
+- 2 回目からは元の prompt を送信せず、統一された continuation prompt を送信する
+
+これが私が以前から強調している理由です。自動リトライは単なる「もう一度リクエスト」ではありません。それは例外ブランチを補うのではなく、実行ライフサイクルを管理することです。プロダクトマネージャーのようですが、エンジニアリング的には確かにそうです。
+
+### 第二層：リトライ戦略をスナップショット化
+
+もう一つ容易に見過ごされる問題は、今回のリクエストで自動リトライを有効にするかどうかを誰が決めるかです。
+
+HagiCode の答えは、「現在のグローバル設定」に依存するのではなく、戦略をスナップショットとして作成し、このリクエストと一緒に進めることです。これにより、セッションキューイング、メッセージ永続化、実行転送、プロバイダーアダプターが戦略を失いません。一度の成功はシステムではなく、継続的な成功こそがシステムです。
+
+コア構造は次のように簡略化できます：
+
+```csharp
+public sealed record ProviderErrorAutoRetrySnapshot
+{
+    public const string DefaultStrategy = "default";
+
+    public bool Enabled { get; init; }
+
+    public string Strategy { get; init; } = DefaultStrategy;
+
+    public static ProviderErrorAutoRetrySnapshot Normalize(bool? enabled, string? strategy)
+    {
+        return new ProviderErrorAutoRetrySnapshot
+        {
+            Enabled = enabled ?? true,
+            Strategy = string.IsNullOrWhiteSpace(strategy)
+                ? DefaultStrategy
+                : strategy.Trim()
+        };
+    }
+}
+```
+
+そして実行側で、プロバイダーが実際に消費する設定オブジェクトにマッピングします。このアプローチの価値は非常に直接的です：
+
+- ビジネス層が「リトライすべきか」を決定
+- ランタイムが「どうリトライするか」を決定
+
+両方が各自の責任を担当し、互いに干渉しません。多くの問題はできないのではなく、コストを計算していないだけです。戦略をスナップショット化することは本質的に、コストを前もって明確に計算することです。
+
+### 第三層：プロバイダーは終了状態判定とコンテキスト判定のみを行う
+
+具体的な Claude Code または Codex プロバイダーでは、責任は非常に薄くなります。これを強化と理解し、代用品と誤解しないでください。
+
+Codex を例にすると、共有コーディネーターに統合するとき、本質的に 3 つだけを提供する必要があります：
+
+```csharp
+await foreach (var message in ProviderErrorAutoRetryCoordinator.ExecuteAsync(
+                   prompt,
+                   options.ProviderErrorAutoRetry,
+                   retryPrompt => ExecuteCodexAttemptAsync(...),
+                   () => !string.IsNullOrWhiteSpace(resolvedThreadId),
+                   DelayAsync,
+                   IsRetryableTerminalFailure,
+                   cancellationToken))
+{
+    yield return message;
+}
+```
+
+プロバイダー自身の判断に実際に属するのは 2 つだけであることがわかります：
+
+- `IsRetryableTerminalFailure`
+- `canRetryInSameContext`
+
+Codex は thread を継続できるかを見、Claude Code は continuation target がまだ存在するかを見ます。バックオフ戦略、リトライ回数、後続の prompt は、プロバイダーに再発明させるべきではありません。
+
+この層を分離した後、HagiCode がより多くの CLI を統合するコストは大幅に低下します。リトライステートマシン全体をコピーする必要はなく、「このプロバイダーの境界条件」を統合するだけです。書くのが早いことは安定していることを意味せず、統合できることは適切に統合できることを意味せず、動くことは長期保守が可能であることを意味しません。
+
+## 間違いやすいポイント：すべてのエラーをリトライ可能と扱わない
+
+この分析で、単独で取り上げて話す価値があるのは、「リトライを実装する方法」ではなく、「間違ったリトライを避ける方法」です。
+
+最初の問題の入り口は、Codex がある reconnect メッセージを識別していなかったことでした。直感として、多くの人は最小の修正を選びます：ホワイトリストにもう一つの文字列プレフィックスを追加する。このアプローチは間違っていませんが、デモ期のソリューションのようなもので、長期保守のソリューションとは言えません。
+
+現在の HagiCode の実装から見ると、システムはすでにより安定した方向に一歩進んでいます。特定のリテラル文字列に注目するのではなく、回復可能な終了状態を統一して共有コーディネーターに処理させます。この利点は明らかです：
+
+- ある文案の小さな変更によって完全に失敗する可能性が低い
+- テストカバレッジは「終了状態エンベロープ」の周りで展開でき、単一のハードコードされたテキストではない
+- 同じプロバイダーのリトライロジックがより一貫している
+
+もちろん、ここに境界を立てる必要があります：より汎用的であることは、より寛大であることを意味しません。**現在のコンテキストを継続できない場合、エラーが一時的な障害に見えても、盲目的にリプレイすべきではありません。**
+
+この点は非常に重要です。本当に安心させるのは、時々うまくいくことではなく、ほとんどの場合で信頼できることです。あるプロセスが熟練者によって維持される必要がある場合、普及にはほど遠いです。
+
+## 実践で最も価値のある 3 つの経験
+
+記事がここまで来たら、実践レベルでまとめましょう。自分のプロジェクトで同様の機能を実装する準備ができている場合、最初に守ることを最も推奨する以下の 3 つです。
+
+### 1. リトライ予算には境界が必要
+
+HagiCode の現在のデフォルトのバックオフリズムは：
+
+- 10 秒
+- 20 秒
+- 60 秒
+
+このリズムはすべてのシステムに適しているわけではありませんが、「境界がある」ということは必ず維持すべきです。そうしないと、自動リトライは復旧メカニズムから事故増幅器にすぐになります。名前を大きくするのに急ぐより、このものがチームで 2 つのイテレーション生き残れるかを確認してください。
+
+### 2. continuation prompt を統一する
+
+プロジェクトでは固定の continuation prompt を使用し、後続の attempt が「現在のコンテキストを継続」するパスを明確にたどり、完全なリクエストを再開しないようにします。この機能は派手ではありませんが、実際のプロジェクトでは必要不可欠です。多くの機能は魔法に見えますが、分解すれば磨かれたエンジニアリングプロセスのセットです。
+
+### 3. 共有ライブラリとアダプター層の両方にミラーテストが必要
+
+この点について多くを言いたいです。多くのチームは共有ランタイムで一層のテストを書き、それで十分だと思っています。実際には不十分です。
+
+HagiCode が私に安心させる理由は、両方の層にテストを補完したからです：
+
+- 共有プロバイダーテストは「本当に自動継続が発生したか」をテスト
+- アダプター層テストは「最終エラーとストリーミングメッセージが破損していないか」をテスト
+
+今回も関連する 2 組のテストを追加で実行し、結果は 31 のテストケースすべてが通過しました。この結果自体は設計が完璧であることを証明できませんが、少なくとも一つのことを示しています：現在の自動リトライは紙面上のソリューションではなく、コードとテストによって共同で制約された能力です。Talk is cheap. Show me the code. ここにぴったりです。
+
+## まとめ
+
+記事全体を一言に圧縮すると、次のようになります：
+
+**Claude Code、Codex などの Agent CLI の自動リトライは、特定のプロバイダー内部の局所的なトリックとしてではなく、共有コーディネーター + 戦略スナップショット + コンテキスト判定 + ミラーテストの組み合わせとして実装すべきです。**
+
+这样做带来的收益，其实非常实在：
+
+这样：
+
+- 逻辑は一度書くだけで、複数のプロバイダーが再利用可能
+- リクエストがリトライを許可するかどうかは、実行チェーンに沿って安定して進むことができる
+- コンテキストがある場合は継続し、ない場合は適時に停止
+- フロントエンドが最終的に見るのは安定した完了状態または失敗状態であり、途中で放棄された中間ノイズの山ではない
+
+このソリューションは、HagiCode が複数の Agent CLI を実際に統合する過程で少しずつ磨き上げられたものです。AI 補助プログラミングが新時代のペアプログラミングではないと言うのでしょうか？ モデルは起步、補完、発散を助けますが、経験の上限を決定するのは、やはりコンテキスト、プロセス、制約です。
+
+この記事が役に立った場合は、HagiCode の公開エントリもぜひご覧ください：
+
+- GitHub: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- 公式サイト: [hagicode.com](https://hagicode.com)
+- 30 分間実践デモ: [www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)
+- デスクトップインストールエントリ: [hagicode.com/desktop/](https://hagicode.com/desktop/)
+- Steam: [Steam ストアページ（ウィッシュリスト追加 / 詳細表示）](https://store.steampowered.com/app/4625540/Hagicode/)
+
+HagiCode はすでに Steam に上架されています。これは画餅ではなく、リンクもここに置いてあります。Steam をお持ちの方は、まずウィッシュリストに追加し、自分でクリックして確認してください。私がここで 10 句も言うよりも直接的です。
+
+まずここまで話を終えて、残りは実際のプロジェクトでお会いしましょう。
+
+## 参考資料
+
+- HagiCode プロジェクトページ: [https://hagicode.com](https://hagicode.com)
+- HagiCode GitHub リポジトリ: [https://github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- 公式デモ動画: [https://www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)
+- デスクトップインストール手順: [https://hagicode.com/desktop/](https://hagicode.com/desktop/)
+
+## 著作権について
+
+お読みいただきありがとうございます。もしこの記事が役に立ったと思ったら、ぜひいいね、保存、シェアでサポートしてください。
+本内容は AI による支援協力を採用しており、最終内容は著者によってレビューされ確認されています。
+- 本文の著者: [newbe36524](https://www.newbe.pro)
+- 原文リンク: [https://docs.hagicode.com/blog/2026-02-11-agent-cli-automatic-retry/](https://docs.hagicode.com/blog/2026-02-11-agent-cli-automatic-retry/)
+- 著作権宣言: 本ブログのすべての記事は特別な声明を除き、BY-NC-SA ライセンス契約を採用しています。転載する場合は出典を明記してください！

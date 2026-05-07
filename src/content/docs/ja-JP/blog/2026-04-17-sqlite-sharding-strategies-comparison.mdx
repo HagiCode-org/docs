@@ -1,0 +1,375 @@
+---
+title: SQLite シャーディングの実践：3つのシャーディング戦略の深い比較
+date: 2026-04-17
+tags: [SQLite, シャーディング, 性能最適化, アーキテクチャ設計, HagiCode]
+description: "シングルファイルの SQLite が並行性のボトルネックに直面したとき、どう打破するか？本文で HagiCode プロジェクトの3つの異なるシーンにおける SQLite シャーディングソリューションを共有し、適切なシャーディング戦略を選択する方法を理解するのを助けます。"
+---
+
+## SQLite シャーディングの実践：3つのシャーディング戦略の深い比較
+
+> シングルファイルの SQLite が並行性のボトルネックに直面したとき、どう突破するか？本文で HagiCode プロジェクトの3つの異なるシーンにおける SQLite シャーディングソリューションを共有し、適切なシャーディング戦略を選択する方法を理解するのを助けます。
+
+プロデューサーの皆さんこんにちは、HagiCode のプロデューサー、俞坤です。
+
+## 背景
+
+高性能アプリケーションを構築する際、シングルファイルの SQLite データベースは非常に現実的な問題に直面します。ユーザー数とデータ量が増えると、これらの状況が次々と起こり始めます：
+
+- 書き込み操作がキューイングし始め、応答時間が目に見えて長くなる
+- クエリ性能がデータの増加とともに低下する
+- マルチスレッドアクセス時に頻繁に "database is locked" エラーが発生する
+
+多くの人の第一反応は：PostgreSQL や MySQL に直接移行すべきか？この操作は問題を解決できますが、デプロイの複雑さが直線的に上昇します。もっと軽量なソリューションはありませんか？
+
+答えは：シャーディングです。結局のところ、エンジニアリング問題はエンジニアリング手法に戻って解決する必要があります。データを複数の SQLite ファイルに分散させることで、並行性能とクエリ性能を大幅に向上させ、SQLite の軽量な特性を維持できます。
+
+## HagiCode について
+
+本文で共有するソリューションは、[HagiCode](https://hagicode.com) プロジェクトでの実践経験から来ています。AI コードアシスタントプロジェクトとして、HagiCode は大量の対話メッセージ、状態の永続化、イベント履歴レコードを処理する必要があります。これらの実際の問題を解決する過程で、私たちは3つの異なるシーンでのシャーディングソリューションをまとめました。
+
+良い仕事をするには良い道具が必要ですが、これらの「道具」の使い方は、具体的な「仕事」を見て判断する必要があります。
+
+私たちのコードリポジトリは [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site) にあります。興味のある友人は深く理解するよう歓迎します。
+
+## 3つのシャーディングソリューションの概要
+
+HagiCode コードベースの分析を通じて、私たちは異なるビジネスシーンに対応した3つの SQLite シャーディングソリューションを発見しました：
+
+1. **Session Message シャーディングストレージ**：AI 対話メッセージストレージ、特徴は高頻度書き込み、Session ベースの分離クエリ
+2. **Orleans Grain シャーディングストレージ**：分散フレームワーク状態永続化、特徴はノード間アクセス、決定論的ルーティングが必要
+3. **Hero History シャーディングストレージ**：ゲーミフィケーションシステム履歴イベントレコード、特徴はイベントソーシング、移行互換性が必要
+
+ビジネスシーンは異なりますが、三者は同じコア設計原則に従っています：
+
+- **決定論的ルーティング**：ビジネス ID から直接シャードを計算、メタデータテーブル不要
+- **透過的アクセス**：上位層は統一インターフェースを通じて操作、シャーディングの存在を感知しない
+- **独立ストレージ**：各シャードは完全に独立した SQLite ファイル
+- **並行性最適化**：WAL モード + busy_timeout でロック競合を低減
+
+多くの人が尋ねます：なぜ汎用のシャーディングソリューションを作らないのか？この質問は非常に実用的です。私たちは直接結論を出します：エンジニアリングに万能ソリューションはありません、現在のビジネスシーンに最も適したソリューションだけがあります。次に、これら3つのソリューションの具体的な実装を深く比較します。
+
+## シャーディング戦略の比較
+
+### シャード数と命名規則
+
+| 側面 | Session Message | Orleans Grain | Hero History |
+|------|----------------|---------------|--------------|
+| **シャード数** | 256 (16²) | 100 | 10 |
+| **命名規則** | 16 進数 (00-ff) | 10 進数 (00-99) | 10 進数 (0-9) |
+| **ストレージディレクトリ** | `DataDir/messages/` | `DataDir/orleans/grains/` | `DataDir/hero-history/` |
+| **ファイル名パターン** | `{shard}.db` | `grains-{shard}.db` | `{shard}.db` |
+
+なぜシャード数にこれほど大きな違いがあるのでしょうか？これはビジネス特性によります。言い換えれば、モデルは変わり、ツールは変わり、ワークフローはアップグレードしますが、エンジニアリングの基本盤は常にそこにあります：まず自分が何の問題を解決するのかを明確にする必要があります。
+
+- **Session Message** は 256 個のシャードを使用します。対話メッセージの書き込み頻度が最も高く、負荷を分散するために多くのシャードが必要だからです
+- **Orleans Grain** は 100 個のシャードを使用します。並行性能と管理複雑さのバランスをとります
+- **Hero History** は 10 個のシャードだけを使用します。履歴イベントの書き込み頻度が低く、移行コストを考慮する必要があるからです
+
+### ルーティングアルゴリズムの違い
+
+ルーティングアルゴリズムはシャーディングソリューションの核心であり、データが各シャードにどのように分散されるかを決定します。3つのソリューションは異なるルーティング戦略を使用しています：
+
+```csharp
+// Session Message: GUID の下2桁 16 進数
+var normalized = Guid.Parse(sessionId.Value).ToString("N").ToLowerInvariant();
+return normalized[^2..];  // 末尾2桁の 16 進数文字を取得
+
+// Orleans Grain: 数字を抽出して下2桁で剰余
+var digits = ExtractDigits(grainId);  // すべての数字を抽出
+var lastTwoDigits = (digits[^2] * 10) + digits[^1];
+return lastTwoDigits % shardCount;
+
+// Hero History: 末尾文字の ASCII 値で剰余
+return heroId[^1] % 10;
+```
+
+**設計思想の解析**：
+
+- **Session Message** の ID は GUID で、16 進数に変換して末尾2桁を取得すると、均一に分散された 256 個のシャードを得られます
+- **Orleans Grain** の ID フォーマットは統一されておらず、文字と数字が含まれる可能性があるため、すべての数字を抽出して剰余を取ります
+- **Hero History** の ID は文字列で、末尾文字の ASCII 値を直接使用して剰余を取ります。シンプルですが分散が不十分な可能性があります
+
+**重要な点**：どのアルゴリズムを使用しても、同一 ID が常に同一シャードにマッピングされることを保証する必要があります。これは分散システムで最も基本的な要件であり、そうでないとデータの不整合が発生します。結局のところ、ルーティングが不安定なら、すべての努力は無駄です。
+
+### 初期化戦略の違い
+
+| 側面 | Session Message | Orleans Grain | Hero History |
+|------|----------------|---------------|--------------|
+| **初期化タイミング** | オンデマンド遅延ロード | 起動時に全量並列初期化 | オンデマンド遅延ロード |
+| **並行制御** | `Lazy<Task>` で重複初期化を防止 | `Parallel.ForEachAsync` | `Lazy<Task>` で重複初期化を防止 |
+
+**なぜ Orleans Grain は起動時全量初期化を選択するのか？**
+
+Orleans は分散フレームワークであり、Grain は任意のノードにスケジュールされる可能性があります。実行時にシャードファイルが存在しないことが発見されると、リクエストが失敗します。起動時の全量初期化は起動時間を延長しますが、実行時の安定性を保証できます。動くことはただの始まりであり、維持できることが本当の腕の見せ所です。
+
+**遅延ロードの利点**：
+
+Session Message と Hero History については、遅延ロードを使用することで起動時間を短縮できます。特定のシャードにアクセスする必要がある場合にのみファイルを作成し、Schema を初期化します。`Lazy<Task>` を使用することで、並行初期化時の競合状態を防ぐことができます。この設計はシンプルに見えますが、実際のプロジェクトでは多くの不要なトラブルを省くことができます。
+
+### Schema 設計の特徴
+
+3つのソリューションの Schema 設計はそれぞれのビジネス特性を反映しています：
+
+**Session Message**：
+- Event Sourcing モードをサポート（イベントテーブル + スナップショットテーブル）
+- メッセージコンテンツブロックサブテーブル（MessageContentBlocks）を含む
+- 圧縮と圧縮マークフィールドを持ち、後続の最適化をサポート
+
+**Orleans Grain**：
+- 最簡設計：単一テーブル GrainState
+- JSON シリアライゼーションで状態をストレージ
+- ETag 楽観的並行制御
+
+**Hero History**：
+- タイムラインクエリ最適化インデックス
+- DedupeKey 一意制約で重複を防止
+- 複数のイベントタイプと状態をサポート
+
+これらの設計からわかるように、Schema 設計はビジネス要件に緊密に合わせるべきであり、汎用性を追求すべきではありません。Orleans Grain のシンプルな設計は、シリアライズされた状態をストレージする必要があり、複雑なクエリ能力が不要であるためです。これは難解なことではなく、エンジニアリングです。名前を大きくするのに急ぐのではなく、まずこのものがチームで2回のイテレーションを生き残れるかを見てください。
+
+### 並行構成の比較
+
+3つのソリューションはすべて同じ SQLite 並行最適化構成を使用しています：
+
+```sql
+PRAGMA journal_mode=WAL;      -- Write-Ahead Logging モード
+PRAGMA synchronous=NORMAL;     -- 永続化オーバーヘッドを低減
+PRAGMA busy_timeout=5000;      -- 5秒ビジーウェイト
+PRAGMA foreign_keys=ON;        -- 外部キー制約
+```
+
+**WAL モードの利点**：
+
+従来のロールバックジャーナルモードは書き込み時にロック競合を発生させますが、WAL モードは読み書きの並行を可能にします。これは大規模データシーンで性能を大幅に向上できます。多くの人はこの構成を知りませんが、それはあなたが思っているよりもずっと重要です。
+
+**synchronous=NORMAL のトレードオフ**：
+
+FULL に設定すると最高の安全性を保証できますが、性能が大幅に低下します。NORMAL モードは安全性と性能の間でバランスをとり、ほとんどのアプリケーションに適しています。この構成はあまり悩む必要はありません、NORMAL で十分です。
+
+## シャーディング戦略の選択方法
+
+HagiCode の3つのソリューションの分析に基づいて、以下の意思決定マトリックスをまとめることができます：
+
+```
+高スループットシーン → より多くのシャード（Message は 256 など）
+シンプルな保守性   → より少ないシャード（Hero History は 10 など）
+数字 ID 主体   → 剰余算法（Orleans Grain）
+GUID 主体    → 16 進数サフィックス（Session Message）
+文字列 ID    → ASCII 剰余（Hero History）
+```
+
+**シャード数選択の経験値**：
+
+- 少なすぎる（< 10）：並行性能の向上が限定的、シャーディングの意味が薄い
+- 多すぎる（> 1000）：ファイル管理が複雑、接続プールのオーバーヘッドが大きい
+- 経験値：10-100 個のシャードはほとんどのシーンに適用
+- 極めて高い並行シーン：256 個のシャードを検討可能
+
+これはデモだけを見ると確かに興奮しやすいですが、本番環境に入ると、コストを一つ一つ計算する必要があります。多くの問題はできないことではなく、コストを明確に計算していないだけです。
+
+## 実践ガイド
+
+### 標準化されたシャーディングルーターの実装
+
+```csharp
+public interface IShardResolver<TId>
+{
+    string ResolveShardKey(TId id);
+}
+
+// 16 進数シャーディング（GUID に適用）
+public class HexSuffixShardResolver : IShardResolver<string>
+{
+    private readonly int _suffixLength;
+
+    public HexSuffixShardResolver(int suffixLength = 2)
+    {
+        _suffixLength = suffixLength;
+    }
+
+    public string ResolveShardKey(string id)
+    {
+        var normalized = id.Replace("-", "").ToLowerInvariant();
+        return normalized[^_suffixLength..];
+    }
+}
+
+// 数字剰余シャーディング（純数字 ID に適用）
+public class NumericModuloShardResolver : IShardResolver<long>
+{
+    private readonly int _shardCount;
+
+    public NumericModuloShardResolver(int shardCount)
+    {
+        _shardCount = shardCount;
+    }
+
+    public string ResolveShardKey(long id)
+    {
+        return (id % _shardCount).ToString("D2");
+    }
+}
+```
+
+### 統一接続ファクトリパターン
+
+```csharp
+public class ShardedConnectionFactory<TOptions>
+{
+    private readonly ConcurrentDictionary<string, Lazy<Task>> _initializationTasks = new();
+    private readonly TOptions _options;
+    private readonly IShardSchemaInitializer _initializer;
+
+    public ShardedConnectionFactory(
+        TOptions options,
+        IShardSchemaInitializer initializer)
+    {
+        _options = options;
+        _initializer = initializer;
+    }
+
+    public async Task<TDbContext> CreateAsync(string shardKey, CancellationToken ct)
+    {
+        var connectionString = BuildConnectionString(shardKey);
+
+        // Lazy<Task> を使用して並行初期化を防止
+        var initTask = _initializationTasks.GetOrAdd(
+            connectionString,
+            _ => new Lazy<Task>(() => InitializeShardAsync(connectionString, ct))
+        );
+
+        await initTask.Value;
+        return CreateDbContext(connectionString);
+    }
+
+    private async Task InitializeShardAsync(string connectionString, CancellationToken ct)
+    {
+        await _initializer.InitializeAsync(connectionString, ct);
+    }
+
+    private string BuildConnectionString(string shardKey)
+    {
+        var shardPath = Path.Combine(_options.BaseDirectory, $"{shardKey}.db");
+        return $"Data Source={shardPath}";
+    }
+
+    private TDbContext CreateDbContext(string connectionString)
+    {
+        // 具体的な ORM に基づいて DbContext を作成
+        return Activator.CreateInstance(typeof(TDbContext), connectionString) as TDbContext;
+    }
+}
+```
+
+### Schema 初期化のベストプラクティス
+
+```csharp
+public class SqliteShardInitializer : IShardSchemaInitializer
+{
+    public async Task InitializeAsync(string connectionString, CancellationToken ct)
+    {
+        await using var connection = new SqliteConnection(connectionString);
+        await connection.OpenAsync(ct);
+
+        // 並行最適化構成
+        await connection.ExecuteAsync("""
+            PRAGMA journal_mode=WAL;
+            PRAGMA synchronous=NORMAL;
+            PRAGMA busy_timeout=5000;
+            PRAGMA foreign_keys=ON;
+        """);
+
+        // テーブル構造を作成
+        await connection.ExecuteAsync("""
+            CREATE TABLE IF NOT EXISTS Entities (
+                Id TEXT PRIMARY KEY,
+                CreatedAt TEXT NOT NULL,
+                UpdatedAt TEXT NOT NULL,
+                Data TEXT NOT NULL,
+                ETag TEXT
+            );
+        """);
+
+        // インデックスを作成
+        await connection.ExecuteAsync("""
+            CREATE INDEX IF NOT EXISTS IX_Entities_CreatedAt
+            ON Entities(CreatedAt DESC);
+
+            CREATE INDEX IF NOT EXISTS IX_Entities_UpdatedAt
+            ON Entities(UpdatedAt DESC);
+        """);
+    }
+}
+```
+
+### 重要な注意点
+
+**1. ルーティングの安定性**
+
+ルーティングアルゴリズムは同一 ID が常に同一シャードにマッピングされることを保証する必要があります。ランダムや時間関連の計算を避け、アルゴリズムに可変パラメータを導入しないでください。
+
+**2. シャード数の選択**
+
+シャード数は設計段階で決定する必要があり、後からの修正は非常に困難です。以下を考慮する必要があります：
+- 現在および将来の並行量
+- 単一シャードの管理コスト
+- データ移行の複雑さ
+
+**3. 移行の考慮**
+
+Hero History ソリューションは完全な移行パスを示しています：
+
+1. 新しいシャーディングストレージインフラを構築
+2. メインライブラリのデータをシャードにコピーする移行サービスを実装
+3. 移行後のクエリ互換性を検証
+4. 読み書きパスをシャードに切り替え
+5. メインライブラリの古いテーブルをクリーンアップ
+
+シャーディングソリューションを設計する際は、将来の移行要件を考慮する必要があります。Talk is cheap. Show me the code ですが、コードだけでは不十分で、完全な移行パスも必要です。一度の成功は体系とは呼べず、継続的な成功こそが体系です。
+
+**4. モニタリングと運用**
+
+- 各シャードのサイズ分布をモニタリングし、データの偏りをタイムリーに発見
+- アラートを設定してシャードのホットスポットを検出し、単一シャードがボトルネックになるのを防止
+- WAL ファイルのサイズを定期的にチェックし、ディスク容量の超過を防止
+- シャードヘルスチェックメカニズムを確立
+
+**5. テストカバレッジ**
+
+- 境界条件のテスト（空 ID、特殊文字、超長 ID）
+- ルーティングの決定論を検証し、同一 ID が常に同一シャードにマッピングされることを保証
+- 並行書き込みストレステスト、ロック競合が効果的に緩和されることを検証
+- 移行テスト、データの整合性と一貫性を保証
+
+## まとめ
+
+HagiCode プロジェクトの3つの SQLite シャーディングソリューションを比較することで、以下のことがわかります：
+
+1. **万能ソリューションはない**：異なるビジネスシーンには異なるシャーディング戦略が必要
+2. **コア原則は汎用的**：決定論的ルーティング、透過的アクセス、独立ストレージ、並行最適化
+3. **設計は未来に向ける**：移行パスと運用コストを考慮
+
+もしあなたのプロジェクトが SQLite を使用しており、並行性のボトルネックに遭遇し始めている場合、この記事がいくつかのアイデアを提供できることを願っています。重量級データベースに急いで移行する必要はありません。場合によっては適切なシャーディングソリューションで問題を解決できます。
+
+もちろん、シャーディングは銀の弾丸ではありません。シャーディングソリューションを選択する前に、まず以下を確認してください：
+- 単一テーブルのクエリ性能を最適化した
+- 適切なインデックスを使用した
+- WAL モードを有効にした
+
+これらの最適化をすべて行った後でも、まだ性能ボトルネックが存在する場合にのみ、シャーディングの導入を検討してください。シンプルなことをうまくやれること、これはそれ自体が一つの能力です。
+
+多くのことは一度言うより一度やる方が良く、次はエンジニアリング結果自体に語らせましょう。
+
+## 参考資料
+
+- HagiCode プロジェクトリポジトリ：[github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- SQLite WAL モードドキュメント：[sqlite.org/wal.html](https://www.sqlite.org/wal.html)
+- Orleans 分散フレームワーク：[dotnet.github.io/orleans](https://dotnet.github.io/orleans/)
+
+## 著作権説明
+
+お読みいただきありがとうございます。もし本文が役に立ったと思ったら、いいね、保存、共有でのサポートを歓迎します。
+本内容は人工知能支援で協力し、最終内容は著者がレビューし確認しました。
+- 本文著者: [newbe36524](https://www.newbe.pro)
+- 原文リンク: [https://docs.hagicode.com/blog/2026-04-17-sqlite-sharding-strategies-comparison/](https://docs.hagicode.com/blog/2026-04-17-sqlite-sharding-strategies-comparison/)
+- 著作権宣言: 本ブログのすべての記事は特別な声明を除き、BY-NC-SA ライセンス契約を採用します。転載は出典を明記してください！

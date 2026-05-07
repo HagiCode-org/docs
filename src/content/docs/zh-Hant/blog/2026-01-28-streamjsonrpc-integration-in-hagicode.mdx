@@ -1,0 +1,328 @@
+---
+title: "StreamJsonRpc 在 HagiCode 中的深度整合與實踐"
+date: 2026-01-28
+truncate: true
+englishSlug: "streamjsonrpc-integration-in-hagicode"
+tags: [StreamJsonRpc, JSON-RPC, "C#", TypeScript, 通訊架構]
+description: "本文詳細介紹了 HagiCode（原 PCode）專案如何成功整合 Microsoft 的 StreamJsonRpc 通訊庫，以替換原有的自訂 JSON-RPC 實作"
+---
+
+## StreamJsonRpc 在 HagiCode 中的深度整合與實踐
+
+> 本文詳細介紹了 HagiCode（原 PCode）專案如何成功整合 Microsoft 的 StreamJsonRpc 通訊庫，以替換原有的自訂 JSON-RPC 實作，並解決了整合過程中的技術痛點與架構挑戰。
+
+## 背景
+
+StreamJsonRpc 是微軟官方維護的用於 .NET 和 TypeScript 的 JSON-RPC 通訊庫，以其強大的型別安全、自動代理生成和成熟的異常處理機制著稱。在 HagiCode 專案中，為了通過 ACP (Agent Communication Protocol) 與外部 AI 工具（如 iflow CLI、OpenCode CLI）進行通訊，並消除早期自訂 JSON-RPC 實作帶來的維護成本和潛在 Bug，專案決定整合 StreamJsonRpc。然而，在整合過程中遇到了串流 JSON-RPC 特有的挑戰，特別是在處理代理目標綁定和泛型參數識別時。
+
+為了解決這些痛點，我們做了一個大膽的決定：整個建置系統推倒重來。這個決定帶來的變化，可能比你想像的還要大——稍後我會具體說。
+
+## 關於 HagiCode
+
+> 先介紹一下本文的「主角專案」
+
+如果你在開發中遇到過這些煩惱：
+- 多專案、多技術棧，建置腳本維護成本高
+- CI/CD 流水線設定繁瑣，每次改都要查文件
+- 跨平台相容性問題層出不窮
+- 想讓 AI 幫忙寫程式碼，但現有工具不夠智慧
+
+那麼我們正在做的 HagiCode 可能你會感興趣。
+
+**HagiCode 是什麼？**
+- 一款 AI 驅動的程式碼智慧助手
+- 支援多語言、跨平台的程式碼生成與最佳化
+- 內建遊戲化機制，讓編碼不再枯燥
+
+**為什麼在這裡提它？**
+本文分享的 StreamJsonRpc 整合方案，正是我們在開發 HagiCode 過程中實踐總結出來的。如果你覺得這套工程化方案有價值，說明我們的技術品味還不錯——那麼 HagiCode 本身也值得關注一下。
+
+**想了解更多？**
+- GitHub: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)（求 Star）
+- 官網: [hagicode.com](https://hagicode.com)
+- 影片示範: [www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)（30 分鐘實戰示範）
+- 安裝指南: [hagicode.com/installation/docker-compose](https://hagicode.com/installation/docker-compose)
+- 公測已開始：現在安裝即可參與公測
+
+## 分析
+
+當前專案處於 ACP 協議整合的關鍵階段，面臨著以下幾個技術痛點和架構挑戰：
+
+### 1. 自訂實作的局限
+原有的 JSON-RPC 實作位於 `src/HagiCode.ClaudeHelper/AcpImp/`，包含 `JsonRpcEndpoint` 和 `ClientSideConnection` 等元件。維護這套自訂程式碼成本高，且缺乏成熟庫的高級功能（如進度報告、取消支援）。
+
+### 2. StreamJsonRpc 整合障礙
+在嘗試將現有的 `CallbackProxyTarget` 模式遷移到 StreamJsonRpc 時，發現 `_rpc.AddLocalRpcTarget(target)` 方法無法識別通過代理模式建立的目標。具體表現為，StreamJsonRpc 無法自動將泛型型別 `T` 的屬性拆分為 RPC 方法參數，導致伺服器端無法正確處理用戶端發起的方法呼叫。
+
+### 3. 架構分層混亂
+現有的 `ClientSideConnection` 混合了傳輸層（WebSocket/Stdio）、協議層（JSON-RPC）和業務層（ACP Agent 介面），導致職責不清，且存在 `AcpAgentCallbackRpcAdapter` 方法綁定缺失的問題。
+
+### 4. 日誌缺失
+WebSocket 傳輸層缺少對原始 JSON 內容的日誌輸出，導致在除錯 RPC 通訊問題時難以定位是序列化問題還是網路問題。
+
+## 解決
+
+針對上述問題，我們採用了以下系統化的解決方案，從架構重構、庫整合和除錯增強三個維度進行最佳化：
+
+### 1. 全面遷移至 StreamJsonRpc
+
+#### 移除舊程式碼
+刪除 `JsonRpcEndpoint.cs`、`AgentSideConnection.cs` 及相關的自訂序列化轉換器（`JsonRpcMessageJsonConverter` 等）。
+
+#### 整合官方庫
+引入 `StreamJsonRpc` NuGet 套件，利用其 `JsonRpc` 類別處理核心通訊邏輯。
+
+#### 抽象傳輸層
+定義 `IAcpTransport` 介面，統一處理 `WebSocket` 和 `Stdio` 兩種傳輸模式，確保協議層與傳輸層解耦。
+
+```csharp
+// IAcpTransport 介面定義
+public interface IAcpTransport
+{
+    Task SendAsync(string message, CancellationToken cancellationToken = default);
+    Task<string> ReceiveAsync(CancellationToken cancellationToken = default);
+    Task CloseAsync(CancellationToken cancellationToken = default);
+}
+
+// WebSocket 傳輸實作
+public class WebSocketTransport : IAcpTransport
+{
+    private readonly WebSocket _webSocket;
+
+    public WebSocketTransport(WebSocket webSocket)
+    {
+        _webSocket = webSocket;
+    }
+
+    // 實作發送和接收方法
+    // ...
+}
+
+// Stdio 傳輸實作
+public class StdioTransport : IAcpTransport
+{
+    private readonly StreamReader _reader;
+    private readonly StreamWriter _writer;
+
+    public StdioTransport(StreamReader reader, StreamWriter writer)
+    {
+        _reader = reader;
+        _writer = writer;
+    }
+
+    // 實作發送和接收方法
+    // ...
+}
+```
+
+### 2. 修復代理目標識別問題
+
+#### 分析 `CallbackProxyTarget`
+檢查現有的動態代理生成邏輯，確定 StreamJsonRpc 無法識別的根本原因（通常是因為代理物件沒有公開實際的方法簽章，或者使用了 StreamJsonRpc 不支援的參數型別）。
+
+#### 重構參數傳遞
+將泛型屬性拆分為明確的 RPC 方法參數。不再依賴動態屬性，而是定義具體的 Request/Response DTO（資料傳輸物件），確保 StreamJsonRpc 能透過反射正確識別方法簽章。
+
+```csharp
+// 原有的泛型屬性方式
+public class CallbackProxyTarget<T>
+{
+    public Func<T, Task> Callback { get; set; }
+}
+
+// 重構後的具體方法方式
+public class ReadTextFileRequest
+{
+    public string FilePath { get; set; }
+}
+
+public class ReadTextFileResponse
+{
+    public string Content { get; set; }
+}
+
+public interface IAcpAgentCallback
+{
+    Task<ReadTextFileResponse> ReadTextFileAsync(ReadTextFileRequest request);
+    // 其他方法...
+}
+```
+
+#### 使用 `Attach` 替代 `AddLocalRpcTarget`
+在某些複雜情境下，手動代理 `JsonRpc` 物件並處理 `RpcConnection` 可能比直接新增目標更靈活。
+
+### 3. 實作方法綁定與日誌增強
+
+#### 實作 `AcpAgentCallbackRpcAdapter`
+確保該元件顯式實作 StreamJsonRpc 的代理介面，將 ACP 協議定義的方法（如 `ReadTextFileAsync`）對應到 StreamJsonRpc 的回呼處理器上。
+
+#### 整合日誌記錄
+在 WebSocket 或 Stdio 的訊息處理管道中，攔截並記錄 JSON-RPC 請求和回應的原始文字。利用 `ILogger` 在解析前和序列化後輸出原始 payload，以便排查格式錯誤。
+
+```csharp
+// 日誌增強的傳輸包裝器
+public class LoggingAcpTransport : IAcpTransport
+{
+    private readonly IAcpTransport _innerTransport;
+    private readonly ILogger<LoggingAcpTransport> _logger;
+
+    public LoggingAcpTransport(IAcpTransport innerTransport, ILogger<LoggingAcpTransport> logger)
+    {
+        _innerTransport = innerTransport;
+        _logger = logger;
+    }
+
+    public async Task SendAsync(string message, CancellationToken cancellationToken = default)
+    {
+        _logger.LogTrace("Sending message: {Message}", message);
+        await _innerTransport.SendAsync(message, cancellationToken);
+    }
+
+    public async Task<string> ReceiveAsync(CancellationToken cancellationToken = default)
+    {
+        var message = await _innerTransport.ReceiveAsync(cancellationToken);
+        _logger.LogTrace("Received message: {Message}", message);
+        return message;
+    }
+
+    public async Task CloseAsync(CancellationToken cancellationToken = default)
+    {
+        _logger.LogDebug("Closing connection");
+        await _innerTransport.CloseAsync(cancellationToken);
+    }
+}
+```
+
+### 4. 架構分層重構
+
+#### 傳輸層 (`AcpRpcClient`)
+封裝 StreamJsonRpc 連線，負責 `InvokeAsync` 和連線生命週期管理。
+
+```csharp
+public class AcpRpcClient : IDisposable
+{
+    private readonly JsonRpc _rpc;
+    private readonly IAcpTransport _transport;
+
+    public AcpRpcClient(IAcpTransport transport)
+    {
+        _transport = transport;
+        _rpc = new JsonRpc(new StreamRpcTransport(transport));
+        _rpc.StartListening();
+    }
+
+    public async Task<TResponse> InvokeAsync<TResponse>(string methodName, object parameters)
+    {
+        return await _rpc.InvokeAsync<TResponse>(methodName, parameters);
+    }
+
+    public void Dispose()
+    {
+        _rpc.Dispose();
+        _transport.Dispose();
+    }
+
+    // StreamRpcTransport 是對 IAcpTransport 的 StreamJsonRpc 介面卡
+    private class StreamRpcTransport : IDuplexPipe
+    {
+        // 實作 IDuplexPipe 介面
+        // ...
+    }
+}
+```
+
+#### 協議層 (`IAcpAgentClient` / `IAcpAgentCallback`)
+定義清晰的 client-to-agent 和 agent-to-client 介面，移除 `Func<IAcpAgent, IAcpClient>` 這種循環依賴的工廠模式，改用依賴注入或直接註冊回呼。
+
+## 實踐
+
+基於 StreamJsonRpc 的最佳實踐和專案經驗，以下是實施過程中的關鍵建議：
+
+### 1. 強型別 DTO 優於動態物件
+StreamJsonRpc 的核心優勢在於強型別。不要使用 `dynamic` 或 `JObject` 傳遞參數。應為每個 RPC 方法定義明確的 C# POCO 類別作為參數。這不僅解決了代理目標識別問題，還能在編譯時發現型別錯誤。
+
+範例：將 `CallbackProxyTarget` 中的泛型屬性替換為 `ReadTextFileRequest` 和 `WriteTextFileRequest` 等具體類別。
+
+### 2. 顯式宣告 Method Name
+使用 `[JsonRpcMethod]` 特性顯式指定 RPC 方法名稱，不要依賴預設的方法名稱對應。這可以防止因命名風格差異（如 PascalCase vs camelCase）導致的呼叫失敗。
+
+```csharp
+public interface IAcpAgentCallback
+{
+    [JsonRpcMethod("readTextFile")]
+    Task<ReadTextFileResponse> ReadTextFileAsync(ReadTextFileRequest request);
+    
+    [JsonRpcMethod("writeTextFile")]
+    Task WriteTextFileAsync(WriteTextFileRequest request);
+}
+```
+
+### 3. 利用連線狀態回呼
+StreamJsonRpc 提供了 `JsonRpc.ConnectionLost` 事件。務必監聽此事件以處理程序意外退出或網路斷線的情況，這比單純依賴 Orleans 的 Grain 失效檢測更及時。
+
+```csharp
+_rpc.ConnectionLost += (sender, e) =>
+{
+    _logger.LogError("RPC connection lost: {Reason}", e.ToString());
+    // 處理重連邏輯或通知使用者
+};
+```
+
+### 4. 日誌分層記錄
+- **Trace 層級**：記錄完整的 JSON Request/Response 原文。
+- **Debug 層級**：記錄方法呼叫堆疊和參數摘要。
+- **注意**：確保日誌中不包含敏感的 Authorization Token 或大檔案內容的 Base64 編碼。
+
+### 5. 處理串流傳輸的特殊性
+StreamJsonRpc 原生支援 `IAsyncEnumerable`。在實作 ACP 的串流 Prompt 回應時，應直接使用 `IAsyncEnumerable` 而不是自訂的分頁邏輯。這能極大簡化串流處理的程式碼量。
+
+```csharp
+public interface IAcpAgentCallback
+{
+    [JsonRpcMethod("streamText")]
+    IAsyncEnumerable<string> StreamTextAsync(StreamTextRequest request);
+}
+```
+
+### 6. 介面卡模式 (Adapter Pattern)
+保持 `ACPSession` 和 `ClientSideConnection` 的分離。`ACPSession` 應專注於 Orleans 的狀態管理和業務邏輯（如訊息入佇列），透過組合而非繼承的方式使用 StreamJsonRpc 連線物件。
+
+## 總結
+
+透過全面整合 StreamJsonRpc，HagiCode 專案成功解決了原自訂實作的維護成本高、功能局限性和架構分層混亂等問題。關鍵改進包括：
+
+1. 採用強型別 DTO 替代動態屬性，提高了程式碼的可維護性和可靠性
+2. 實作了傳輸層抽象和協議層分離，提升了架構的清晰性
+3. 增強了日誌記錄功能，便於排查通訊問題
+4. 引入了串流傳輸支援，簡化了串流處理的實作
+
+這些改進為 HagiCode 提供了更穩定、更高效的通訊基礎，使其能夠更好地與外部 AI 工具進行互動，並為未來的功能擴展奠定了堅實的基礎。
+
+## 參考資料
+
+- StreamJsonRpc 官方文件：[https://learn.microsoft.com/en-us/dotnet/api/microsoft.visualstudio.threading.streamjsonrpc](https://learn.microsoft.com/en-us/dotnet/api/microsoft.visualstudio.threading.streamjsonrpc)
+- ACP (Agent Communication Protocol) 規範：[https://github.com/microsoft/agentcommunicationprotocol](https://github.com/microsoft/agentcommunicationprotocol)
+- HagiCode 專案：[https://github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Orleans 官方文件：[https://learn.microsoft.com/en-us/dotnet/orleans](https://learn.microsoft.com/en-us/dotnet/orleans)
+
+---
+
+如果本文對你有幫助：
+- 點個讚讓更多人看到
+- 來 GitHub 給個 Star：[github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- 訪問官網了解更多：[hagicode.com](https://hagicode.com)
+- 觀看 30 分鐘實戰示範：[www.bilibili.com/video/BV1pirZBuEzq/](https://www.bilibili.com/video/BV1pirZBuEzq/)
+- 一鍵安裝體驗：[hagicode.com/installation/docker-compose](https://hagicode.com/installation/docker-compose)
+- 公測已開始，歡迎安裝體驗
+
+
+
+---
+
+感謝您的閱讀,如果您覺得本文有用,快點擊下方按讚按鈕👍,讓更多的人看到本文。
+
+本內容採用人工智慧輔助協作,經本人審核,符合本人觀點與立場。
+
+- **本文作者:** [newbe36524](https://www.newbe.pro)
+- **本文連結:** [https://hagicode.com/blog/2026/01/28/streamjsonrpc-integration-in-hagicode](https://hagicode.com/blog/2026/01/28/streamjsonrpc-integration-in-hagicode)
+- **版權聲明:** 本部落格所有文章除特別聲明外,均採用 BY-NC-SA 許可協議。轉載請註明出處!
