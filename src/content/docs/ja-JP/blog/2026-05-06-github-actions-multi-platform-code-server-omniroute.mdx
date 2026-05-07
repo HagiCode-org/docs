@@ -1,0 +1,480 @@
+---
+title: GitHub Actions でマルチプラットフォームの code-server と OmniRoute をビルドする方法
+date: 2026-05-07
+tags: [omniroute]
+---
+
+## GitHub Actions でマルチプラットフォームの code-server と OmniRoute をビルドする方法
+
+> Linux、macOS、Windows の 3 つのプラットフォームでビルドし、統一してリリースする必要がある面对、私たちは GitHub Actions ベースのマルチプラットフォーム CI/CD パイプラインを設計しました。この件は難しくも簡単でもありませんが、ハマるときは本当に頭を抱えるものです。この記事では、このパイプラインの設計思想と実装の詳細を共有します——もちろん、私たちが踏んだ坑も含めて。
+
+## 背景
+
+[code-server](https://github.com/coder/code-server) は、VS Code をブラウザ上で実行するオープンソースプロジェクトで、開発者がリモートサーバー上の Web IDE を通じて開発できるようにします。HagiCode デスクトップ版が code-server を組み込みランタイムとして採用するにあたり、異なるオペレーティングシステム（Linux、macOS、Windows）で code-server のカスタム版をビルド、検証、配布する必要がありました。
+
+この件は本来シンプルであるべきでしたが、......人生にそんな簡単なものがあるでしょうか？
+
+同時に、[OmniRoute](https://github.com/diegosouzapw/OmniRoute) はマルチモデルルーティングサービスとして、code-server と同じビルド・リリースパイプラインを共有する必要があります。2 つのパッケージはビルド方法が異なりますが、最終的には同じ GitHub Release に集約してリリースする必要があります。まるで元々交わらない 2 本の線が、ある点で出会うように——これが所謂運命というものです。
+
+これはいくつかのエンジニアリング上の課題をもたらしました：
+
+1. **クロスプラットフォームビルドの違い**：Linux、macOS、Windows の 3 つのプラットフォームでビルドツールチェーンが完全に異なります（Linux は quilt + bash、macOS は Homebrew、Windows は MSYS2）——各プラットフォームにはそれぞれの気難しさがあります
+2. **ビルドアーティファクトの検証**：ビルド完了後にアーティファクトが正常に起動するかを自動検証する必要があります——結局のところ、動かないものをリリースしたい人はいません
+3. **統一バージョン管理**：2 つのパッケージは同じバージョン番号とリリースタグを共有する必要があります——まるで 2 人が同じ名前を使うように、何らかのルールが必要です
+4. **並列ビルドと直列リリース**：ビルドは並列で可能ですが、リリースは調整が必要です——ここで間違えると、本当に間違えたことになります
+
+## HagiCode について
+
+この記事で共有するソリューションは、[HagiCode](https://hagicode.com) プロジェクトでの実践経験から来ています。HagiCode は AI コーディングアシスタントプロジェクトで、そのデスクトップ製品に code-server を組み込みランタイムとして統合しているため、マルチプラットフォームビルドとリリースのエンジニアリング問題を解決する必要がありました。この件は、突き詰めれば製品を作るためだけのもので、それだけです。
+
+### 上流ビルドパイプラインの制限
+
+code-server の上流プロジェクトが備える CI/CD パイプライン（`build.yaml`）は `linux-x64` プラットフォームのみをビルドし、そのリリースフロー（`publish.yaml`）も npm、AUR、Docker などのチャネルにのみ対応しています。以下はサポートされていません：
+
+- macOS と Windows のネイティブビルド——おそらくこれら 2 つのプラットフォームは重要ではないと考えているのでしょう
+- マルチプラットフォーム行列並列ビルド——恐らく上流チームの人員が少ないからでしょう
+- 統一されたアーティファクト検証メカニズム——とりあえずリリースしてユーザーに試してもらえばいい
+
+これは何でもありません。各プロジェクトにはそれぞれの優先順序があります。ただ、私たちがちょうどこれらの機能を必要としていたので、自分たちでやることにしただけです。
+
+### 設計上の決定
+
+上記の分析に基づき、HagiCode は `repos/vendered` で独立したビルドパイプラインを設計しました。核心的な決定は以下の通りです：
+
+**1. 共有バージョン管理とリリースツールチェーンの再利用**
+
+バージョン番号は UTC 日付形式 `YYYY.MMDD.RRRR` を採用します。ここで `RRRR` は GitHub Actions 実行番号のゼロ埋めシーケンスです。これによりバージョンの単調増加とトレーサビリティが保証されます——結局のところ、時間は逆流しません。あることが一旦起きてしまえば、もう変えられません：
+
+```javascript
+// scripts/versioning.mjs
+export function formatDateVersion({ date = new Date(), revision }) {
+  const year = normalizedDate.getUTCFullYear()
+  const month = String(normalizedDate.getUTCMonth() + 1).padStart(2, "0")
+  const day = String(normalizedDate.getUTCDate()).padStart(2, "0")
+  return `${year}.${month}${day}.${normalizedRevision}`
+}
+```
+
+例えば、2026-05-05 の最初のビルドはバージョン `2026.0505.0001` とタグ `v2026.0505.0001` を生成します。
+
+このバージョン番号形式は特に何でもありません。ただ、ちょうど使えるだけです。
+
+**2. パッケージレベルの分離されたビルドスクリプト**
+
+各パッケージ（code-server、omniroute）は `packages/<name>/scripts/` の下で独自のビルドと検証ロジックを維持し、共有のリリースツール（`scripts/versioning.mjs`、`scripts/github-release.mjs`、`scripts/publication.mjs`）はパッケージに依存しない状態を保ちます。それぞれが自分のことを管理し、互いに干渉しない——これがいわゆる「井水は河水を犯さず」というものでしょう。
+
+**3. 統一されたメタデータコントラクト**
+
+すべてのパッケージは標準化された `metadata.json` を出力します。これには `schemaVersion`、`packageId`、`version`、`platform`、`arch`、`sourceRevision`、`artifacts[]` フィールドが含まれ、ダウンストリームの消費者がパッケージの違いを感知する必要がなくなります。統一されたフォーマットがあれば、誰でも少し楽になります。
+
+## ソリューション
+
+### Workflow 全体アーキテクチャ
+
+パイプライン全体は `repos/vendered/.github/workflows/code-server-artifacts.yaml` で定義され、以下のステージを含みます：
+
+```
+prepare_release → build (matrix) → verify (matrix) → publish_github_release
+```
+
+このフローはシンプルとも言えますし、複雑とも言えます——どう見るかによります。
+
+### トリガー条件
+
+```yaml
+on:
+  workflow_dispatch:          # 手動トリガー
+  schedule:
+    - cron: "23 3 * * *"     # 毎日定時ビルド
+  push:
+    branches: [main]          # メインブランチプッシュでトリガー
+    paths:                    # 関連ファイルの変更時のみトリガー
+      - ".github/workflows/code-server-artifacts.yaml"
+      - ".gitmodules"
+      - "scripts/**"
+      - "packages/code-server/**"
+      - "packages/omniroute/**"
+```
+
+毎日定時ビルドは午前 3:23 に設定しました——特に深い理由はありません。ただ適当に選んだ時間です。おそらくこの時間を選んだ人は、それほど深く考えていなかったのでしょう。
+
+### ステージ 1：バージョン準備
+
+```yaml
+jobs:
+  prepare_release:
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - id: version
+        run: node ./scripts/versioning.mjs >> "$GITHUB_OUTPUT"
+```
+
+このステージでは統一されたバージョン番号と Git タグを生成し、後続のすべてのビルドとリリースステップがこれら 2 つの値を共有します。良い始まりは、少なくとも後続の作業の手間を省くことができます。
+
+### ステージ 2：マルチプラットフォーム行列ビルド
+
+ビルドステージでは `strategy.matrix` を使用して、異なるプラットフォームで並列実行します：
+
+#### code-server ビルド行列
+
+```yaml
+build_code_server:
+  needs: prepare_release
+  strategy:
+    fail-fast: false
+    matrix:
+      include:
+        - name: code-server Linux
+          runner: ubuntu-22.04
+          artifact_name: code-server-linux
+        - name: code-server macOS
+          runner: macos-latest
+          artifact_name: code-server-macos
+        - name: code-server Windows
+          runner: windows-latest
+          artifact_name: code-server-windows
+```
+
+重要な設計：`fail-fast: false` により、あるプラットフォームが失敗しても他のプラットフォームのビルドがキャンセルされないようにします。結局のところ、1 つのプラットフォームが落ちたからといって、すべてのプラットフォームに問題があるわけではありません。みんな一緒に道連れになる必要はありません。
+
+#### omniroute ビルド行列
+
+```yaml
+build_omniroute:
+  needs: prepare_release
+  strategy:
+    fail-fast: false
+    matrix:
+      include:
+        - name: omniroute Linux x64
+          runner: ubuntu-22.04
+          platform: linux
+          arch: amd64
+        - name: omniroute macOS x64
+          runner: macos-15-intel
+          platform: macos
+          arch: amd64
+        - name: omniroute macOS arm64
+          runner: macos-14
+          platform: macos
+          arch: arm64
+        - name: omniroute Windows x64
+          runner: windows-latest
+          platform: windows
+          arch: amd64
+```
+
+OmniRoute の行列はさらに豊富で、macOS の Intel と ARM の 2 つのアーキテクチャを含みます。macOS ARM は `macos-14` runner（Apple Silicon）、Intel は `macos-15-intel` を使用することに注意してください。この世界就是这样、何かが陣営分けされているものです——Intel と ARM のように、永遠に和解することはありません。
+
+### ステージ 3：プラットフォーム固有の前提条件
+
+各プラットフォームには異なるツールチェーンが必要です。Workflow は条件付きステップで処理します：
+
+#### Linux
+
+```yaml
+- name: Install Linux prerequisites
+  if: runner.os == 'Linux'
+  run: sudo apt-get update && sudo apt-get install -y jq rsync quilt libkrb5-dev
+```
+
+#### macOS
+
+```yaml
+- name: Install macOS prerequisites
+  if: runner.os == 'macOS'
+  run: brew install jq rsync quilt python-setuptools
+```
+
+#### Windows（MSYS2）
+
+Windows が最も複雑です。Unix 類似ツールチェーンを提供するために MSYS2 が必要です——これも仕方がないことです。結局のところ、Windows の設計哲学は Unix システムと完全に異なります：
+
+```yaml
+- name: Setup MSYS2
+  if: runner.os == 'Windows'
+  uses: msys2/setup-msys2@v2
+  with:
+    msystem: MSYS
+    path-type: inherit
+    update: true
+    install: >-
+      diffutils jq patch quilt rsync unzip zip
+
+- name: Configure Windows shell paths
+  if: runner.os == 'Windows'
+  shell: pwsh
+  run: |
+    Add-Content -Path $env:GITHUB_ENV -Value 'NPM_CONFIG_SCRIPT_SHELL=/usr/bin/bash'
+    Add-Content -Path $env:GITHUB_ENV -Value ("MSYS2_CMD={0}\\setup-msys2\\msys2.cmd" -f $env:RUNNER_TEMP)
+```
+
+これらの設定はそれほど複雑ではありませんが、初めて遭遇するときは確かに少し混乱させられます。
+
+### ステージ 4：ビルドアーティファクト検証
+
+各プラットフォームでビルド完了後、検証ステップはアーティファクトをダウンロード、解凍し、実際に起動して可用性を検証します。結局のところ、私たちはそもそも動かないものをリリースしたくありません——それは恥ずかしいからです：
+
+```yaml
+verify_code_server:
+  needs: build_code_server
+  strategy:
+    fail-fast: false
+    matrix:
+      include:
+        - name: code-server Linux
+          runner: ubuntu-22.04
+          bash_path: bash
+        - name: code-server Windows
+          runner: windows-latest
+          bash_path: C:\msys64\usr\bin\bash.exe
+```
+
+検証スクリプト（`verify-startup.mjs`）は以下を行います：
+
+1. ビルドアーティファクトを解凍
+2. ランダムな利用可能ポートで code-server を起動
+3. `/healthz` エンドポイントをポーリングしてサービスの準備完了を待機
+4. サービスが 200 を返したことを確認してからプロセスを終了
+
+```javascript
+async function waitForHealth(port) {
+  const deadline = Date.now() + 60_000
+  while (Date.now() < deadline) {
+    const response = await requestHealth(port)
+    if (response.statusCode === 200) return
+    await new Promise((resolve) => setTimeout(resolve, 1000))
+  }
+  throw new Error(`Timed out waiting for code-server to become healthy`)
+}
+```
+
+ヘルスチェックを待っている間は少し不安になります——まるで永遠に返信してくれない人を待っているようです。ただ、今回は最終的にサービスは起動しますが、ある人は永遠に返信してくれないかもしれません。
+
+### ステージ 5：統一リリース
+
+すべてのビルドと検証完了後、リリースステージはアーティファクトを収集し、GitHub Release を作成します：
+
+```yaml
+publish_github_release:
+  needs:
+    - prepare_release
+    - build_code_server
+    - build_omniroute
+    - verify_code_server
+    - verify_omniroute
+  if: >-
+    ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+        github.event_name == 'workflow_dispatch' }}
+  concurrency:
+    group: ${{ format('vendered-github-release-{0}', needs.prepare_release.outputs.tag) }}
+    cancel-in-progress: false
+```
+
+重要なポイント：
+
+- **並行性制御**：`concurrency` を使用して、同じタグのリリースが並行実行されないようにします——重複リリースを避けるのは良いことです
+- **条件付きリリース**：`main` ブランチプッシュまたは手動トリガー時のみリリースし、定時ビルドはビルドと検証のみ実行
+- **アーティファクト収集**：`download-artifact` の `pattern` パラメータを使用して、code-server と omniroute のすべてのプラットフォームアーティファクトを一括ダウンロード
+
+## 実践
+
+### クロスプラットフォームビルドスクリプトの記述要点
+
+ビルドスクリプト（`build-artifacts.mjs`）はプラットフォームの違いを処理する必要があります。以下が要点です：
+
+**1. プラットフォーム検出と正規化**
+
+```javascript
+function normalizePlatform(value) {
+  switch (String(value).toLowerCase()) {
+    case "darwin":
+    case "macos":
+      return "macos"
+    case "win32":
+    case "windows":
+    case "windows_nt":
+      return "windows"
+    default:
+      return "linux"
+  }
+}
+```
+
+異なるシステムは同じプラットフォームを異なる呼び方で呼びます——まるで同じ人が異なる場面で異なる名前を持つように、ですが、結局は同じ人です。
+
+**2. Windows での Shell 互換性**
+
+Windows では、`npm run` は `cmd.exe` を呼び出しますが、code-server のビルドスクリプトは bash に依存しています。解決策は `NPM_CONFIG_SCRIPT_SHELL` 環境変数を設定し、MSYS2 を使用することです。これも仕方がないことです。結局のところ、Windows と Unix の設計理念は完全に異なります：
+
+```javascript
+function withCodeServerEnv(env) {
+  const scriptShell = platform === "windows"
+    ? "/usr/bin/bash"
+    : env.BASH_PATH || "bash"
+  return {
+    ...env,
+    NPM_CONFIG_SCRIPT_SHELL: platform === "windows" ? scriptShell : env.NPM_CONFIG_SCRIPT_SHELL,
+  }
+}
+```
+
+**3. アーティファクトパッケージング**
+
+異なるプラットフォームは異なるアーカイブ形式を使用します（Linux/macOS は `.tar.gz`、Windows は `.zip`）——各プラットフォームにはそれぞれの好みがあります。まるでそれぞれの人が自分の生活習慣を持っているように：
+
+```javascript
+if (platform === "windows") {
+  await run("powershell.exe", [
+    "-NoLogo", "-NoProfile", "-Command",
+    `Compress-Archive -Path '${releaseDir}' -DestinationPath '${archivePath}' -Force`,
+  ])
+} else {
+  await run("tar", ["-czf", archivePath, "-C", codeServerRoot, path.basename(releaseDir)])
+}
+```
+
+**4. パッチ管理**
+
+code-server のカスタマイズは `patches/` ディレクトリの下の quilt パッチで実現されます。Linux は quilt を直接使用し、macOS は Homebrew を通じて quilt をインストールし、Windows は MSYS2 内の quilt を使用するか、`patch` コマンドにフォールバックする必要があります（ここは結構面倒です）：
+
+```javascript
+// Windows で patch コマンドを使用して quilt の代わりに
+async function applyPatchesWithPatch(env) {
+  const series = await readFile(path.join(codeServerRoot, "patches", "series"), "utf8")
+  const patchFiles = series.split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(line => line && !line.startsWith("#"))
+
+  for (const patchFile of patchFiles) {
+    await runMsys2(`patch -p1 --forward -i "patches/${patchFile}"`, { cwd: codeServerRoot, env })
+  }
+}
+```
+
+Windows の部分は確かにかなり時間をかけました——仕方がない、Windows の設計理念は他のシステムと違うんです。
+
+### バージョン番号設計の考慮事項
+
+HagiCode は `YYYY.MMDD.RRRR` 形式を採用し、上流のセマンティックバージョニングを採用しません。理由は以下の通りです：
+
+- **決定性**：各ビルドのバージョン番号は日付と実行番号で一意に決まる
+- **単調増加**：日付プレフィックスにより自然ソートが時間順序になることを保証
+- **ソースのトレーサビリティ**：バージョン番号からビルド時間と CI 実行番号を推測できる
+
+これは特に何でもありません。ただ、ちょうど使えるだけです。セマンティックバージョニングなんてものは、聞こえはいいですが、実際に使ってみると結構面倒です。
+
+### 注意事項
+
+1. **サブモジュール再帰的チェックアウト**：ビルド時には `submodules: recursive` を使用する必要があります。code-server と omniroute の上流コードが完全にプルされることを保証します（ここは忘れがちです）
+2. **Node バージョンマッチング**：code-server ビルドは上流 `.node-version` ファイルで指定された Node バージョンを使用し、omniroute は Node 24 を使用します
+3. **Windows ホームディレクトリ**：OmniRoute は Windows CI で手動で `$HOME` ディレクトリ構造を作成する必要があります。ビルドスクリプトが存在しないパスにアクセスしないようにするためです——Windows のディレクトリ構造は他のシステムとは少し違います
+4. **検証タイムアウト**：code-server 起動検証には 60 秒のタイムアウトを設定しています。実際の起動速度に応じて調整が必要です
+5. **アーティファクトスリム化**：ビルド完了後に組み込みの Node バイナリを削除します（`slimRelease`）。ダウンストリームは独自の Node ランタイムを使用するためです
+6. **リリースべき等性**：`github-release.mjs` は既存の Release の更新をサポートします（古い Asset を削除してから新しいものをアップロード）。再試行を安全にします
+
+これらはすべて坑を踏んで得た経験です——もちろん、坑を踏んでいるときは本当に頭を抱えるものです。
+
+### 完全な CI/CD フローチャート
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     トリガー元                                     │
+│  push to main / workflow_dispatch / cron(23 3 * * *)            │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  prepare_release                                                 │
+│  バージョン番号生成: 2026.0506.0001, タグ: v2026.0506.0001     │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │
+              ┌────────────┼────────────┐
+              ▼            ▼            ▼
+┌──────────────┐ ┌──────────────┐ ┌──────────────┐
+│ code-server  │ │ code-server  │ │ code-server  │
+│ Linux        │ │ macOS        │ │ Windows      │
+│ ubuntu-22.04 │ │ macos-latest │ │win-latest    │
+└──────┬───────┘ └──────┬───────┘ └──────┬───────┘
+       │                │                │
+       ▼                ▼                ▼
+┌──────────────┐ ┌──────────────┐ ┌──────────────┐
+│ verify       │ │ verify       │ │ verify       │
+│ Linux        │ │ macOS        │ │ Windows      │
+│ 起動+healthz │ │ 起動+healthz │ │ 起動+healthz │
+└──────┬───────┘ └──────┬───────┘ └──────┬───────┘
+       │                │                │
+       └────────────────┼────────────────┘
+                        │
+       ┌────────────────┼────────────────┐
+       ▼                ▼                ▼
+┌──────────────┐ ┌──────────────┐ ┌──────────────┐
+│ omniroute    │ │ omniroute    │ │ omniroute    │ ...
+│ linux-amd64  │ │ macos-amd64  │ │ macos-arm64  │
+└──────┬───────┘ └──────┬───────┘ └──────┬───────┘
+       │                │                │
+       └────────────────┼────────────────┘
+                        │
+                        ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  publish_github_release                                          │
+│  すべてのアーティファクトをダウンロード → GitHub Release 作成/更新 → アーカイブファイルアップロード │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+このフローチャートは複雑に見えますが、分解して見るとそれほど難しくありません。多くのことはこうです。見ると怖いですが、やってみればそれほどのことではありません。
+
+### 重要な設定リファレンス
+
+```yaml
+# ビルド環境変数
+env:
+  CI: true
+  GITHUB_TOKEN: ${{ github.token }}
+  ELECTRON_SKIP_BINARY_DOWNLOAD: 1    # Electron ダウンロードをスキップ
+  PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1  # Playwright ブラウザダウンロードをスキップ
+  npm_config_build_from_source: true   # ソースからネイティブモジュールをビルド
+  VERSION: ${{ needs.prepare_release.outputs.version }}
+```
+
+これらの環境変数はビルド速度と正確性にとって重要です。不必要なバイナリダウンロードをスキップすることでビルド時間を大幅に削減し、`build_from_source` はネイティブモジュールがターゲットプラットフォームで正しくコンパイルされることを保証します。
+
+このパイプラインを通じて、HagiCode は 3 つのオペレーティングシステムで code-server と OmniRoute の自動化されたビルド、検証、リリースを実現し、元々手動操作が必要だったマルチプラットフォームリリースフローを完全に自動化された CI/CD プロセスに変えました。これは面倒なことをそれほど面倒でないものにすることです。
+
+## まとめ
+
+マルチプラットフォーム CI/CD パイプライン設計の重要なポイントは以下の通りです：
+
+- **バージョン番号集中管理**：パイプラインの開始時に統一されたバージョン番号を生成し、すべてのダウンストリームステップで共有
+- **ビルドとリリースの分離**：`fail-fast: false` を使用して、あるプラットフォームが失敗しても他のプラットフォームに影響しないようにし、リリースステージですべてのアーティファクトを収集
+- **プラットフォーム分離ビルドスクリプト**：各パッケージは独自のビルドロジックを維持し、共有ツールチェーンはパッケージに依存しない状態を保つ
+- **アーティファクト自動検証**：ビルド後に直ちに可用性を検証し、リリース後に問題が発覚するのを回避
+
+このソリューションは code-server と OmniRoute だけでなく、マルチプラットフォームビルドが必要な他のプロジェクトにも参考になります。この記事で共有したビルドシステムは、まさに私たちが HagiCode 開発中に実際に坑を踏み、実際に最適化したソリューションです。このソリューションに価値を感じてくれたなら、私たちのエンジニアリング力は悪くないということです——では、HagiCode 自体も注目に値するでしょう。
+
+結局のところ、このような面倒なことを自動化できる人は、そう悪くないはずです。
+
+## 参考资料
+
+- [HagiCode プロジェクトアドレス](https://github.com/HagiCode-org/site)
+- [HagiCode 公式サイト](https://hagicode.com)
+- [code-server 上流リポジトリ](https://github.com/coder/code-server)
+- [OmniRoute プロジェクト](https://github.com/diegosouzapw/OmniRoute)
+- [GitHub Actions ドキュメント](https://docs.github.com/en/actions)
+
+---
+
+この記事が役に立った場合：
+- GitHub で Star をください：[github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- 公式サイトにアクセスして詳細をご確認ください：[hagicode.com](https://hagicode.com)
+- 正式版デモ動画をご覧ください：[www.bilibili.com/video/BV1z4oWB3EpY/](https://www.bilibili.com/video/BV1z4oWB3EpY/)
+- ワンクリックインストール体験：[docs.hagicode.com/installation/docker-compose](https://docs.hagicode.com/installation/docker-compose)
+- Desktop デスクトップ版クイックインストール：[hagicode.com/desktop/](https://hagicode.com/desktop/)
+- ベータテストが開始されました。ぜひインストールして体験してください

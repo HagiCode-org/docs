@@ -1,0 +1,375 @@
+---
+title: SQLite 分片方案實戰：三種分片策略的深度對比
+date: 2026-04-17
+tags: [SQLite, 分片, 性能優化, 架構設計, HagiCode]
+description: "當單文件 SQLite 遇到併發瓶頸，我們該如何破局？本文分享 HagiCode 項目中三種不同場景下的 SQLite 分片方案，幫你理解如何選擇合適的分片策略。"
+---
+
+## SQLite 分片方案實戰：三種分片策略的深度對比
+
+> 當單文件 SQLite 遇到併發瓶頸，我們該如何破局？本文分享 HagiCode 項目中三種不同場景下的 SQLite 分片方案，幫你理解如何選擇合適的分片策略。
+
+全民製作人們大家好，我是 HagiCode 製作人俞坤。
+
+## 背景
+
+在構建高性能應用時，單文件 SQLite 數據庫會碰到很現實的問題。用戶量和數據量一上來，這些狀況就會排隊找上門：
+
+- 寫入操作開始排隊，響應時間肉眼可見地變長
+- 查詢性能隨數據增長往下掉
+- 多線程訪問時頻繁出現 "database is locked" 錯誤
+
+很多人第一反應是：要不要直接遷移到 PostgreSQL 或者 MySQL？這波操作雖然能解決問題，但部署複雜度會直線上升。有沒有更輕量的方案？
+
+答案是：分片。說到底，工程問題還是要回到工程方法裡解決，通過將數據分散到多個 SQLite 文件，可以顯著提升併發能力和查詢性能，同時保持 SQLite 的輕量級特性。
+
+## 關於 HagiCode
+
+本文分享的方案來自我們在 [HagiCode](https://hagicode.com) 項目中的實踐經驗。作為一個 AI 代碼助手項目，HagiCode 需要處理大量的對話消息、狀態持久化和事件歷史記錄。正是在解決這些實際問題的過程中，我們總結出了三種不同場景下的分片方案。
+
+工欲善其事，必先利其器，但這些"器"怎麼用，還得看具體的"事"是什麼。
+
+我們的代碼倉庫在 [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)，感興趣的朋友深入了解。
+
+## 三種分片方案概覽
+
+經過對 HagiCode 代碼庫的分析，我們發現了三種針對不同業務場景的 SQLite 分片方案：
+
+1. **Session Message 分片存儲**：AI 對話消息存儲，特點是高頻寫入、基於 Session 的隔離查詢
+2. **Orleans Grain 分片存儲**：分佈式框架狀態持久化，特點是跨節點訪問、需要確定性路由
+3. **Hero History 分片存儲**：遊戲化系統歷史事件記錄，特點是事件溯源、需要遷移兼容
+
+雖然業務場景不同，但三者都遵循相同的核心設計原則：
+
+- **確定性路由**：直接從業務 ID 計算分片，無需元數據表
+- **透明訪問**：上層通過統一接口操作，不感知分片存在
+- **獨立存儲**：每個分片是完全獨立的 SQLite 文件
+- **併發優化**：WAL 模式 + busy_timeout 降低鎖競爭
+
+很多人會問：為什麼不搞一套通用的分片方案？這個問題問得很實在，我們直接上結論：工程上沒有萬能方案，只有最貼合當前業務場景的方案。接下來我們深入對比這三種方案的具體實現。
+
+## 分片策略對比
+
+### 分片數量與命名規則
+
+| 方面 | Session Message | Orleans Grain | Hero History |
+|------|----------------|---------------|--------------|
+| **分片數量** | 256 (16²) | 100 | 10 |
+| **命名規則** | 16 進制 (00-ff) | 10 進制 (00-99) | 10 進制 (0-9) |
+| **存儲目錄** | `DataDir/messages/` | `DataDir/orleans/grains/` | `DataDir/hero-history/` |
+| **文件名模式** | `{shard}.db` | `grains-{shard}.db` | `{shard}.db` |
+
+為什麼分片數量差異這麼大？這取決於業務特點。換句話說，模型會說，工具會變，工作流會升級，但工程上的基本盤一直都在那裡：你先搞清楚自己要解決什麼問題。
+
+- **Session Message** 使用 256 個分片，因為對話消息的寫入頻率最高，需要更多的分片來分散負載
+- **Orleans Grain** 使用 100 個分片，平衡了併發性能和管理複雜度
+- **Hero History** 只用 10 個分片，因為歷史事件寫入頻率較低，且需要考慮遷移成本
+
+### 路由算法差異
+
+路由算法是分片方案的核心，決定了數據如何分佈到各個分片。三種方案使用了不同的路由策略：
+
+```csharp
+// Session Message: GUID 後兩位 16 進制
+var normalized = Guid.Parse(sessionId.Value).ToString("N").ToLowerInvariant();
+return normalized[^2..];  // 取末兩位 16 進制字符
+
+// Orleans Grain: 提取數字後兩位取模
+var digits = ExtractDigits(grainId);  // 提取所有數字
+var lastTwoDigits = (digits[^2] * 10) + digits[^1];
+return lastTwoDigits % shardCount;
+
+// Hero History: 末位字符 ASCII 值取模
+return heroId[^1] % 10;
+```
+
+**設計思路解析**：
+
+- **Session Message** 的 ID 是 GUID，轉換為 16 進制後取末兩位，可以得到均勻分佈的 256 個分片
+- **Orleans Grain** 的 ID 格式不統一，可能包含字母和數字，所以提取所有數字後取模
+- **Hero History** 的 ID 是字符串，直接用末位字符的 ASCII 值取模，簡單但分佈可能不夠均勻
+
+**關鍵點**：無論使用哪種算法，都必須保證同一 ID 永遠映射到同一分片。這是分佈式系統中最基本的要求，否則會導致數據不一致。說到底，路由不穩定，一切努力都是零。
+
+### 初始化策略差異
+
+| 方面 | Session Message | Orleans Grain | Hero History |
+|------|----------------|---------------|--------------|
+| **初始化時機** | 按需懶加載 | 啟動時全量並行初始化 | 按需懶加載 |
+| **併發控制** | `Lazy<Task>` 防重複初始化 | `Parallel.ForEachAsync` | `Lazy<Task>` 防重複初始化 |
+
+**為什麼 Orleans Grain 選擇啟動時全量初始化？**
+
+因為 Orleans 是分佈式框架，Grain 可能被調度到任意節點。如果在運行時才發現分片文件不存在，會導致請求失敗。啟動時全量初始化雖然會延長啟動時間，但能確保運行時的穩定性。能跑起來只是開始，能維護下去才算本事。
+
+**懶加載的優勢**：
+
+對於 Session Message 和 Hero History，使用懶加載可以減少啟動時間，只有在真正需要訪問某個分片時才創建文件和初始化 Schema。使用 `Lazy<Task>` 可以防止併發初始化時的競態條件。這個設計看著簡單，但在真實項目裡能省掉很多不必要的麻煩。
+
+### Schema 設計特點
+
+三種方案的 Schema 設計反映了各自的業務特點：
+
+**Session Message**：
+- 支持 Event Sourcing 模式（事件表 + 快照表）
+- 包含消息內容塊子表（MessageContentBlocks）
+- 具有壓縮和壓縮標記字段，支持後續優化
+
+**Orleans Grain**：
+- 最簡設計：單表 GrainState
+- JSON 序列化存儲狀態
+- ETag 樂觀併發控制
+
+**Hero History**：
+- 時間線查詢優化索引
+- DedupeKey 唯一約束防重複
+- 支持多種事件類型和狀態
+
+從這些設計中可以看出，Schema 設計應該緊密貼合業務需求，而不是追求通用性。Orleans Grain 的簡單設計正是因為它只需要存儲序列化後的狀態，不需要複雜的查詢能力。這波不是玄學，是工程。別急著把名字起得太大，先看看這東西能不能在團隊裡活過兩個迭代。
+
+### 併發配置對比
+
+三種方案都使用了相同的 SQLite 併發優化配置：
+
+```sql
+PRAGMA journal_mode=WAL;      -- 寫前日誌模式
+PRAGMA synchronous=NORMAL;     -- 降低持久化開銷
+PRAGMA busy_timeout=5000;      -- 5秒忙等待
+PRAGMA foreign_keys=ON;        -- 外鍵約束
+```
+
+**WAL 模式的優勢**：
+
+傳統的回滾日誌模式在寫入時會產生鎖競爭，而 WAL 模式允許讀寫併發進行。這在大數據量場景下可以顯著提升性能。很多人不知道這個配置，其實它比你想的重要得多。
+
+**synchronous=NORMAL 的權衡**：
+
+設置為 FULL 可以保證最高安全性，但會顯著降低性能。NORMAL 模式在安全性和性能之間取得了平衡，對於大多數應用來說是合適的選擇。這個配置不需要糾結太久，NORMAL 就夠了。
+
+## 如何選擇分片策略
+
+基於對 HagiCode 三種方案的分析，我們可以總結出以下決策矩陣：
+
+```
+高吞吐量場景 → 更多分片（如 Message 用 256）
+簡單維護性   → 較少分片（如 Hero History 用 10）
+數字 ID 為主 → 取模算法（Orleans Grain）
+GUID 為主    → 16 進制後綴（Session Message）
+字符串 ID    → ASCII 取模（Hero History）
+```
+
+**分片數量選擇的經驗值**：
+
+- 太少（< 10）：併發提升有限，分片意義不大
+- 太多（> 1000）：文件管理複雜，連接池開銷大
+- 經驗值：10-100 個分片適用於大多數場景
+- 極高併發場景：可以考慮 256 個分片
+
+這事你要是只看演示，確實容易上頭；可一旦進了生產環境，賬就得一筆一筆算清楚。很多問題不是不能做，只是沒把代價算明白。
+
+## 實踐指南
+
+### 實現標準化分片路由器
+
+```csharp
+public interface IShardResolver<TId>
+{
+    string ResolveShardKey(TId id);
+}
+
+// 16 進制分片（適用於 GUID）
+public class HexSuffixShardResolver : IShardResolver<string>
+{
+    private readonly int _suffixLength;
+
+    public HexSuffixShardResolver(int suffixLength = 2)
+    {
+        _suffixLength = suffixLength;
+    }
+
+    public string ResolveShardKey(string id)
+    {
+        var normalized = id.Replace("-", "").ToLowerInvariant();
+        return normalized[^_suffixLength..];
+    }
+}
+
+// 數字取模分片（適用於純數字 ID）
+public class NumericModuloShardResolver : IShardResolver<long>
+{
+    private readonly int _shardCount;
+
+    public NumericModuloShardResolver(int shardCount)
+    {
+        _shardCount = shardCount;
+    }
+
+    public string ResolveShardKey(long id)
+    {
+        return (id % _shardCount).ToString("D2");
+    }
+}
+```
+
+### 統一連接工廠模式
+
+```csharp
+public class ShardedConnectionFactory<TOptions>
+{
+    private readonly ConcurrentDictionary<string, Lazy<Task>> _initializationTasks = new();
+    private readonly TOptions _options;
+    private readonly IShardSchemaInitializer _initializer;
+
+    public ShardedConnectionFactory(
+        TOptions options,
+        IShardSchemaInitializer initializer)
+    {
+        _options = options;
+        _initializer = initializer;
+    }
+
+    public async Task<TDbContext> CreateAsync(string shardKey, CancellationToken ct)
+    {
+        var connectionString = BuildConnectionString(shardKey);
+
+        // 使用 Lazy<Task> 防止併發初始化
+        var initTask = _initializationTasks.GetOrAdd(
+            connectionString,
+            _ => new Lazy<Task>(() => InitializeShardAsync(connectionString, ct))
+        );
+
+        await initTask.Value;
+        return CreateDbContext(connectionString);
+    }
+
+    private async Task InitializeShardAsync(string connectionString, CancellationToken ct)
+    {
+        await _initializer.InitializeAsync(connectionString, ct);
+    }
+
+    private string BuildConnectionString(string shardKey)
+    {
+        var shardPath = Path.Combine(_options.BaseDirectory, $"{shardKey}.db");
+        return $"Data Source={shardPath}";
+    }
+
+    private TDbContext CreateDbContext(string connectionString)
+    {
+        // 根據具體的 ORM 創建 DbContext
+        return Activator.CreateInstance(typeof(TDbContext), connectionString) as TDbContext;
+    }
+}
+```
+
+### Schema 初始化最佳實踐
+
+```csharp
+public class SqliteShardInitializer : IShardSchemaInitializer
+{
+    public async Task InitializeAsync(string connectionString, CancellationToken ct)
+    {
+        await using var connection = new SqliteConnection(connectionString);
+        await connection.OpenAsync(ct);
+
+        // 併發優化配置
+        await connection.ExecuteAsync("""
+            PRAGMA journal_mode=WAL;
+            PRAGMA synchronous=NORMAL;
+            PRAGMA busy_timeout=5000;
+            PRAGMA foreign_keys=ON;
+        """);
+
+        // 創建表結構
+        await connection.ExecuteAsync("""
+            CREATE TABLE IF NOT EXISTS Entities (
+                Id TEXT PRIMARY KEY,
+                CreatedAt TEXT NOT NULL,
+                UpdatedAt TEXT NOT NULL,
+                Data TEXT NOT NULL,
+                ETag TEXT
+            );
+        """);
+
+        // 創建索引
+        await connection.ExecuteAsync("""
+            CREATE INDEX IF NOT EXISTS IX_Entities_CreatedAt
+            ON Entities(CreatedAt DESC);
+
+            CREATE INDEX IF NOT EXISTS IX_Entities_UpdatedAt
+            ON Entities(UpdatedAt DESC);
+        """);
+    }
+}
+```
+
+### 關鍵注意事項
+
+**1. 路由穩定性**
+
+路由算法必須保證同一 ID 永遠映射到同一分片。避免使用隨機或時間相關的計算，也不要在算法中引入可變參數。
+
+**2. 分片數量選擇**
+
+分片數量應該在設計階段確定，後期修改非常困難。需要考慮：
+- 當前和未來的併發量
+- 單個分片的管理成本
+- 數據遷移的複雜度
+
+**3. 遷移考慮**
+
+Hero History 方案展示了完整的遷移路徑：
+
+1. 新建分片存儲基礎設施
+2. 實現遷移服務將主庫數據複製到分片
+3. 驗證遷移後查詢兼容性
+4. 切換讀寫路徑到分片
+5. 清理主庫舊表
+
+設計分片方案時就需要考慮未來的遷移需求。Talk is cheap. Show me the code，但光有代碼還不夠，你還得有完整的遷移路徑。一次成功不叫體系，持續成功才叫體系。
+
+**4. 監控與運維**
+
+- 監控各分片的大小分佈，及時發現數據傾斜
+- 設置告警檢測分片熱點，避免單個分片成為瓶頸
+- 定期檢查 WAL 文件大小，防止磁盤空間佔用過多
+- 建立分片健康檢查機制
+
+**5. 測試覆蓋**
+
+- 測試邊界條件（空 ID、特殊字符、超長 ID）
+- 驗證路由確定性，確保同一 ID 總是映射到同一分片
+- 併發寫入壓力測試，驗證鎖競爭得到有效緩解
+- 遷移測試，確保數據完整性和一致性
+
+## 總結
+
+通過對比 HagiCode 項目中的三種 SQLite 分片方案，我們可以看到：
+
+1. **沒有萬能的解決方案**：不同業務場景需要不同的分片策略
+2. **核心原則是通用的**：確定性路由、透明訪問、獨立存儲、併發優化
+3. **設計要面向未來**：考慮遷移路徑和運維成本
+
+如果你的項目正在使用 SQLite，並且開始遇到併發瓶頸，希望這篇文章能為你提供一些思路。不需要急著遷移到重量級數據庫，有時候合適的分片方案就能解決問題。
+
+當然，分片不是銀彈。在選擇分片方案之前，先確保：
+- 你已經優化了單表查詢性能
+- 你已經使用了合適的索引
+- 你已經啟用了 WAL 模式
+
+只有在這些優化都做完之後，仍然存在性能瓶頸時，才考慮引入分片。你能把簡單的事情做好，這本身就是一種能力。
+
+很多話講一遍不如做一遍，接下來就讓工程結果自己發聲。
+
+## 參考資料
+
+- HagiCode 項目倉庫：[github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- SQLite WAL 模式文檔：[sqlite.org/wal.html](https://www.sqlite.org/wal.html)
+- Orleans 分佈式框架：[dotnet.github.io/orleans](https://dotnet.github.io/orleans/)
+
+## 版權說明
+
+感謝您的閱讀,如果您覺得本文有用,歡迎點贊、收藏和分享支持。
+本內容採用人工智能輔助協作,最終內容由作者審核並確認。
+- 本文作者: [newbe36524](https://www.newbe.pro)
+- 原文鏈接: [https://docs.hagicode.com/blog/2026-04-17-sqlite-sharding-strategies-comparison/](https://docs.hagicode.com/blog/2026-04-17-sqlite-sharding-strategies-comparison/)
+- 版權聲明: 本博客所有文章除特別聲明外,均採用 BY-NC-SA 許可協議。轉載請註明出處!

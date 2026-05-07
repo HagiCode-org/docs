@@ -1,0 +1,480 @@
+---
+title: How to Build Multi-Platform code-server and OmniRoute with GitHub Actions
+date: 2026-05-07
+tags: [omniroute]
+---
+
+## How to Build Multi-Platform code-server and OmniRoute with GitHub Actions
+
+> Facing the requirement to build and publish across Linux, macOS, and Windows platforms with a unified release process, we designed a multi-platform CI/CD pipeline based on GitHub Actions. It's not that difficult when you think about it, but the pitfalls we encountered along the way were definitely hair-pulling. This article shares the design philosophy and implementation details of this pipeline—and of course, the pitfalls we stepped on.
+
+## Background
+
+[code-server](https://github.com/coder/code-server) is an open-source project that runs VS Code in a browser, allowing developers to work through a web IDE on a remote server. As HagiCode Desktop integrates code-server as a built-in runtime, we need to build, verify, and distribute customized versions of code-server across different operating systems (Linux, macOS, Windows).
+
+This should have been simple, except... when is life ever that easy?
+
+At the same time, [OmniRoute](https://github.com/diegosouzapw/OmniRoute), as a multi-model routing service, also needs to share the same build and release pipeline with code-server. Although the two packages have different build methods, they ultimately need to converge into the same GitHub Release for publication. Like two originally non-intersecting lines that eventually meet at some point—this is what you call fate.
+
+This brings several engineering challenges:
+
+1. **Cross-platform build differences**: The build toolchains for Linux, macOS, and Windows are completely different (Linux uses quilt + bash, macOS uses Homebrew, Windows requires MSYS2)—each platform has its own temperament
+2. **Build artifact verification**: After building, artifacts need to be automatically verified to start properly—after all, no one wants to release something that doesn't even run
+3. **Unified version management**: Two packages need to share the same version number and release tag—like two people sharing one name, there needs to be some logic to it
+4. **Parallel builds with serial release**: Builds can be parallel, but releases need to be coordinated—this is where mistakes happen, and when they do, they're real mistakes
+
+## About HagiCode
+
+The solution shared in this article comes from practical experience in the [HagiCode](https://hagicode.com) project. HagiCode is an AI coding assistant project that integrates code-server as a built-in runtime in its desktop product, therefore needing to solve multi-platform build and release engineering problems. Put simply, this is just to get the product out—nothing more.
+
+### Limitations of Upstream Build Pipeline
+
+The code-server upstream project's built-in CI/CD pipeline (`build.yaml`) only builds for the `linux-x64` platform, and its release process (`publish.yaml`) only targets npm, AUR, and Docker channels. It doesn't support:
+
+- Native builds for macOS and Windows—perhaps these platforms aren't considered important enough
+- Multi-platform matrix parallel builds—maybe the upstream team is small
+- Unified artifact verification mechanism—let users test it themselves after release
+
+This isn't a big deal—every project has its own priorities. It's just that we happen to need these features, so we'll build them ourselves.
+
+### Design Decisions
+
+Based on the above analysis, HagiCode designed an independent build pipeline in `repos/vendered` with the following core decisions:
+
+**1. Reuse Shared Version Management and Release Toolchain**
+
+Version numbers adopt the UTC date format `YYYY.MMDD.RRRR`, where `RRRR` is a zero-padded sequence of the GitHub Actions run number. This ensures monotonic incrementing and traceability of versions—after all, time doesn't flow backward, just like some things once changed cannot be undone:
+
+```javascript
+// scripts/versioning.mjs
+export function formatDateVersion({ date = new Date(), revision }) {
+  const year = normalizedDate.getUTCFullYear()
+  const month = String(normalizedDate.getUTCMonth() + 1).padStart(2, "0")
+  const day = String(normalizedDate.getUTCDate()).padStart(2, "0")
+  return `${year}.${month}${day}.${normalizedRevision}`
+}
+```
+
+For example, the first build on 2026-05-05 generates version `2026.0505.0001` and tag `v2026.0505.0001`.
+
+Actually, there's nothing special about this version format—it's just barely sufficient.
+
+**2. Package-Level Isolated Build Scripts**
+
+Each package (code-server, omniroute) maintains its own build and verification logic in `packages/<name>/scripts/`, while shared release tools (`scripts/versioning.mjs`, `scripts/github-release.mjs`, `scripts/publication.mjs`) remain package-agnostic. Each manages its own affairs without interfering with others—this is basically what's called "staying in one's lane."
+
+**3. Unified Metadata Contract**
+
+All packages produce standardized `metadata.json` containing `schemaVersion`, `packageId`, `version`, `platform`, `arch`, `sourceRevision`, and `artifacts[]` fields, ensuring downstream consumers don't need to be aware of package differences. With a unified format, everyone can save some trouble.
+
+## Solution
+
+### Overall Workflow Architecture
+
+The entire pipeline is defined in `repos/vendered/.github/workflows/code-server-artifacts.yaml` and includes the following stages:
+
+```
+prepare_release → build (matrix) → verify (matrix) → publish_github_release
+```
+
+The process is simple if you look at it one way, complex if you look at it another—it all depends on your perspective.
+
+### Trigger Conditions
+
+```yaml
+on:
+  workflow_dispatch:          # Manual trigger
+  schedule:
+    - cron: "23 3 * * *"     # Daily scheduled build
+  push:
+    branches: [main]          # Trigger on push to main branch
+    paths:                    # Only trigger when related files change
+      - ".github/workflows/code-server-artifacts.yaml"
+      - ".gitmodules"
+      - "scripts/**"
+      - "packages/code-server/**"
+      - "packages/omniroute/**"
+```
+
+The daily scheduled build is set for 3:23 AM—no particular reason, just picked a random time. Maybe the person who chose this time didn't think too much about it either.
+
+### Stage 1: Version Preparation
+
+```yaml
+jobs:
+  prepare_release:
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - id: version
+        run: node ./scripts/versioning.mjs >> "$GITHUB_OUTPUT"
+```
+
+This stage generates a unified version number and Git tag, shared by all subsequent build and release steps. A good start, at least it saves a lot of trouble for the work that follows.
+
+### Stage 2: Multi-Platform Matrix Build
+
+The build stage uses `strategy.matrix` to execute in parallel across different platforms:
+
+#### code-server Build Matrix
+
+```yaml
+build_code_server:
+  needs: prepare_release
+  strategy:
+    fail-fast: false
+    matrix:
+      include:
+        - name: code-server Linux
+          runner: ubuntu-22.04
+          artifact_name: code-server-linux
+        - name: code-server macOS
+          runner: macos-latest
+          artifact_name: code-server-macos
+        - name: code-server Windows
+          runner: windows-latest
+          artifact_name: code-server-windows
+```
+
+Key design: `fail-fast: false` ensures that failure on one platform doesn't cancel builds on other platforms. After all, one platform failing doesn't mean all platforms have problems—no need for everyone to go down together.
+
+#### omniroute Build Matrix
+
+```yaml
+build_omniroute:
+  needs: prepare_release
+  strategy:
+    fail-fast: false
+    matrix:
+      include:
+        - name: omniroute Linux x64
+          runner: ubuntu-22.04
+          platform: linux
+          arch: amd64
+        - name: omniroute macOS x64
+          runner: macos-15-intel
+          platform: macos
+          arch: amd64
+        - name: omniroute macOS arm64
+          runner: macos-14
+          platform: macos
+          arch: arm64
+        - name: omniroute Windows x64
+          runner: windows-latest
+          platform: windows
+          arch: amd64
+```
+
+OmniRoute's matrix is richer, including both Intel and ARM architectures for macOS. Note that macOS ARM uses the `macos-14` runner (Apple Silicon), while Intel uses `macos-15-intel`. That's just how the world is—some things are always divided into camps—like Intel and ARM, never to reconcile.
+
+### Stage 3: Platform-Specific Prerequisites
+
+Each platform requires different toolchains, and the workflow handles these through conditional steps:
+
+#### Linux
+
+```yaml
+- name: Install Linux prerequisites
+  if: runner.os == 'Linux'
+  run: sudo apt-get update && sudo apt-get install -y jq rsync quilt libkrb5-dev
+```
+
+#### macOS
+
+```yaml
+- name: Install macOS prerequisites
+  if: runner.os == 'macOS'
+  run: brew install jq rsync quilt python-setuptools
+```
+
+#### Windows (MSYS2)
+
+Windows is the most complex, requiring MSYS2 to provide a Unix-like toolchain—this can't be helped, since Windows' design philosophy is completely different from Unix systems:
+
+```yaml
+- name: Setup MSYS2
+  if: runner.os == 'Windows'
+  uses: msys2/setup-msys2@v2
+  with:
+    msystem: MSYS
+    path-type: inherit
+    update: true
+    install: >-
+      diffutils jq patch quilt rsync unzip zip
+
+- name: Configure Windows shell paths
+  if: runner.os == 'Windows'
+  shell: pwsh
+  run: |
+    Add-Content -Path $env:GITHUB_ENV -Value 'NPM_CONFIG_SCRIPT_SHELL=/usr/bin/bash'
+    Add-Content -Path $env:GITHUB_ENV -Value ("MSYS2_CMD={0}\\setup-msys2\\msys2.cmd" -f $env:RUNNER_TEMP)
+```
+
+Actually, these configurations aren't that complex—it's just that the first time you encounter them, they can be a bit confusing.
+
+### Stage 4: Build Artifact Verification
+
+After building on each platform, verification steps download the artifacts, extract them, and actually start them to verify usability. After all, we don't want to release something that doesn't even run—that would be too embarrassing:
+
+```yaml
+verify_code_server:
+  needs: build_code_server
+  strategy:
+    fail-fast: false
+    matrix:
+      include:
+        - name: code-server Linux
+          runner: ubuntu-22.04
+          bash_path: bash
+        - name: code-server Windows
+          runner: windows-latest
+          bash_path: C:\msys64\usr\bin\bash.exe
+```
+
+The verification script (`verify-startup.mjs`) will:
+
+1. Extract the build artifacts
+2. Start code-server on a random available port
+3. Poll the `/healthz` endpoint waiting for the service to be ready
+4. Confirm the service responds with 200, then shut down the process
+
+```javascript
+async function waitForHealth(port) {
+  const deadline = Date.now() + 60_000
+  while (Date.now() < deadline) {
+    const response = await requestHealth(port)
+    if (response.statusCode === 200) return
+    await new Promise((resolve) => setTimeout(resolve, 1000))
+  }
+  throw new Error(`Timed out waiting for code-server to become healthy`)
+}
+```
+
+Waiting for health checks always makes people a bit anxious—like waiting for someone who will never reply. It's just that this time the service will eventually start, while some people may never respond to you.
+
+### Stage 5: Unified Release
+
+After all builds and verifications are complete, the release stage collects the artifacts and creates a GitHub Release:
+
+```yaml
+publish_github_release:
+  needs:
+    - prepare_release
+    - build_code_server
+    - build_omniroute
+    - verify_code_server
+    - verify_omniroute
+  if: >-
+    ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+        github.event_name == 'workflow_dispatch' }}
+  concurrency:
+    group: ${{ format('vendered-github-release-{0}', needs.prepare_release.outputs.tag) }}
+    cancel-in-progress: false
+```
+
+Key points:
+
+- **Concurrency control**: Use `concurrency` to ensure releases for the same tag don't execute in parallel—avoiding duplicate releases is generally a good thing
+- **Conditional release**: Only publish on push to `main` branch or manual trigger; scheduled builds only execute build and verification
+- **Artifact aggregation**: Use the `pattern` parameter of `download-artifact` to batch download all platform artifacts for both code-server and omniroute
+
+## Practice
+
+### Key Points for Writing Cross-Platform Build Scripts
+
+The build script (`build-artifacts.mjs`) needs to handle platform differences. Here are the key points:
+
+**1. Platform Detection and Normalization**
+
+```javascript
+function normalizePlatform(value) {
+  switch (String(value).toLowerCase()) {
+    case "darwin":
+    case "macos":
+      return "macos"
+    case "win32":
+    case "windows":
+    case "windows_nt":
+      return "windows"
+    default:
+      return "linux"
+  }
+}
+```
+
+Different systems have different names for the same platform—like the same person having different names in different settings, but still being the same person.
+
+**2. Shell Compatibility on Windows**
+
+On Windows, `npm run` calls `cmd.exe`, but code-server's build scripts depend on bash. The solution is to set the `NPM_CONFIG_SCRIPT_SHELL` environment variable and use MSYS2. This can't be helped, since Windows and Unix design philosophies are completely different:
+
+```javascript
+function withCodeServerEnv(env) {
+  const scriptShell = platform === "windows"
+    ? "/usr/bin/bash"
+    : env.BASH_PATH || "bash"
+  return {
+    ...env,
+    NPM_CONFIG_SCRIPT_SHELL: platform === "windows" ? scriptShell : env.NPM_CONFIG_SCRIPT_SHELL,
+  }
+}
+```
+
+**3. Artifact Packaging**
+
+Different platforms use different archive formats (Linux/macOS use `.tar.gz`, Windows uses `.zip`)—each platform has its own preferences, like everyone has their own habits:
+
+```javascript
+if (platform === "windows") {
+  await run("powershell.exe", [
+    "-NoLogo", "-NoProfile", "-Command",
+    `Compress-Archive -Path '${releaseDir}' -DestinationPath '${archivePath}' -Force`,
+  ])
+} else {
+  await run("tar", ["-czf", archivePath, "-C", codeServerRoot, path.basename(releaseDir)])
+}
+```
+
+**4. Patch Management**
+
+Customization of code-server is implemented through quilt patches in the `patches/` directory. Linux uses quilt directly, macOS installs quilt through Homebrew, and Windows needs to use quilt from MSYS2 or fall back to the `patch` command (this part is quite troublesome):
+
+```javascript
+// Use patch command instead of quilt on Windows
+async function applyPatchesWithPatch(env) {
+  const series = await readFile(path.join(codeServerRoot, "patches", "series"), "utf8")
+  const patchFiles = series.split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(line => line && !line.startsWith("#"))
+
+  for (const patchFile of patchFiles) {
+    await runMsys2(`patch -p1 --forward -i "patches/${patchFile}"`, { cwd: codeServerRoot, env })
+  }
+}
+```
+
+Windows definitely took a lot of time to figure out—can't be helped, Windows' design philosophy is just different from other systems.
+
+### Version Number Design Considerations
+
+HagiCode adopts the `YYYY.MMDD.RRRR` format rather than upstream semantic versioning for the following reasons:
+
+- **Determinism**: Each build's version number is uniquely determined by date and run number
+- **Monotonic incrementing**: The date prefix ensures natural sorting matches chronological order
+- **Traceable source**: The build time and CI run sequence number can be inferred from the version number
+
+Actually, this isn't anything special—it's just barely sufficient. Semantic versioning sounds nice in theory, but it's quite troublesome to use in practice.
+
+### Important Notes
+
+1. **Submodule recursive checkout**: When building, must use `submodules: recursive` to ensure code-server and omniroute upstream code is fully pulled (easy to forget)
+2. **Node version matching**: code-server builds use the Node version specified in the upstream `.node-version` file, omniroute uses Node 24
+3. **Windows home directory**: OmniRoute on Windows CI needs to manually create the `$HOME` directory structure to avoid build scripts accessing non-existent paths—Windows directory structure is different from other systems
+4. **Verification timeout**: code-server startup verification has a 60-second timeout, adjust according to actual startup speed
+5. **Artifact slimming**: After building, delete the embedded Node binary (`slimRelease`) since downstream will use its own Node runtime
+6. **Release idempotency**: `github-release.mjs` supports updating existing Releases (delete old Asset then upload new one), ensuring retry safety
+
+These are all experiences gained from stepping on pitfalls—of course, when you're stepping on those pitfalls, it really does make you want to pull your hair out.
+
+### Complete CI/CD Flow Diagram
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     Trigger Sources                              │
+│  push to main / workflow_dispatch / cron(23 3 * * *)            │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  prepare_release                                                 │
+│  Generate version: 2026.0506.0001, tag: v2026.0506.0001         │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │
+              ┌────────────┼────────────┐
+              ▼            ▼            ▼
+┌──────────────┐ ┌──────────────┐ ┌──────────────┐
+│ code-server  │ │ code-server  │ │ code-server  │
+│ Linux        │ │ macOS        │ │ Windows      │
+│ ubuntu-22.04 │ │ macos-latest │ │win-latest    │
+└──────┬───────┘ └──────┬───────┘ └──────┬───────┘
+       │                │                │
+       ▼                ▼                ▼
+┌──────────────┐ ┌──────────────┐ ┌──────────────┐
+│ verify       │ │ verify       │ │ verify       │
+│ Linux        │ │ macOS        │ │ Windows      │
+│ start+healthz│ │ start+healthz│ │ start+healthz│
+└──────┬───────┘ └──────┬───────┘ └──────┬───────┘
+       │                │                │
+       └────────────────┼────────────────┘
+                        │
+       ┌────────────────┼────────────────┐
+       ▼                ▼                ▼
+┌──────────────┐ ┌──────────────┐ ┌──────────────┐
+│ omniroute    │ │ omniroute    │ │ omniroute    │ ...
+│ linux-amd64  │ │ macos-amd64  │ │ macos-arm64  │
+└──────┬───────┘ └──────┬───────┘ └──────┬───────┘
+       │                │                │
+       └────────────────┼────────────────┘
+                        │
+                        ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  publish_github_release                                          │
+│  Download all artifacts → Create/update GitHub Release → Upload  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+This flow diagram looks quite complex, but broken down, it's actually not that difficult. Many things are like this—looking scary, but doing it is just whatever.
+
+### Key Configuration Reference
+
+```yaml
+# Build environment variables
+env:
+  CI: true
+  GITHUB_TOKEN: ${{ github.token }}
+  ELECTRON_SKIP_BINARY_DOWNLOAD: 1    # Skip Electron download
+  PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1  # Skip Playwright browser download
+  npm_config_build_from_source: true   # Build native modules from source
+  VERSION: ${{ needs.prepare_release.outputs.version }}
+```
+
+These environment variables are crucial for build speed and correctness: skipping unnecessary binary downloads can significantly reduce build time, and `build_from_source` ensures native modules compile correctly on the target platform.
+
+Through this pipeline, HagiCode achieves automated building, verification, and release of code-server and OmniRoute across three operating systems, transforming what was originally a manual multi-platform release process into a fully automated CI/CD process. This也算是 making a troublesome thing less troublesome.
+
+## Summary
+
+The key to designing a multi-platform CI/CD pipeline lies in:
+
+- **Centralized version management**: Generate a unified version number at the beginning of the pipeline, shared by all downstream steps
+- **Separation of build and release**: Use `fail-fast: false` to ensure failure on one platform doesn't affect other platforms, with the release stage aggregating all artifacts
+- **Platform-isolated build scripts**: Each package maintains its own build logic, shared toolchain remains package-agnostic
+- **Automated artifact verification**: Verify usability immediately after building to avoid discovering issues only after release
+
+This solution is not only applicable to code-server and OmniRoute, but can also provide reference for other projects needing multi-platform builds. The build system shared in this article is exactly the solution we practically stepped on pits and optimized during the development of HagiCode. If you find this solution valuable, it shows our engineering strength is pretty good—then HagiCode itself is also worth paying attention to.
+
+After all, people who can automate this kind of troublesome thing probably aren't too bad themselves.
+
+## References
+
+- [HagiCode Project Repository](https://github.com/HagiCode-org/site)
+- [HagiCode Official Website](https://hagicode.com)
+- [code-server Upstream Repository](https://github.com/coder/code-server)
+- [OmniRoute Project](https://github.com/diegosouzapw/OmniRoute)
+- [GitHub Actions Documentation](https://docs.github.com/en/actions)
+
+---
+
+If this article helped you:
+- Give us a Star on GitHub: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Visit the official website to learn more: [hagicode.com](https://hagicode.com)
+- Watch the official demo video: [www.bilibili.com/video/BV1z4oWB3EpY/](https://www.bilibili.com/video/BV1z4oWB3EpY/)
+- One-click installation to experience: [docs.hagicode.com/installation/docker-compose](https://docs.hagicode.com/installation/docker-compose)
+- Desktop quick installation: [hagicode.com/desktop/](https://hagicode.com/desktop/)
+- Public beta has started, welcome to install and experience

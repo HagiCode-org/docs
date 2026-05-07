@@ -1,0 +1,449 @@
+---
+title: How to Use Copilot CLI to Integrate GPT, Claude, and Other AI Models
+date: 2026-05-06
+tags: [AI, GPT, Claude, Copilot CLI, Orleans, Grain]
+---
+
+## How to Use Copilot CLI to Integrate GPT, Claude, and Other AI Models
+
+> In AI application development, how can you integrate multiple models like GPT and Claude with a unified interface? This article shares the design of an Orleans Grain-based AI provider system and practical experience integrating GitHub Copilot CLI.
+
+## Background
+
+In modern AI application development, integrating the latest GPT models is a core requirement for many developers. GitHub Copilot CLI is a powerful tool that not only supports OpenAI's GPT series models (such as GPT-4, GPT-5), but also supports other mainstream AI models like Claude. Through Copilot CLI, developers can use a unified command-line interface to call different AI models without needing to implement complex integration logic separately for each model.
+
+This is actually a classic problem. Having to write calling logic for each model—well, that's just painful. After all, the more code you write, the more tedious it gets. Rather than reinventing the wheel, it's better to find a unified interface that handles everything. Copilot CLI is exactly that—you just call it, and it handles the rest.
+
+**Core Value**:
+- Unified CLI interface to access multiple AI models
+- Support for session management and context preservation
+- Built-in tool calling capabilities (file operations, Git operations, etc.)
+- Support for streaming responses and real-time output
+
+## About HagiCode
+
+The solution shared in this article comes from our practical experience in the [HagiCode](https://hagicode.com) project. HagiCode is an AI coding assistant project, and during development we faced the challenge of needing to support multiple AI models simultaneously—some users prefer GPT-4, some prefer Claude, and others want to try the latest GPT-5. If we implemented separate calling logic for each model, the code would become difficult to maintain. Through Copilot CLI's unified interface, we successfully solved this multi-model support pain point.
+
+Basically, users just have diverse tastes. Some like GPT, some prefer Claude, and others insist on using the latest GPT-5. We just want everyone to be able to use their favorite model—after all, being happy is what matters most.
+
+## System Architecture Design
+
+We implemented an extensible AI provider system through Orleans Grain architecture, with the overall architecture as follows:
+
+```
+┌─────────────────┐
+│  Frontend/Client │
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────────────────────┐
+│  IGitHubCopilotGrain (Interface) │
+│  - ExecuteCommandStreamAsync     │
+│  - RunEditAsync                  │
+│  - CancelAsync                   │
+└────────┬────────────────────────┘
+         │
+         ▼
+┌─────────────────────────────────┐
+│  GitHubCopilotGrain (Implementation)│
+│  - State Management              │
+│  - Session Binding               │
+│  - Response Mapping              │
+└────────┬────────────────────────┘
+         │
+         ▼
+┌─────────────────────────────────┐
+│  CopilotAIProvider (Provider)    │
+│  - Configuration Parsing         │
+│  - Permission Management         │
+│  - Stream Processing             │
+└────────┬────────────────────────┘
+         │
+         ▼
+┌─────────────────────────────────┐
+│  HagiCode.Libs (Shared Runtime)  │
+│  - Copilot CLI Process Management│
+│  - Message Protocol Parsing      │
+│  - Session Persistence           │
+└─────────────────────────────────┘
+```
+
+The advantage of this architecture is **clear layering and single responsibility**. The interface layer defines a unified AI service contract, the implementation layer handles Orleans' distributed state management, the provider layer encapsulates Copilot CLI interaction details, and the underlying runtime is responsible for communicating with the CLI process.
+
+Basically, just clarify responsibilities—let each part do what it should do, no mixing. After all, once code gets messy, it's hard to fix later.
+
+## Core Component Analysis
+
+### 1. GitHubCopilotGrain: Distributed AI Service Interface
+
+As an Orleans Grain implementation, `GitHubCopilotGrain` provides distributed AI service capabilities:
+
+```csharp
+public interface IGitHubCopilotGrain : IGrainWithStringKey
+{
+    /// <summary>
+    /// Execute command and stream response
+    /// </summary>
+    Task<IAsyncEnumerable<GitHubCopilotResponse>> ExecuteCommandStreamAsync(
+        string command,
+        string? heroId = null,
+        CancellationToken token = default,
+        string? executionMessageId = null,
+        string? systemMessage = null,
+        Dictionary<string, string>? requestSettings = null);
+
+    /// <summary>
+    /// Execute edit operation
+    /// </summary>
+    Task<IAsyncEnumerable<GitHubCopilotResponse>> RunEditAsync(
+        string editCommand,
+        string? heroId = null,
+        CancellationToken token = default);
+
+    /// <summary>
+    /// Cancel current execution
+    /// </summary>
+    Task CancelAsync(string heroId);
+}
+```
+
+**Key Design Points**:
+- Use `IAsyncEnumerable` to support streaming responses, avoiding long waits
+- Implement session-level state isolation through `heroId`
+- Support passing `requestSettings` to dynamically configure model parameters
+
+### 2. CopilotAIProvider: Core Provider Implementation
+
+`CopilotAIProvider` is the core of the entire solution, encapsulating all interaction logic with Copilot CLI:
+
+```csharp
+public class CopilotAIProvider : IAIProvider, IVersionedAIProvider
+{
+    private readonly CopilotOptions _options;
+    private readonly ICopilotProcessExecutor _executor;
+
+    public async IAsyncEnumerable<AIStreamingChunk> SendMessageAsync(
+        AIRequest request,
+        string? embeddedCommandPrompt = null,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        // Build execution options
+        var options = new CopilotOptions
+        {
+            Model = request.Model ?? _options.Model,
+            SessionId = request.Options?.Settings?.GetValueOrDefault("copilotSessionId"),
+            Timeout = _options.Timeout,
+            PermissionMode = request.OperationType == AIOperationType.Edit
+                ? CopilotPermissionMode.BypassPermissions
+                : CopilotPermissionMode.Default
+        };
+
+        // Execute command and stream response processing
+        await foreach (var message in _executor.ExecuteAsync(
+            options, request.Prompt, cancellationToken))
+        {
+            yield return BuildChunk(message);
+        }
+    }
+}
+```
+
+**Core Features**:
+- **Automatic Retry Mechanism**: Handles transient network issues and CLI process exceptions
+- **Reasoning Content Tracking**: Captures the model's reasoning process (reasoning field)
+- **Multiple Message Type Handling**: Supports assistant, tool.started, tool.completed and other message types
+- **Permission Mode Switching**: Edit operations automatically use bypassPermissions, regular queries use default
+
+### 3. CopilotOptions: Flexible Configuration System
+
+The configuration class supports rich option settings:
+
+```csharp
+public class CopilotOptions
+{
+    /// <summary>
+    /// Specify the model to use, such as "gpt-4", "gpt-5", "claude-opus-4.5"
+    /// </summary>
+    public string Model { get; set; } = "gpt-4";
+
+    /// <summary>
+    /// Copilot CLI executable path
+    /// </summary>
+    public string ExecutablePath { get; set; } = "copilot";
+
+    /// <summary>
+    /// Session timeout
+    /// </summary>
+    public TimeSpan Timeout { get; set; } = TimeSpan.FromSeconds(1800);
+
+    /// <summary>
+    /// Authentication method
+    /// </summary>
+    public CopilotAuthSource AuthSource { get; set; } = CopilotAuthSource.LoggedInUser;
+
+    /// <summary>
+    /// Permission mode
+    /// </summary>
+    public CopilotPermissionMode PermissionMode { get; set; } = CopilotPermissionMode.Default;
+
+    /// <summary>
+    /// Session ID for context preservation
+    /// </summary>
+    public string? SessionId { get; set; }
+
+    /// <summary>
+    /// Tool permission configuration
+    /// </summary>
+    public CopilotToolPermissions? Permissions { get; set; }
+}
+```
+
+Configuration is all about being practical. After all, who wants to write a bunch of configurations they'll never use? Covering most scenarios is enough.
+
+## Configuration Guide
+
+### 1. Basic Configuration
+
+Add Copilot provider configuration in `appsettings.json`:
+
+```json
+{
+  "AI": {
+    "Providers": {
+      "Providers": {
+        "GitHubCopilot": {
+          "Enabled": true,
+          "ExecutablePath": "copilot",
+          "Model": "gpt-5",
+          "Timeout": 1800,
+          "IdleTimeout": 300,
+          "UseLoggedInUser": true,
+          "NoAskUser": true,
+          "PermissionMode": "default",
+          "Permissions": {
+            "AllowAllTools": false,
+            "AllowAllPaths": false,
+            "AllowedTools": ["Read", "Bash(git:*)", "Bash(cat:*)"],
+            "DeniedTools": []
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+### 2. Model Selection
+
+The system supports the following models (specified via Copilot CLI's `--model` parameter):
+
+| Model | Description | Recommended Scenarios |
+|------|-------------|---------------------|
+| gpt-4 / gpt-4-turbo | OpenAI 4th generation model | General tasks, cost-effective |
+| gpt-5 | OpenAI latest 5th generation model | Complex reasoning, best results needed |
+| claude-sonnet-4.5 | Anthropic Sonnet 4.5 | Balance performance and cost |
+| claude-opus-4.5 | Anthropic Opus 4.5 | High-precision tasks |
+
+In HagiCode's practice, we use GPT-4 as the default daily model, switch to GPT-5 for complex tasks (like large-scale refactoring), and offer Claude models as an alternative for users who prefer Anthropic.
+
+### 3. Register Services
+
+Register related services in the DI container:
+
+```csharp
+// Register Copilot AI provider
+services.AddSingleton<IAIProvider, CopilotAIProvider>();
+
+// Register Orleans Grain
+services.AddSingleton<IGitHubCopilotGrain, GitHubCopilotGrain>();
+
+// Register process executor
+services.AddSingleton<ICopilotProcessExecutor, CopilotProcessExecutor>();
+```
+
+Actually just these few lines, nothing special. Just register what needs to be registered, so you can find it when you need it.
+
+## Practice Examples
+
+### 1. Basic Call
+
+```csharp
+// Get Grain
+var grain = grainFactory.GetGrain<IGitHubCopilotGrain>("session-123");
+
+// Execute command
+await foreach (var response in grain.ExecuteCommandStreamAsync(
+    "Analyze the code structure of the current directory and generate documentation",
+    heroId: null,
+    token: cancellationToken))
+{
+    switch (response.Type)
+    {
+        case ExecutorResponseType.Text:
+            Console.Write(response.Content);
+            break;
+        case ExecutorResponseType.ToolCall:
+            Console.WriteLine($"[Tool Call] {response.ToolName}");
+            break;
+        case ExecutorResponseType.Completion:
+            Console.WriteLine($"\n[Complete] Token Usage: {response.PromptTokens}+{response.CompletionTokens}");
+            break;
+    }
+}
+```
+
+### 2. Context-Aware Session
+
+```csharp
+var requestSettings = new Dictionary<string, string>
+{
+    { "model", "gpt-5" },
+    { "temperature", "0.7" },
+    { "maxTokens", "4096" },
+    { "copilotSessionId", "existing-session-123" }  // Preserve session context
+};
+
+await foreach (var response in grain.ExecuteCommandStreamAsync(
+    "Based on the previous analysis, generate corresponding unit tests",
+    requestSettings: requestSettings,
+    token: cancellationToken))
+{
+    // Handle response
+}
+```
+
+### 3. Edit Mode Call
+
+```csharp
+await foreach (var response in grain.RunEditAsync(
+    "Convert all PascalCase naming to camelCase",
+    heroId: "hero-001",
+    token: cancellationToken))
+{
+    if (response.Type == ExecutorResponseType.FileEdit)
+    {
+        Console.WriteLine($"[Edit] {response.FilePath}: {response.EditCount} changes");
+    }
+}
+```
+
+## Best Practices
+
+### Session Persistence
+
+Using the `copilotSessionId` parameter can preserve context across requests, which is very useful in scenarios requiring multi-turn conversations. For example:
+
+```csharp
+// First round: establish context
+var settings1 = new Dictionary<string, string> { { "copilotSessionId", "session-001" } };
+await grain.ExecuteCommandStreamAsync("This is a C# project using .NET 8", requestSettings: settings1);
+
+// Second round: ask based on context
+var settings2 = new Dictionary<string, string> { { "copilotSessionId", "session-001" } };
+await grain.ExecuteCommandStreamAsync("Recommend suitable project structure", requestSettings: settings2);
+```
+
+After all, AI isn't omnipotent—without context, how would it know what you're talking about? It's like chatting—you need back-and-forth to keep the conversation going.
+
+### Permission Control
+
+Choose the appropriate permission mode based on the operation type:
+
+- **Query Operations**: Use `default` mode, allowing AI to only read files and execute safe Git commands
+- **Edit Operations**: Use `bypassPermissions` mode, allowing AI to modify files
+
+```csharp
+var permissionMode = operationType == AIOperationType.Edit
+    ? CopilotPermissionMode.BypassPermissions
+    : CopilotPermissionMode.Default;
+```
+
+### Tool Whitelist
+
+Control AI-executable operations through `AllowedTools` configuration:
+
+```json
+{
+  "Permissions": {
+    "AllowAllTools": false,
+    "AllowedTools": [
+      "Read",
+      "Bash(git:*)",
+      "Bash(cat:*)",
+      "Glob"
+    ]
+  }
+}
+```
+
+In HagiCode, we strictly limit AI's operation permissions, only allowing file reading and Git command execution to ensure system security.
+
+After all, you can't be too careful with security. Who knows if the AI might suddenly decide to delete your entire project?
+
+### Timeout Handling
+
+The default timeout is set to 30 minutes, which may need adjustment for operations involving large numbers of files (such as full code analysis):
+
+```csharp
+var options = new CopilotOptions
+{
+    Timeout = TimeSpan.FromMinutes(60)  // Extend to 60 minutes
+};
+```
+
+## Common Questions
+
+### Q: How do I switch between different AI models?
+
+A: Specify through the `Model` configuration item or `requestSettings`:
+
+```csharp
+var settings = new Dictionary<string, string> { { "model", "claude-opus-4.5" } };
+```
+
+Actually just changing a parameter, nothing complicated.
+
+### Q: How long can session context be preserved?
+
+A: Depends on Copilot CLI's implementation, usually cleaned up after session idle timeout (default 5 minutes). Can be adjusted through `IdleTimeout` configuration.
+
+### Q: How to handle CLI process crashes?
+
+A: `CopilotAIProvider` has a built-in automatic retry mechanism that captures process exceptions and restarts the CLI. If consecutive failures exceed a threshold, it throws an `AIProviderException`.
+
+Program crashes are unavoidable. Just do your best with fault tolerance—if it really crashes, just restart it.
+
+### Q: Is custom tool support available?
+
+A: Copilot CLI's supported tools are predefined, but you can control which tools are available through `AllowedTools` configuration. Custom tools require waiting for future Copilot CLI updates.
+
+## Summary
+
+By integrating multiple AI models through Copilot CLI, we solved the multi-model support challenge in HagiCode development. The core advantages of this solution are:
+
+1. **Unified Interface**: One codebase supports multiple models like GPT and Claude
+2. **Session Management**: Automatically handles context preservation and session isolation
+3. **Tool Integration**: Built-in common tools like file operations and Git operations
+4. **Streaming Response**: Real-time AI output return, improving user experience
+5. **Security and Control**: Fine-grained permission control and tool whitelisting
+
+If your project also needs to support multiple AI models, or you're looking for a mature CLI tool integration solution, give Copilot CLI a try. This architecture has been thoroughly validated in HagiCode and can handle complex production environment requirements.
+
+After all, who wants to write separate calling code for each model? Having a unified solution saves everyone trouble.
+
+## References
+
+- [GitHub Copilot CLI Official Documentation](https://docs.github.com/en/copilot)
+- [Orleans Distributed Framework](https://www.microsoft.com/en-us/research/project/orleans/)
+- [HagiCode Project Repository](https://github.com/HagiCode-org/site)
+- [HagiCode Official Website](https://hagicode.com)
+- [HagiCode Installation Guide](https://docs.hagicode.com/installation/docker-compose)
+- [HagiCode Desktop Quick Installation](https://hagicode.com/desktop/)
+
+If this article helped you:
+- Give us a Star on GitHub: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Visit our official website to learn more: [hagicode.com](https://hagicode.com)
+- Watch the official release demo video: [www.bilibili.com/video/BV1z4oWB3EpY/](https://www.bilibili.com/video/BV1z4oWB3EpY/)
+- One-click installation experience: [docs.hagicode.com/installation/docker-compose](https://docs.hagicode.com/installation/docker-compose)
+- Desktop client quick installation: [hagicode.com/desktop/](https://hagicode.com/desktop/)
+- Public beta has started, welcome to install and experience
