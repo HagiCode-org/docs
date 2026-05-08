@@ -1,0 +1,215 @@
+---
+title: 用不同的 Agent 優化 OpenSpec 各階段效能：HagiCode 實踐總結
+date: 2026-05-08
+tags: [OpenSpec, AI, Agent, 提示詞工程, HagiCode, 工作流程優化]
+---
+
+## 用不同的 Agent 優化 OpenSpec 各階段效能：HagiCode 實踐總結
+
+> 通用提示詞無法應對不同開發階段的具體需求，透過階段特定的 agent 和參數化模板系統，讓 AI 在每個環節都能輸出高品質內容。
+
+## 背景
+
+OpenSpec 是一個提案驅動的開發系統，透過結構化的工作流程管理技術提案的建立、審查和實作。這個想法本身挺好的，只是在實際使用中，我們發現單一通用的 AI 提示詞存在明顯問題。
+
+explore 階段缺乏上下文錨定，AI 探索時容易偏離提案範圍；工件生成品質不穩定，design.md 缺少視覺化元素，proposal.md 缺少程式碼變更表，tasks.md 甚至混入了不該包含的 Git 操作；職責邊界模糊，不同文件類型應該包含什麼內容不明確；提示詞缺乏彈性，無法根據不同場景動態調整 AI 行為。
+
+這些問題直接影響了 OpenSpec 工作流程的效率和輸出品質。其实也沒別的辦法，只能自己動手改提示詞模板了。這篇文章就是那段日子的記錄。
+
+## 關於 HagiCode
+
+本文分享的方案來自我們在 [HagiCode](https://hagicode.com) 專案中的實踐經驗。HagiCode 是一個 AI 驅動的程式碼助手，在開發過程中我們大量使用 OpenSpec 工作流程來管理技術提案。本文介紹的 agent 分層策略，正是我們在實際使用中總結出來的優化方案。
+
+如果你覺得這套方案有價值，說明我們的工程實踐還不錯——HagiCode 本身也值得關注一下。
+
+## OpenSpec 工作流程解析
+
+OpenSpec 系統包含多個核心階段，每個階段都有其特定的目標和約束。理解這些階段的職責邊界，是設計有效 agent 策略的基礎。
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                        OpenSpec 工作流程階段                        │
+├─────────────────────────────────────────────────────────────────────┤
+│  ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐     │
+│  │ Explore  │ -> │   New    │ -> │    FF    │ -> │  Apply   │     │
+│  └──────────┘    └──────────┘    └──────────┘    └──────────┘     │
+│  ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐     │
+│  │ Archive  │    │   Sync   │    │ Verify   │    │  Status  │     │
+│  └──────────┘    └──────────┘    └──────────┘    └──────────┘     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+每個階段的目標完全不同：Explore 階段需要思考姿態，專注於資訊收集；New 階段要聚焦需求分析和方案設計；FF 階段按依賴順序批次建立工件；Apply 階段將提案轉化為實際程式碼。用同一個提示詞模板去驅動這些差異巨大的任務，顯然不太合理。
+
+## 提示詞系統架構
+
+OpenSpec 使用模板化的提示詞系統，這為 agent 分層提供了技術基礎。模板檔案採用 `.hbs` (Handlebars/Scriban) 格式，配合 `.json` 元資料檔案定義參數和驗證規則，支援中英雙語。
+
+關鍵的設計是 `PromptScenario` 枚舉，它定義了不同階段的提示詞場景：
+
+```csharp
+public enum PromptScenario
+{
+    OpenspecV1Explore,      // 探索階段
+    OpenspecV1New,          // 新建提案
+    OpenspecV1Ff,           // 快速生成
+    OpenspecV1Apply,        // 應用變更
+    OpenspecV1Archive       // 歸檔
+}
+```
+
+每個場景都有對應的獨立模板檔案，比如 `openspec-v1-explore.zh-CN.hbs` 和 `openspec-v1-ff.zh-CN.hbs`，這樣可以針對不同階段注入特定的約束和指導。
+
+## 參數化的提示詞載入
+
+實作動態參數注入是整個系統的核心。`FilePromptProvider` 負責根據場景和參數載入提示詞：
+
+```csharp
+public async Task<string> GetOpenspecV1FfPromptAsync(
+    string changeName,
+    string changeDescription,
+    string locale = "en-US",
+    string? planningDirectionInstructions = null,
+    CancellationToken cancellationToken = default)
+{
+    var parameters = new Dictionary<string, object>
+    {
+        { "planningDirectionInstructions", 
+          ResolvePlanningDirectionInstructions(locale, planningDirectionInstructions) }
+    };
+    
+    if (!string.IsNullOrWhiteSpace(changeName))
+    {
+        parameters["changeName"] = changeName;
+    }
+    
+    return await GetPromptWithParametersAsync(
+        PromptScenario.OpenspecV1Ff,
+        locale,
+        cancellationToken,
+        parameters);
+}
+```
+
+這種設計允許我們在執行時動態注入參數，比如 `changeName` 和 `planningDirectionInstructions`，而不需要修改模板檔案本身。
+
+## 規劃方向動態設定
+
+HagiCode 實作了一個靈活的規劃方向系統，允許使用者為每次生成選擇不同的方向。每個方向都有獨立的 ID、描述和提示詞片段：
+
+```csharp
+public static class ProposalPlanningDirections
+{
+    private static readonly ProposalPlanningDirectionDefinition[] Catalog =
+    [
+        new(
+            ExploreId,
+            "Explore mode",
+            DefaultEnabled: true,
+            EnglishPromptFragment:
+            "- Explore mode: add an explicit exploration pass...",
+            ChinesePromptFragment:
+            "- 探索模式：在定稿工件之前增加明確的探索階段..."),
+        // ... change-map, flowchart, prototype, architecture, sequence
+    ];
+    
+    public static NormalizedProposalPlanningDirections Normalize(
+        bool? enableExploreMode,
+        IReadOnlyList<PlanningDirectionOptionDto>? planningDirections)
+    {
+        // 合併預設設定和使用者自訂設定
+    }
+}
+```
+
+支援的方向包括：`explore`（探索模式）、`change-map`（變更地圖）、`flowchart`（互動流程圖）、`prototype`（UI 原型）、`architecture`（架構圖）、`sequence`（API 時序圖）。使用者可以自由開關這些方向，系統會動態生成對應的提示詞指令區塊。
+
+在 Handlebars 模板中使用條件語句來注入這些指令：
+
+```handlebars
+{{#if planningDirectionInstructions}}
+## 本次生成的規劃方向
+
+{{{planningDirectionInstructions}}}
+{{/if}}
+```
+
+## 明確的內容範圍約束
+
+最關鍵的改進是明確不同文件類型的內容範圍約束，特別是 tasks.md。我們在提示詞中新增了嚴格的約束條件：
+
+```markdown
+### tasks.md 內容範圍約束
+
+當建立 `tasks.md` 工件時，必須遵守以下內容範圍約束：
+
+**必須包含**：
+- 業務邏輯任務（程式碼實作、功能開發）
+- 技術實作任務（元件整合、API 開發）
+- 測試任務（單元測試、整合測試）
+- 文件任務（更新文件、新增註解）
+
+**禁止包含**：
+- Git 提交操作（git add、git commit、git push）
+- 版本控制管理工作流程
+- 部署和發布操作
+```
+
+使用規範語言（MUST/SHALL）而非建議性語言，確保 AI 嚴格理解這些約束。對於 proposal.md 和 design.md，我們也明確了各自的職責邊界：proposal.md 必須包含程式碼變更表和 UI 原型圖（當涉及 UI 變更時），而 design.md 必須包含架構圖和資料流程圖。
+
+## 探索階段上下文錨定
+
+Explore 階段的問題最容易被忽視——AI 探索時可能完全偏離提案範圍。我們透過增強提示詞來解決：
+
+```markdown
+## Explore 執行原則
+
+- **不需要寫文件** - 探索結果不需要儲存為獨立文件
+- **資訊傳遞** - 探索完成後，收集的資訊將傳遞給 Proposal 建立階段
+- **重點是思考** - 探索的價值在於資訊收集，而非文件產出
+
+## 與 Proposal 建立銜接
+
+Explore 階段發生在提案建立後、專案程式碼尚未編寫時。探索完成後，
+系統會引導你建立或填充 `proposal.md` 檔案，探索收集的資訊將作為提案內容的基礎。
+```
+
+這樣明確了 Explore 階段的定位：它是資訊收集的前置步驟，不是獨立的三文件產出環節。AI 理解這一點後，就能更聚焦於提案相關的知識探索。
+
+## 實作指南
+
+如果你想在 HagiCode 中應用這套方案，可以按以下步驟操作：
+
+1. **定義規劃方向**：在 `ProposalPlanningDirections.cs` 中定義方向 ID、預設狀態和提示詞片段
+2. **模板參數化**：在 `.hbs` 模板中使用條件語句和變數注入
+3. **驗證輸出**：啟用特定方向時檢查對應工件是否包含預期內容
+4. **測試邊界**：驗證停用方向時不會生成對應內容，且不影響其他方向
+
+需要注意的是，模板修改要與上游保持同步，中英文模板的結構要一致。規劃方向的渲染應在微秒級完成，避免影響效能。
+
+## 總結
+
+OpenSpec 工作流程的效能優化，核心在於理解不同階段的差異化需求。透過階段特定的 agent、參數化模板和明確的內容約束，我們讓 AI 在每個環節都能輸出高品質內容。
+
+這套方案在 HagiCode 的實踐中得到了驗證——不僅提高了文件品質，還減少了人工修改的工作量。如果你的團隊也在使用類似的提案驅動工作流程，希望這些經驗能對你有所啟發。
+
+其实也就是把問題拆開來看罷了。每個階段有每個階段的特點，用對方法，問題自然就簡單了。
+
+## 參考資料
+
+- HagiCode 專案地址：[github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- HagiCode 官網：[hagicode.com](https://hagicode.com)
+- 正式版演示影片：[www.bilibili.com/video/BV1z4oWB3EpY/](https://www.bilibili.com/video/BV1z4oWB3EpY/)
+- 一鍵安裝體驗：[docs.hagicode.com/installation/docker-compose](https://docs.hagicode.com/installation/docker-compose)
+- Desktop 桌面端快速安裝：[hagicode.com/desktop/](https://hagicode.com/desktop/)
+
+---
+
+如果本文對你有幫助：
+- 點個讚讓更多人看到
+- 來 GitHub 給個 Star
+- 訪問官網了解更多
+- 觀看演示影片了解完整功能
+- 一鍵安裝開始體驗
+
+公測已開始，歡迎安裝體驗！

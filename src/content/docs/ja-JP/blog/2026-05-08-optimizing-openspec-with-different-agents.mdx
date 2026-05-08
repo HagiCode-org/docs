@@ -1,0 +1,215 @@
+---
+title: 異なる Agent で OpenSpec の各段階のパフォーマンスを最適化：HagiCode 実践まとめ
+date: 2026-05-08
+tags: [OpenSpec, AI, Agent, プロンプトエンジニアリング, HagiCode, ワークフロー最適化]
+---
+
+## 異なる Agent で OpenSpec の各段階のパフォーマンスを最適化：HagiCode 実践まとめ
+
+> 汎用プロンプトは異なる開発段階の具体的なニーズに対応できません。段階固有の agent とパラメータ化されたテンプレートシステムにより、AI が各段階で高品質なコンテンツを出力できるようにします。
+
+## 背景
+
+OpenSpec は提案駆動型の開発システムであり、構造化されたワークフローを通じて技術提案の作成、レビュー、実装を管理します。このアイデア自体は良いのですが、実際に使用してみると、単一の汎用 AI プロンプトには明らかな問題があることがわかりました。
+
+explore 段階ではコンテキストのアンカーが不足しており、AI が探索中に提案の範囲から逸脱しやすい傾向があります。成果物の品質は不安定で、design.md には視覚的な要素が不足しており、proposal.md にはコード変更表が含まれておらず、tasks.md には含まれるべきではない Git 操作が混入していることさえあります。責任の境界が曖昧で、異なるドキュメントタイプに含めるべき内容が明確ではありません。プロンプトに柔軟性が不足しており、異なるシナリオに応じて AI の挙動を動的に調整できません。
+
+これらの問題は、OpenSpec ワークフローの効率と出力品質に直接影響を与えています。実のところ、自分でプロンプトテンプレートを修正する以外に方法はありません。この記事は、あの時期の記録です。
+
+## HagiCode について
+
+この記事で共有するソリューションは、[HagiCode](https://hagicode.com) プロジェクトでの実践経験から来ています。HagiCode は AI 主導のコードアシスタントであり、開発プロセスで技術提案を管理するために OpenSpec ワークフローを extensively 使用しています。この記事で紹介する agent 階層化戦略は、実際の使用でまとめられた最適化ソリューションです。
+
+このソリューションに価値を感じてくれたら、私たちのエンジニアリング実践は悪くないということです——HagiCode 自体も注目に値します。
+
+## OpenSpec ワークフロー解析
+
+OpenSpec システムには複数のコア段階が含まれており、各段階には独自の目標と制約があります。これらの段階の責任の境界を理解することは、効果的な agent 戦略を設計するための基礎です。
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                        OpenSpec ワークフロー段階                     │
+├─────────────────────────────────────────────────────────────────────┤
+│  ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐     │
+│  │ Explore  │ -> │   New    │ -> │    FF    │ -> │  Apply   │     │
+│  └──────────┘    └──────────┘    └──────────┘    └──────────┘     │
+│  ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐     │
+│  │ Archive  │    │   Sync   │    │ Verify   │    │  Status  │     │
+│  └──────────┘    └──────────┘    └──────────┘    └──────────┘     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+各段階の目標は完全に異なります：Explore 段階では思考姿勢が必要で、情報収集に集中します。New 段階では要件分析とソリューション設計に焦点を当てます。FF 段階では依存順に従ってバッチで成果物を作成します。Apply 段階では提案を実際のコードに変換します。同じプロンプトテンプレートでこれらの大きな差異があるタスクを駆動するのは、明らかに不合理です。
+
+## プロンプトシステムアーキテクチャ
+
+OpenSpec はテンプレート化されたプロンプトシステムを使用しており、これが agent 階層化の技術的基盤を提供します。テンプレートファイルは `.hbs` (Handlebars/Scriban) 形式を採用し、`.json` メタデータファイルと組み合わせてパラメータと検証ルールを定義し、中英二カ国語をサポートします。
+
+重要な設計は `PromptScenario` 列挙型で、異なる段階のプロンプトシナリオを定義します：
+
+```csharp
+public enum PromptScenario
+{
+    OpenspecV1Explore,      // 探索段階
+    OpenspecV1New,          // 新規提案
+    OpenspecV1Ff,           // 高速生成
+    OpenspecV1Apply,        // 変更適用
+    OpenspecV1Archive       // アーカイブ
+}
+```
+
+各シナリオには対応する独立したテンプレートファイルがあります。例えば `openspec-v1-explore.zh-CN.hbs` と `openspec-v1-ff.zh-CN.hbs` で、これにより異なる段階で特定の制約とガイダンスを注入できます。
+
+## パラメータ化されたプロンプト読み込み
+
+動的パラメータインジェクションの実装はシステム全体の中核です。`FilePromptProvider` はシナリオとパラメータに基づいてプロンプトを読み込みます：
+
+```csharp
+public async Task<string> GetOpenspecV1FfPromptAsync(
+    string changeName,
+    string changeDescription,
+    string locale = "en-US",
+    string? planningDirectionInstructions = null,
+    CancellationToken cancellationToken = default)
+{
+    var parameters = new Dictionary<string, object>
+    {
+        { "planningDirectionInstructions", 
+          ResolvePlanningDirectionInstructions(locale, planningDirectionInstructions) }
+    };
+    
+    if (!string.IsNullOrWhiteSpace(changeName))
+    {
+        parameters["changeName"] = changeName;
+    }
+    
+    return await GetPromptWithParametersAsync(
+        PromptScenario.OpenspecV1Ff,
+        locale,
+        cancellationToken,
+        parameters);
+}
+```
+
+この設計により、テンプレートファイル自体を変更することなく、実行時に `changeName` や `planningDirectionInstructions` などのパラメータを動的に注入できます。
+
+## 計画方向の動的設定
+
+HagiCode は柔軟な計画方向システムを実装しており、ユーザーは各生成で異なる方向を選択できます。各方向には独立した ID、説明、プロンプトフラグメントがあります：
+
+```csharp
+public static class ProposalPlanningDirections
+{
+    private static readonly ProposalPlanningDirectionDefinition[] Catalog =
+    [
+        new(
+            ExploreId,
+            "Explore mode",
+            DefaultEnabled: true,
+            EnglishPromptFragment:
+            "- Explore mode: add an explicit exploration pass...",
+            ChinesePromptFragment:
+            "- 探索模式：在定稿工件之前增加明确的探索阶段..."),
+        // ... change-map, flowchart, prototype, architecture, sequence
+    ];
+    
+    public static NormalizedProposalPlanningDirections Normalize(
+        bool? enableExploreMode,
+        IReadOnlyList<PlanningDirectionOptionDto>? planningDirections)
+    {
+        // デフォルト設定とユーザーカスタム設定をマージ
+    }
+}
+```
+
+サポートされる方向には：`explore`（探索モード）、`change-map`（変更マップ）、`flowchart`（インタラクションフローチャート）、`prototype`（UI プロトタイプ）、`architecture`（アーキテクチャ図）、`sequence`（API シーケンス図）が含まれます。ユーザーはこれらの方向を自由にオン・オフでき、システムは対応するプロンプト命令ブロックを動的に生成します。
+
+Handlebars テンプレートでは条件文を使用してこれらの命令を注入します：
+
+```handlebars
+{{#if planningDirectionInstructions}}
+## 今回生成の計画方向
+
+{{{planningDirectionInstructions}}}
+{{/if}}
+```
+
+## 明確なコンテンツ範囲制約
+
+最も重要な改善は、異なるドキュメントタイプのコンテンツ範囲制約を明確にすることです、特に tasks.md について。プロンプトに厳格な制約条件を追加しました：
+
+```markdown
+### tasks.md コンテンツ範囲制約
+
+`tasks.md` 成果物を作成する際、以下のコンテンツ範囲制約を遵守する必要があります：
+
+**必須**：
+- ビジネスロジックタスク（コード実装、機能開発）
+- 技術実装タスク（コンポーネント統合、API 開発）
+- テストタスク（単体テスト、統合テスト）
+- ドキュメントタスク（ドキュメント更新、コメント追加）
+
+**禁止**：
+- Git コミット操作（git add、git commit、git push）
+- バージョン管理管理ワークフロー
+- デプロイとリリース操作
+```
+
+規範的言語（MUST/SHALL）を使用して提言的言語ではなく、AI がこれらの制約を厳密に理解するようにします。proposal.md と design.md についても、それぞれの責任境界を明確にしました：proposal.md にはコード変更表と UI プロトタイプ図（UI 変更が関わる場合）が必須であり、design.md にはアーキテクチャ図とデータフロー図が必須です。
+
+## 探索段階のコンテキストアンカー
+
+Explore 段階の問題は最も見落とされがちです——AI が探索中に提案の範囲から完全に逸脱する可能性があります。プロンプトを強化することでこれを解決しました：
+
+```markdown
+## Explore 実行原則
+
+- **ドキュメントを書く必要はない** - 探索結果を独立したドキュメントとして保存する必要はありません
+- **情報伝達** - 探索完了後、収集した情報は Proposal 作成段階に伝達されます
+- **重要なのは思考** - 探索の価値は情報収集にあり、ドキュメント出力ではありません
+
+## Proposal 作成との連携
+
+Explore 段階は提案作成後、プロジェクトコードがまだ書かれていない時に発生します。探索完了後、
+システムは `proposal.md` ファイルの作成または入力をガイドし、探索で収集した情報は提案コンテンツの基礎として使用されます。
+```
+
+これにより Explore 段階の位置づけが明確になります：それは情報収集の前置ステップであり、独立したドキュメント出力段階ではありません。AI がこの点を理解すれば、提案に関連する知識探索にさらに集中できます。
+
+## 実装ガイド
+
+HagiCode でこのソリューションを適用したい場合、以下の手順で操作できます：
+
+1. **計画方向を定義**：`ProposalPlanningDirections.cs` で方向 ID、デフォルト状態、プロンプトフラグメントを定義します
+2. **テンプレートのパラメータ化**：`.hbs` テンプレートで条件文と変数インジェクションを使用します
+3. **出力の検証**：特定の方向を有効にしたとき、対応する成果物に予期されるコンテンツが含まれているか確認します
+4. **境界のテスト**：方向を無効にしたとき対応するコンテンツが生成されず、他の方向に影響しないことを確認します
+
+注意点として、テンプレートの変更は上流と同期を保つ必要があり、中英テンプレートの構造は一貫している必要があります。計画方向のレンダリングはマイクロ秒秒で完了し、パフォーマンスに影響を与えないようにする必要があります。
+
+## まとめ
+
+OpenSpec ワークフローのパフォーマンス最適化は、異なる段階の差別化されたニーズを理解することにあります。段階固有の agent、パラメータ化されたテンプレート、明確なコンテンツ制約を通じて、AI が各段階で高品質なコンテンツを出力できるようにしました。
+
+このソリューションは HagiCode の実践で検証されています——ドキュメント品質が向上しただけでなく、手作業での修正作業も削減されました。あなたのチームでも同様の提案駆動型ワークフローを使用している場合、これらの経験が役立つことを願っています。
+
+結局は問題を分解して見るだけです。各段階には各段階の特徴があり、正しい方法を使えば、問題は自然と簡単になります。
+
+## 参考資料
+
+- HagiCode プロジェクトアドレス：[github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- HagiCode 公式サイト：[hagicode.com](https://hagicode.com)
+- 正式版デモ動画：[www.bilibili.com/video/BV1z4oWB3EpY/](https://www.bilibili.com/video/BV1z4oWB3EpY/)
+- ワンクリックインストール体験：[docs.hagicode.com/installation/docker-compose](https://docs.hagicode.com/installation/docker-compose)
+- Desktop デスクトップ版クイックインストール：[hagicode.com/desktop/](https://hagicode.com/desktop/)
+
+---
+
+この記事が役に立った場合：
+- いいねして更多人に見てもらいましょう
+- GitHub に Star をください
+- 公式サイトにアクセスして詳しく知る
+- デモ動画を見て完全な機能を理解する
+- ワンクリックインストールで体験を開始する
+
+ベータテストが開始されました。インストールして体験してください！

@@ -1,0 +1,215 @@
+---
+title: "Otimizando a eficácia de cada etapa do OpenSpec com diferentes Agentes: resumo da prática do HagiCode"
+date: 2026-05-08
+tags: [OpenSpec, AI, Agent, Engenharia de Prompt, HagiCode, Otimização de Fluxo de Trabalho]
+---
+
+## Otimizando a eficácia de cada etapa do OpenSpec com diferentes Agentes: resumo da prática do HagiCode
+
+> Prompts genéricos não conseguem atender às necessidades específicas de diferentes etapas de desenvolvimento. Por meio de agentes específicos de cada etapa e um sistema de modelos parametrizados, a IA pode produzir conteúdo de alta qualidade em cada etapa.
+
+## Contexto
+
+OpenSpec é um sistema de desenvolvimento orientado a propostas que gerencia a criação, revisão e implementação de propostas técnicas através de um fluxo de trabalho estruturado. A ideia em si é bastante boa, mas no uso prático descobrimos que prompts genéricos de IA têm problemas óbvios.
+
+A etapa Explore falta ancoragem de contexto, e a IA tende a se desviar do escopo da proposta durante a exploração; a qualidade da geração de artefatos é instável, design.md carece de elementos visuais, proposal.md carece de tabela de mudanças de código, tasks.md até inclui operações Git que não deveriam estar lá; os limites de responsabilidade são vagos, não está claro o conteúdo que diferentes tipos de documentos devem conter; os prompts carecem de flexibilidade e não conseguem ajustar dinamicamente o comportamento da IA de acordo com diferentes cenários.
+
+Esses problemas impactam diretamente a eficiência e a qualidade de saída do fluxo de trabalho OpenSpec. Na verdade, não há outra saída senão modificar manualmente os modelos de prompts. Este artigo é um registro desses dias.
+
+## Sobre o HagiCode
+
+A solução compartilhada neste artigo vem da nossa experiência prática no projeto [HagiCode](https://hagicode.com). HagiCode é um assistente de código impulsionado por IA. Durante o desenvolvimento, usamos amplamente o fluxo de trabalho OpenSpec para gerenciar propostas técnicas. A estratégia de camadas de agentes apresentada neste artigo é exatamente a solução de otimização que resumimos no uso prático.
+
+Se você acha que esta solução tem valor, mostra que nossa prática de engenharia é bastante boa - o HagiCode também vale a pena ser considerado.
+
+## Análise do Fluxo de Trabalho OpenSpec
+
+O sistema OpenSpec contém múltiplas etapas principais, cada uma com seus objetivos e restrições específicas. Compreender os limites de responsabilidade dessas etapas é a base para projetar estratégias eficazes de agentes.
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                     Etapas do Fluxo de Trabalho OpenSpec            │
+├─────────────────────────────────────────────────────────────────────┤
+│  ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐     │
+│  │ Explore  │ -> │   New    │ -> │    FF    │ -> │  Apply   │     │
+│  └──────────┘    └──────────┘    └──────────┘    └──────────┘     │
+│  ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐     │
+│  │ Archive  │    │   Sync   │    │ Verify   │    │  Status  │     │
+│  └──────────┘    └──────────┘    └──────────┘    └──────────┘     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+Os objetivos de cada etapa são completamente diferentes: a etapa Explore requer uma postura reflexiva, focada na coleta de informações; a etapa New deve focar na análise de requisitos e design de solução; a etapa FF cria artefatos em lote em ordem de dependência; a etapa Apply converte a proposta em código real. Usar o mesmo modelo de prompt para conduzir essas tarefas tão diferentes é obviamente irracional.
+
+## Arquitetura do Sistema de Prompts
+
+OpenSpec usa um sistema de prompts modelados, que fornece uma base técnica para a estratificação de agentes. Os arquivos de modelo usam o formato `.hbs` (Handlebars/Scriban), combinados com arquivos de metadados `.json` para definir parâmetros e regras de validação, suportando chinês e inglês.
+
+O design chave é a enumeração `PromptScenario`, que define diferentes cenários de prompts por etapa:
+
+```csharp
+public enum PromptScenario
+{
+    OpenspecV1Explore,      // Etapa de exploração
+    OpenspecV1New,          // Nova proposta
+    OpenspecV1Ff,           // Geração rápida
+    OpenspecV1Apply,        // Aplicar mudanças
+    OpenspecV1Archive       // Arquivar
+}
+```
+
+Cada cenário tem seu próprio arquivo de modelo independente, como `openspec-v1-explore.zh-CN.hbs` e `openspec-v1-ff.zh-CN.hbs`, permitindo injetar restrições e orientações específicas para diferentes etapas.
+
+## Carregamento de Prompts Parametrizados
+
+Implementar injeção dinâmica de parâmetros é o núcleo de todo o sistema. `FilePromptProvider` é responsável por carregar prompts com base no cenário e parâmetros:
+
+```csharp
+public async Task<string> GetOpenspecV1FfPromptAsync(
+    string changeName,
+    string changeDescription,
+    string locale = "en-US",
+    string? planningDirectionInstructions = null,
+    CancellationToken cancellationToken = default)
+{
+    var parameters = new Dictionary<string, object>
+    {
+        { "planningDirectionInstructions", 
+          ResolvePlanningDirectionInstructions(locale, planningDirectionInstructions) }
+    };
+    
+    if (!string.IsNullOrWhiteSpace(changeName))
+    {
+        parameters["changeName"] = changeName;
+    }
+    
+    return await GetPromptWithParametersAsync(
+        PromptScenario.OpenspecV1Ff,
+        locale,
+        cancellationToken,
+        parameters);
+}
+```
+
+Este design nos permite injetar dinamicamente parâmetros em tempo de execução, como `changeName` e `planningDirectionInstructions`, sem precisar modificar o próprio arquivo de modelo.
+
+## Configuração Dinâmica de Direção de Planejamento
+
+O HagiCode implementa um sistema flexível de direção de planejamento que permite aos usuários escolher diferentes direções para cada geração. Cada direção tem seu próprio ID, descrição e fragmento de prompt:
+
+```csharp
+public static class ProposalPlanningDirections
+{
+    private static readonly ProposalPlanningDirectionDefinition[] Catalog =
+    [
+        new(
+            ExploreId,
+            "Explore mode",
+            DefaultEnabled: true,
+            EnglishPromptFragment:
+            "- Explore mode: add an explicit exploration pass...",
+            ChinesePromptFragment:
+            "- 探索模式：在定稿工件之前增加明确的探索阶段..."),
+        // ... change-map, flowchart, prototype, architecture, sequence
+    ];
+    
+    public static NormalizedProposalPlanningDirections Normalize(
+        bool? enableExploreMode,
+        IReadOnlyList<PlanningDirectionOptionDto>? planningDirections)
+    {
+        // Mesclar configuração padrão e configuração personalizada do usuário
+    }
+}
+```
+
+As direções suportadas incluem: `explore` (modo de exploração), `change-map` (mapa de mudanças), `flowchart` (fluxograma de interação), `prototype` (protótipo UI), `architecture` (diagrama de arquitetura), `sequence` (diagrama de sequência API). Os usuários podem ligar e desligar livremente essas direções, e o sistema gera dinamicamente os blocos de instruções de prompt correspondentes.
+
+Nos modelos Handlebars, use instruções condicionais para injetar essas instruções:
+
+```handlebars
+{{#if planningDirectionInstructions}}
+## Direções de Planejamento para Esta Geração
+
+{{{planningDirectionInstructions}}}
+{{/if}}
+```
+
+## Restrições Explícitas de Escopo de Conteúdo
+
+A melhoria mais crítica é esclarecer as restrições de escopo de conteúdo para diferentes tipos de documentos, especialmente tasks.md. Adicionamos restrições estritas no prompt:
+
+```markdown
+### Restrições de Escopo de Conteúdo tasks.md
+
+Ao criar o artefato `tasks.md`, devem ser observadas as seguintes restrições de escopo de conteúdo:
+
+**DEVE incluir**:
+- Tarefas de lógica de negócios (implementação de código, desenvolvimento de funcionalidades)
+- Tarefas de implementação técnica (integração de componentes, desenvolvimento de API)
+- Tarefas de teste (testes unitários, testes de integração)
+- Tarefas de documentação (atualizar documentação, adicionar comentários)
+
+**NÃO DEVE incluir**:
+- Operações de commit Git (git add, git commit, git push)
+- Fluxos de trabalho de gerenciamento de controle de versão
+- Operações de implantação e lançamento
+```
+
+Use linguagem normativa (MUST/SHALL) em vez de linguagem sugestiva para garantir que a IA entenda estritamente essas restrições. Para proposal.md e design.md, também esclarecemos seus respectivos limites de responsabilidade: proposal.md DEVE conter tabela de mudanças de código e protótipos UI (quando envolver mudanças de UI), enquanto design.md DEVE conter diagramas de arquitetura e diagramas de fluxo de dados.
+
+## Ancoragem de Contexto na Etapa Explore
+
+O problema da etapa Explore é o mais fácil de ser ignorado - a IA pode se desviar completamente do escopo da proposta durante a exploração. Resolvemos isso aprimorando o prompt:
+
+```markdown
+## Princípios de Execução Explore
+
+- **Não é necessário escrever documentos** - Os resultados da exploração não precisam ser salvos como documentos independentes
+- **Transferência de informações** - Após a conclusão da exploração, as informações coletadas serão transmitidas para a etapa de criação da Proposal
+- **O foco é pensar** - O valor da exploração está na coleta de informações, não na produção de documentos
+
+## Conexão com a Criação de Proposal
+
+A etapa Explore ocorre após a criação da proposta e antes que o código do projeto seja escrito. Após a conclusão da exploração,
+o sistema irá guiá-lo a criar ou preencher o arquivo `proposal.md`, e as informações coletadas na exploração servirão como base para o conteúdo da proposta.
+```
+
+Isso esclarece o posicionamento da etapa Explore: é uma etapa preliminar de coleta de informações, não uma etapa independente de produção de documentos. Depois que a IA entende isso, ela pode focar mais na exploração de conhecimento relacionado à proposta.
+
+## Guia de Implementação
+
+Se você quiser aplicar esta solução no HagiCode, pode seguir estas etapas:
+
+1. **Definir direções de planejamento**: Defina IDs de direção, estado padrão e fragmentos de prompt em `ProposalPlanningDirections.cs`
+2. **Parametrização de modelos**: Use instruções condicionais e injeção de variáveis em modelos `.hbs`
+3. **Validar saída**: Ao habilitar direções específicas, verifique se os artefatos correspondentes contêm o conteúdo esperado
+4. **Testar limites**: Valide que quando uma direção está desabilitada, o conteúdo correspondente não é gerado e não afeta outras direções
+
+Observe que as modificações do modelo devem ser mantidas em sincronia com o upstream, e a estrutura dos modelos em chinês e inglês deve ser consistente. A renderização das direções de planejamento deve ser concluída em nível de microssegundos para evitar impacto no desempenho.
+
+## Resumo
+
+A otimização da eficácia do fluxo de trabalho OpenSpec reside em compreender as necessidades diferenciadas de diferentes etapas. Por meio de agentes específicos de cada etapa, modelos parametrizados e restrições explícitas de conteúdo, permitimos que a IA produza conteúdo de alta qualidade em cada etapa.
+
+Esta solução foi validada na prática do HagiCode - não apenas melhorou a qualidade dos documentos, mas também reduziu a carga de trabalho de modificações manuais. Se sua equipe também está usando fluxo de trabalho orientado a propostas semelhante, espero que essas experiências sejam úteis para você.
+
+Na verdade, é apenas dividir o problema em partes. Cada etapa tem suas próprias características, use o método certo e o problema se torna naturalmente simples.
+
+## Referências
+
+- Endereço do projeto HagiCode: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- Site oficial HagiCode: [hagicode.com](https://hagicode.com)
+- Vídeo de demonstração da versão oficial: [www.bilibili.com/video/BV1z4oWB3EpY/](https://www.bilibili.com/video/BV1z4oWB3EpY/)
+- Instalação com um clique: [docs.hagicode.com/installation/docker-compose](https://docs.hagicode.com/installation/docker-compose)
+- Instalação rápida Desktop: [hagicode.com/desktop/](https://hagicode.com/desktop/)
+
+---
+
+Se este artigo for útil para você:
+- Dê um like para que mais pessoas vejam
+- Venha ao GitHub e dê uma Star
+- Visite o site oficial para saber mais
+- Assista ao vídeo de demonstração para了解 funcionalidades completas
+- Instale com um clique para começar a体验
+
+O beta público começou, bem-vindo para instalar e体验!

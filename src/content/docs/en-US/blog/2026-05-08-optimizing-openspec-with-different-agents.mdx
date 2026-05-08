@@ -1,0 +1,215 @@
+---
+title: "Optimizing OpenSpec Phase Efficiency with Different Agents: HagiCode Practice Summary"
+date: 2026-05-08
+tags: [OpenSpec, AI, Agent, Prompt Engineering, HagiCode, Workflow Optimization]
+---
+
+## Optimizing OpenSpec Phase Efficiency with Different Agents: HagiCode Practice Summary
+
+> Generic prompts cannot address the specific needs of different development phases. Through phase-specific agents and a parametric template system, we enable AI to output high-quality content at every stage.
+
+## Background
+
+OpenSpec is a proposal-driven development system that manages the creation, review, and implementation of technical proposals through structured workflows. The concept itself is sound, but in actual use, we discovered that a single generic AI prompt has significant issues.
+
+The explore phase lacks context anchoring, causing AI to easily deviate from the proposal scope during exploration; artifact generation quality is unstable, with design.md missing visual elements, proposal.md missing code change tables, and tasks.md even including Git operations that shouldn't be there; responsibility boundaries are blurred, with unclear definitions of what different document types should contain; prompts lack flexibility and cannot dynamically adjust AI behavior according to different scenarios.
+
+These issues directly impact the efficiency and output quality of the OpenSpec workflow. There's really no other way but to modify the prompt templates ourselves. This article is a record of that period.
+
+## About HagiCode
+
+The solution shared in this article comes from our practical experience in the [HagiCode](https://hagicode.com) project. HagiCode is an AI-driven code assistant, and we heavily use the OpenSpec workflow to manage technical proposals during development. The agent layering strategy introduced in this article is precisely the optimization solution we summarized from actual use.
+
+If you find this solution valuable, it shows our engineering practice is decent—HagiCode itself is worth paying attention to.
+
+## OpenSpec Workflow Analysis
+
+The OpenSpec system contains multiple core phases, each with specific goals and constraints. Understanding the responsibility boundaries of these phases is the foundation for designing effective agent strategies.
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                        OpenSpec Workflow Phases                     │
+├─────────────────────────────────────────────────────────────────────┤
+│  ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐     │
+│  │ Explore  │ -> │   New    │ -> │    FF    │ -> │  Apply   │     │
+│  └──────────┘    └──────────┘    └──────────┘    └──────────┘     │
+│  ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐     │
+│  │ Archive  │    │   Sync   │    │ Verify   │    │  Status  │     │
+│  └──────────┘    └──────────┘    └──────────┘    └──────────┘     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+Each phase has completely different goals: The Explore phase requires a thinking posture, focusing on information collection; the New phase should focus on requirement analysis and solution design; the FF phase creates artifacts in batches in dependency order; the Apply phase transforms proposals into actual code. Using the same prompt template to drive these vastly different tasks is clearly unreasonable.
+
+## Prompt System Architecture
+
+OpenSpec uses a templated prompt system, which provides the technical foundation for agent layering. Template files use `.hbs` (Handlebars/Scriban) format, paired with `.json` metadata files to define parameters and validation rules, supporting both Chinese and English.
+
+The key design is the `PromptScenario` enumeration, which defines prompt scenarios for different phases:
+
+```csharp
+public enum PromptScenario
+{
+    OpenspecV1Explore,      // Exploration phase
+    OpenspecV1New,          // Create proposal
+    OpenspecV1Ff,           // Fast generation
+    OpenspecV1Apply,        // Apply changes
+    OpenspecV1Archive       // Archive
+}
+```
+
+Each scenario has a corresponding independent template file, such as `openspec-v1-explore.zh-CN.hbs` and `openspec-v1-ff.zh-CN.hbs`, allowing specific constraints and guidance to be injected for different phases.
+
+## Parameterized Prompt Loading
+
+Implementing dynamic parameter injection is the core of the entire system. `FilePromptProvider` is responsible for loading prompts based on scenario and parameters:
+
+```csharp
+public async Task<string> GetOpenspecV1FfPromptAsync(
+    string changeName,
+    string changeDescription,
+    string locale = "en-US",
+    string? planningDirectionInstructions = null,
+    CancellationToken cancellationToken = default)
+{
+    var parameters = new Dictionary<string, object>
+    {
+        { "planningDirectionInstructions", 
+          ResolvePlanningDirectionInstructions(locale, planningDirectionInstructions) }
+    };
+    
+    if (!string.IsNullOrWhiteSpace(changeName))
+    {
+        parameters["changeName"] = changeName;
+    }
+    
+    return await GetPromptWithParametersAsync(
+        PromptScenario.OpenspecV1Ff,
+        locale,
+        cancellationToken,
+        parameters);
+}
+```
+
+This design allows us to dynamically inject parameters at runtime, such as `changeName` and `planningDirectionInstructions`, without modifying the template file itself.
+
+## Dynamic Planning Direction Configuration
+
+HagiCode implements a flexible planning direction system that allows users to select different directions for each generation. Each direction has an independent ID, description, and prompt fragment:
+
+```csharp
+public static class ProposalPlanningDirections
+{
+    private static readonly ProposalPlanningDirectionDefinition[] Catalog =
+    [
+        new(
+            ExploreId,
+            "Explore mode",
+            DefaultEnabled: true,
+            EnglishPromptFragment:
+            "- Explore mode: add an explicit exploration pass...",
+            ChinesePromptFragment:
+            "- 探索模式：在定稿工件之前增加明确的探索阶段..."),
+        // ... change-map, flowchart, prototype, architecture, sequence
+    ];
+    
+    public static NormalizedProposalPlanningDirections Normalize(
+        bool? enableExploreMode,
+        IReadOnlyList<PlanningDirectionOptionDto>? planningDirections)
+    {
+        // Merge default configuration and user custom configuration
+    }
+}
+```
+
+Supported directions include: `explore` (exploration mode), `change-map` (change map), `flowchart` (interaction flowchart), `prototype` (UI prototype), `architecture` (architecture diagram), `sequence` (API sequence diagram). Users can freely toggle these directions, and the system dynamically generates corresponding prompt instruction blocks.
+
+Conditional statements are used in Handlebars templates to inject these instructions:
+
+```handlebars
+{{#if planningDirectionInstructions}}
+## Planning Directions for This Generation
+
+{{{planningDirectionInstructions}}}
+{{/if}}
+```
+
+## Clear Content Scope Constraints
+
+The most critical improvement is clarifying content scope constraints for different document types, especially tasks.md. We added strict constraint conditions in the prompts:
+
+```markdown
+### tasks.md Content Scope Constraints
+
+When creating `tasks.md` artifacts, the following content scope constraints must be observed:
+
+**Must include**:
+- Business logic tasks (code implementation, feature development)
+- Technical implementation tasks (component integration, API development)
+- Testing tasks (unit tests, integration tests)
+- Documentation tasks (updating documentation, adding comments)
+
+**Must not include**:
+- Git commit operations (git add, git commit, git push)
+- Version control management workflows
+- Deployment and release operations
+```
+
+Using normative language (MUST/SHALL) rather than suggestive language ensures AI strictly understands these constraints. For proposal.md and design.md, we also clarified their respective responsibility boundaries: proposal.md must include code change tables and UI prototype diagrams (when involving UI changes), while design.md must include architecture diagrams and data flow diagrams.
+
+## Exploration Phase Context Anchoring
+
+The problem with the Explore phase is most easily overlooked—AI exploration may completely deviate from the proposal scope. We address this through prompt enhancement:
+
+```markdown
+## Explore Execution Principles
+
+- **No documentation needed** - Exploration results do not need to be saved as independent documents
+- **Information transfer** - After exploration is complete, collected information will be passed to the Proposal creation phase
+- **Focus is on thinking** - The value of exploration lies in information collection, not document output
+
+## Integration with Proposal Creation
+
+The Explore phase occurs after proposal creation and before project code is written. After exploration is complete,
+the system will guide you to create or populate the `proposal.md` file, and information collected during exploration will serve as the foundation for proposal content.
+```
+
+This clarifies the positioning of the Explore phase: it's a preliminary step for information collection, not an independent document output phase. Once AI understands this, it can focus more on knowledge exploration related to the proposal.
+
+## Implementation Guide
+
+If you want to apply this solution in HagiCode, follow these steps:
+
+1. **Define planning directions**: Define direction IDs, default states, and prompt fragments in `ProposalPlanningDirections.cs`
+2. **Template parameterization**: Use conditional statements and variable injection in `.hbs` templates
+3. **Verify output**: When specific directions are enabled, check whether corresponding artifacts contain expected content
+4. **Test boundaries**: Verify that when directions are disabled, corresponding content is not generated, and other directions are not affected
+
+Note that template modifications must be kept in sync with upstream, and the structure of Chinese and English templates must be consistent. Rendering of planning directions should complete in microseconds to avoid impacting performance.
+
+## Summary
+
+The core of optimizing OpenSpec workflow efficiency lies in understanding the differentiated needs of different phases. Through phase-specific agents, parameterized templates, and clear content constraints, we enable AI to output high-quality content at every stage.
+
+This solution has been validated in HagiCode's practice—not only improving documentation quality but also reducing the workload of manual modifications. If your team is also using similar proposal-driven workflows, I hope these experiences can inspire you.
+
+It's really just breaking down the problem. Each phase has its own characteristics, use the right method, and the problem naturally becomes simple.
+
+## References
+
+- HagiCode project repository: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- HagiCode official website: [hagicode.com](https://hagicode.com)
+- Official version demo video: [www.bilibili.com/video/BV1z4oWB3EpY/](https://www.bilibili.com/video/BV1z4oWB3EpY/)
+- One-click installation experience: [docs.hagicode.com/installation/docker-compose](https://docs.hagicode.com/installation/docker-compose)
+- Desktop quick installation: [hagicode.com/desktop/](https://hagicode.com/desktop/)
+
+---
+
+If this article helps you:
+- Give it a like to help more people see it
+- Come to GitHub and give us a Star
+- Visit the official website to learn more
+- Watch the demo video to understand complete features
+- One-click installation to start experiencing
+
+Public beta has begun, welcome to install and experience!

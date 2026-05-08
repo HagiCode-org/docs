@@ -1,0 +1,215 @@
+---
+title: "다양한 Agent로 OpenSpec 각 단계 효율 최적화: HagiCode 실전 정리"
+date: 2026-05-08
+tags: [OpenSpec, AI, Agent, 프롬프트 엔지니어링, HagiCode, 워크플로우 최적화]
+---
+
+## 다양한 Agent로 OpenSpec 각 단계 효율 최적화: HagiCode 실전 정리
+
+> 범용 프롬프트는 다른 개발 단계의 구체적인 요구사항에 대응할 수 없습니다. 단계별 특정 agent와 매개변수화된 템플릿 시스템을 통해 AI가 모든 단계에서 고품질 콘텐츠를 출력하도록 합니다.
+
+## 배경
+
+OpenSpec은 제안 기반 개발 시스템으로, 구조화된 워크플로우를 통해 기술 제안의 생성, 검토 및 구현을 관리합니다. 이 아이디어 자체는 꽤 좋지만 실제 사용에서 단일 범용 AI 프롬프트에는 명확한 문제가 있음을 발견했습니다.
+
+explore 단계에서는 컨텍스트 앵커링이 부족하여 AI 탐색 시 제안 범위를 벗어나기 쉽고, 아티팩트 생성 품질이 불안정하며 design.md에는 시각화 요소가 부족하고 proposal.md에는 코드 변경표가 부족하며 tasks.md에는 포함해서는 안 되는 Git 작업이 섞여 들어가기도 합니다. 또한 책임 경계가 모호하여 다른 문서 유형에 어떤 내용이 포함되어야 하는지 명확하지 않고, 프롬프트는 유연성이 부족하여 다른 시나리오에 따라 AI 동작을 동적으로 조정할 수 없습니다.
+
+이러한 문제는 OpenSpec 워크플로우의 효율성과 출력 품질에 직접적인 영향을 미칩니다. 사실 다른 방법은 없고 직접 프롬프트 템플릿을 수정해야 했습니다. 이 글은 그 시기의 기록입니다.
+
+## HagiCode 소개
+
+이 글에서 공유하는 솔루션은 [HagiCode](https://hagicode.com) 프로젝트에서의 실전 경험에서 나왔습니다. HagiCode는 AI 기반 코드 어시스턴트로, 개발 과정에서 OpenSpec 워크플로우를 적극적으로 활용하여 기술 제안을 관리합니다. 이 글에서 소개하는 agent 계층화 전략은 실제 사용 중에 정리한 최적화 솔루션입니다.
+
+이 솔루션이 가치 있다고 생각하신다면 저희의 엔지니어링 실무가 괜찮다는 뜻이겠죠——HagiCode 그 자체도 주목해볼 만합니다.
+
+## OpenSpec 워크플로우 분석
+
+OpenSpec 시스템은 여러 핵심 단계를 포함하며, 각 단계마다 특정한 목표와 제약이 있습니다. 이러한 단계의 책임 경계를 이해하는 것이 효과적인 agent 전략을 설계하는 기초입니다.
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                        OpenSpec 워크플로우 단계                      │
+├─────────────────────────────────────────────────────────────────────┤
+│  ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐     │
+│  │ Explore  │ -> │   New    │ -> │    FF    │ -> │  Apply   │     │
+│  └──────────┘    └──────────┘    └──────────┘    └──────────┘     │
+│  ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐     │
+│  │ Archive  │    │   Sync   │    │ Verify   │    │  Status  │     │
+│  └──────────┘    └──────────┘    └──────────┘    └──────────┘     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+각 단계의 목표는 완전히 다릅니다. Explore 단계는 사고 태세가 필요하고 정보 수집에 집중하며, New 단계는 요구사항 분석과 솔루션 설계에 집중하고, FF 단계는 의존성 순서대로 아티팩트를 일괄 생성하며, Apply 단계는 제안을 실제 코드로 변환합니다. 동일한 프롬프트 템플릿으로 이렇게 차이가 큰 작업을 구동하는 것은 명백히 합리적이지 않습니다.
+
+## 프롬프트 시스템 아키텍처
+
+OpenSpec은 템플릿화된 프롬프트 시스템을 사용하며, 이는 agent 계층화를 위한 기술적 기반을 제공합니다. 템플릿 파일은 `.hbs` (Handlebars/Scriban) 형식을 채택하고 `.json` 메타데이터 파일과 함께 매개변수와 검증 규칙을 정의하며 중영 이중 언어를 지원합니다.
+
+핵심 설계는 다양한 단계의 프롬프트 시나리오를 정의하는 `PromptScenario` 열거형입니다:
+
+```csharp
+public enum PromptScenario
+{
+    OpenspecV1Explore,      // 탐색 단계
+    OpenspecV1New,          // 새 제안 생성
+    OpenspecV1Ff,           // 빠른 생성
+    OpenspecV1Apply,        // 변경사항 적용
+    OpenspecV1Archive       // 아카이브
+}
+```
+
+각 시나리오에는 해당하는 독립 템플릿 파일이 있으며, 예를 들어 `openspec-v1-explore.zh-CN.hbs`와 `openspec-v1-ff.zh-CN.hbs`처럼 다양한 단계에 특정 제약과 지침을 주입할 수 있습니다.
+
+## 매개변수화된 프롬프트 로딩
+
+동적 매개변수 주입을 구현하는 것이 전체 시스템의 핵심입니다. `FilePromptProvider`는 시나리오와 매개변수에 따라 프롬프트를 로딩합니다:
+
+```csharp
+public async Task<string> GetOpenspecV1FfPromptAsync(
+    string changeName,
+    string changeDescription,
+    string locale = "en-US",
+    string? planningDirectionInstructions = null,
+    CancellationToken cancellationToken = default)
+{
+    var parameters = new Dictionary<string, object>
+    {
+        { "planningDirectionInstructions", 
+          ResolvePlanningDirectionInstructions(locale, planningDirectionInstructions) }
+    };
+    
+    if (!string.IsNullOrWhiteSpace(changeName))
+    {
+        parameters["changeName"] = changeName;
+    }
+    
+    return await GetPromptWithParametersAsync(
+        PromptScenario.OpenspecV1Ff,
+        locale,
+        cancellationToken,
+        parameters);
+}
+```
+
+이 설계는 런타임에 `changeName` 및 `planningDirectionInstructions`와 같은 매개변수를 동적으로 주입할 수 있게 해주며 템플릿 파일 자체를 수정할 필요가 없습니다.
+
+## 계획 방향 동적 구성
+
+HagiCode는 유연한 계획 방향 시스템을 구현하여 사용자가 매번 생성마다 다른 방향을 선택할 수 있도록 합니다. 각 방향은 독립적인 ID, 설명 및 프롬프트 조각을 가집니다:
+
+```csharp
+public static class ProposalPlanningDirections
+{
+    private static readonly ProposalPlanningDirectionDefinition[] Catalog =
+    [
+        new(
+            ExploreId,
+            "Explore mode",
+            DefaultEnabled: true,
+            EnglishPromptFragment:
+            "- Explore mode: add an explicit exploration pass...",
+            ChinesePromptFragment:
+            "- 탐색 모드: 최종 아티팩트 전에 명확한 탐색 단계 추가..."),
+        // ... change-map, flowchart, prototype, architecture, sequence
+    ];
+    
+    public static NormalizedProposalPlanningDirections Normalize(
+        bool? enableExploreMode,
+        IReadOnlyList<PlanningDirectionOptionDto>? planningDirections)
+    {
+        // 기본 구성과 사용자 정의 구성 병합
+    }
+}
+```
+
+지원하는 방향은 다음과 같습니다: `explore`(탐색 모드), `change-map`(변경 맵), `flowchart`(상호작용 플로우 차트), `prototype`(UI 프로토타입), `architecture`(아키텍처 다이어그램), `sequence`(API 시퀀스 다이어그램). 사용자는 이러한 방향을 자유롭게 켜고 끌 수 있으며 시스템은 해당 프롬프트 명령 블록을 동적으로 생성합니다.
+
+Handlebars 템플릿에서 조건문을 사용하여 이러한 명령을 주입합니다:
+
+```handlebars
+{{#if planningDirectionInstructions}}
+## 이번 생성의 계획 방향
+
+{{{planningDirectionInstructions}}}
+{{/if}}
+```
+
+## 명확한 콘텐츠 범위 제약
+
+가장 중요한 개선점은 다른 문서 유형의 콘텐츠 범위 제약을 명확히 하는 것, 특히 tasks.md입니다. 프롬프트에 엄격한 제약 조건을 추가했습니다:
+
+```markdown
+### tasks.md 콘텐츠 범위 제약
+
+`tasks.md` 아티팩트를 생성할 때 다음 콘텐츠 범위 제약을 준수해야 합니다:
+
+**반드시 포함**:
+- 비즈니스 로직 작업(코드 구현, 기능 개발)
+- 기술 구현 작업(컴포넌트 통합, API 개발)
+- 테스트 작업(단위 테스트, 통합 테스트)
+- 문서 작업(문서 업데이트, 주석 추가)
+
+**포함 금지**:
+- Git 제출 작업(git add, git commit, git push)
+- 버전 제어 관리 워크플로우
+- 배포 및 릴리스 작업
+```
+
+규범적 언어(MUST/SHALL)를 사용하여 권장 언어 대신 AI가 이러한 제약을 엄격하게 이해하도록 합니다. proposal.md와 design.md에 대해서도 각각의 책임 경계를 명확히 했습니다: proposal.md는 코드 변경표와 UI 프로토타입 다이어그램(UI 변경 포함 시)을 반드시 포함해야 하며, design.md는 아키텍처 다이어그램과 데이터 플로우 다이어그램을 반드시 포함해야 합니다.
+
+## 탐색 단계 컨텍스트 앵커링
+
+탐색 단계의 문제는 가장 쉽게 간과됩니다——AI 탐색 시 제안 범위를 완전히 벗어날 수 있습니다. 프롬프트 강화를 통해 해결했습니다:
+
+```markdown
+## Explore 실행 원칙
+
+- **문서 작성 불필요** - 탐색 결과를 독립 문서로 저장할 필요 없음
+- **정보 전달** - 탐색 완료 후 수집된 정보는 Proposal 생성 단계로 전달됨
+- **중점은 사고** - 탐색의 가치는 정보 수집에 있지 문서 산출에 있지 않음
+
+## Proposal 생성과 연결
+
+Explore 단계는 제안 생성 후, 프로젝트 코드가 아직 작성되지 않았을 때 발생합니다. 탐색 완료 후,
+시스템은 `proposal.md` 파일을 생성하거나 채우도록 안내하며, 탐색 중 수집된 정보는 제안 콘텐츠의 기초가 됩니다.
+```
+
+이렇게 Explore 단계의 위치를 명확히 합니다: 정보 수집의 사전 단계이지 독립적인 문서 산출 단계가 아닙니다. AI가 이 점을 이해하면 제안 관련 지식 탐색에 더 집중할 수 있습니다.
+
+## 구현 가이드
+
+HagiCode에서 이 솔루션을 적용하려면 다음 단계대로 수행하세요:
+
+1. **계획 방향 정의**: `ProposalPlanningDirections.cs`에서 방향 ID, 기본 상태 및 프롬프트 조각 정의
+2. **템플릿 매개변수화**: `.hbs` 템플릿에서 조건문 및 변수 주입 사용
+3. **출력 검증**: 특정 방향을 활성화할 때 해당 아티팩트에 예상 콘텐츠가 포함되어 있는지 확인
+4. **경계 테스트**: 방향을 비활성화할 때 해당 콘텐츠가 생성되지 않고 다른 방향에 영향을 미치지 않는지 확인
+
+주의할 점은 템플릿 수정은 업스트림과 동기화를 유지해야 하며 중영문 템플릿 구조가 일치해야 합니다. 계획 방향 렌더링은 마이크로초 단위로 완료되어야 하며 성능 영향을 피해야 합니다.
+
+## 요약
+
+OpenSpec 워크플로우의 효율 최적화 핵심은 다양한 단계의 차별화된 요구사항을 이해하는 것입니다. 단계별 특정 agent, 매개변수화된 템플릿, 명확한 콘텐츠 제약을 통해 AI가 모든 단계에서 고품질 콘텐츠를 출력하도록 했습니다.
+
+이 솔루션은 HagiCode 실무에서 검증되었습니다——문서 품질을 높였을 뿐만 아니라 수동 수정 작업량도 줄였습니다. 귀하의 팀도 유사한 제안 기반 워크플로우를 사용 중이라면 이 경험이 도움이 되기를 바랍니다.
+
+사실 문제를 나누어 보는 것뿐입니다. 각 단계마다 특성이 있고 올바른 방법을 사용하면 문제가 자연스럽게 간단해집니다.
+
+## 참고 자료
+
+- HagiCode 프로젝트 주소: [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- HagiCode 공식 웹사이트: [hagicode.com](https://hagicode.com)
+- 정식 버전 데모 영상: [www.bilibili.com/video/BV1z4oWB3EpY/](https://www.bilibili.com/video/BV1z4oWB3EpY/)
+- 원클릭 설치 체험: [docs.hagicode.com/installation/docker-compose](https://docs.hagicode.com/installation/docker-compose)
+- Desktop 데스크톱용 빠른 설치: [hagicode.com/desktop/](https://hagicode.com/desktop/)
+
+---
+
+이 글이 도움이 되셨다면:
+- 좋아요를 눌러 더 많은 사람들에게 알리기
+- GitHub에서 Star 주기
+- 공식 웹사이트 방문하여 자세히 알아보기
+- 데모 영상 시청하여 완전한 기능 확인하기
+- 원클릭 설치로 체험 시작하기
+
+베타 테스트가 시작되었습니다. 설치하여 체험해보세요!

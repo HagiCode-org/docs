@@ -1,0 +1,291 @@
+---
+title: "Accélération de la distribution P2P des applications de bureau : une chaîne complète du consommateur au diffuseur"
+date: 2026-05-08
+tags: [P2P, Application de bureau, Architecture de distribution, Téléchargement hybride, HagiCode Desktop]
+---
+
+## Accélération de la distribution P2P des applications de bureau : une chaîne complète du consommateur au diffuseur
+
+> La distribution de fichiers volumineux pour les applications de bureau a toujours été un problème casse-tête — coûts de bande passante élevés, vitesses de téléchargement lentes, mauvaise expérience utilisateur. Cet article partage notre solution de distribution hybride implémentée dans HagiCode Desktop, qui accélère les téléchargements grâce à la technologie P2P tout en maintenant la capacité de secours HTTP, réalisant finalement une boucle complète entre le diffuseur et le consommateur.
+
+## Contexte
+
+Les packages de distribution des applications de bureau sont généralement volumineux, atteignant souvent plusieurs centaines de mégaoctets. C'est en fait assez normal, puisque les applications modernes ont de plus en plus de fonctionnalités, leur taille augmente naturellement. Pour une application comme HagiCode Desktop, chaque mise à jour de version signifie distribuer des fichiers volumineux à un grand nombre d'utilisateurs, ce qui représente un défi important pour la bande passante du serveur.
+
+L'approche traditionnelle consiste à télécharger directement via HTTP, simple et directe mais avec des problèmes évidents : pression élevée sur le serveur pendant les périodes de pointe, vitesses de téléchargement lentes pour les utilisateurs, en particulier pour les utilisateurs overseas. Il n'y a vraiment pas de moyen de contourner cela, la distance physique étant là. La technologie P2P peut bien résoudre ce problème — les utilisateurs se partageant des fragments de fichiers entre eux, réduisant la pression sur le serveur tout en améliorant les vitesses de téléchargement.
+
+Mais ce n'est pas si simple. Lors du développement de HagiCode Desktop, nous avons découvert un phénomène intéressant : le consommateur (l'application de bureau) avait déjà la capacité de téléchargement hybride, pouvant analyser des champs comme `torrentUrl`, `infoHash`, `webSeeds`, `sha256`, etc., et prioriser le téléchargement P2P via un coordinateur de téléchargement hybride. Cependant, le diffuseur (chaîne d'outils de construction) ne produisait pas de manière stable ces champs dans le `index.json` d'Azure Blob.
+
+Cela créait en fait une rupture : le client s'attendait à une méthode de distribution plus efficace, mais le diffuseur utilisait encore une liste de fichiers plate traditionnelle pour construire l'index. Le potentiel d'accélération P2P était ainsi gaspillé, ce qui est regrettable.
+
+Pour combler cette boucle, nous avons conçu un plan de transformation complet — de la génération des métadonnées côté diffuseur à la coordination du téléchargement hybride côté consommateur, permettant à toute la chaîne de distribution de fonctionner réellement. Ensuite, je partagerai en détail les idées de conception et les détails de mise en œuvre de cette solution, en espérant donner des références aux amis confrontés à des problèmes similaires.
+
+## À propos de HagiCode
+
+La solution de distribution hybride partagée dans cet article provient de notre expérience pratique dans le projet [HagiCode](https://hagicode.com). HagiCode Desktop est notre application de bureau, prenant en charge Windows, macOS et Linux. En tant que projet d'assistant de code IA, le bureau a besoin de mettre à jour fréquemment les packages de distribution, ce qui nous a poussés à explorer des méthodes de distribution plus efficaces. Après tout, personne ne veut attendre des heures pour chaque mise à jour, n'est-ce pas ?
+
+## Analyse
+
+### Nature du problème
+
+En surface, il s'agit d'une demande fonctionnelle "d'ajouter la génération de fichiers torrent". Mais après une analyse approfondie, nous avons découvert qu'il s'agissait en fait d'un problème de **désalignement du contrat producteur-consommateur**. Cette situation est assez courante, la compréhension des développeurs et des opérations n'est parfois pas sur la même longueur d'onde.
+
+Le consommateur s'attend à des champs de distribution hybride au niveau de l'actif :
+```json
+{
+  "torrentUrl": "https://...",
+  "infoHash": "<sha1 infohash>",
+  "webSeeds": ["https://..."],
+  "sha256": "<package digest>"
+}
+```
+
+Alors que le diffuseur fournit une liste plate au niveau fichier :
+```json
+{
+  "files": [
+    {"name": "hagicode-1.2.3-win-x64.zip", "url": "https://..."},
+    {"name": "hagicode-1.2.3-win-x64.zip.torrent", "url": "https://..."}
+  ]
+}
+```
+
+Ces deux ne correspondent pas sémantiquement. Le consommateur ne peut pas déterminer à partir de la liste plate quel fichier est le fichier principal et lequel est le sidecar, ni établir de relation d'association entre eux. C'est comme si vous cherchiez une personne, mais qu'on ne vous donne qu'un annuaire téléphonique, vous laissant trouver par vous-même, ce qui est aussi gênant.
+
+### Contraintes clés
+
+Lors de la conception de la solution, nous avons défini plusieurs contraintes qui doivent être satisfaites :
+
+**Cohérence des seuils** : Le diffuseur et le consommateur doivent utiliser le même seuil de taille de fichier. Nous l'avons fixé à 100 MB — seuls les fichiers atteignant cette taille génèrent des métadonnées P2P. Cela évite la dérive de stratégie "le diffuseur marque comme accélérable, le consommateur juge non accélérable". C'est en fait assez important, car si les deux extrémités ne sont pas cohérentes, divers bugs étranges apparaîtront.
+
+**Garantie de secours** : `webSeeds` doit inclure `directUrl`. C'est pour garantir que même sans connexion P2P (comme être le premier téléchargeur), les utilisateurs peuvent télécharger complètement le fichier via HTTP. P2P est un moyen d'accélération, pas un remplacement. C'est comme conduire, P2P est l'autoroute, mais il faut aussi garder la route ordinaire, au cas où l'autoroute serait embouteillée.
+
+**Fenêtre de compatibilité** : `index.json` doit sortir les projections `assets` et `files`. Les anciens clients peuvent ne pas reconnaître le champ `assets`, il faut garder `files` comme projection de compatibilité pour éviter que la mise à niveau côté serveur n'interrompe les clients. C'est en fait assez courant, car tous les utilisateurs ne mettent pas à jour leur client à temps.
+
+### Décisions techniques
+
+Pour la mise en œuvre spécifique, nous adoptons une architecture "constructeur de métadonnées indépendant + script de pontage Node optionnel", plutôt que d'implémenter directement la génération torrent dans `AzureBlobAdapter`.
+
+Cela présente plusieurs avantages :
+1. **Responsabilités claires** : La logique de construction des métadonnées est indépendante de l'adaptateur de stockage, facilitant les tests et la maintenance
+2. **Découplage de plateforme** : L'environnement C# peut appeler des scripts Node pour générer des torrents, en utilisant les bibliothèques torrent existantes
+3. **Migration conviviale** : À l'avenir, s'il faut migrer vers un autre backend de stockage, le constructeur de métadonnées peut être réutilisé
+
+C'est en fait un assez bon choix, après tout, avec des responsabilités claires, la maintenance ultérieure est également beaucoup plus simple.
+
+## Solution
+
+### 1. Flux de construction des métadonnées
+
+Le flux complet de construction des métadonnées est le suivant :
+
+```
+Emballage terminé → Identifier les grands fichiers(≥100MB) → Calculer sha256 → Générer .torrent sidecar 
+→ Extraire infoHash → Assembler metadata → Télécharger ZIP + .torrent → Écrire index.json
+```
+
+Chaque étape a des responsabilités claires :
+
+**Identification des fichiers** : Parcourir les artefacts de construction, filtrer les fichiers de taille ≥ 100 MB. Ce seuil est cohérent avec `HYBRID_THRESHOLD_BYTES` du consommateur. C'est en fait assez important, car si les seuils ne sont pas cohérents, divers problèmes étranges apparaîtront.
+
+**Calcul SHA256** : Calculer le résumé SHA256 pour le fichier principal, utilisé pour la vérification d'intégrité après le téléchargement. C'est la ligne de défense de sécurité, garantissant que le fichier téléchargé par l'utilisateur n'a pas été falsifié. C'est comme ajouter une empreinte au fichier, au cas où il serait falsifié, cela peut être détecté à temps.
+
+**Génération Torrent** : Utiliser un script Node pour appeler la bibliothèque torrent, générer le fichier sidecar `.torrent`. Le nom adopte le format `{artifact}.zip.torrent`, facilitant la recherche inverse du sidecar à partir du nom du fichier ZIP. C'est en fait une petite astuce, rendant la normalisation des noms, ce qui facilite également le traitement ultérieur.
+
+**Extraction InfoHash** : Extraire l'infoHash (format SHA1) du fichier torrent, qui est l'identifiant unique pour identifier les ressources dans le réseau P2P. C'est comme le numéro d'identification de chaque personne, avec cela, le réseau P2P peut trouver la ressource correspondante.
+
+**Assemblage des métadonnées** : Assembler `directUrl`, `torrentUrl`, `infoHash`, `webSeeds`, `sha256` en un objet complet de métadonnées d'actif.
+
+### 2. Mise à niveau de la structure d'index
+
+Passer de la projection plate `files` à l'objet `assets` au niveau de l'actif :
+
+```json
+{
+  "versions": [{
+    "version": "1.2.3",
+    "assets": [{
+      "name": "hagicode-1.2.3-win-x64.zip",
+      "directUrl": "https://hagicode.blob.core.windows.net/releases/v1.2.3/hagicode-1.2.3-win-x64.zip",
+      "torrentUrl": "https://hagicode.blob.core.windows.net/releases/v1.2.3/hagicode-1.2.3-win-x64.zip.torrent",
+      "infoHash": "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7r8s9t0",
+      "sha256": "1a2b3c4d5e6f7g8h9i0j1k2l3m4n5o6p7q8r9s0t1u2v3w4x5y6z7a8b9c0d1e2f",
+      "webSeeds": [
+        "https://hagicode.blob.core.windows.net/releases/v1.2.3/hagicode-1.2.3-win-x64.zip"
+      ]
+    }],
+    "files": [ // Projection de compatibilité
+      {"name": "hagicode-1.2.3-win-x64.zip", "url": "https://..."}
+    ]
+  }]
+}
+```
+
+Cette structure présente plusieurs considérations de conception :
+
+**Coexistence de double projection** : `assets` fournit des métadonnées complètes de distribution hybride, `files` fournit une vue de compatibilité simplifiée. Les nouveaux clients utilisent prioritairement `assets`, les anciens clients reviennent à `files`. C'est en fait un compromis, après tout, on ne peut pas abandonner les anciens utilisateurs.
+
+**WebSeeds inclut DirectUrl par défaut** : Garantit que même sans connexion P2P, les utilisateurs peuvent télécharger complètement via HTTP. C'est le plan de secours, garantissant une disponibilité à 100%. C'est comme conduire, P2P est l'autoroute, mais il faut aussi garder la route ordinaire, au cas où l'autoroute serait embouteillée.
+
+**Convention de nommage claire** : Le nommage `{artifact}.zip.torrent` permet au consommateur de découvrir automatiquement le sidecar, sans configuration supplémentaire. C'est en fait une petite astuce, rendant la normalisation des noms, ce qui facilite également le traitement ultérieur.
+
+### 3. Orchestration de publication
+
+`Build.AzureStorage.cs` orchestre le flux complet via `AzureReleasePublishOrchestrator` :
+
+```csharp
+var orchestrator = new AzureReleasePublishOrchestrator(
+    new ArtifactHybridMetadataBuilder(), // Construire les métadonnées hybrides
+    adapter);
+
+summary = await orchestrator.PublishAsync(
+    downloadedFiles,
+    publishOptions,
+    outputPath,
+    UploadIndex,
+    MinifyIndexJson,
+    EffectiveGitHubRepository);
+```
+
+L'orchestrateur garantit que le sidecar est téléchargé avant l'index, et sort des informations de diagnostic dans le résumé. Ainsi, si la publication échoue, on peut rapidement localiser si c'est un échec de génération de sidecar, un téléchargement manquant, ou un échec d'écriture d'index. C'est en fait assez important, car si la publication échoue, pouvoir localiser rapidement le problème fait gagner du temps.
+
+## Pratique
+
+### Modules de code clés
+
+#### 1. Consommateur de métadonnées
+
+Le consommateur construit des métadonnées de distribution hybride à partir de l'objet actif de `index.json` :
+
+```typescript
+// http-index-source.ts:418-463
+private buildHybridMetadata(asset: HttpIndexAsset, directUrl: string, assetKind: VersionAssetKind): HybridDistributionMetadata {
+  const torrentUrl = this.resolveOptionalUrl(asset.torrentUrl);
+  const hasTorrentMetadata = Boolean(torrentUrl || asset.infoHash);
+  
+  // WebSeeds inclut directUrl par défaut, garantissant le secours
+  const webSeeds = [...legacyWebSeeds, ...structuredWebSeeds];
+  if (directUrl && !webSeeds.some((seed) => seed.toLowerCase() === directUrl.toLowerCase())) {
+    webSeeds.push(directUrl);
+  }
+  
+  return {
+    torrentUrl,
+    infoHash: asset.infoHash,
+    webSeeds,
+    sha256: asset.sha256,
+    hasTorrentMetadata,
+    torrentFirst: hasTorrentMetadata, // Prioriser l'utilisation de P2P
+    eligible: hasTorrentMetadata,
+  };
+}
+```
+
+Points clés de conception :
+- Le drapeau `torrentFirst` contrôle la stratégie de téléchargement, priorisant P2P lorsqu'il y a des métadonnées torrent
+- `webSeeds` inclut forcément `directUrl`, garantissant la capacité de secours
+- Le champ `eligible` indique si cet actif prend en charge la distribution hybride
+
+C'est en fait une petite astuce, grâce à ces drapeaux, on peut contrôler flexiblement la stratégie de téléchargement.
+
+#### 2. Coordinateur de téléchargement hybride
+
+Le coordinateur de téléchargement hybride est responsable de l'exécution de la logique de téléchargement réelle :
+
+```typescript
+// hybrid-download-coordinator.ts:83-184
+async download(...): Promise<HybridDownloadResult> {
+  const policy = this.policyEvaluator.evaluate(version, settings);
+  
+  if (policy.useHybrid) {
+    try {
+      // Prioriser le téléchargement via le moteur Torrent
+      await this.engine.download(version, cachePath, settings, onProgress);
+    } catch (error) {
+      // Revenir à HTTP/WebSeed en cas d'échec de Torrent
+      await this.downloadViaHttpSources(version, cachePath, packageSource, policy, ...);
+    }
+  } else {
+    // Mode HTTP uniquement
+    await packageSource.downloadPackage(version, cachePath, onProgress);
+  }
+  
+  // Vérification sha256 pour garantir l'intégrité
+  return await this.verify(version, cachePath, ...);
+}
+```
+
+Stratégie de téléchargement :
+1. Évaluer les paramètres utilisateur et l'environnement réseau, décider d'activer ou non le mode hybride
+2. Essayer prioritairement le téléchargement Torrent (P2P)
+3. Revenir automatiquement à HTTP/WebSeed en cas d'échec
+4. Utiliser SHA256 pour vérifier l'intégrité après le téléchargement
+
+Cette conception garantit la meilleure expérience utilisateur — accélération avec P2P, téléchargement normal sans P2P. C'est en fait une assez bonne stratégie, après tout, l'expérience utilisateur est la plus importante.
+
+#### 3. Orchestration côté diffuseur
+
+Le diffuseur orchestre tout le processus via l'orchestrateur :
+
+```csharp
+// Build.AzureStorage.cs:152-168
+var orchestrator = new AzureReleasePublishOrchestrator(
+    new ArtifactHybridMetadataBuilder(),
+    adapter);
+
+summary = await orchestrator.PublishAsync(
+    downloadedFiles,
+    publishOptions,
+    outputPath,
+    UploadIndex,
+    MinifyIndexJson,
+    EffectiveGitHubRepository);
+```
+
+L'orchestrateur est responsable de :
+1. Appeler le constructeur de métadonnées pour générer les métadonnées P2P
+2. Garantir que le fichier principal et le sidecar sont tous deux téléchargés vers le stockage Blob
+3. Mettre à jour les projections `assets` et `files` de `index.json`
+4. Sortir le résumé de publication, contenant des informations de diagnostic
+
+C'est en fait une assez bonne architecture, grâce à l'orchestrateur, tout le processus est enchaîné, ce qui facilite également la maintenance ultérieure.
+
+### Expérience pratique
+
+Lors de la mise en œuvre de cette solution, nous avons accumulé une certaine expérience pratique :
+
+**Les conventions de nommage sont importantes** : Utiliser `{artifact}.zip.torrent` facilite la recherche inverse du sidecar à partir du ZIP. Cette convention semble simple, mais dans le fonctionnement réel, elle peut éviter beaucoup de problèmes — le consommateur peut découvrir automatiquement le sidecar, sans configuration supplémentaire. C'est en fait une petite astuce, rendant la normalisation des noms, ce qui facilite également le traitement ultérieur.
+
+**Le diagnostic d'échec doit être clair** : Le résumé de publication doit distinguer clairement l'échec de génération de sidecar, le téléchargement manquant, l'échec d'écriture d'index. Nous avons souffert dans les premières versions, après un échec de publication, nous ne savions pas à quelle étape le problème s'était produit, ce qui rendait le dépannage très difficile. Maintenant, chaque étape a des messages d'erreur clairs, la localisation des problèmes est beaucoup plus rapide. C'est en fait assez important, car le temps de débogage est aussi un coût.
+
+**Dégradation sécurisée** : Les actifs ne satisfaisant pas les conditions reviennent automatiquement à HTTP-only, ne bloquant pas toute la publication. Par exemple, si un fichier est inférieur à 100 MB, ou si la génération torrent échoue, les métadonnées P2P ne sont pas générées, et le téléchargement se fait directement via HTTP. Ainsi, même si le lien P2P a des problèmes, cela n'affecte pas les fonctionnalités de base. C'est en fait une assez bonne stratégie, après tout, on ne peut pas laisser un échec de fonctionnalité affecter tout le processus de publication.
+
+**Vérification des seuils** : Le seuil côté diffuseur doit être cohérent avec `HYBRID_THRESHOLD_BYTES` du consommateur. Nous définissons cette valeur comme une constante, et testons la cohérence du consommateur et du diffuseur dans le CI. Si elle n'est pas cohérente, il y aura la situation gênante "le diffuseur pense que cela peut être accéléré, le consommateur juge que cela ne peut pas être accéléré". C'est en fait assez important, car si les deux extrémités ne sont pas cohérentes, divers problèmes étranges apparaîtront.
+
+**SHA256 est la ligne de défense de sécurité** : Quel que soit le canal de téléchargement (P2P, HTTP, WebSeed), tout est vérifié avec SHA256 à la fin. C'est la dernière ligne de défense contre la falsification de fichiers, absolument pas à ommer. C'est comme ajouter une empreinte au fichier, au cas où il serait falsifié, cela peut être détecté à temps. Après tout, pour les questions de sécurité, on ne peut jamais être trop prudent.
+
+## Résumé
+
+La distribution de fichiers volumineux pour les applications de bureau est un problème classique, la technologie P2P offre une solution élégante. Grâce à cette architecture de distribution hybride, HagiCode Desktop a réalisé plusieurs objectifs clés :
+
+**Réduire les coûts de distribution** : P2P partage la pression de bande passante du serveur, maintenant une capacité de distribution stable même pendant les périodes de pointe. C'est en fait un assez bon gain, après tout, économiser de l'argent sur la bande passante est aussi une bonne chose.
+
+**Améliorer l'expérience utilisateur** : Les vitesses de téléchargement sont considérablement améliorées lorsqu'il y a une connexion P2P, en particulier pour les utilisateurs overseas. Sans connexion P2P, le téléchargement normal via HTTP est également possible, garantissant une disponibilité à 100%. C'est en fait une assez bonne stratégie, après tout, l'expérience utilisateur est la plus importante.
+
+**Chemin d'évolution progressif** : Grâce à la conception d'index à double projection, nous avons réalisé une mise à niveau indépendante du serveur et du client. Les anciens clients ne sont pas affectés, les nouveaux clients activent progressivement l'accélération P2P. C'est en fait une assez bonne architecture, après tout, si la mise à niveau est progressive, cela n'affectera pas les utilisateurs existants.
+
+L'idée centrale de cette solution est "l'amélioration progressive" — HTTP est la ligne de base, P2P est l'amélioration. Cela garantit à la fois la fiabilité et offre un espace d'amélioration des performances. C'est en fait un assez bon concept, après tout, on ne peut pas sacrifier la fiabilité pour poursuivre les performances.
+
+Si vous travaillez également sur la distribution d'applications de bureau, ou si vous êtes confronté à des problèmes de distribution de fichiers volumineux similaires, j'espère que cette solution vous donnera des idées. La technologie P2P n'est pas mystérieuse, la clé est de bien concevoir le contrat entre le diffuseur et le consommateur, permettant à toute la chaîne de fonctionner. C'est en fait une assez bonne expérience, après tout, si on peut aider les autres, c'est aussi une bonne chose.
+
+## Références
+
+- [Dépôt GitHub HagiCode](https://github.com/HagiCode-org/site)
+- [Site officiel HagiCode](https://hagicode.com)
+- [Guide d'installation HagiCode Desktop](https://hagicode.com/desktop/)
+- [Spécification du protocole Bittorrent](https://www.bittorrent.org/beps/bep_0003.html)
+- [Spécification de l'extension WebSeed (BEP 0019)](https://www.bittorrent.org/beps/bep_0019.html)
+
+---
+
+Si cet article vous aide, n'hésitez pas à venir sur GitHub pour un Star : [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site). La version bêta publique de HagiCode Desktop a commencé, installez-la et essayez-la ! C'est en fait une assez bonne invitation, après tout, plus il y a de personnes qui l'essaient, plus il y a de retours, ce qui est aussi une bonne chose.

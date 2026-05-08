@@ -1,0 +1,291 @@
+---
+title: 桌面應用程式 P2P 分發加速實踐：從消費端到發布端的全鏈路打通
+date: 2026-05-08
+tags: [P2P, 桌面應用程式, 分發架構, 混合下載, HagiCode Desktop]
+---
+
+## 桌面應用程式 P2P 分發加速實踐：從消費端到發布端的全鏈路打通
+
+> 桌面應用程式的大檔案分發一直是個讓人頭疼的問題——頻寬成本高、下載速度慢、使用者體驗差。本文分享我們在 HagiCode Desktop 中實現的混合分發方案，透過 P2P 技術加速下載，同時保持 HTTP 回源能力，最終實現了發布端和消費端的完整閉環。
+
+## 背景
+
+桌面應用程式的分發包通常都不小，動輒幾百 MB。這其實也挺正常的，畢竟現在的應用程式功能越來越多，體積自然也就上去了。對於像 HagiCode Desktop 這樣的應用程式來說，每次版本更新都意味著要向大量使用者分發大檔案，這對伺服器頻寬是個不小的考驗。
+
+傳統做法是直接走 HTTP 下載，簡單直接但問題也很明顯：高峰期伺服器壓力大，使用者下載速度慢，尤其是海外使用者。這也沒什麼辦法，畢竟物理距離在那裡擺著。P2P 技術可以很好地解決這個問題——使用者之間互相分享檔案片段，既能減輕伺服器壓力，又能提升下載速度。
+
+只是事情沒那麼簡單。我們在開發 HagiCode Desktop 時發現一個有趣的現象：消費端（桌面應用程式）已經具備了混合下載的能力，可以解析 `torrentUrl`、`infoHash`、`webSeeds`、`sha256` 等欄位，並透過混合下載協調器優先使用 P2P 加速下載。然而，發布端（建置工具鏈）卻沒有把這些欄位穩定地產出到 Azure Blob 的 `index.json` 中。
+
+這其實就形成了一個斷層：客戶端期待著更高效能的分發方式，但發布端還在用傳統的平鋪檔案列表建構索引。P2P 加速的潛力就這樣被浪費了，也算個遺憾吧。
+
+為了打通這個閉環，我們做了一個完整的改造方案——從發布端的元資料生成，到消費端的混合下載協調，讓整個分發鏈路真正跑起來。接下來，我會詳細分享這套方案的設計思路和實作細節，希望能給遇到類似問題的朋友一些參考。
+
+## 關於 HagiCode
+
+本文分享的混合分發方案來自我們在 [HagiCode](https://hagicode.com) 專案中的實踐經驗。HagiCode Desktop 是我們的桌面端應用程式，支援 Windows、macOS 和 Linux 多平台。作為一個 AI 程式碼助手專案，桌面端需要頻繁更新分發包，這促使我們探索更高效能的分發方式。畢竟，誰也不願意每次更新都要等上半天，不是嗎？
+
+## 分析
+
+### 問題本質
+
+表面上看，這是一個「新增 torrent 檔案生成」的功能需求。但深入分析後，我們發現這其實是一個 **producer-consumer 契約錯位** 問題。這種情況也挺常見的，開發和運維的理解有時候就不在一個頻道上。
+
+消費端期待的是資產級的混合分發欄位：
+```json
+{
+  "torrentUrl": "https://...",
+  "infoHash": "<sha1 infohash>",
+  "webSeeds": ["https://..."],
+  "sha256": "<package digest>"
+}
+```
+
+而發布端提供的卻是檔案級的平鋪列表：
+```json
+{
+  "files": [
+    {"name": "hagicode-1.2.3-win-x64.zip", "url": "https://..."},
+    {"name": "hagicode-1.2.3-win-x64.zip.torrent", "url": "https://..."}
+  ]
+}
+```
+
+這兩者在語義上完全不匹配。消費端無法從平鋪列表中判斷哪個檔案是主檔案、哪個是 sidecar，也無法建立它們之間的關聯關係。這就像你想找一個人，卻只給你一份電話簿，讓你自己去找，也挺麻煩的。
+
+### 關鍵約束
+
+在設計解決方案時，我們明確了幾個必須滿足的約束：
+
+**閾值一致性**：發布端與消費端必須使用相同的檔案大小閾值。我們設定為 100 MB——只有達到這個大小的檔案才生成 P2P 元資料。這樣可以避免「發布端標記可加速、消費端判定不加速」的策略漂移。這其實也挺重要的，畢竟兩端不一致的話，就會出現各種奇怪的 bug。
+
+**回源保證**：`webSeeds` 必須包含 `directUrl`。這是為了保證即使沒有 P2P 連線（比如作為第一個下載者），使用者也能透過 HTTP 完整下載檔案。P2P 是加速手段，不是替代方案。這就像開車，P2P 是高速公路，但也要保留普通公路，以防高速公路堵車。
+
+**相容性視窗**：`index.json` 需要同時輸出 `assets` 和 `files` 投影。舊客戶端可能不認識 `assets` 欄位，需要保留 `files` 作為相容投影，避免伺服器升級導致客戶端中斷。這其實也挺常見的，畢竟不是所有使用者都會及時更新客戶端。
+
+### 技術決策
+
+在具體實作上，我們採用「**獨立元資料建構器 + 可選 Node 橋接腳本**」的架構，而不是直接在 `AzureBlobAdapter` 中實作 torrent 生成。
+
+這樣做有幾個好處：
+1. **職責清晰**：元資料建構邏輯獨立於儲存介面卡，便於測試和維護
+2. **平台解耦**：C# 環境可以呼叫 Node 腳本生成 torrent，利用現成的 torrent 函式庫
+3. **遷移友善**：未來如果需要遷移到其他儲存後端，元資料建構器可以複用
+
+這其實也算個不錯的選擇，畢竟職責清晰的話，後續維護起來也省心很多。
+
+## 解決
+
+### 1. 元資料建構流程
+
+完整的元資料建構流程是這樣的：
+
+```
+打包完成 → 識別大檔案(≥100MB) → 計算 sha256 → 生成 .torrent sidecar 
+→ 提取 infoHash → 組裝 metadata → 上傳 ZIP + .torrent → 寫入 index.json
+```
+
+每一步都有明確的職責：
+
+**檔案識別**：遍歷建置產物，篩選出大小 ≥ 100 MB 的檔案。這個閾值與消費端的 `HYBRID_THRESHOLD_BYTES` 保持一致。這其實也挺重要的，畢竟閾值不一致的話，就會出現各種奇怪的問題。
+
+**SHA256 計算**：對主檔案計算 SHA256 摘要，用於下載後的完整性校驗。這是安全防線，確保使用者下載的檔案沒有被篡改。這就像給檔案加個指紋，萬一被篡改了，也能及時發現。
+
+**Torrent 生成**：使用 Node 腳本呼叫 torrent 函式庫，生成 `.torrent` sidecar 檔案。命名採用 `{artifact}.zip.torrent` 格式，便於從 ZIP 檔名反查 sidecar。這其實也算個小技巧，讓命名規範一些，後續處理起來也方便。
+
+**InfoHash 提取**：從 torrent 檔案中提取 infoHash（SHA1 格式），這是 P2P 網路中識別資源的的唯一標識。這就像每個人的身份證號，有了這個，P2P 網路才能找到對應的資源。
+
+**元資料組裝**：將 `directUrl`、`torrentUrl`、`infoHash`、`webSeeds`、`sha256` 組裝成完整的資產元資料物件。
+
+### 2. 索引結構升級
+
+從平鋪的 `files` 投影升級為資產級的 `assets` 物件：
+
+```json
+{
+  "versions": [{
+    "version": "1.2.3",
+    "assets": [{
+      "name": "hagicode-1.2.3-win-x64.zip",
+      "directUrl": "https://hagicode.blob.core.windows.net/releases/v1.2.3/hagicode-1.2.3-win-x64.zip",
+      "torrentUrl": "https://hagicode.blob.core.windows.net/releases/v1.2.3/hagicode-1.2.3-win-x64.zip.torrent",
+      "infoHash": "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7r8s9t0",
+      "sha256": "1a2b3c4d5e6f7g8h9i0j1k2l3m4n5o6p7q8r9s0t1u2v3w4x5y6z7a8b9c0d1e2f",
+      "webSeeds": [
+        "https://hagicode.blob.core.windows.net/releases/v1.2.3/hagicode-1.2.3-win-x64.zip"
+      ]
+    }],
+    "files": [ // 相容投影
+      {"name": "hagicode-1.2.3-win-x64.zip", "url": "https://..."}
+    ]
+  }]
+}
+```
+
+這個結構有幾個設計考慮：
+
+**雙投影並存**：`assets` 提供完整的混合分發元資料，`files` 提供簡化的相容視圖。新客戶端優先使用 `assets`，舊客戶端回退到 `files`。這其實也算個妥協，畢竟不能丟下舊使用者不管。
+
+**WebSeeds 預設包含 DirectUrl**：確保即使沒有 P2P 連線，使用者也能透過 HTTP 完整下載。這是兜底方案，保證 100% 可用性。這就像開車，P2P 是高速公路，但也要保留普通公路，以防高速公路堵車。
+
+**命名約定清晰**：`{artifact}.zip.torrent` 的命名讓消費端可以自動發現 sidecar，無需額外配置。這其實也算個小技巧，讓命名規範一些，後續處理起來也方便。
+
+### 3. 發布編排
+
+`Build.AzureStorage.cs` 透過 `AzureReleasePublishOrchestrator` 編排完整流程：
+
+```csharp
+var orchestrator = new AzureReleasePublishOrchestrator(
+    new ArtifactHybridMetadataBuilder(), // 建構混合元資料
+    adapter);
+
+summary = await orchestrator.PublishAsync(
+    downloadedFiles,
+    publishOptions,
+    outputPath,
+    UploadIndex,
+    MinifyIndexJson,
+    EffectiveGitHubRepository);
+```
+
+編排器確保 sidecar 先於 index 上傳，並在摘要中輸出診斷資訊。這樣如果發布失敗，可以快速定位是 sidecar 生成失敗、上傳缺失，還是索引寫入失敗。這其實也挺重要的，畢竟發布失敗的話，能快速定位問題，省得浪費時間。
+
+## 實踐
+
+### 關鍵程式碼模組
+
+#### 1. 元資料消費端
+
+消費端從 `index.json` 的資產物件建構混合分發元資料：
+
+```typescript
+// http-index-source.ts:418-463
+private buildHybridMetadata(asset: HttpIndexAsset, directUrl: string, assetKind: VersionAssetKind): HybridDistributionMetadata {
+  const torrentUrl = this.resolveOptionalUrl(asset.torrentUrl);
+  const hasTorrentMetadata = Boolean(torrentUrl || asset.infoHash);
+  
+  // WebSeeds 預設包含 directUrl，確保回源
+  const webSeeds = [...legacyWebSeeds, ...structuredWebSeeds];
+  if (directUrl && !webSeeds.some((seed) => seed.toLowerCase() === directUrl.toLowerCase())) {
+    webSeeds.push(directUrl);
+  }
+  
+  return {
+    torrentUrl,
+    infoHash: asset.infoHash,
+    webSeeds,
+    sha256: asset.sha256,
+    hasTorrentMetadata,
+    torrentFirst: hasTorrentMetadata, // 優先使用 P2P
+    eligible: hasTorrentMetadata,
+  };
+}
+```
+
+關鍵設計點：
+- `torrentFirst` 標誌控制下載策略，有 torrent 元資料時優先使用 P2P
+- `webSeeds` 強制包含 `directUrl`，確保回源能力
+- `eligible` 欄位表示該資產是否支援混合分發
+
+這其實也算個小技巧，透過這些標誌位，可以靈活控制下載策略。
+
+#### 2. 混合下載協調器
+
+混合下載協調器負責執行實際的下載邏輯：
+
+```typescript
+// hybrid-download-coordinator.ts:83-184
+async download(...): Promise<HybridDownloadResult> {
+  const policy = this.policyEvaluator.evaluate(version, settings);
+  
+  if (policy.useHybrid) {
+    try {
+      // 優先使用 Torrent 引擎下載
+      await this.engine.download(version, cachePath, settings, onProgress);
+    } catch (error) {
+      // Torrent 失敗時回退到 HTTP/WebSeed
+      await this.downloadViaHttpSources(version, cachePath, packageSource, policy, ...);
+    }
+  } else {
+    // HTTP-only 模式
+    await packageSource.downloadPackage(version, cachePath, onProgress);
+  }
+  
+  // sha256 校驗確保完整性
+  return await this.verify(version, cachePath, ...);
+}
+```
+
+下載策略：
+1. 評估使用者設定和網路環境，決定是否啟用混合模式
+2. 優先嘗試 Torrent 下載（P2P）
+3. 失敗時自動回退到 HTTP/WebSeed
+4. 下載完成後使用 SHA256 校驗完整性
+
+這種設計保證了最好的使用者體驗——有 P2P 時加速，沒有時也能正常下載。這其實也算個不錯的策略，畢竟使用者體驗才是最重要的。
+
+#### 3. 發布端編排
+
+發布端透過編排器協調整個流程：
+
+```csharp
+// Build.AzureStorage.cs:152-168
+var orchestrator = new AzureReleasePublishOrchestrator(
+    new ArtifactHybridMetadataBuilder(),
+    adapter);
+
+summary = await orchestrator.PublishAsync(
+    downloadedFiles,
+    publishOptions,
+    outputPath,
+    UploadIndex,
+    MinifyIndexJson,
+    EffectiveGitHubRepository);
+```
+
+編排器負責：
+1. 呼叫元資料建構器生成 P2P 元資料
+2. 確保主檔案和 sidecar 都上傳到 Blob 儲存
+3. 更新 `index.json` 的 `assets` 和 `files` 投影
+4. 輸出發布摘要，包含診斷資訊
+
+這其實也算個不錯的架構，透過編排器，把整個流程串起來，也方便後續維護。
+
+### 實踐經驗
+
+在實施這套方案的過程中，我們積累了一些實踐經驗：
+
+**命名約定很重要**：使用 `{artifact}.zip.torrent` 便於從 ZIP 反查 sidecar。這個約定看似簡單，但在實際運行中能省去很多麻煩——消費端可以自動發現 sidecar，無需額外配置。這其實也算個小技巧，讓命名規範一些，後續處理起來也方便。
+
+**失敗診斷要清晰**：發布摘要需明確區分 sidecar 生成失敗、上傳缺失、索引寫入失敗。我們在早期版本中吃過虧，發布失敗後不知道是哪一步出了問題，排查起來很費勁。現在每一步都有明確的錯誤資訊，問題定位快多了。這其實也挺重要的，畢竟調試時間也是一種成本。
+
+**安全降級**：不滿足條件的資產自動回退為 HTTP-only，不阻塞整個發布。比如某個檔案小於 100 MB，或者 torrent 生成失敗，就不生成 P2P 元資料，直接走 HTTP 下載。這樣即使 P2P 鏈路出問題，也不影響基本功能。這其實也算個不錯的策略，畢竟不能因為一個功能失敗，就影響整個發布流程。
+
+**閾值校驗**：發布端閾值必須與消費端 `HYBRID_THRESHOLD_BYTES` 保持一致。我們把這個值定義為常數，並在 CI 中測試消費端和發布端的一致性。如果不一致，會出現「發布端認為可以加速、消費端判定不加速」的尷尬情況。這其實也挺重要的，畢竟兩端不一致的話，就會出現各種奇怪的問題。
+
+**SHA256 是安全防線**：無論透過什麼管道下載（P2P、HTTP、WebSeed），最後都用 SHA256 校驗。這是防止檔案被篡改的最後一道防線，絕對不能省。這就像給檔案加個指紋，萬一被篡改了，也能及時發現。畢竟安全問題，再怎麼謹慎也不為過。
+
+## 總結
+
+桌面應用程式的大檔案分發是個經典難題，P2P 技術提供了一種優雅的解決方案。透過這套混合分發架構，HagiCode Desktop 實現了幾個關鍵目標：
+
+**降低分發成本**：P2P 分擔了伺服器頻寬壓力，高峰期也能保持穩定的分發能力。這其實也算個不錯的收益，畢竟能省點頻寬錢也是好的。
+
+**提升使用者體驗**：有 P2P 連線時下載速度顯著提升，尤其是海外使用者。沒有 P2P 連線時也能透過 HTTP 正常下載，保證 100% 可用性。這其實也算個不錯的策略，畢竟使用者體驗才是最重要的。
+
+**平滑演進路徑**：透過雙投影索引設計，實現了伺服器端和客戶端的獨立升級。舊客戶端不受影響，新客戶端逐步啟用 P2P 加速。這其實也算個不錯的架構，畢竟能平滑升級的話，就不會影響現有使用者。
+
+這套方案的核心思路是「漸進式增強」——HTTP 是基線，P2P 是增強。這樣既保證了可靠性，又提供了效能提升的空間。這其實也算個不錯的理念，畢竟不能因為追求效能，就犧牲可靠性。
+
+如果你也在做桌面應用程式分發，或者面臨類似的大檔案分發問題，希望這套方案能給你一些啟發。P2P 技術並不神秘，關鍵是要設計好發布端和消費端的契約，讓整個鏈路跑通。這其實也算個不錯的經驗，畢竟能幫到別人的話，也算個好事吧。
+
+## 參考資料
+
+- [HagiCode GitHub 儲存庫](https://github.com/HagiCode-org/site)
+- [HagiCode 官網](https://hagicode.com)
+- [HagiCode Desktop 安裝指南](https://hagicode.com/desktop/)
+- [Bittorrent Protocol 規範](https://www.bittorrent.org/beps/bep_0003.html)
+- [WebSeed 擴充規範 (BEP 0019)](https://www.bittorrent.org/beps/bep_0019.html)
+
+---
+
+如果本文對你有幫助，歡迎來 GitHub 給個 Star：[github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)。HagiCode Desktop 公測已開始，歡迎安裝體驗！這其實也算個不錯的邀請，畢竟能多一個人試用，也就多一份回饋，也算個好事吧。
