@@ -228,6 +228,7 @@ export class DocsPromoteBannerController {
   private readonly boundHandlePause: () => void;
   private readonly boundHandleClose: (event: MouseEvent) => void;
   private readonly boundHandleMotionChange: () => void;
+  private readonly boundHandleVisibilityChange: () => void;
 
   private connected = false;
   private promotions: ActivePromotion[] = [];
@@ -291,6 +292,16 @@ export class DocsPromoteBannerController {
       this.updatePauseButton();
       this.syncRotationTimer();
     };
+    this.boundHandleVisibilityChange = () => {
+      this.syncRotationTimer();
+
+      if (this.isDocumentVisible()) {
+        this.startRefreshTimer();
+        return;
+      }
+
+      this.stopRefreshTimer();
+    };
     this.pauseLabel = this.pauseButton?.getAttribute('data-rotation-pause-label')
       ?? (mapDocsLocaleToPromoteLocale(this.locale) === 'en' ? 'Pause automatic rotation' : '暂停自动轮播');
     this.resumeLabel = this.pauseButton?.getAttribute('data-rotation-resume-label')
@@ -307,6 +318,7 @@ export class DocsPromoteBannerController {
     this.prefersReducedMotion = this.motionQuery?.matches ?? false;
     this.attachListeners();
     await this.reloadPromotions({ forceRefresh: false });
+    this.syncRotationTimer();
     this.startRefreshTimer();
   }
 
@@ -333,6 +345,7 @@ export class DocsPromoteBannerController {
     this.closeButton?.addEventListener('click', this.boundHandleClose);
     window.addEventListener('scroll', this.boundRequestLayoutSync, { passive: true });
     window.addEventListener('resize', this.boundRequestLayoutSync);
+    document.addEventListener('visibilitychange', this.boundHandleVisibilityChange);
 
     if (this.motionQuery) {
       if (typeof this.motionQuery.addEventListener === 'function') {
@@ -360,6 +373,7 @@ export class DocsPromoteBannerController {
     this.closeButton?.removeEventListener('click', this.boundHandleClose);
     window.removeEventListener('scroll', this.boundRequestLayoutSync);
     window.removeEventListener('resize', this.boundRequestLayoutSync);
+    document.removeEventListener('visibilitychange', this.boundHandleVisibilityChange);
 
     if (this.motionQuery) {
       if (typeof this.motionQuery.removeEventListener === 'function') {
@@ -603,6 +617,7 @@ export class DocsPromoteBannerController {
       this.promotions.length < 2 ||
       this.isPaused ||
       this.prefersReducedMotion ||
+      !this.isDocumentVisible() ||
       visibilityState !== 'ready'
     ) {
       return;
@@ -622,7 +637,16 @@ export class DocsPromoteBannerController {
 
   private startRefreshTimer(): void {
     this.stopRefreshTimer();
+
+    if (!this.isDocumentVisible()) {
+      return;
+    }
+
     this.refreshHandle = window.setInterval(() => {
+      if (!this.isDocumentVisible()) {
+        return;
+      }
+
       void this.reloadPromotions({ forceRefresh: true });
     }, this.refreshIntervalMs);
   }
@@ -632,6 +656,10 @@ export class DocsPromoteBannerController {
       window.clearInterval(this.refreshHandle);
       this.refreshHandle = null;
     }
+  }
+
+  private isDocumentVisible(): boolean {
+    return typeof document === 'undefined' || document.visibilityState !== 'hidden';
   }
 
   private requestLayoutSync(): void {

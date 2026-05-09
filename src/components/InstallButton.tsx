@@ -3,7 +3,7 @@
  * 支持自动平台检测、下拉菜单选择版本、Docker 版本跳转。
  * 运行时仅消费 canonical index，并展示加载/可用/失败状态。
  */
-import React, { useCallback, useEffect, useId, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 
 import type {
   AssetType,
@@ -275,6 +275,7 @@ export default function InstallButton({
   channel = 'stable',
   locale = 'zh',
 }: InstallButtonProps) {
+  const wrapperRef = useRef<HTMLDivElement | null>(null);
   const supportedInitialPlatforms = useMemo(
     () => filterSupportedPlatformGroups(initialPlatforms),
     [initialPlatforms],
@@ -378,7 +379,14 @@ export default function InstallButton({
     };
   }, [channel]);
 
+  const showSteamShortcut = variant === 'compact' && steamStoreLink.href.length > 0;
+  const needsSteamLink = variant === 'compact';
+
   useEffect(() => {
+    if (!needsSteamLink) {
+      return undefined;
+    }
+
     let mounted = true;
 
     void loadSteamStoreLink().then((nextLink) => {
@@ -390,7 +398,7 @@ export default function InstallButton({
     return () => {
       mounted = false;
     };
-  }, []);
+  }, [needsSteamLink]);
 
   useEffect(() => {
     if (initialVersion || supportedInitialPlatforms.length > 0 || versionError) {
@@ -451,19 +459,27 @@ export default function InstallButton({
   }, [canDownload, currentOS, orderedPlatformData]);
 
   useEffect(() => {
-    const handleClickOutside = () => {
+    if (!isDropdownOpen) {
+      return undefined;
+    }
+
+    const handlePointerDown = (event: MouseEvent | PointerEvent) => {
+      if (wrapperRef.current?.contains(event.target as Node)) {
+        return;
+      }
+
       setIsDropdownOpen(false);
     };
 
-    if (isDropdownOpen) {
-      document.addEventListener('click', handleClickOutside);
-      return () => document.removeEventListener('click', handleClickOutside);
-    }
-
-    return undefined;
+    document.addEventListener('pointerdown', handlePointerDown);
+    return () => document.removeEventListener('pointerdown', handlePointerDown);
   }, [isDropdownOpen]);
 
   useEffect(() => {
+    if (!isDropdownOpen) {
+      return undefined;
+    }
+
     const handleEscape = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         setIsDropdownOpen(false);
@@ -472,7 +488,7 @@ export default function InstallButton({
 
     document.addEventListener('keydown', handleEscape);
     return () => document.removeEventListener('keydown', handleEscape);
-  }, []);
+  }, [isDropdownOpen]);
 
   const handleToggleDropdown = (event: React.MouseEvent) => {
     event.stopPropagation();
@@ -538,7 +554,6 @@ export default function InstallButton({
     .filter((entry) => Boolean(entry.action));
   const showDisabledPrimaryButtons = primarySourceButtons.length === 0;
   const primaryButtonsDisabled = isLoading || !canDownload || (!FEATURE_MAC_DOWNLOAD_ENABLED && currentOS === 'macos');
-  const showSteamShortcut = variant === 'compact' && steamStoreLink.href.length > 0;
   const showDropdownToggle = canDownload && platformData.length > 0;
 
   const macDisabledSection = !FEATURE_MAC_DOWNLOAD_ENABLED && macPlatform ? (
@@ -577,7 +592,10 @@ export default function InstallButton({
   ) : null;
 
   return (
-    <div className={`install-button-wrapper install-button-wrapper--${variant} ${className}`}>
+    <div
+      ref={wrapperRef}
+      className={`install-button-wrapper install-button-wrapper--${variant} ${className}`}
+    >
       <div
         className={`split-button-container ${variant === 'compact' ? 'split-button-container--segmented' : ''}`}
         data-action-group={variant === 'compact' ? 'segmented' : 'default'}
@@ -678,106 +696,108 @@ export default function InstallButton({
               </svg>
             </button>
 
-            <ul
-              className={`dropdown-menu ${isDropdownOpen ? 'dropdown-menu-open' : ''}`}
-              id={`${buttonId}-menu`}
-              role="menu"
-              aria-label={t.selectDownloadVersion}
-            >
-              {showMacDisabledFirst && macDisabledSection}
-              {orderedPlatformData.map((platformGroup) => (
-                <React.Fragment key={platformGroup.platform}>
-                  <div
-                    className={`dropdown-group-label platform--${platformGroup.platform}`}
-                    role="presentation"
+            {isDropdownOpen && (
+              <ul
+                className="dropdown-menu dropdown-menu-open"
+                id={`${buttonId}-menu`}
+                role="menu"
+                aria-label={t.selectDownloadVersion}
+              >
+                {showMacDisabledFirst && macDisabledSection}
+                {orderedPlatformData.map((platformGroup) => (
+                  <React.Fragment key={platformGroup.platform}>
+                    <div
+                      className={`dropdown-group-label platform--${platformGroup.platform}`}
+                      role="presentation"
+                    >
+                      <span className="platform-icon">{PLATFORM_ICONS[platformGroup.platform]}</span>
+                      <span className="platform-name">{platformGroup.platformLabel}</span>
+                      {version?.version && (
+                        <span className="version-tag">{version.version}</span>
+                      )}
+                    </div>
+                    {platformGroup.options.map((option, index) => {
+                      const archLabel = getArchitectureLabel(option.assetType, locale);
+                      const fileExt = getFileExtension(option.assetType);
+                      const isRecommended = index === 0;
+                      const actionPair = resolvePrimaryDownloadActionPair({
+                        sourceActions: option.sourceActions,
+                      });
+                      const visiblePrimaryActions = primarySourceOrder
+                        .map((source) => ({
+                          source,
+                          action: actionPair[source],
+                          label: getPrimaryDownloadSourceLabel(source, locale),
+                        }))
+                        .filter((entry) => Boolean(entry.action));
+                      return (
+                        <li key={option.url} role="none">
+                          <div className={`dropdown-item dropdown-item-multi-source ${isRecommended ? 'dropdown-item-recommended' : ''}`}>
+                            <div className="dropdown-item-meta">
+                              <span className="dropdown-item-label">
+                                {getAssetTypeLabel(option.assetType, locale)}
+                                {archLabel && <span className="arch-label"> ({archLabel})</span>}
+                                {fileExt && <span className="file-ext-badge">{fileExt}</span>}
+                                {isRecommended && <span className="recommended-badge">{t.recommended}</span>}
+                              </span>
+                              {option.size && (
+                                <span className="dropdown-item-size">{option.size}</span>
+                              )}
+                            </div>
+                            <div className="dropdown-source-actions">
+                              {visiblePrimaryActions.map(({ source, action, label }) => (
+                                <a
+                                  key={`${option.url}-${source}`}
+                                  href={action?.url ?? option.url}
+                                  className={`dropdown-source-action dropdown-source-action--${source}`}
+                                  role="menuitem"
+                                  download
+                                  onClick={handleLinkClick}
+                                >
+                                  <span>{label}</span>
+                                </a>
+                              ))}
+                              {actionPair.secondary.map((action) => (
+                                <a
+                                  key={`${option.url}-${action.kind}`}
+                                  href={action.url}
+                                  className="dropdown-source-action dropdown-source-action-secondary"
+                                  role="menuitem"
+                                  download
+                                  onClick={handleLinkClick}
+                                >
+                                  <span>{getDownloadActionLabel(action.kind, locale)}</span>
+                                </a>
+                              ))}
+                            </div>
+                          </div>
+                        </li>
+                      );
+                    })}
+                  </React.Fragment>
+                ))}
+                {!showMacDisabledFirst && macDisabledSection}
+                <li role="separator" className="dropdown-separator" />
+                <li role="none">
+                  <a
+                    href={containerLink}
+                    className="dropdown-item dropdown-item-docker"
+                    role="menuitem"
+                    onClick={handleLinkClick}
                   >
-                    <span className="platform-icon">{PLATFORM_ICONS[platformGroup.platform]}</span>
-                    <span className="platform-name">{platformGroup.platformLabel}</span>
-                    {version?.version && (
-                      <span className="version-tag">{version.version}</span>
-                    )}
-                  </div>
-                  {platformGroup.options.map((option, index) => {
-                    const archLabel = getArchitectureLabel(option.assetType, locale);
-                    const fileExt = getFileExtension(option.assetType);
-                    const isRecommended = index === 0;
-                    const actionPair = resolvePrimaryDownloadActionPair({
-                      sourceActions: option.sourceActions,
-                    });
-                    const visiblePrimaryActions = primarySourceOrder
-                      .map((source) => ({
-                        source,
-                        action: actionPair[source],
-                        label: getPrimaryDownloadSourceLabel(source, locale),
-                      }))
-                      .filter((entry) => Boolean(entry.action));
-                    return (
-                      <li key={option.url} role="none">
-                        <div className={`dropdown-item dropdown-item-multi-source ${isRecommended ? 'dropdown-item-recommended' : ''}`}>
-                          <div className="dropdown-item-meta">
-                            <span className="dropdown-item-label">
-                              {getAssetTypeLabel(option.assetType, locale)}
-                              {archLabel && <span className="arch-label"> ({archLabel})</span>}
-                              {fileExt && <span className="file-ext-badge">{fileExt}</span>}
-                              {isRecommended && <span className="recommended-badge">{t.recommended}</span>}
-                            </span>
-                            {option.size && (
-                              <span className="dropdown-item-size">{option.size}</span>
-                            )}
-                          </div>
-                          <div className="dropdown-source-actions">
-                            {visiblePrimaryActions.map(({ source, action, label }) => (
-                              <a
-                                key={`${option.url}-${source}`}
-                                href={action?.url ?? option.url}
-                                className={`dropdown-source-action dropdown-source-action--${source}`}
-                                role="menuitem"
-                                download
-                                onClick={handleLinkClick}
-                              >
-                                <span>{label}</span>
-                              </a>
-                            ))}
-                            {actionPair.secondary.map((action) => (
-                              <a
-                                key={`${option.url}-${action.kind}`}
-                                href={action.url}
-                                className="dropdown-source-action dropdown-source-action-secondary"
-                                role="menuitem"
-                                download
-                                onClick={handleLinkClick}
-                              >
-                                <span>{getDownloadActionLabel(action.kind, locale)}</span>
-                              </a>
-                            ))}
-                          </div>
-                        </div>
-                      </li>
-                    );
-                  })}
-                </React.Fragment>
-              ))}
-              {!showMacDisabledFirst && macDisabledSection}
-              <li role="separator" className="dropdown-separator" />
-              <li role="none">
-                <a
-                  href={containerLink}
-                  className="dropdown-item dropdown-item-docker"
-                  role="menuitem"
-                  onClick={handleLinkClick}
-                >
-                  <svg className="docker-icon" viewBox="0 0 24 24" fill="currentColor">
-                    <path d="M13.983 11.078h2.119a.186.186 0 00.186-.185V9.006a.186.186 0 00-.186-.186h-2.119a.185.185 0 00-.185.185v1.888c0 .102.083.185.185.185m-2.954-5.43h2.118a.186.186 0 00.186-.186V3.574a.186.186 0 00-.186-.185h-2.118a.185.185 0 00-.185.185v1.888c0 .102.082.185.185.186m0 2.716h2.118a.187.187 0 00.186-.186V6.29a.186.186 0 00-.186-.185h-2.118a.185.185 0 00-.185.185v1.887c0 .102.082.185.185.186m-2.93 0h2.12a.186.186 0 00.184-.186V6.29a.185.185 0 00-.185-.185H8.1a.185.185 0 00-.185.185v1.887c0 .102.083.185.185.186m-2.964 0h2.119a.186.186 0 00.185-.186V6.29a.185.185 0 00-.185-.185H5.136a.186.186 0 00-.186.185v1.887c0 .102.084.185.186.186m5.893 2.715h2.118a.186.186 0 00.186-.185V9.006a.186.186 0 00-.186-.186h-2.118a.185.185 0 00-.185.185v1.888c0 .102.082.185.185.185m-2.93 0h2.12a.185.185 0 00.184-.185V9.006a.185.185 0 00-.184-.186h-2.12a.185.185 0 00-.184.185v1.888c0 .102.083.185.185.185m-2.964 0h2.119a.185.185 0 00.185-.185V9.006a.185.185 0 00-.185-.186h-2.12a.186.186 0 00-.185.186v1.887c0 .102.084.185.186.185m-2.92 0h2.12a.185.185 0 00.184-.185V9.006a.185.185 0 00-.184-.186h-2.12a.185.185 0 00-.184.185v1.888c0 .102.082.185.185.185M23.763 9.89c-.065-.051-.672-.51-1.954-.51-.338.001-.676.03-1.01.087-.248-1.7-1.653-2.53-1.716-2.566l-.344-.199-.226.327c-.284.438-.49.922-.612 1.43-.23.97-.09 1.882.403 2.661-.595.332-1.55.413-1.744.42H.751a.751.751 0 00-.75.748 11.376 11.376 0 00.692 4.062c.545 1.428 1.355 2.48 2.41 3.124 1.18.723 3.1 1.137 5.275 1.137.983.003 1.963-.086 2.93-.266a12.248 12.248 0 003.823-1.389c.98-.567 1.86-1.288 2.61-2.136 1.252-1.418 1.998-2.997 2.553-4.4h.221c1.372 0 2.215-.549 2.68-1.009.309-.293.55-.65.707-1.046l.098-.288z" />
-                  </svg>
-                  <span className="dropdown-item-label">{t.containerDeployment}</span>
-                  <svg className="external-icon" viewBox="0 0 24 24" fill="none">
-                    <path d="M18 13V19C18 19.5304 17.7893 20.0391 17.4142 20.4142C17.0391 20.7893 16.5304 21 16 21H5C4.46957 21 3.96086 20.7893 3.58579 20.4142C3.21071 20.0391 3 19.5304 3 19V8C3 7.46957 3.21071 6.96086 3.58579 6.58579C3.96086 6.21071 4.46957 6 5 6H11" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-                    <path d="M15 3H21V9" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-                    <path d="M10 14L21 3" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-                  </svg>
-                </a>
-              </li>
-            </ul>
+                    <svg className="docker-icon" viewBox="0 0 24 24" fill="currentColor">
+                      <path d="M13.983 11.078h2.119a.186.186 0 00.186-.185V9.006a.186.186 0 00-.186-.186h-2.119a.185.185 0 00-.185.185v1.888c0 .102.083.185.185.185m-2.954-5.43h2.118a.186.186 0 00.186-.186V3.574a.186.186 0 00-.186-.185h-2.118a.185.185 0 00-.185.185v1.888c0 .102.082.185.185.186m0 2.716h2.118a.187.187 0 00.186-.186V6.29a.186.186 0 00-.186-.185h-2.118a.185.185 0 00-.185.185v1.887c0 .102.082.185.185.186m-2.93 0h2.12a.186.186 0 00.184-.186V6.29a.185.185 0 00-.185-.185H8.1a.185.185 0 00-.185.185v1.887c0 .102.083.185.185.186m-2.964 0h2.119a.186.186 0 00.185-.186V6.29a.185.185 0 00-.185-.185H5.136a.186.186 0 00-.186.185v1.887c0 .102.084.185.186.186m5.893 2.715h2.118a.186.186 0 00.186-.185V9.006a.186.186 0 00-.186-.186h-2.118a.185.185 0 00-.185.185v1.888c0 .102.082.185.185.185m-2.93 0h2.12a.185.185 0 00.184-.185V9.006a.185.185 0 00-.184-.186h-2.12a.185.185 0 00-.184.185v1.888c0 .102.083.185.185.185m-2.964 0h2.119a.185.185 0 00.185-.185V9.006a.185.185 0 00-.185-.186h-2.12a.186.186 0 00-.185.186v1.887c0 .102.084.185.186.185m-2.92 0h2.12a.185.185 0 00.184-.185V9.006a.185.185 0 00-.184-.186h-2.12a.185.185 0 00-.184.185v1.888c0 .102.082.185.185.185M23.763 9.89c-.065-.051-.672-.51-1.954-.51-.338.001-.676.03-1.01.087-.248-1.7-1.653-2.53-1.716-2.566l-.344-.199-.226.327c-.284.438-.49.922-.612 1.43-.23.97-.09 1.882.403 2.661-.595.332-1.55.413-1.744.42H.751a.751.751 0 00-.75.748 11.376 11.376 0 00.692 4.062c.545 1.428 1.355 2.48 2.41 3.124 1.18.723 3.1 1.137 5.275 1.137.983.003 1.963-.086 2.93-.266a12.248 12.248 0 003.823-1.389c.98-.567 1.86-1.288 2.61-2.136 1.252-1.418 1.998-2.997 2.553-4.4h.221c1.372 0 2.215-.549 2.68-1.009.309-.293.55-.65.707-1.046l.098-.288z" />
+                    </svg>
+                    <span className="dropdown-item-label">{t.containerDeployment}</span>
+                    <svg className="external-icon" viewBox="0 0 24 24" fill="none">
+                      <path d="M18 13V19C18 19.5304 17.7893 20.0391 17.4142 20.4142C17.0391 20.7893 16.5304 21 16 21H5C4.46957 21 3.96086 20.7893 3.58579 20.4142C3.21071 20.0391 3 19.5304 3 19V8C3 7.46957 3.21071 6.96086 3.58579 6.58579C3.96086 6.21071 4.46957 6 5 6H11" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                      <path d="M15 3H21V9" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                      <path d="M10 14L21 3" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                    </svg>
+                  </a>
+                </li>
+              </ul>
+            )}
           </>
         )}
       </div>

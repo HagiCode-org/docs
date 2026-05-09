@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { AssetType, CpuArchitecture } from '@shared/desktop';
 import type { DesktopVersionData } from '@shared/version-manager';
+import * as steamStoreLink from '@shared/steam-store-link';
 import * as versionManager from '@shared/version-manager';
 import InstallButton, { filterSupportedPlatformGroups } from '../InstallButton';
 
@@ -96,6 +97,7 @@ describe('InstallButton runtime states', () => {
   beforeEach(() => {
     vi.mocked(versionManager.getDesktopVersionData).mockReset();
     vi.mocked(versionManager.clearDesktopVersionCache).mockReset();
+    vi.mocked(steamStoreLink.loadSteamStoreLink).mockClear();
     assignMock.mockReset();
     window.history.replaceState({}, '', '/');
   });
@@ -320,6 +322,17 @@ describe('InstallButton runtime states', () => {
     expect(await screen.findByRole('menu')).toBeInTheDocument();
   });
 
+  it('keeps the dropdown menu subtree out of the DOM until the toggle is opened', async () => {
+    vi.mocked(versionManager.getDesktopVersionData).mockResolvedValue(
+      createVersionData(),
+    );
+
+    render(<InstallButton variant="full" locale="en" />);
+
+    await screen.findByRole('link', { name: /China/i });
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+  });
+
   it('adds a direct Steam shortcut to the compact header install cluster', async () => {
     vi.mocked(versionManager.getDesktopVersionData).mockResolvedValue(
       createVersionData({
@@ -392,6 +405,18 @@ describe('InstallButton runtime states', () => {
     expect(steamLink.querySelector('[data-steam-icon=\"true\"]')).not.toBeNull();
     expect(screen.getByRole('link', { name: /China/i })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: /GitHub/i })).toBeInTheDocument();
+  });
+
+  it('skips the Steam link fetch for the full install surface', async () => {
+    vi.mocked(versionManager.getDesktopVersionData).mockResolvedValue(
+      createVersionData(),
+    );
+
+    render(<InstallButton variant="full" locale="en" />);
+
+    await screen.findByRole('link', { name: /China/i });
+    expect(vi.mocked(steamStoreLink.loadSteamStoreLink)).not.toHaveBeenCalled();
+    expect(screen.queryByRole('link', { name: 'Open Hagicode on Steam' })).not.toBeInTheDocument();
   });
 
   it('hides the missing GitHub button when only the accelerated source is available', async () => {
