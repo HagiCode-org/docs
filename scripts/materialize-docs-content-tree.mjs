@@ -22,6 +22,93 @@ import {
 
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const docsRoot = path.resolve(scriptDirectory, '..');
+const YAML_FRONTMATTER_KEYS_PATTERN = /^(title|date|description|tags|sidebar):/mu;
+
+function shouldQuoteFrontmatterValue(value) {
+  const trimmedValue = value.trim();
+  if (!trimmedValue.includes(': ')) {
+    return false;
+  }
+
+  if (/^['"]/u.test(trimmedValue)) {
+    return false;
+  }
+
+  if (/^[\[{>|&*!]/u.test(trimmedValue)) {
+    return false;
+  }
+
+  return true;
+}
+
+function extractMetadataFrontmatter(source) {
+  const lines = source.split('\n');
+
+  for (let startIndex = 0; startIndex < lines.length; startIndex += 1) {
+    if (lines[startIndex] !== '---') {
+      continue;
+    }
+
+    for (let endIndex = startIndex + 1; endIndex < lines.length; endIndex += 1) {
+      if (lines[endIndex] !== '---') {
+        continue;
+      }
+
+      const frontmatter = lines.slice(startIndex + 1, endIndex).join('\n');
+      if (/(^|\n)---(\n|$)/u.test(frontmatter)) {
+        continue;
+      }
+
+      if (!YAML_FRONTMATTER_KEYS_PATTERN.test(frontmatter)) {
+        continue;
+      }
+
+      return {
+        frontmatter,
+        body: lines.slice(endIndex + 1).join('\n'),
+      };
+    }
+  }
+
+  return null;
+}
+
+function sanitizeYamlFrontmatter(source) {
+  const extractedFrontmatter = extractMetadataFrontmatter(source);
+  if (!extractedFrontmatter) {
+    return source;
+  }
+
+  let changed = false;
+  const sanitizedFrontmatter = extractedFrontmatter.frontmatter
+    .split('\n')
+    .map((line) => {
+      if (/^\s/u.test(line)) {
+        return line;
+      }
+
+      const frontmatterMatch = /^([A-Za-z0-9_-]+):( +)(.+)$/u.exec(line);
+      if (!frontmatterMatch) {
+        return line;
+      }
+
+      const [, key, spacing, value] = frontmatterMatch;
+      if (!shouldQuoteFrontmatterValue(value)) {
+        return line;
+      }
+
+      changed = true;
+      return `${key}:${spacing}${JSON.stringify(value.trim())}`;
+    })
+    .join('\n');
+
+  const normalizedSource = `---\n${sanitizedFrontmatter}\n---\n${extractedFrontmatter.body}`;
+  if (changed || normalizedSource !== source) {
+    return normalizedSource;
+  }
+
+  return source;
+}
 
 function splitTargetSuffix(target) {
   const hashIndex = target.indexOf('#');
@@ -322,7 +409,7 @@ export async function materializeDocsContentTree(options = {}) {
       generatedRoot,
     });
 
-    await writeFile(outputPath, rewriteContent(content), 'utf8');
+    await writeFile(outputPath, sanitizeYamlFrontmatter(rewriteContent(content)), 'utf8');
   }
 
   for (const routeLocale of DOCS_ROUTE_LOCALE_OPTIONS.map((locale) => locale.code)) {
@@ -353,7 +440,7 @@ export async function materializeDocsContentTree(options = {}) {
         translationsRoot,
         generatedRoot,
       });
-      content = rewriteContent(content);
+      content = sanitizeYamlFrontmatter(rewriteContent(content));
 
       await mkdir(path.dirname(outputPath), { recursive: true });
       await writeFile(outputPath, content, 'utf8');

@@ -77,3 +77,63 @@ Localized body.
     assert.match(japaneseFallback, /!\[Example\]\(\.\.\/\.\.\/img\/example\.png\)/u);
   });
 });
+
+test('content assembly quotes plain-scalar frontmatter values that contain colons', async () => {
+  await withFixture(async (rootDir) => {
+    await writeFile(
+      rootDir,
+      'src/content/docs/blog/example.mdx',
+      `---
+title: Example Title: Needs YAML quoting
+description: Safe summary
+tags: [example]
+---
+
+Body.
+`,
+    );
+
+    await materializeDocsContentTree({ docsRoot: rootDir });
+
+    const output = await fs.readFile(
+      path.join(rootDir, 'src/content/.generated/docs/blog/example.mdx'),
+      'utf8',
+    );
+
+    assert.match(output, /^title: "Example Title: Needs YAML quoting"$/mu);
+    assert.match(output, /^description: Safe summary$/mu);
+  });
+});
+
+test('content assembly recovers metadata frontmatter after accidental AI preamble text', async () => {
+  await withFixture(async (rootDir) => {
+    await writeFile(
+      rootDir,
+      'src/content/docs/blog/example-with-preamble.mdx',
+      `I apologize for the technical difficulties. Please save this file manually:
+
+---
+
+---
+title: Example Recovery Title
+date: 2026-05-09
+tags: [example]
+---
+
+Recovered body.
+`,
+    );
+
+    await materializeDocsContentTree({ docsRoot: rootDir });
+
+    const output = await fs.readFile(
+      path.join(rootDir, 'src/content/.generated/docs/blog/example-with-preamble.mdx'),
+      'utf8',
+    );
+
+    assert.doesNotMatch(output, /technical difficulties/u);
+    assert.match(output, /^---\ntitle: Example Recovery Title\ndate: 2026-05-09\ntags: \[example\]\n---/u);
+    assert.match(output, /^date: 2026-05-09$/mu);
+    assert.match(output, /Recovered body\./u);
+  });
+});
