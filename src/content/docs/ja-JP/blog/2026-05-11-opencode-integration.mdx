@@ -1,0 +1,263 @@
+---
+title: OpenCode統合の実践：独立プロセスから共有ランタイムへのアーキテクチャ進化
+date: 2026-05-11
+tags: [opencode, monorepo, integration, architecture]
+---
+
+## OpenCode統合の実践：独立プロセスから共有ランタイムへのアーキテクチャ進化
+
+> 本記事は、HagiCode での OpenCode AI アシスタント統合の完全な実践を共有します。アーキテクチャ進化の過程での重要な設計判断、直面した課題、そして最終的な解決策を含みます。
+
+## 背景
+
+OpenCode は GitHub でホストされているオープンソースの AI コーディングアシスタントプロジェクトです。HagiCode のような monorepo プロジェクトにとって、OpenCode をサポートされる AI Provider として統合することは、提案生成、コード編集、ワークフロー実行でバックエンドモデルとして使用できることを意味します。
+
+ただ、この統合プロセスは想像したほど順調ではありませんでした。初期には2つの独立した提案がありました：1つは C# SDK を作成する計画で、後々廃止されました——実のところ大きな損失でもありませんでした。もう1つはリポジトリレベルの統合で、これは継続されました。OpenCode が正式な会話フローに組み込まれると、会話管理、エラー回復などの一連の問題に直面しました。来るものは来るということで。
+
+さらに厄介だったのは、最初に設計した「セッションごとの独立プロセス」モードが実際の運用でリソースオーバーヘッドが大きい問題を露呈し、「システムレベルの共有ランタイム」モードに再構築せざるを得なくなったことです。同時に 400 BadRequest の落とし穴にも踏みました——外部エンドポイントの再利用にコンテキストが不足してリクエストが失敗したのです。言うのも涙が出そうです。
+
+この記事は、こうして踏んだ落とし穴、行った設計判断を整理し、今後 OpenCode を統合する必要のあるプロジェクトにいくつかの参考を提供するだけです。結局、美しい事物や人は必ずしも所有する必要はなく、美しいままでいれば、その美しさを静かに見ていればいいのです......技術の共有も同様です。
+
+## HagiCode について
+
+本記事で共有するソリューションは、[HagiCode](https://hagicode.com) プロジェクトでの実践経験から来ています。HagiCode は AI ベースのコードアシスタントプロジェクトで、開発プロセスで複数の AI Provider を統合する必要があり、OpenCode はその1つです。以下で共有するアーキテクチャ進化のプロセスは、すべて実際のプロジェクトで落とし穴を踏み、最適化して得た真の経験です。どうしようもないことですが、踏んだ落とし穴は埋めるしかありません。
+
+## 技術アーキテクチャ
+
+### 全体レイヤー設計
+
+HagiCode の OpenCode 統合アーキテクチャは5層に分かれており、各層の責任は明確です：
+
+**1. リポジトリ統合層**
+
+MonoSpecs 設定システム（`.hagicode/monospecs.yaml`）を通じて OpenCode リポジトリを登録します。ここには選択肢があります：submodule を使うか plain Git repository を使うか？私たちは後者を選択し、統一された `scripts/clone-repos.mjs` スクリプトでクローンと同期を管理します。これでより柔軟になり、submodule がもたらす権限と協業の問題も回避できます——誰もあのエラー画面を見たくないものです。
+
+**2. Provider 層**
+
+`OpenCodeCliProvider` は `IAIProvider` インターフェースを実装し、外部 AI サービスとの接続のための標準的な抽象化層です。最初の提案では「セッションごとの独立プロセス」を目指しましたが、実際の運用でリソースオーバーヘッドが大きすぎることが判明し、最終的に共有ランタイムモードに変更し、`OpenCodeRuntimeCoordinator` でシステムレベルのランタイムライフサイクルを管理することになりました。これもたいしたことではありません。アイデアは素晴らしいですが、現実は残酷です。
+
+**3. Runtime 管理層**
+
+`OpenCodeRuntimeCoordinator` はアーキテクチャ全体の中核で、ランタイムの起動、ヘルスチェック、失効時の再構築を担当します。`HagiCode.Libs.Providers.OpenCode` を HTTP クライアントの基礎として使用し、OpenCode ランタイムとのすべての相互作用をカプセル化しています。あの冬の夜のように、窓の外の竹は昨日と同じで、彼女への応答が少なくても、彼女はやはり窓の外を見るのが好き——ランタイムも同様に、誰かが静かに見守る必要があります。
+
+**4. セッション永続化層**
+
+SQLite データベース（`opencode-session-bindings-v2.db`）を使用して、CessionId から OpenCode SessionId へのマッピングを永続化します。この設計は重要で、セッションの回復と再起動をサポートし、毎回新しいセッションを作成することを回避します。記憶というものは、時々忘れたほうが良いこともありますが、プログラムの世界では記憶なしにはやっていけません。
+
+**5. エラー回復層**
+
+`ProviderErrorAutoRetryCoordinator` は自動リトライメカニズムを提供し、`OpenCodeRetryableTerminalFailureClassifier` と協力してエラーを分類します——どれをリトライできるか、どれを直接失敗させるべきか。この層はシステムの堅牢性を大幅に向上させます。実のところ何でもありません。システムが人間のように、転んでも起き上がれるようにするだけです。
+
+### 重要なデータフロー
+
+AI リクエストが来ると、データフローは次のようになります：
+
+1. リクエストが最初に `OpenCodeCliProvider` に到達
+2. Provider が `OpenCodeRuntimeCoordinator` にランタイムを要求
+3. Coordinator は利用可能なランタイムがあるかチェックし、なければ新しいものを起動
+4. CessionId でセッションバインディングをクエリまたは作成
+5. バインドされた SessionId を使用して OpenCode API を呼び出し
+6. エラーが発生した場合、エラーの種類に基づいてリトライするか決定
+
+このプロセスは単純に見えますが、各段階で落とし穴を踏みました。これは意味があるのでしょうか？たぶんそうです。ともかく踏みました......そして気づきました。落とし穴を踏むこと自体が成長の一部なのだと。
+
+## 重要な設計判断
+
+### 独立プロセスから共有ランタイムへ
+
+最初の `opencode-csharp-sdk` 提案は「セッションごとに独立したプロセス」というモードを採用していました。アイデアは素晴らしいものでした：分離性が高く、1つのプロセスがクラッシュしても他のセッションに影響しません。ただ現実は残酷でした：
+
+- リソースオーバーヘッドが大きい：各プロセスがランタイムをロードし、メモリ使用量が直線的に上昇
+- 起動が遅い：プロセスの頻繁な作成と破棄で、無視できないオーバーヘッド
+- 管理が複雑：プロセスのライフサイクル管理自体が厄介なこと
+
+最終的に「システムレベルの共有ランタイム」モードに変更しました。すべてのセッションが同じランタイムプロセスを再利用し、セッションIDで異なるセッションを区別します。この変更により、リソース使用量が1桁減少し、応答速度も明らかに向上しました。実のところ何でもありません。「一人で独占」から「みんなで使う」にしただけです。
+
+### 自己管理エンドポイント vs 外部 BaseUri
+
+初期に不可解な 400 BadRequest 問題に直面しました。調査の結果、外部 BaseUrl を再利用していましたが、必要なコンテキスト情報が不足していることが判明しました。OpenCode のランタイムはステートフルで、外部エンドポイントを直接使用するとコンテキストが失われます——記憶を失った人のように、途方に暮れます。
+
+解決策はシンプルです：自己管理ランタイムを維持し、外部エンドポイントに依存しません。設定ファイルで `BaseUri` を空にし、システムにランタイムのライフサイクルを自分で管理させます。
+
+```yaml
+AI:
+  OpenCode:
+    Enabled: true
+    ExecutablePath: "opencode"
+    BaseUri: null  # 空にして自己管理ランタイムを使用
+    Model: "anthropic/claude-sonnet-4-20250514"
+```
+
+この設定変更は取るに足らないように見えますが、当時最も頭を悩ませていた問題を解決しました。時として答えは目の前にあります。ただ私たちは遠回りしすぎただけです。
+
+### セッションバインディング戦略
+
+セッションバインディングはもう一つの重要な設計です。CessionId をバインディングキーとして使用し、3つのモードをサポートします：
+
+- **started**：新しいセッション、新しい OpenCode SessionId を作成
+- **resumed**：既存のセッションを回復、データベースからバインディングを読み取り
+- **restarted**：セッションを再起動、新しい SessionId を作成 but 履歴を保持
+
+この設計により、セッション管理が柔軟になり、ユーザーはいつでも以前の対話を回復でき、システムはランタイムの再起動後に自動的にバインディングを再構築できます。記憶というものは、時々忘れたいのに忘れられず、時々覚えたいのに覚えられない......プログラム世界の記憶はかなり信頼できます。
+
+## 実施ソリューション
+
+### 1. リポジトリ統合
+
+`.hagicode/monospecs.yaml` で OpenCode リポジトリを登録します：
+
+```yaml
+repositories:
+  - path: "repos/opencode"
+    url: "https://github.com/anomalyco/opencode.git"
+    displayName: "OpenCode"
+    icon: "⌨️"
+```
+
+次にクローンスクリプトを実行します：
+
+```bash
+node scripts/clone-repos.mjs
+```
+
+これで OpenCode のソースコードをローカルに取得でき、その後いつでも更新できます。実にシンプルで、エラーが出なければ問題ありません......
+
+### 2. Provider 設定
+
+`appsettings.yml` で OpenCode provider を設定します：
+
+```yaml
+AI:
+  OpenCode:
+    Enabled: true
+    ExecutablePath: "opencode"
+    BaseUri: null
+    Model: "anthropic/claude-sonnet-4-20250514"
+    RequestTimeoutSeconds: 300
+    StartupTimeoutSeconds: 60
+```
+
+いくつかの重要なパラメータ：
+- `RequestTimeoutSeconds`：単一リクエストのタイムアウト時間、デフォルト5分——待ちすぎるのは結構辛いものです
+- `StartupTimeoutSeconds`：ランタイム起動のタイムアウト時間、十分に1分を与えます
+
+### 3. Provider 回復
+
+OpenCode を AI Provider システムに再び組み込みます：
+
+- `AIProviderType` 列挙型で `OpenCodeCli` を回復
+- `AIProviderFactory` で作成ロジックを回復
+- `ExecutorGrainFactory` が `OpenCodeCli` を専用 grain にルーティング
+
+これらの変更により、OpenCode は特別扱いではなく、対等な AI Provider になりました。実のところみんな同じで、特別なものなどありません。
+
+### 4. Runtime 管理コード例
+
+```csharp
+// OpenCodeRuntimeCoordinator を通じてランタイムを取得
+var runtime = await _runtimeCoordinator.GetRuntimeAsync(
+    _settings,
+    request.WorkingDirectory,
+    cancellationToken);
+
+// セッションを作成または回復
+var session = await ResolveSessionAsync(runtime, request, cancellationToken);
+
+// prompt を送信
+var response = await session.Runtime.Client.PromptAsync(
+    session.SessionId,
+    promptRequest,
+    cancellationToken);
+```
+
+このコードはシンプルに見えますが、背後で多くの作業を行っています：ランタイム起動、ヘルスチェック、セッションバインディングのクエリと作成。多くのことと同様に、表面上は何も見えませんが、背後には物語があります。
+
+### 5. エラー回復メカニズム
+
+```csharp
+// リトライ可能なエラーを検出しランタイムを再構築
+if (ShouldRetryWithFreshRuntime(ex, cancellationToken))
+{
+    await _runtimeCoordinator.InvalidateAsync(runtime, ...);
+    var recoveredRuntime = await ResolveRuntimeAsync(request, cancellationToken);
+    // 新しいランタイムでリトライ
+}
+```
+
+自動リトライメカニズムはシステムの堅牢性を大幅に向上させ、ネットワークの揺れ、ランタイムの偶発的クラッシュも自動的に回復できます。実のところ人生も同様で、転んでも起き上がれば大したことではありません......プログラムは人間より遥かに頑丈です。
+
+## 実践ガイド
+
+### 重要な設定クイックリファレンス
+
+| 設定項目 | デフォルト値 | 説明 |
+|--------|--------|------|
+| `Enabled` | `true` | OpenCode provider を有効にするか |
+| `ExecutablePath` | `"opencode"` | OpenCode 実行可能ファイルのパス |
+| `BaseUri` | `null` | 外部エンドポイント（空を推奨） |
+| `Model` | - | デフォルトモデル |
+| `RequestTimeoutSeconds` | `300` | リクエストタイムアウト時間 |
+| `StartupTimeoutSeconds` | `60` | ランタイム起動タイムアウト時間 |
+
+### セッションバインディングデータベース構造
+
+```sql
+CREATE TABLE IF NOT EXISTS OpenCodeSessionBindings (
+    BindingKey TEXT NOT NULL PRIMARY KEY,
+    OpenCodeSessionId TEXT NOT NULL,
+    CreatedAtUtc TEXT NOT NULL,
+    UpdatedAtUtc TEXT NOT NULL
+);
+```
+
+バインディングは30日間保持され、期限切れで自動的にクリーンアップされます。この設計はセッション回復能力を保証しつつ、データの無限な膨張を回避します。すべてには期限があり、期限が切れたらクリーンアップする。これは一種の諦めでもあります......
+
+### よくある問題と解決策
+
+**1. 400 BadRequest エラー**
+
+`BaseUri` 設定を確認し、空にして自己管理ランタイムを使用することを推奨します。外部エンドポイントを使用する必要がある場合、コンテキストが完全であることを確認してください。実のところ多くの場合、問題は「思い込み」にあります。
+
+**2. セッションが回復できない**
+
+CessionId が正しく渡されているか確認し、データベースに対応するバインディングレコードが存在するかチェックしてください。記憶を探すように、手がかりが必要です。
+
+**3. モデル選択の問題**
+
+2つのフォーマットをサポート：`provider/model`（例：`anthropic/claude-sonnet-4`）とプロバイダーなしフォーマット（例：`claude-sonnet-4`）。すべての道はローマに通じますが、ある道は歩きやすく、ある道は少し曲がりくねっているだけです。
+
+**4. ツール名の不一致**
+
+ツール名は自動的に正規化され、括弧とコロンの後の内容が削除されます。例えば `read(path)` は `read` になります。呼び出し時に注意が必要です。これらの詳細は大したことではありません。ただ見落とされやすいだけです。
+
+**5. 自動リトライが動作しない**
+
+エラー分類器がリトライ可能なエラーを正しく認識しているか確認してください。デフォルトでは、ネットワークエラー、ランタイム失効などが最大3回自動リトライされます。ともかくもう数回試してみてください。うまくいくかもしれません。
+
+### 関連コードパス
+
+- Provider: `repos/hagicode-core/src/PCode.ClaudeHelper/AI/Providers/OpenCodeCliProvider.cs`
+- Runtime Coordinator: `repos/hagicode-core/src/PCode.ClaudeHelper/AI/Providers/OpenCodeRuntimeCoordinator.cs`
+- 設定: `repos/hagicode-core/src/PCode.ClaudeHelper/AI/Configuration/OpenCodeSettings.cs`
+- 提案アーカイブ: `openspec/changes/archive/2026-03-*opencode*/`
+
+## まとめ
+
+HagiCode の OpenCode 統合プロセスは、継続的に落とし穴を踏み、継続的に最適化するプロセスそのものです。最初の独立プロセスモードから共有ランタイムへ、外部エンドポイントの再利用から自己管理ランタイムへ、すべてのアーキテクチャ調整は実際のニーズによって駆動されました。実のところ何でもありません。踏むべき落とし穴は一つも残さず踏みました。
+
+核心的な経験は3つあります：
+
+1. **リソース共有が重要**：分離を盲目的に追求せず、共有ランタイムでリソースオーバーヘッドを大幅に削減——時々一人で独占するよりみんなで使うほうが良い
+2. **状態管理には注意**：ステートフルなサービスは自分で管理し、外部エンドポイントに依存しない——自分のことは自分でやるのが結局一番確実
+3. **エラー回復は不可欠**：自動リトライメカニズムでシステムの堅牢性を一段階向上——転んでも起き上がれば大したことではない
+
+このソリューションは現在 HagiCode で安定して動作し、セッション回復、自動リトライ、ランタイム再構築などの機能をサポートしています。もしプロジェクトでも OpenCode を統合する必要がある場合、これらの経験が遠回りを減らす助けになることを願っています。結局......遠回りしてこそ近道がわかるというもので、時々わかってももう何の役にも立たないこともあります。
+
+## 参考資料
+
+- [OpenCode GitHub リポジトリ](https://github.com/anomalyco/opencode)
+- [HagiCode GitHub リポジトリ](https://github.com/HagiCode-org/site)
+- HagiCode 公式サイト：[hagicode.com](https://hagicode.com)
+- HagiCode インストールガイド：[docs.hagicode.com/installation/docker-compose](https://docs.hagicode.com/installation/docker-compose)
+- HagiCode Desktop デスクトップ版：[hagicode.com/desktop/](https://hagicode.com/desktop/)
+- 正式版デモ動画：[www.bilibili.com/video/BV1z4oWB3EpY/](https://www.bilibili.com/video/BV1z4oWB3EpY/)

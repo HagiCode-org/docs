@@ -1,0 +1,263 @@
+---
+title: OpenCode 연결 실무: 독립 프로세스에서 공유 Runtime으로의 아키텍처 진화
+date: 2026-05-11
+tags: [opencode, monorepo, integration, architecture]
+---
+
+## OpenCode 연결 실무: 독립 프로세스에서 공유 Runtime으로의 아키텍처 진화
+
+> 이 문서는 HagiCode에 OpenCode AI 어시스턴트를 통합한 전체 실무 경험을 공유합니다. 아키텍처 진화 과정에서의 핵심 설계 결정, 겪은 문제점들, 그리고 최종 해결 방안을 포함합니다.
+
+## 배경
+
+OpenCode는 GitHub에서 호스팅되는 오픈소스 AI 코딩 어시스턴트 프로젝트입니다. HagiCode와 같은 monorepo 프로젝트에 OpenCode를 지원되는 AI Provider로 통합한다는 것은, 제안 생성, 코드 편집, 워크플로우 실행에서 이를 백엔드 모델로 사용할 수 있음을 의미합니다.
+
+다만 이 통합 과정은 생각만큼 순탄치 않았습니다. 초기에는 두 개의 독립적인 제안이 있었습니다. 하나는 C# SDK를 만들 계획이었는데 나중에 폐기되었습니다——사실 큰 손해도 아니었습니다. 다른 하나는 저장소 수준 통합을 하는 것이었는데, 이것은 유지되었습니다. OpenCode가 정식 세션 체인에 들어오면서 세션 관리, 오류 복구 등 일련의 문제에 부딪혔습니다. 올 것이 오니까요.
+
+더 골치 아픈 것은, 초기에 설계한 "세션별 독립 프로세스" 모드가 실제运行에서 리소스 오버헤드가 큰 문제를 노출하여 "시스템 수준 공유 runtime" 모드로 재구성해야 했다는 것입니다. 동시에 400 BadRequest의 함정도 밟았습니다——외부 엔드포인트 재사용 시 컨텍스트가 부족하여 요청이 실패한 것이지요. 말하자니 눈물이 앞을 가리네요.
+
+이 문서는 이렇게 밟은 함정과 했던 설계 결정들을 정리하여, 향후 OpenCode 통합이 필요한 프로젝트들에 참고가 되도록 하는 것입니다. 아름다운 것 또는 사람, 꼭 소유할 필요는 없습니다. 그녀가 여전히 아름답다면, 그저 그 아름다움을 잘 바라보면 됩니다......기술 공유도 마찬가지입니다.
+
+## HagiCode에 대하여
+
+이 문서에서 공유하는 방안은 [HagiCode](https://hagicode.com) 프로젝트에서의 실무 경험에서 비롯되었습니다. HagiCode는 AI 기반 코드 어시스턴트 프로젝트로, 개발 과정에서 여러 AI Provider를 통합해야 했고, OpenCode도 그중 하나였습니다. 아래에 공유하는 아키텍처 진화 과정은 모두 실제 프로젝트에서 함정을 밟고 최적화해 나온 진정한 경험입니다. 어쩔 수 없죠, 밟은 함정은 메워야 합니다.
+
+## 기술 아키텍처
+
+### 전체 계층 설계
+
+HagiCode의 OpenCode 통합 아키텍처는 5계층으로 나뉘며, 각 계층의 책임이 명확합니다.
+
+**1. 저장소 통합 계층**
+
+MonoSpecs 구성 시스템(`.hagicode/monospecs.yaml`)을 통해 OpenCode 저장소를 등록합니다. 여기에 선택지가 있습니다: submodule을 쓸 것인가, plain Git repository를 쓸 것인가? 우리는 후자를 선택하여, 통일된 `scripts/clone-repos.mjs` 스크립트로 클로닝과 동기화를 관리합니다. 이것이 더 유연하고, submodule이 가져오는 권한과 협업 문제도 피합니다——아무도 그 오류 화면을 보고 싶지 않으니까요. 하지만 어쩔 수 없죠.
+
+**2. Provider 계층**
+
+`OpenCodeCliProvider`는 `IAIProvider` 인터페이스를 구현하며, 이는 외부 AI 서비스 연결의 표준 추상화 계층입니다. 초기 제안은 "세션별 독립 프로세스"를 하려 했지만, 실제 실행 후 리소스 오버헤드가 너무 커서 결국 공유 runtime 모드로 바꾸었습니다. `OpenCodeRuntimeCoordinator`를 통해 시스템 수준 runtime 수명 주기를 관리합니다. 이것도 별거 아니네요, 생각은 아름답고 현실은 잔인할 뿐입니다.
+
+**3. Runtime 관리 계층**
+
+`OpenCodeRuntimeCoordinator`는 전체 아키텍처의 핵심으로, runtime의 시작, 건강 검사, 실패 재생성을 담당합니다. `HagiCode.Libs.Providers.OpenCode`를 HTTP 클라이언트 기반으로 사용하여 OpenCode runtime과의 모든 상호작용을 캡슐화합니다. 그날 겨울 밤처럼, 창밖의 대나무는 어제와 같았는데, 그녀에게의 답장이 없어도, 그녀는 여전히 창밖을 보는 것을 좋아하듯——runtime도 마찬가지로, 누군가 조용히 지켜줘야 합니다.
+
+**4. 세션 지속성 계층**
+
+SQLite 데이터베이스(`opencode-session-bindings-v2.db`)를 사용하여 CessionId에서 OpenCode SessionId로의 매핑을 지속화합니다. 이 설계는 매우 중요합니다. 세션 복구와 재시작을 지원하여 매번 새 세션을 생성하는 것을 피합니다. 기억이라는 것, 때로는 잊어버리는 게 더 나을 때도 있지만, 프로그램 세상에는 기억이 정말 필요합니다.
+
+**5. 오류 복구 계층**
+
+`ProviderErrorAutoRetryCoordinator`는 자동 재시도 메커니즘을 제공하며, `OpenCodeRetryableTerminalFailureClassifier`와 함께 오류를 분류합니다——어떤 것은 재시도할 수 있고, 어떤 것은 바로 실패해야 합니다. 이 계층은 시스템의 견고성을 크게 높였습니다. 사실 별거 아니에요, 시스템이 사람처럼 넘어지면 다시 일어설 수 있게 해준 것뿐입니다.
+
+### 핵심 데이터 흐름
+
+AI 요청이 들어오면 데이터 흐름은 다음과 같습니다:
+
+1. 요청이 먼저 `OpenCodeCliProvider`에 도달
+2. Provider가 `OpenCodeRuntimeCoordinator`에 runtime을 요청
+3. Coordinator가 사용 가능한 runtime이 있는지 확인하고, 없으면 새로 시작
+4. CessionId로 세션 바인딩을 조회하거나 생성
+5. 바인딩된 SessionId로 OpenCode API 호출
+6. 오류가 발생하면 오류 유형에 따라 재시도 여부 결정
+
+이 과정은 간단해 보이지만, 모든 단계에서 함정을 밟았습니다. 이게 의미가 있을까요? 아마도, 어차피 다 밟았습니다......생각해보니, 함정을 밟는 것 자체가 성장의 일부입니다.
+
+## 핵심 설계 결정
+
+### 독립 프로세스에서 공유 Runtime으로
+
+초기의 `opencode-csharp-sdk` 제안은 "세션별 독립 프로세스" 모드를 채택했습니다. 생각은 아름다웠습니다: 격리성이 좋아서, 하나의 프로세스가崩溃해도 다른 세션에 영향이 없습니다. 하지만 현실은 잔인했습니다:
+
+- 리소스 오버헤드가 큼: 각 프로세스가 runtime을 로드해야 해서 메모리 사용량이 직선적으로 상승
+- 시작이 느림: 프로세스를 자주 생성하고 파괴해서 오버헤드가 무시할 수 없음
+- 관리가 복잡함: 프로세스 수명 주기 관리 자체가 귀찮은 일
+
+결국 우리는 "시스템 수준 공유 runtime" 모드로 바꾸었습니다. 모든 세션이 하나의 runtime 프로세스를 공유하고, 세션 id로 다른 세션을 구분합니다. 이 변경으로 리소스 점유가 한 자릿수 줄었고, 응답 속도도 현저히 향상되었습니다. 사실 별거 아니에요, "혼자 독점"을 "함께 쓰기"로 바꾼 것뿐입니다.
+
+### 자관리 엔드포인트 vs 외부 BaseUri
+
+초기에 기이한 400 BadRequest 문제에 부딪혔습니다. 조사해 보니 외부 BaseUrl을 재사용했는데 필요한 컨텍스트 정보가 부족했기 때문입니다. OpenCode의 runtime은 상태가 있어서, 외부 엔드포인트를 직접 쓰면 컨텍스트가 손실됩니다——기억을 잃은 사람처럼,茫然無措입니다.
+
+해결 방안은 간단합니다: 자관리 runtime을 유지하고 외부 엔드포인트에 의존하지 않습니다. 구성 파일에서 `BaseUri`를 비워두어 시스템이 스스로 runtime의 수명 주기를 관리하게 합니다.
+
+```yaml
+AI:
+  OpenCode:
+    Enabled: true
+    ExecutablePath: "opencode"
+    BaseUri: null  # 비워둠, 자관리 runtime 사용
+    Model: "anthropic/claude-sonnet-4-20250514"
+```
+
+이 구성 변경은 대수롭지 않아 보이지만, 당시 가장 골치 아픈 문제를 해결했습니다. 때로는 답이 눈앞에 있는데, 우리가 너무 많은 돌아가는 길을 걸었을 뿐입니다.
+
+### 세션 바인딩 전략
+
+세션 바인딩은 또 다른 핵심 설계입니다. 우리는 CessionId를 바인딩 키로 사용하여 세 가지 모드를 지원합니다:
+
+- **started**: 새 세션, 새 OpenCode SessionId 생성
+- **resumed**: 기존 세션 복구, 데이터베이스에서 바인딩 읽기
+- **restarted**: 세션 재시작, 새 SessionId 생성하지만 기록 보존
+
+이 설계는 세션 관리를 매우 유연하게 만들어, 사용자는 언제든지 이전 대화를 복구할 수 있고, 시스템도 runtime 재시작 후 자동으로 바인딩을 재구성할 수 있습니다. 기억이라는 것, 때로는 잊고 싶어도 잊을 수 없고, 때로는 기억하고 싶어도 기억할 수 없을 때가 있습니다......프로그램 세상의 기억은 꽤 믿을만합니다.
+
+## 구현 방안
+
+### 1. 저장소 통합
+
+`.hagicode/monospecs.yaml`에서 OpenCode 저장소를 등록합니다:
+
+```yaml
+repositories:
+  - path: "repos/opencode"
+    url: "https://github.com/anomalyco/opencode.git"
+    displayName: "OpenCode"
+    icon: "⌨️"
+```
+
+그리고 클로닝 스크립트를 실행합니다:
+
+```bash
+node scripts/clone-repos.mjs
+```
+
+이렇게 OpenCode 소스 코드를 로컬로 가져오고, 나중에 언제든지 업데이트할 수 있습니다. 사실 꽤 간단합니다, 오류만 안 나면......
+
+### 2. Provider 구성
+
+`appsettings.yml`에서 OpenCode provider를 구성합니다:
+
+```yaml
+AI:
+  OpenCode:
+    Enabled: true
+    ExecutablePath: "opencode"
+    BaseUri: null
+    Model: "anthropic/claude-sonnet-4-20250514"
+    RequestTimeoutSeconds: 300
+    StartupTimeoutSeconds: 60
+```
+
+몇 가지 핵심 매개변수:
+- `RequestTimeoutSeconds`: 단일 요청의 제한 시간, 기본값 5분——너무 오래 기다리는 것도 꽤 고문입니다
+- `StartupTimeoutSeconds`: runtime 시작의 제한 시간, 충분히 1분을 줍니다
+
+### 3. Provider 복구
+
+OpenCode를 AI Provider 시스템에 다시 포함시킵니다:
+
+- `AIProviderType` 열거형에서 `OpenCodeCli` 복구
+- `AIProviderFactory`에서 생성 로직 복구
+- `ExecutorGrainFactory`가 `OpenCodeCli`를 전용 grain으로 라우팅
+
+이러한 변경으로 OpenCode가 특별 취급이 아닌 평등한 AI Provider가 되었습니다. 사실 다 똑같습니다, 특별한 것도 없고 그저 그런 것뿐입니다.
+
+### 4. Runtime 관리 코드 예시
+
+```csharp
+// OpenCodeRuntimeCoordinator를 통해 runtime 획득
+var runtime = await _runtimeCoordinator.GetRuntimeAsync(
+    _settings,
+    request.WorkingDirectory,
+    cancellationToken);
+
+// 세션 생성 또는 복구
+var session = await ResolveSessionAsync(runtime, request, cancellationToken);
+
+// prompt 전송
+var response = await session.Runtime.Client.PromptAsync(
+    session.SessionId,
+    promptRequest,
+    cancellationToken);
+```
+
+이 코드는 아주 간결해 보이지만, 배후에서 많은 작업을 합니다: runtime 시작, 건강 검사, 세션 바인딩 조회 및 생성. 많은 일들처럼, 표면으로는 아무것도 안 보이지만, 배후에는 모두 이야기가 있습니다.
+
+### 5. 오류 복구 메커니즘
+
+```csharp
+// 재시도 가능한 오류를 감지하고 runtime 재생성
+if (ShouldRetryWithFreshRuntime(ex, cancellationToken))
+{
+    await _runtimeCoordinator.InvalidateAsync(runtime, ...);
+    var recoveredRuntime = await ResolveRuntimeAsync(request, cancellationToken);
+    // 새 runtime으로 재시도
+}
+```
+
+자동 재시도 메커니즘은 시스템의 견고성을 크게 높여, 네트워크 jitter, runtime 우발적 붕괴都能 자동으로 복구됩니다. 사실 인생도 마찬가지입니다, 넘어지면 일어나면 됩니다, 큰일 아닙니다......프로그램이 사람보다 훨씬 강합니다.
+
+## 실무 가이드
+
+### 핵심 구성 속성표
+
+| 구성 항목 | 기본값 | 설명 |
+|--------|--------|------|
+| `Enabled` | `true` | OpenCode provider 활성화 여부 |
+| `ExecutablePath` | `"opencode"` | OpenCode 실행 파일 경로 |
+| `BaseUri` | `null` | 외부 엔드포인트 (비워두기 권장) |
+| `Model` | - | 기본 모델 |
+| `RequestTimeoutSeconds` | `300` | 요청 제한 시간 |
+| `StartupTimeoutSeconds` | `60` | Runtime 시작 제한 시간 |
+
+### 세션 바인딩 데이터베이스 구조
+
+```sql
+CREATE TABLE IF NOT EXISTS OpenCodeSessionBindings (
+    BindingKey TEXT NOT NULL PRIMARY KEY,
+    OpenCodeSessionId TEXT NOT NULL,
+    CreatedAtUtc TEXT NOT NULL,
+    UpdatedAtUtc TEXT NOT NULL
+);
+```
+
+바인딩은 30일간 보존되며, 기한이 지나면 자동으로 정리됩니다. 이 설계는 세션 복구 능력을 보장하면서도 데이터 무한 증식을 피합니다. 모든 것에는 기한이 있고, 기한이 지나면 정리하는 것도 일종의 해소입니다......
+
+### 일반적인 문제와 해결 방안
+
+**1. 400 BadRequest 오류**
+
+`BaseUri` 구성을 확인하고, 비워두어 자관리 runtime을 사용하는 것을 권장합니다. 반드시 외부 엔드포인트를 사용해야 한다면 컨텍스트가 완전한지 확인하세요. 사실 대부분의 경우 문제는 "당연하다고 생각하는 것"에서 발생합니다.
+
+**2. 세션 복구 불가**
+
+CessionId가 올바르게 전달되는지 확인하고, 데이터베이스에 해당 바인딩 기록이 존재하는지 확인하세요. 기억을 찾는 것처럼, 단서가 있어야 합니다.
+
+**3. 모델 선택 문제**
+
+두 가지 형식을 지원합니다: `provider/model`(예: `anthropic/claude-sonnet-4`)과 provider 없는 형식(예: `claude-sonnet-4`). 모든 길은 로마로 통하지만, 어떤 길은 조금 더 걷기 좋고, 어떤 길은 조금 더 굽어 있을 뿐입니다.
+
+**4. 도구 이름 불일치**
+
+도구 이름은 자동으로 정규화되어 괄호와 콜론 뒤의 내용이 제거됩니다. 예를 들어 `read(path)`는 `read`가 되고, 호출할 때 주의해야 합니다. 이런 디테일은 대수롭지 않지만, 쉽게 무시되기도 합니다.
+
+**5. 자동 재시도 작동 안 함**
+
+오류 분류기가 재시도 가능한 오류를 올바르게 식별하는지 확인하세요. 기본적으로 네트워크 오류, runtime 실패 등은 최대 3회 자동 재시도됩니다. 몇 번 더 시도해도 나쁠 것 없습니다, 어쩌면 성공할 수도 있습니다.
+
+### 관련 코드 경로
+
+- Provider: `repos/hagicode-core/src/PCode.ClaudeHelper/AI/Providers/OpenCodeCliProvider.cs`
+- Runtime Coordinator: `repos/hagicode-core/src/PCode.ClaudeHelper/AI/Providers/OpenCodeRuntimeCoordinator.cs`
+- 구성: `repos/hagicode-core/src/PCode.ClaudeHelper/AI/Configuration/OpenCodeSettings.cs`
+- 제안 아카이브: `openspec/changes/archive/2026-03-*opencode*/`
+
+## 요약
+
+HagiCode의 OpenCode 통합 과정은 사실 끊임없이 함정을 밟고 끊임없이 최적화하는 과정이었습니다. 초기의 독립 프로세스 모드에서 공유 runtime으로, 외부 엔드포인트 재사용에서 자관리 runtime으로, 모든 아키텍처 조정은 실제 수요에 의해 구동되었습니다. 사실 별거 아니에요, 밟아야 할 함정은 하나도 빠짐없이 밟았을 뿐입니다.
+
+핵심 경험은 세 가지입니다:
+
+1. **리소스 공유가 중요합니다**: 격리를 맹목적으로 추구하지 말고, 공유 runtime이 리소스 오버헤드를 크게 낮출 수 있습니다——때로는 혼자 독점하는 것보다 함께 쓰는 게 나습니다
+2. **상태 관리를 조심하세요**: 상태가 있는 서비스는 직접 관리하고, 외부 엔드포인트에 의존하지 마세요——자신의 일은 스스로 하는 게 더 믿을만합니다
+3. **오류 복구는 필수입니다**: 자동 재시도 메커니즘은 시스템 견고성을 한 단계 높일 수 있습니다——넘어지면 일어나면 됩니다, 큰일 아닙니다
+
+이 방안은 현재 HagiCode에서 안정적으로运行 중이며, 세션 복구, 자동 재시도, runtime 재생성 등 기능을 지원합니다. 당신의 프로젝트도 OpenCode 통합이 필요하다면, 이 경험들이 돌아가는 길을 줄이는 데 도움이 되기를 바랍니다. 아무튼......돌아가는 길을 걸어야 지름길이 어디 있는지 알게 되고, 때로는 알아도 소용없을 때가 있습니다.
+
+## 참고 자료
+
+- [OpenCode GitHub 저장소](https://github.com/anomalyco/opencode)
+- [HagiCode GitHub 저장소](https://github.com/HagiCode-org/site)
+- HagiCode 공식 웹사이트: [hagicode.com](https://hagicode.com)
+- HagiCode 설치 가이드: [docs.hagicode.com/installation/docker-compose](https://docs.hagicode.com/installation/docker-compose)
+- HagiCode Desktop 데스크톱: [hagicode.com/desktop/](https://hagicode.com/desktop/)
+- 정식 버전 데모 영상: [www.bilibili.com/video/BV1z4oWB3EpY/](https://www.bilibili.com/video/BV1z4oWB3EpY/)

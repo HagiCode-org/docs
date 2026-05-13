@@ -1,0 +1,263 @@
+---
+title: OpenCode 對接實踐：從獨立進程到共享 Runtime 的架構演進
+date: 2026-05-11
+tags: [opencode, monorepo, integration, architecture]
+---
+
+## OpenCode 對接實踐：從獨立進程到共享 Runtime 的架構演進
+
+> 本文分享 HagiCode 集成 OpenCode AI 助手的完整實踐，包括架構演進過程中的關鍵設計決策、遇到的坑以及最終解決方案。
+
+## 背景
+
+OpenCode 是一個開源的 AI 編碼助手項目，託管在 GitHub 上。對於 HagiCode 這樣的 monorepo 項目來說，將 OpenCode 集成為受支持的 AI Provider，意味著在提案生成、代碼編輯和工作流執行中都可以使用它作為後端模型。
+
+只是這個集成過程倒也沒有想像中那麼順利。早期存在兩個獨立提案：一個計劃創建 C# SDK，後來廢棄了——其實也算不上什麼損失；另一個做倉庫級集成，倒是堅持了下來。隨著 OpenCode 進入正式會話鏈路，又遇到了會話管理、錯誤恢復等一系列問題，畢竟該來的總會來。
+
+更頭疼的是，最初設計的"每會話獨立進程"模式在實際運行中暴露出資源開銷大的問題，不得不重構為"系統級共享 runtime"模式。同時還踩了 400 BadRequest 的坑——復用外部端點缺少上下文導致請求失敗，說起來都是淚。
+
+這篇文章就是把這些踩過的坑、做過的設計決策整理出來，給後續需要集成 OpenCode 的項目一些參考罷了。畢竟美的事物或人，不一定要佔有，只要她還是美的，自己好好看著她的美就好了......技術分享也是如此。
+
+## 關於 HagiCode
+
+本文分享的方案來自我們在 [HagiCode](https://hagicode.com) 項目中的實踐經驗。HagiCode 是一個基於 AI 的代碼助手項目，在開發過程中我們需要集成多個 AI Provider，OpenCode 就是其中之一。下面分享的架構演進過程，都是我們在實際項目中踩坑、優化出來的真實經驗，反正也沒轍，踩過的坑總得填上。
+
+## 技術架構
+
+### 整體分層設計
+
+HagiCode 集成 OpenCode 的架構分為五層，每層職責清晰：
+
+**1. 倉庫集成層**
+
+通過 MonoSpecs 配置系統（`.hagicode/monospecs.yaml`）註冊 OpenCode 倉庫。這裡有個選擇：用 submodule 還是 plain Git repository？我們選擇了後者，通過統一的 `scripts/clone-repos.mjs` 腳本管理克隆和同步。這樣更靈活，也避免了 submodule 帶來的權限和協作問題——畢竟誰也不想看見那張報錯的照，可是沒轍。
+
+**2. Provider 層**
+
+`OpenCodeCliProvider` 實現 `IAIProvider` 接口，這是對接外部 AI 服務的標準抽象層。最初的提案想搞"每會話獨立進程"，但實際運行後發現資源開銷太大，最終改成了共享 runtime 模式，通過 `OpenCodeRuntimeCoordinator` 管理系統級 runtime 生命週期。這也沒什麼啦，想法很美好，現實很殘酷罷了。
+
+**3. Runtime 管理層**
+
+`OpenCodeRuntimeCoordinator` 是整個架構的核心，負責 runtime 的啟動、健康檢查和失效重建。它使用 `HagiCode.Libs.Providers.OpenCode` 作為 HTTP 客戶端基礎，封裝了所有與 OpenCode runtime 的交互。就像那個冬天的晚上，窗外的竹子還是和昨天一樣，少了那份對她的回應，她還是喜歡看著窗外——runtime 也是如此，需要有人默默守護。
+
+**4. Session 持久化層**
+
+用 SQLite 數據庫（`opencode-session-bindings-v2.db`）持久化 CessionId 到 OpenCode SessionId 的映射。這個設計很關鍵，它支持會話恢復和重啟，避免每次都創建新會話。畢竟記憶這東西，有時候忘了反而更好，可程序世界裡沒記憶還真不行。
+
+**5. 錯誤恢復層**
+
+`ProviderErrorAutoRetryCoordinator` 提供自動重試機制，配合 `OpenCodeRetryableTerminalFailureClassifier` 對錯誤進行分類——哪些可以重試，哪些應該直接失敗。這層大大提高了系統的健壯性。其實也沒啥，就是讓系統能像人一樣，跌倒了再爬起來罷了。
+
+### 關鍵數據流
+
+當一個 AI 請求進來時，數據流是這樣的：
+
+1. 請求先到 `OpenCodeCliProvider`
+2. Provider 向 `OpenCodeRuntimeCoordinator` 請求 runtime
+3. Coordinator 檢查是否有可用 runtime，沒有就啟動新的
+4. 通過 CessionId 查詢或創建 session 綁定
+5. 使用綁定的 SessionId 調用 OpenCode API
+6. 如果出錯，根據錯誤類型決定是否重試
+
+這個過程看起來簡單，但每個環節都踩過坑。這有意義嗎？或許吧，反正都踩過了......也想明白了，踩坑本身就是成長的一部分。
+
+## 關鍵設計決策
+
+### 從獨立進程到共享 Runtime
+
+最初的 `opencode-csharp-sdk` 提案採用"每會話一個獨立進程"的模式。想法很美好：隔離性好，一個進程崩潰不影響其他會話。只是現實很殘酷：
+
+- 資源開銷大：每個進程都要加載 runtime，內存佔用直線上升
+- 啟動慢：頻繁創建銷毀進程，開銷不可忽視
+- 管理複雜：進程生命週期管理本身就是個麻煩事
+
+最終我們改成了"系統級共享 runtime"模式。所有會話復用同一個 runtime 進程，通過 session id 區分不同會話。這個改動讓資源佔用降低了一個數量級，響應速度也明顯提升。其實也沒什麼，只是把"一個人獨享"變成了"大家一起用"罷了。
+
+### 自管端點 vs 外部 BaseUri
+
+早期遇到一個詭異的 400 BadRequest 問題。排查發現是因為復用了外部 BaseUrl，但缺少必要的上下文信息。OpenCode 的 runtime 是有狀態的，直接用外部端點相當於上下文丟失——就像失去記憶的人，茫然無措。
+
+解決方案很簡單：維護自管 runtime，不依賴外部端點。配置文件中 `BaseUri` 留空，讓系統自己管理 runtime 的生命週期。
+
+```yaml
+AI:
+  OpenCode:
+    Enabled: true
+    ExecutablePath: "opencode"
+    BaseUri: null  # 留空，使用自管 runtime
+    Model: "anthropic/claude-sonnet-4-20250514"
+```
+
+這個配置改動看起來不起眼，但解決了當時最頭疼的問題。畢竟有時候答案就在眼前，只是我們繞了太多彎路罷了。
+
+### 會話綁定策略
+
+會話綁定是另一個關鍵設計。我們用 CessionId 作為綁定 key，支持三種模式：
+
+- **started**：新會話，創建新的 OpenCode SessionId
+- **resumed**：恢復已有會話，從數據庫讀取綁定
+- **restarted**：重啟會話，創建新 SessionId 但保留歷史記錄
+
+這個設計讓會話管理變得很靈活，用戶可以隨時恢復之前的對話，系統也能在 runtime 重啟後自動重建綁定。畢竟記憶這東西，有時候想忘忘不掉，有時候想記記不住......程序世界裡的記憶倒是挺靠譜的。
+
+## 實施方案
+
+### 1. 倉庫集成
+
+在 `.hagicode/monospecs.yaml` 中註冊 OpenCode 倉庫：
+
+```yaml
+repositories:
+  - path: "repos/opencode"
+    url: "https://github.com/anomalyco/opencode.git"
+    displayName: "OpenCode"
+    icon: "⌨️"
+```
+
+然後運行克隆腳本：
+
+```bash
+node scripts/clone-repos.mjs
+```
+
+這樣就把 OpenCode 源碼拉到本地了，後續可以隨時更新。其實也挺簡單的，只要不報錯就行......
+
+### 2. Provider 配置
+
+在 `appsettings.yml` 中配置 OpenCode provider：
+
+```yaml
+AI:
+  OpenCode:
+    Enabled: true
+    ExecutablePath: "opencode"
+    BaseUri: null
+    Model: "anthropic/claude-sonnet-4-20250514"
+    RequestTimeoutSeconds: 300
+    StartupTimeoutSeconds: 60
+```
+
+幾個關鍵參數：
+- `RequestTimeoutSeconds`：單個請求的超時時間，默認 5 分鐘——畢竟等太久也是挺折磨人的
+- `StartupTimeoutSeconds`：runtime 啟動的超時時間，給足 1 分鐘
+
+### 3. Provider 恢復
+
+把 OpenCode 重新納入 AI Provider 體系：
+
+- 在 `AIProviderType` 枚舉中恢復 `OpenCodeCli`
+- 在 `AIProviderFactory` 中恢復創建邏輯
+- `ExecutorGrainFactory` 將 `OpenCodeCli` 路由到專用 grain
+
+這些改動讓 OpenCode 成為平等對待的 AI Provider，而不是特例。其實大家都是一樣的，沒有什麼特殊不特殊罷了。
+
+### 4. Runtime 管理代碼示例
+
+```csharp
+// 通過 OpenCodeRuntimeCoordinator 獲取 runtime
+var runtime = await _runtimeCoordinator.GetRuntimeAsync(
+    _settings,
+    request.WorkingDirectory,
+    cancellationToken);
+
+// 創建或恢復 session
+var session = await ResolveSessionAsync(runtime, request, cancellationToken);
+
+// 發送 prompt
+var response = await session.Runtime.Client.PromptAsync(
+    session.SessionId,
+    promptRequest,
+    cancellationToken);
+```
+
+這段代碼看起來很簡潔，但背後做了很多工作：runtime 啟動、健康檢查、session 綁定查詢和創建。就像很多事情一樣，表面上看不出什麼，背後都是故事罷了。
+
+### 5. 錯誤恢復機制
+
+```csharp
+// 檢測可重試錯誤並重建 runtime
+if (ShouldRetryWithFreshRuntime(ex, cancellationToken))
+{
+    await _runtimeCoordinator.InvalidateAsync(runtime, ...);
+    var recoveredRuntime = await ResolveRuntimeAsync(request, cancellationToken);
+    // 使用新 runtime 重試
+}
+```
+
+自動重試機制大大提高了系統的健壯性，網絡抖動、runtime 偶發崩潰都能自動恢復。其實人生也是如此，跌倒了就爬起來，沒什麼大不了的......程序比人堅強多了。
+
+## 實踐指南
+
+### 關鍵配置速查
+
+| 配置項 | 默認值 | 說明 |
+|--------|--------|------|
+| `Enabled` | `true` | 是否啟用 OpenCode provider |
+| `ExecutablePath` | `"opencode"` | OpenCode 可執行文件路徑 |
+| `BaseUri` | `null` | 外部端點（推薦留空） |
+| `Model` | - | 默認模型 |
+| `RequestTimeoutSeconds` | `300` | 請求超時時間 |
+| `StartupTimeoutSeconds` | `60` | Runtime 啟動超時時間 |
+
+### 會話綁定數據庫結構
+
+```sql
+CREATE TABLE IF NOT EXISTS OpenCodeSessionBindings (
+    BindingKey TEXT NOT NULL PRIMARY KEY,
+    OpenCodeSessionId TEXT NOT NULL,
+    CreatedAtUtc TEXT NOT NULL,
+    UpdatedAtUtc TEXT NOT NULL
+);
+```
+
+綁定保留 30 天，超期自動清理。這個設計既保證了會話恢復能力，又避免了數據無限膨脹。畢竟什麼都有一個期限，過期了就清理掉，也算是一種釋然吧......
+
+### 常見問題和解決方案
+
+**1. 400 BadRequest 錯誤**
+
+檢查 `BaseUri` 配置，建議留空使用自管 runtime。如果必須用外部端點，確保上下文完整。其實大多數時候，問題就出在"想當然"上罷了。
+
+**2. 會話無法恢復**
+
+確認 CessionId 是否正確傳遞，檢查數據庫中是否存在對應綁定記錄。就像尋找記憶一樣，得有線索才行。
+
+**3. 模型選擇問題**
+
+支持兩種格式：`provider/model`（如 `anthropic/claude-sonnet-4`）和無 provider 格式（如 `claude-sonnet-4`）。條條大路通羅馬，只是有的路好走一點，有的路稍微曲折一點而已。
+
+**4. 工具名稱不匹配**
+
+工具名會自動規範化，去除括號和冒號後的內容。例如 `read(path)` 會變成 `read`，調用時要注意。這些細節也不算什麼，只是容易被忽略罷了。
+
+**5. 自動重試不工作**
+
+檢查錯誤分類器是否正確識別了可重試錯誤。默認情況下，網絡錯誤、runtime 失效等會自動重試最多 3 次。畢竟再試幾次也無妨，說不定就成了呢。
+
+### 相關代碼路徑
+
+- Provider: `repos/hagicode-core/src/PCode.ClaudeHelper/AI/Providers/OpenCodeCliProvider.cs`
+- Runtime Coordinator: `repos/hagicode-core/src/PCode.ClaudeHelper/AI/Providers/OpenCodeRuntimeCoordinator.cs`
+- 配置: `repos/hagicode-core/src/PCode.ClaudeHelper/AI/Configuration/OpenCodeSettings.cs`
+- 提案歸檔: `openspec/changes/archive/2026-03-*opencode*/`
+
+## 總結
+
+HagiCode 集成 OpenCode 的過程，其實就是不斷踩坑、不斷優化的過程。從最初的獨立進程模式到共享 runtime，從復用外部端點到自管 runtime，每一次架構調整都是實際需求驅動的。其實也沒什麼，就是該踩的坑一個都沒少踩罷了。
+
+核心經驗有三條：
+
+1. **資源共享很重要**：不要盲目追求隔離，共享 runtime 能大幅降低資源開銷——有時候一個人獨享不如大家一起用
+2. **狀態管理要小心**：有狀態的服務要自己管理，別依賴外部端點——畢竟自己的事情還是自己做比較靠譜
+3. **錯誤恢復不能少**：自動重試機制能讓系統健壯性上一個台階——跌倒了就爬起來，沒什麼大不了的
+
+這套方案現在在 HagiCode 中運行穩定，支持會話恢復、自動重試、runtime 重建等功能。如果你的項目也需要集成 OpenCode，希望這些經驗能幫你少走彎路。畢竟......走了彎路才知道捷徑在哪裡，只是有時候知道了也沒什麼用了。
+
+## 參考資料
+
+- [OpenCode GitHub 倉庫](https://github.com/anomalyco/opencode)
+- [HagiCode GitHub 倉庫](https://github.com/HagiCode-org/site)
+- HagiCode 官網：[hagicode.com](https://hagicode.com)
+- HagiCode 安裝指南：[docs.hagicode.com/installation/docker-compose](https://docs.hagicode.com/installation/docker-compose)
+- HagiCode Desktop 桌面端：[hagicode.com/desktop/](https://hagicode.com/desktop/)
+- 正式版演示視頻：[www.bilibili.com/video/BV1z4oWB3EpY/](https://www.bilibili.com/video/BV1z4oWB3EpY/)

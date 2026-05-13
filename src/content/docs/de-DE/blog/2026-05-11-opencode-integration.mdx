@@ -1,0 +1,263 @@
+---
+title: OpenCode-Integrationspraxis: Architekturevolution von eigenständigen Prozessen zu gemeinsamem Runtime
+date: 2026-05-11
+tags: [opencode, monorepo, integration, architecture]
+---
+
+## OpenCode-Integrationspraxis: Architekturevolution von eigenständigen Prozessen zu gemeinsamem Runtime
+
+> Dieser Artikel teilt die vollständige Praxis der Integration von OpenCode AI Assistant in HagiCode, einschließlich der wichtigsten Designentscheidungen im Architekturevolutionsprozess, der encountered Probleme und der最终lösungen.
+
+## Hintergrund
+
+OpenCode ist ein Open-Source-AI-Coding-Assistant-Projekt, das auf GitHub gehostet wird. Für HagiCode als Monorepo-Projekt bedeutet die Integration von OpenCode als unterstützter AI Provider, dass es als Backend-Modell für Proposal-Generierung, Code-Bearbeitung und Workflow-Ausführung verwendet werden kann.
+
+Der Integrationsprozess verlief jedoch nicht so reibungslos wie erwartet. Ursprünglich gab es zwei unabhängige Vorschläge: einer plante die Erstellung eines C# SDK, der später verworfen wurde – was eigentlich kein großer Verlust war; ein anderer für Repository-Level-Integration wurde fortgesetzt. Als OpenCode in die offizielle Session-Leitung eingebunden wurde, traten eine Reihe von Problemen auf, wie Session-Management, Fehlerwiederherstellung und mehr – schließlich kommt, was kommen muss.
+
+Noch frustrierender war, dass das ursprünglich entworfene „ein eigenständiger Prozess pro Session“-Modell in der Praxis hohe Ressourcenkosten offenbarte, was eine Refaktorisierung zum „System-Level Shared Runtime“-Modell erforderlich machte. Gleichzeitig stolperten wir über die 400 BadRequest-Falle – die Wiederverwendung externer Endpunkte ohne Kontext führte zu Anfragefehlern – eine traurige Geschichte.
+
+Dieser Artikel fasst die encountered Probleme und Designentscheidungen zusammen, um anderen Projekten, die OpenCode integrieren möchten, als Referenz zu dienen. Schließlich muss man schöne Dinge oder Menschen nicht unbedingt besitzen; solange sie schön sind, kann man ihre Schönheit einfach genießen... Auch bei technischem Teilen ist es so.
+
+## Über HagiCode
+
+Die in diesem Artikel geteilte Lösung stammt aus unserer praktischen Erfahrung im [HagiCode](https://hagicode.com) Projekt. HagiCode ist ein AI-basierter Code-Assistent, bei dem wir im Entwicklungsprozess mehrere AI Provider integrieren mussten, OpenCode ist einer davon. Der folgende Architekturevolutionsprozess basiert auf realen Erfahrungen aus encountered Problemen und Optimierungen in unserem Projekt – man hat halt keine Wahl, die encountered Löcher müssen gefüllt werden.
+
+## Technische Architektur
+
+### Gesamt-Schichten-Design
+
+Die HagiCode-OpenCode-Integrationsarchitektur ist in fünf Schichten unterteilt, jede mit klaren Verantwortlichkeiten:
+
+**1. Repository-Integrationsschicht**
+
+Registrierung des OpenCode-Repositorys über das MonoSpecs-Konfigurationssystem (`.hagicode/monospecs.yaml`). Hier gab es eine Wahl: Submodule oder plain Git Repository? Wir entschieden uns für Letzteres und verwalten das Klonen und Synchronisieren über ein einheitliches `scripts/clone-repos.mjs` Skript. Dies ist flexibler und vermeidet die Berechtigungs- und Kooperationsprobleme von Submodulen – schließlich will niemand diese Fehlermeldung sehen, aber man hat keine Wahl.
+
+**2. Provider-Schicht**
+
+`OpenCodeCliProvider` implementiert die `IAIProvider`-Schnittstelle, die Standardabstraktionsschicht für die Verbindung mit externen AI-Diensten. Der ursprüngliche Vorschlag wollte „einen eigenständigen Prozess pro Session“, aber in der Praxis erwies sich der Ressourcenaufwand als zu hoch, schließlich wechselten wir zum Shared Runtime-Modell und verwalten die System-Level-Runtime-Lebensdauer über `OpenCodeRuntimeCoordinator`. Das ist auch okay, die Idee war schön, die Realität grausam.
+
+**3. Runtime-Management-Schicht`
+
+`OpenCodeRuntimeCoordinator` ist das Kern der gesamten Architektur, verantwortlich für Runtime-Start, Gesundheitsprüfung und Invalidierungswiederherstellung. Es verwendet `HagiCode.Libs.Providers.OpenCode` als HTTP-Client-Basis und kapselt alle Interaktionen mit der OpenCode-Runtime. Wie an einem winterlichen Abend, der Bambus außerhalb ist wie gestern, ohne die Antwort auf sie, sie schaut immer noch gerne aus dem Fenster – auch Runtime braucht jemanden, der sie schweigend beschützt.
+
+**4. Session-Persistenz-Schicht**
+
+Verwendung einer SQLite-Datenbank (`opencode-session-bindings-v2.db`) zur Persistenz der CessionId-zu-OpenCode-SessionId-Zuordnung. Dieses Design ist entscheidend, da es Session-Wiederherstellung und Neustart unterstützt, ohne bei jeder Mal eine neue Session erstellen zu müssen. Schließlich ist das Gedächtnis manchmal besser vergessen, aber in der Programmierwelt geht es ohne Erinnerung nicht.
+
+**5. Fehlerwiederherstellungs-Schicht**
+
+`ProviderErrorAutoRetryCoordinator` bietet einen automatischen Wiederholungsmechanismus, zusammen mit `OpenCodeRetryableTerminalFailureClassifier` zur Fehlerklassifikation – welche können wiederholt werden, welche sollten direkt fehlschlagen. Diese Schicht verbessert die Systemrobustheit erheblich. Eigentlich nichts Besonderes, einfach das System wie Menschen fallen lassen und wieder aufstehen lassen.
+
+### Schlüssel-Datenfluss
+
+Wenn eine AI-Anfrage eingeht, sieht der Datenfluss so aus:
+
+1. Anfrage geht zuerst an `OpenCodeCliProvider`
+2. Provider fordert Runtime von `OpenCodeRuntimeCoordinator` an
+3. Coordinator prüft, ob eine verfügbare Runtime vorhanden ist, startet sonst neue
+4. Abfrage oder Erstellung der Session-Bindung über CessionId
+5. Verwenden der gebundenen SessionId zum Aufrufen der OpenCode-API
+6. Bei Fehler Entscheider über Wiederholung basierend auf Fehlertyp
+
+Dieser Prozess sieht einfach aus, aber jede Phase hat Probleme verursacht. Hat das Sinn? Vielleicht, jedenfalls sind wir durch alle gegangen... und haben verstanden, dass encountered Löcher selbst Teil des Wachstums sind.
+
+## Schlüssel-Designentscheidungen
+
+### Von eigenständigen Prozessen zu gemeinsamem Runtime
+
+Der ursprüngliche `opencode-csharp-sdk` Vorschlag verwendete das „ein eigenständiger Prozess pro Session“-Modell. Die Idee war schön: gute Isolation, ein abgestürzter Prozess beeinflusst keine anderen Sessions. Aber die Realität war grausam:
+
+- Hoher Ressourcenaufwand: Jeder Prozess muss die Runtime laden, Speicherverbrauch steigt dramatisch
+- Langsamer Start: Häufiges Erstellen und Zerstören von Prozessen, nicht zu vernachlässigender Overhead
+- Komplexe Verwaltung: Prozess-Lebenszyklus-Management ist selbst ein Ärgernis
+
+Schließlich wechselten wir zum „System-Level Shared Runtime“-Modell. Alle Sessions teilen sich denselben Runtime-Prozess, unterscheiden sich aber durch Session-IDs. Diese Änderung senkte den Ressourcenverbrauch um eine Größenordnung und verbesserte die Reaktionszeit deutlich. Eigentlich nichts Besonderes, einfach aus „eine Person alleine nutzen“ zu „alle zusammen nutzen“ geändert.
+
+### Selbst verwaltete Endpunkte vs. externe BaseUri
+
+Früher gab es ein seltsames 400 BadRequest-Problem. Die Untersuchung zeigte, dass dies daran lag, dass externe BaseUrl wiederverwendet wurde, aber notwendige Kontextinformationen fehlten. OpenCode Runtime ist zustandsbehaftet, die direkte Verwendung externer Endpunkte bedeutet Kontextverlust – wie jemand ohne Erinnerung, hilflos und ratlos.
+
+Die Lösung ist einfach: selbst verwaltete Runtime unterhalten, nicht von externen Endpunkten abhängen. In der Konfigurationsdatei `BaseUri` leer lassen, das System selbst die Runtime-Lebensdauer verwalten lassen.
+
+```yaml
+AI:
+  OpenCode:
+    Enabled: true
+    ExecutablePath: "opencode"
+    BaseUri: null  # Leer lassen, selbst verwaltete Runtime verwenden
+    Model: "anthropic/claude-sonnet-4-20250514"
+```
+
+Diese Konfigurationsänderung sieht unscheinbar aus, löste aber das damals frustrierendste Problem. Manchmal ist die Antwort direkt vor Augen, wir haben nur zu viele Umwege gemacht.
+
+### Session-Bindungsstrategie
+
+Session-Bindung ist ein weiteres Schlüssel-Design. Wir verwenden CessionId als Bindungsschlüssel, unterstützen drei Modi:
+
+- **started**: Neue Session, erstellt neue OpenCode SessionId
+- **resumed**: Wiederherstellung vorhandener Session, liest Bindung aus Datenbank
+- **restarted**: Session-Neustart, erstellt neue SessionId aber behält Verlauf
+
+ Dieses Design macht Session-Management sehr flexibel, Benutzer können jederzeit vorherige Konversationen wiederherstellen, das System kann auch nach Runtime-Neustart automatisch Bindungen wiederherstellen. Schließlich ist das Gedächtnis manchmal unmöglich zu vergessen, manchmal unmöglich zu merken... In der Programmierwelt ist das Gedächtnis ziemlich zuverlässig.
+
+## Implementierungslösung
+
+### 1. Repository-Integration
+
+Registrierung des OpenCode-Repositorys in `.hagicode/monospecs.yaml`:
+
+```yaml
+repositories:
+  - path: "repos/opencode"
+    url: "https://github.com/anomalyco/opencode.git"
+    displayName: "OpenCode"
+    icon: "⌨️"
+```
+
+Dann das Klon-Skript ausführen:
+
+```bash
+node scripts/clone-repos.mjs
+```
+
+Damit wird der OpenCode-Quellcode lokal gezogen, kann jederzeit aktualisiert werden. Eigentlich ziemlich einfach, solange kein Fehler auftritt...
+
+### 2. Provider-Konfiguration
+
+Konfiguration des OpenCode Providers in `appsettings.yml`:
+
+```yaml
+AI:
+  OpenCode:
+    Enabled: true
+    ExecutablePath: "opencode"
+    BaseUri: null
+    Model: "anthropic/claude-sonnet-4-20250514"
+    RequestTimeoutSeconds: 300
+    StartupTimeoutSeconds: 60
+```
+
+Einige wichtige Parameter:
+- `RequestTimeoutSeconds`: Timeout für einzelne Anfragen, standardmäßig 5 Minuten – zu lange zu warten ist auch ziemlich quälend
+- `StartupTimeoutSeconds`: Timeout für Runtime-Start, ganze 1 Minute gegeben
+
+### 3. Provider-Wiederherstellung
+
+Wiedereingliederung von OpenCode in das AI Provider-System:
+
+- Wiederherstellung von `OpenCodeCli` in `AIProviderType`-Aufzählung
+- Wiederherstellung der Erstellungslogik in `AIProviderFactory`
+- `ExecutorGrainFactory` leitet `OpenCodeCli` an dediziertes Grain weiter
+
+Diese Änderungen machen OpenCode zu einem gleich behandelten AI Provider, keinen Sonderfall. Eigentlich sind alle gleich, nichts Besonderes.
+
+### 4. Runtime-Management-Codebeispiel
+
+```csharp
+// Runtime über OpenCodeRuntimeCoordinator abrufen
+var runtime = await _runtimeCoordinator.GetRuntimeAsync(
+    _settings,
+    request.WorkingDirectory,
+    cancellationToken);
+
+// Session erstellen oder wiederherstellen
+var session = await ResolveSessionAsync(runtime, request, cancellationToken);
+
+// Prompt senden
+var response = await session.Runtime.Client.PromptAsync(
+    session.SessionId,
+    promptRequest,
+    cancellationToken);
+```
+
+Dieser Code sieht sehr prägnant aus, aber dahinter steckt viel Arbeit: Runtime-Start, Gesundheitsprüfung, Session-Bindungsabfrage und -erstellung. Wie bei vielen Dingen, auf der Oberfläche sieht man nichts, dahinter stecken Geschichten.
+
+### 5. Fehlerwiederherstellungsmechanismus
+
+```csharp
+// Wiederherstellbare Fehler erkennen und Runtime neu erstellen
+if (ShouldRetryWithFreshRuntime(ex, cancellationToken))
+{
+    await _runtimeCoordinator.InvalidateAsync(runtime, ...);
+    var recoveredRuntime = await ResolveRuntimeAsync(request, cancellationToken);
+    // Mit neuer Runtime wiederholen
+}
+```
+
+Der automatische Wiederholungsmechanismus verbessert die Systemrobustheit erheblich, Netzwerkschwankungen, gelegentliche Runtime-Abstürze können automatisch wiederhergestellt werden. Eigentlich ist das Leben auch so, gefallen und wieder aufstehen, nichts Großes... Programme sind viel stärker als Menschen.
+
+## Praxisleitfaden
+
+### Schnellreferenz für Schlüsselkonfigurationen
+
+| Konfiguration | Standardwert | Beschreibung |
+|---------------|--------------|--------------|
+| `Enabled` | `true` | Ob OpenCode Provider aktiviert ist |
+| `ExecutablePath` | `"opencode"` | Pfad zur OpenCode-ausführbaren Datei |
+| `BaseUri` | `null` | Externer Endpunkt (empfohlen leer zu lassen) |
+| `Model` | - | Standardmodell |
+| `RequestTimeoutSeconds` | `300` | Anfrage-Timeout |
+| `StartupTimeoutSeconds` | `60` | Runtime-Start-Timeout |
+
+### Session-Bindungsdatenbankstruktur
+
+```sql
+CREATE TABLE IF NOT EXISTS OpenCodeSessionBindings (
+    BindingKey TEXT NOT NULL PRIMARY KEY,
+    OpenCodeSessionId TEXT NOT NULL,
+    CreatedAtUtc TEXT NOT NULL,
+    UpdatedAtUtc TEXT NOT NULL
+);
+```
+
+Bindungen werden 30 Tage lang aufbewahrt, danach automatisch bereinigt. Dieses Design garantiert sowohl Session-Wiederherstellungsfähigkeit als auch vermeidet unbegrenzte Datenausdehnung. Schließlich hat alles eine Frist, abgelaufenes werden bereinigt, das ist auch eine Art Loslassen...
+
+### Häufige Probleme und Lösungen
+
+**1. 400 BadRequest-Fehler**
+
+Überprüfung der `BaseUri`-Konfiguration, empfohlen leer zu lassen für selbst verwaltete Runtime. Wenn externer Endpunkt verwendet werden muss, sicherstellen, dass Kontext vollständig ist. Meistens liegt das Problem an „selbstverständlichen Annahmen“.
+
+**2. Session kann nicht wiederhergestellt werden**
+
+Bestätigen, dass CessionId korrekt übergeben wird, überprüfen, ob entsprechende Bindungseinträge in der Datenbank existieren. Wie bei der Suche nach Erinnerungen, man braucht Hinweise.
+
+**3. Modellauswahlproblem**
+
+Unterstützung von zwei Formaten: `provider/model` (wie `anthropic/claude-sonnet-4`) und Format ohne Provider (wie `claude-sonnet-4`). Viele Wege führen nach Rom, manche sind einfacher, manche etwas kurviger.
+
+**4. Werkzeugnamen stimmen nicht überein**
+
+Werkzeugnamen werden automatisch normalisiert, Inhalte in Klammern und nach Doppelpunkten entfernt. Zum Beispiel wird `read(path)` zu `read`, beim Aufruf muss man darauf achten. Diese Details sind nichts Besonderes, nur leicht zu übersehen.
+
+**5. Automatische Wiederholung funktioniert nicht**
+
+Überprüfung, ob der Fehlerklassifikator wiederherstellbare Fehler korrekt erkennt. Standardmäßig werden Netzwerkfehler, Runtime-Invalidierung etc. automatisch bis zu 3 Mal wiederholt. Noch ein paar Versuche schaden nicht, vielleicht klappt es ja.
+
+### Verwandte Codepfade
+
+- Provider: `repos/hagicode-core/src/PCode.ClaudeHelper/AI/Providers/OpenCodeCliProvider.cs`
+- Runtime Coordinator: `repos/hagicode-core/src/PCode.ClaudeHelper/AI/Providers/OpenCodeRuntimeCoordinator.cs`
+- Konfiguration: `repos/hagicode-core/src/PCode.ClaudeHelper/AI/Configuration/OpenCodeSettings.cs`
+- Vorschlagsarchiv: `openspec/changes/archive/2026-03-*opencode*/`
+
+## Zusammenfassung
+
+Der Integrationsprozess von HagiCode mit OpenCode ist eigentlich ein kontinuierlicher Prozess des encountered Problems und der Optimierung. Vom ursprünglichen eigenständigen Prozessmodell zum gemeinsamen Runtime, von der Wiederverwendung externer Endpunkte zur selbst verwalteten Runtime, jede Architektureinstellung wurde durch tatsächliche Anforderungen angetrieben. Eigentlich nichts Besonderes, einfach alle encountered Löcher durchgemacht.
+
+Die Kernerfahrung hat drei Punkte:
+
+1. **Ressourcenteilung ist wichtig**: Nicht blind nach Isolation streben, gemeinsames Runtime kann Ressourcenkosten drastisch senken – manchmal ist gemeinsames Nutzen besser als alleine nutzen
+2. **Zustandsmanagement muss vorsichtig sein**: Zustandsbehaftete Services sollten selbst verwaltet werden, nicht von externen Endpunkten abhängen – schließlich sind eigenen Dinge selbst zu machen zuverlässiger
+3. **Fehlerwiederherstellung nicht vergessen**: Automatischer Wiederholungsmechanismus kann die Systemrobustheit auf eine höhere Stufe heben – gefallen und wieder aufstehen, nichts Großes
+
+Diese Lösung läuft jetzt in HagiCode stabil, unterstützt Session-Wiederherstellung, automatische Wiederholung, Runtime-Neuerstellung und andere Funktionen. Wenn Ihr Projekt auch OpenCode integrieren muss, hoffe ich, dass diese Erfahrungen Ihnen helfen, weniger Umwege zu machen. Schließlich... nur nach Umwegen weiß man, wo die Abkürzung liegt, manchmal ist das Wissen aber auch nutzlos.
+
+## Referenzmaterial
+
+- [OpenCode GitHub Repository](https://github.com/anomalyco/opencode)
+- [HagiCode GitHub Repository](https://github.com/HagiCode-org/site)
+- HagiCode offizielle Website: [hagicode.com](https://hagicode.com)
+- HagiCode Installationsanleitung: [docs.hagicode.com/installation/docker-compose](https://docs.hagicode.com/installation/docker-compose)
+- HagiCode Desktop Desktop-Client: [hagicode.com/desktop/](https://hagicode.com/desktop/)
+- Offizielle Demo-Video: [www.bilibili.com/video/BV1z4oWB3EpY/](https://www.bilibili.com/video/BV1z4oWB3EpY/)
