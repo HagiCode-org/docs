@@ -37,7 +37,7 @@ import type {
 } from '@shared/version-manager';
 import { getLink, getLinkWithLocale } from '@shared/links';
 import { getFallbackSteamStoreLink, loadSteamStoreLink } from '@shared/steam-store-link';
-import { FEATURE_MAC_DOWNLOAD_ENABLED } from '@/config/features';
+import { FEATURE_MAC_DOWNLOAD_ENABLED, FEATURE_SITE_STEAM_ENABLED } from '@/config/features';
 
 const MAC_DOWNLOAD_DISABLED_NOTICE = '建议安装 Docker 版本';
 const MAC_DOWNLOAD_DISABLED_NOTICE_EN = 'Recommended: Install Docker version';
@@ -379,8 +379,8 @@ export default function InstallButton({
     };
   }, [channel]);
 
-  const showSteamShortcut = variant === 'compact' && steamStoreLink.href.length > 0;
-  const needsSteamLink = variant === 'compact';
+  const showSteamShortcut = FEATURE_SITE_STEAM_ENABLED && variant === 'compact' && steamStoreLink.href.length > 0;
+  const needsSteamLink = FEATURE_SITE_STEAM_ENABLED && variant === 'compact';
 
   useEffect(() => {
     if (!needsSteamLink) {

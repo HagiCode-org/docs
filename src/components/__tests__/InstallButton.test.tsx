@@ -333,7 +333,7 @@ describe('InstallButton runtime states', () => {
     expect(screen.queryByRole('menu')).not.toBeInTheDocument();
   });
 
-  it('adds a direct Steam shortcut to the compact header install cluster', async () => {
+  it('keeps the compact header install cluster free of the Steam shortcut while Steam support is pending', async () => {
     vi.mocked(versionManager.getDesktopVersionData).mockResolvedValue(
       createVersionData({
         latest: {
@@ -397,12 +397,8 @@ describe('InstallButton runtime states', () => {
 
     render(<InstallButton variant="compact" locale="en" />);
 
-    const steamLink = await screen.findByRole('link', { name: 'Open Hagicode on Steam' });
-    expect(steamLink).toHaveAttribute('href', fallbackSteamUrl);
-    expect(steamLink).toHaveAttribute('target', '_blank');
-    expect(steamLink).toHaveAttribute('rel', 'noopener noreferrer');
-    expect(steamLink).toHaveTextContent('Steam');
-    expect(steamLink.querySelector('[data-steam-icon=\"true\"]')).not.toBeNull();
+    await screen.findByRole('link', { name: /China/i });
+    expect(screen.queryByRole('link', { name: 'Open Hagicode on Steam' })).not.toBeInTheDocument();
     expect(screen.getByRole('link', { name: /China/i })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: /GitHub/i })).toBeInTheDocument();
   });
@@ -413,6 +409,18 @@ describe('InstallButton runtime states', () => {
     );
 
     render(<InstallButton variant="full" locale="en" />);
+
+    await screen.findByRole('link', { name: /China/i });
+    expect(vi.mocked(steamStoreLink.loadSteamStoreLink)).not.toHaveBeenCalled();
+    expect(screen.queryByRole('link', { name: 'Open Hagicode on Steam' })).not.toBeInTheDocument();
+  });
+
+  it('skips the Steam link fetch for the compact install surface while Steam support is pending', async () => {
+    vi.mocked(versionManager.getDesktopVersionData).mockResolvedValue(
+      createVersionData(),
+    );
+
+    render(<InstallButton variant="compact" locale="en" />);
 
     await screen.findByRole('link', { name: /China/i });
     expect(vi.mocked(steamStoreLink.loadSteamStoreLink)).not.toHaveBeenCalled();
