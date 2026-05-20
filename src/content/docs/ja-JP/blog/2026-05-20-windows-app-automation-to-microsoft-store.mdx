@@ -1,0 +1,425 @@
+---
+title: Windows アプリの Microsoft Store への自動公開に関する自動化実践
+date: 2026-05-20
+tags: [Windows, Microsoft Store, 自動化, Electron, CI/CD]
+---
+
+## Windows アプリの Microsoft Store への自動公開に関する自動化実践
+
+> バージョン解析から Store 公開までの全プロセスを自動化し、手動操作の煩雑なフローにさようなら。
+
+## 背景
+
+Electron アプリを Microsoft Store に公開したい場合、おそらく次のような問題に直面するでしょう：Store は分離されたインストールプロセスをサポートしていません——デスクトップアプリとサーバーペイロードを 1 つの完全な AppX/MSIX パッケージにまとめる必要があります。
+
+これだけならまだしも、問題はこれからです。新しいバージョンをリリースするたびに、次の作業が必要です：
+
+1. デスクトップとサーバーのバージョンが更新されているか確認
+2. 対応する tag からコードをチェックアウト
+3. サーバーペイロードをダウンロードして注入
+4. MSIX パッケージをビルド
+5. Microsoft Store に手動でアップロード
+6. ストア情報と価格を設定
+
+すべてのステップを手動で実行する必要がある場合、それは本当に骨の折れる作業です。しかもエラーが発生しやすく、どのステップを実行してどのステップを実行していないか、自分でも覚えていない可能性があります。
+
+実際、これは誰のせいでもありません。手動操作は本質的に見落としがちなものです。ただ、私たちは毎回このような手間をかけたくないので、この問題を完全に解決することにしました——プロセス全体を自動的に実行できるようにしたのです。
+
+## HagiCode について
+
+この記事で共有するソリューションは、[HagiCode](https://hagicode.com) プロジェクトでの実践的な経験から生まれたものです。AI コードアシスタントとして、HagiCode はデスクトップ版と Web 版を提供しており、複数の配信チャネルをサポートする必要があります。Windows Store の自動公開を実装する過程で、完全な自動化ソリューションをまとめました。
+
+言ってみれば、これはおそらく予期せぬ収穫だったと言えます。当初は時間を節約するためでしたが、最終的にはこのようなものができあがりました。
+
+## 技術アーキテクチャの分析
+
+この問題は、実際には複数の技術レイヤーの調整に関係しています。これを 5 つのレイヤーに分けることができます：
+
+### バージョン調整レイヤー
+
+まず、新しいバージョンをリリースする必要があるタイミングを知る必要があります。Azure インデックス（ビルド産物を保存するために使用する blob ストレージ）からデスクトップとサーバーコンポーネントの最新バージョンを解析し、新しい Store パッケージを生成する必要があるかどうかを判断する必要があります。
+
+これはまるで自分に問いかけているようなものです：今、これをするべきですか？
+
+### ワークスペース管理レイヤー
+
+AppX のビルドはソースコードレベルの設定とランタイムレイアウトに依存しているため、既存のビルド産物を単純に再パッケージすることはできません。デスクトップリポジトリの特定の tag からコードをチェックアウトし、ビルドで使用されるソースコードの状態が正しいことを確認する必要があります。
+
+何といっても、ソースコードが間違っていれば、その後どれだけ努力しても無駄です。
+
+### ランタイムパッケージングレイヤー
+
+これが核心部分です。サーバーペイロードをデスクトップアプリのパッケージレイアウトに注入する必要があります。こうすることで、アプリ起動時にパッケージ化されたランタイムを検出し、Steam モード（オフラインモード）に入ります。
+
+このステップがうまくいかなければ、これまでのすべての努力も無駄になります。
+
+### ビルド出力レイヤー
+
+electron-builder を使用して Store の要件を満たす MSIX パッケージを生成します。このステップは Windows 環境で実行する必要があります。AppX ビルドには Windows SDK が必要だからです。
+
+適切な場所で適切なことをする必要があります。
+
+### 公開配信レイヤー
+
+最後に GitHub Releases と Microsoft Store に公開します。GitHub Release はバックアップとバージョン追踪として機能し、Microsoft Store はエンドユーザー向けです。
+
+すべての準備が整い、あと一押しだけです。
+
+## 全体アーキテクチャの設計
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    package-release workflow                  │
+├─────────────────────────────────────────────────────────────┤
+│  ┌─────────────────┐    ┌─────────────────┐                │
+│  │ resolve_plan    │───▶│   build         │                │
+│  │ (バージョン解析とスキップ)│    │   (MSIXビルド)    │                │
+│  └─────────────────┘    └────────┬────────┘                │
+│         │                       │                          │
+│         ▼                       ▼                          │
+│  ┌─────────────────┐    ┌─────────────────┐                │
+│  │ skip_summary    │    │   publish       │                │
+│  │ (スキップレポート)       │    │   (公開)         │                │
+│  └─────────────────┘    └────────┬────────┘                │
+│                                 │                          │
+│                                 ▼                          │
+│                        ┌─────────────────┐                 │
+│                        │ publish_store   │                 │
+│                        │ (Store公開)     │                 │
+│                        └─────────────────┘                 │
+└─────────────────────────────────────────────────────────────┘
+```
+
+プロセス全体は GitHub Actions によって駆動され、定期的（4 時間ごと）または手動でトリガーできます。手動トリガー時には、特定のデスクトップバージョンとサーバーバージョンを指定したり、強制再ビルドを行ったりできます。
+
+実際、4 時間ごとというのはそれほど頻繁ではありません。コードの更新には速い場合も遅い場合もありますが、これは安全のためです。
+
+## 実装の詳細
+
+### 1. ビルドプランの解析
+
+最初のステップは、新しいバージョンをビルドする必要があるかどうかを判断することです。デスクトップとサーバーコンポーネントの現在のバージョンを解析し、対応するリリースが既に存在するかどうかを確認する必要があります。
+
+```javascript
+// scripts/resolve-dispatch-build-plan.mjs
+export async function resolveDispatchBuildPlan({
+  eventName,
+  eventPayload,
+  desktopAzureSasUrl,
+  serverAzureSasUrl,
+}) {
+  // トリガー入力を解析
+  const trigger = normalizeTriggerInputs({ eventName, eventPayload });
+  
+  // Azure インデックスからデスクトップとサーバーバージョンを解析
+  const [desktopRelease, serverRelease] = await Promise.all([
+    resolveIndexRelease({ 
+      azureSasUrl: desktopAzureSasUrl,
+      platformId: 'win-x64' 
+    }),
+    resolveIndexRelease({ 
+      azureSasUrl: serverAzureSasUrl,
+      platformId: 'win-x64' 
+    })
+  ]);
+  
+  // リリース tag を生成
+  const desktopTag = normalizeGitTag(desktopRelease.version);
+  const releaseTag = deriveStoreReleaseTag(desktopRelease.version, serverRelease.version);
+  // たとえば：desktop-v1.2.3-server-v4.5.6
+  
+  // 既存かどうかを確認（重複ビルドを回避）
+  const existingRelease = await findReleaseByTag(packerRepository, releaseTag);
+  const shouldBuild = !existingRelease || trigger.forceRebuild;
+  
+  return {
+    release: { tag: releaseTag, exists: Boolean(existingRelease) },
+    build: { shouldBuild, skipReason },
+    upstream: { desktop: { tag: desktopTag }, server }
+  };
+}
+```
+
+このステップの重要な点はスキップロジックです——同じバージョンの組み合わせが既にビルドされている場合、完全なビルドプロセスを再度実行する必要はありません。これにより、CI コストと時間を節約できます。
+
+同じことを繰り返すのは、おそらくあまり意味がありません。結局のところ、時間とリソースは限られています。
+
+### 2. ワークスペースの準備
+
+ビルドすることが決定されたら、クリーンなビルド環境を準備する必要があります。git worktree を使用して、特定の tag からコードをチェックアウトします。
+
+```javascript
+// scripts/prepare-packaging-workspace.mjs
+export async function preparePackagingWorkspace({
+  planPath,
+  platformId,
+  workspacePath,
+  desktopSourcePath
+}) {
+  // git worktree を使用して特定の tag からデスクトップコードをチェックアウト
+  await runCommand('git', [
+    '-C', resolvedDesktopSourcePath,
+    'worktree', 'add', '--detach',
+    desktopWorkspace,
+    `refs/tags/${plan.upstream.desktop.tag}`
+  ]);
+  
+  // ワークスペースを検証
+  const validation = await validateDesktopWorkspace({
+    desktopWorkspace,
+    storePackageConfig
+  });
+  
+  // ワークスペースマニフェストを作成
+  const workspaceManifest = {
+    desktopWorkspace,
+    runtimeInjectionRoot: validation.runtimeRoot,
+    desktopTag: plan.upstream.desktop.tag,
+    desktopRef,
+  };
+  
+  return workspaceManifest;
+}
+```
+
+worktree を使用する利点は、メインの作業ディレクトリに影響を与えず、ビルドを並行して実行でき、ビルド完了後に簡単にクリーンアップできることです。
+
+何といっても、ビルドのためにメインの作業ディレクトリが乱雑になるのは誰も望みません。
+
+### 3. サーバーペイロードの注入
+
+このステップは、サーバーペイロードをダウンロードして正しい位置に注入します。
+
+```javascript
+// scripts/stage-server-payload.mjs
+export async function stageServerPayload({
+  planPath,
+  workspacePath,
+  platformId,
+  azureSasUrl
+}) {
+  // Azure インデックスからサーバーペイロードをダウンロード
+  const assetSource = resolveAssetDownloadUrl({ asset, sasUrl: azureSasUrl });
+  await downloadFromSource({ 
+    sourceUrl: assetSource, 
+    destinationPath: downloadPath 
+  });
+  
+  // 解凍して検証
+  await extractArchive(downloadPath, extractionPath);
+  const runtimeRoot = await resolveRuntimeRoot(extractionPath);
+  const validation = await validateServerPayloadRoot(runtimeRoot, platformId);
+  
+  // パッケージランタイムレイアウトに注入
+  // ターゲットパスは resources/portable-fixed/current
+  // このパスは AppX 内の extra/portable-fixed/current にマッピングされます
+  await copyDir(runtimeRoot, targetPath);
+}
+```
+
+重要なのはパスのマッピングです——`resources/portable-fixed/current` は AppX の `extra/portable-fixed/current` にパッケージ化されるため、アプリ起動時にローカルランタイムを検出してオフラインモードに入ります。
+
+パスというものは、少しも間違いが許されません。少しのずれで、見つからなくなる可能性があります。
+
+### 4. MSIX のビルド
+
+準備されたワークスペースとサーバーペイロードがあれば、MSIX パッケージをビルドできます。
+
+```javascript
+// scripts/build-appx.mjs
+export async function buildAppx({
+  planPath,
+  workspacePath,
+  platformId
+}) {
+  // Store 固有の electron-builder 設定オーバーレイを生成
+  const overlayConfig = await writeStoreElectronBuilderConfig({
+    desktopWorkspace: workspaceManifest.desktopWorkspace,
+    sourceConfigPath: storePackageConfig.desktop.electronBuilderConfigPath,
+    outputConfigPath: 'electron-builder.store.yml'
+  });
+  
+  // デスクトップビルドコマンドを実行
+  await runShellCommand(
+    buildDesktopStoreCommand(overlayConfig.outputPath, desktopScripts),
+    workspaceManifest.desktopWorkspace
+  );
+  
+  // MSIX 出力を収集
+  const storeOutputs = await findStoreOutputs(pkgDirectory);
+  const artifactPath = path.join(
+    workspaceManifest.outputDirectory, 
+    artifactFileName
+  );
+  await copySingleFile(primaryOutput, artifactPath);
+}
+```
+
+electron-builder 設定には、パッケージアイデンティティ、発行者表示名など、Store 固有のメタデータを含める必要があります。これらの情報は Store 提出時に使用されます。
+
+設定が間違っていると、パッケージを作成できません。これについてはあまり言うことはありません。
+
+### 5. GitHub への公開
+
+ビルドが完了したら、産物を GitHub Releases に公開する必要があります。
+
+```javascript
+// scripts/publish-release.mjs
+export async function publishRelease({
+  planPath,
+  artifactsDir,
+  outputDir,
+  forceDryRun
+}) {
+  // 公開産物マニフェストを構築
+  const publicationArtifacts = await buildPublicationArtifacts({
+    plan,
+    artifactsDir,
+    outputDir
+  });
+  
+  if (!dryRun) {
+    // GitHub Release を作成または更新
+    const releaseResult = await upsertReleaseNotes(
+      plan.release.repository,
+      plan.release.tag,
+      token,
+      { name, body }
+    );
+    
+    // アセットをアップロード
+    for (const upload of publicationArtifacts.uploads) {
+      await uploadReleaseAsset({
+        release: releaseResult.release,
+        filePath: upload.filePath,
+        fileName: upload.fileName
+      });
+    }
+  }
+}
+```
+
+GitHub Release はバージョン追踪とバックアップとして機能し、Store 公開が失敗した場合でも、ビルド産物を保持できます。
+
+バックアップを用意しておくことは常に良いことです。いつか巻き戻す必要があるかもしれません。
+
+### 6. Microsoft Store への公開
+
+最後のステップは、Microsoft Store CLI を使用してストアに公開することです。
+
+```yaml
+# .github/workflows/package-release.yml
+publish_store:
+  runs-on: windows-latest
+  steps:
+    - name: Configure Microsoft Store CLI
+      uses: microsoft/microsoft-store-apppublisher@v1.2
+    
+    - name: Publish MSIX packages to Store
+      shell: pwsh
+      run: |
+        msstore reconfigure --tenantId $env:AZURE_AD_TENANT_ID ...
+        msstore publish "$($package.FullName)" -id $env:MICROSOFT_STORE_PRODUCT_ID
+```
+
+このステップは Windows runner で実行する必要があります。Microsoft Store CLI には Windows 環境が必要だからです。
+
+適切な場所で適切なことをする必要があります。環境を変えるとできません。
+
+## 実践ガイド
+
+### 設定ファイル
+
+Store パッケージ設定ファイルは、パッケージアイデンティティとビルド設定を定義します：
+
+```json
+{
+  "packageIdentity": {
+    "displayName": "Hagicode",
+    "publisherDisplayName": "newbe36524",
+    "publisher": "CN=8B6C8A94-AAE5-4C8B-9202-A29EA42B042F",
+    "identityName": "newbe36524.Hagicode",
+    "backgroundColor": "transparent",
+    "languages": ["en-US", "zh-CN", "zh-Hant"]
+  },
+  "supportedWindowsTargets": ["win-x64"],
+  "desktop": {
+    "submodulePath": "inputs/hagicode-desktop",
+    "electronBuilderConfigPath": "electron-builder.yml",
+    "buildScript": "build:appx",
+    "runtimeInjectionPath": "resources/portable-fixed/current"
+  }
+}
+```
+
+設定は、一度変更するだけで頭痛の種になるので、一度で正しく設定するのが最善です。
+
+### ワークフローのトリガー
+
+定期的または手動でトリガーできます：
+
+```yaml
+on:
+  schedule:
+    - cron: '0 */4 * * *'  # 4 時間ごとに実行
+  workflow_dispatch:
+    inputs:
+      desktop_version:
+        description: 'デスクトップバージョンセレクター'
+        required: false
+      server_version:
+        description: 'サーバーバージョンセレクター'
+        required: false
+      force_rebuild:
+        description: '存在する場合でも強制再ビルド'
+        type: boolean
+      dry_run:
+        description: 'ビルドのみで公開しない'
+        type: boolean
+```
+
+自動でも手動でも、最終的に動けば問題ありません。
+
+### 重要な注意事項
+
+1. **Git Tag の要件**：デスクトップリポジトリには、リリースバージョンに対応する tag（v1.2.3 など）が含まれている必要があります。そうでない場合、ビルドは失敗します
+
+2. **Azure SAS URL**：インデックスにアクセスするために、`DESKTOP_AZURE_SAS_URL` と `SERVER_AZURE_SAS_URL` 環境変数を設定する必要があります
+
+3. **Microsoft Store 認証情報**：次のシークレットを設定する必要があります：
+   - `AZURE_AD_APPLICATION_CLIENT_ID`
+   - `AZURE_AD_APPLICATION_SECRET`
+   - `AZURE_AD_TENANT_ID`
+   - `SELLER_ID`
+   - `MICROSOFT_STORE_PRODUCT_ID`
+
+4. **ランタイム検証**：サーバーペイロードには必須のランタイムファイルが含まれている必要があります。そうでない場合、パッケージ化は失敗します
+
+5. **Windows Runner**：AppX ビルドと Store 公開は Windows runner で実行する必要があります
+
+6. **重複検出**：スケジュールされた実行は、同じ release tag が存在するかどうかを確認し、不要なビルドを回避します
+
+これらの落とし穴はおそらくすべて一度は経験したので、注意喚起として書いておきました。結局のところ、誰も同じ間違いを繰り返したいとは思いませんよね。
+
+## まとめ
+
+Windows Store の自動公開は複雑に見えますが、独立したステップに分解すると、それぞれのステップは難しくありません。重要なのは：
+- git worktree を使用してビルド環境を管理する
+- サーバーペイロードを正しいパスに注入する
+- electron-builder を使用して MSIX パッケージを生成する
+- Store CLI を使用して最終公開を完了する
+
+このソリューションは HagiCode プロジェクトで数ヶ月間安定して動作しており、「完全自動化」の目標を基本的に達成しています——最初の認証情報と設定の構成を除いて、その後のバージョンリリースには人的介入が必要ありません。
+
+実際、多くのことはそうですが、難しく見えても、やってみればそれほどのことではありません。少しの忍耐と挑戦が必要なだけです。
+
+もし同様の自動化作業をしているなら、この記事が何らかの参考になれば幸いです。もちろん、各プロジェクトの状況は異なるため、具体的なニーズに応じてソリューションを調整する必要があるかもしれません。
+
+結局のところ、ローマに通ずる道は一つではありませんが、歩きやすい道もあれば、少し曲折している道もあるだけです......
+
+## 参考資料
+
+- [Microsoft Store CLI ドキュメント](https://github.com/microsoft/AppPublisher)
+- [electron-builder ドキュメント](https://www.electron.build/)
+- [HagiCode GitHub リポジトリ](https://github.com/HagiCode-org/site)
+- [HagiCode 公式サイト](https://hagicode.com)

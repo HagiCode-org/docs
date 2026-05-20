@@ -1,0 +1,425 @@
+---
+title: Automated Practice for Publishing Windows Apps to Microsoft Store
+date: 2026-05-20
+tags: [Windows, Microsoft Store, Automation, Electron, CI/CD]
+---
+
+## Automated Practice for Publishing Windows Apps to Microsoft Store
+
+> How to achieve end-to-end automation from version resolution to Store publishing, saying goodbye to the cumbersome manual process.
+
+## Background
+
+If you have an Electron app you want to publish to the Microsoft Store, you'll likely run into this trouble: the Store doesn't support separate installation processes—you have to package the desktop app and server payload into a single complete AppX/MSIX package.
+
+That wouldn't be so bad, but the problems continue. Every time you release a new version, you have to:
+
+1. Check if desktop and server versions are updated
+2. Check out code from the corresponding tags
+3. Download and inject the server payload
+4. Build the MSIX package
+5. Manually upload to Microsoft Store
+6. Configure store information and pricing
+
+If every step requires manual operation, it's too much trouble. Plus, it's error-prone—you might not even remember which steps you've completed and which you haven't.
+
+Actually, you can't really blame anyone, since manual operations are inherently prone to omissions. But we really didn't want to go through this hassle every time, so we decided to solve this problem once and for all—make the entire process run automatically.
+
+## About HagiCode
+
+The solution shared in this article comes from our practical experience in the [HagiCode](https://hagicode.com) project. As an AI code assistant, HagiCode provides both desktop and web clients and needs to support multiple distribution channels. In the process of implementing Windows Store automated publishing, we've developed a complete automation solution.
+
+It's somewhat of an unexpected bonus. Originally just to save some time, we didn't expect to end up building such a comprehensive system.
+
+## Technical Architecture Analysis
+
+This problem actually involves coordination across multiple technical layers. We can break it down into five layers:
+
+### Version Coordination Layer
+
+First, we need to know when to publish a new version. We need to parse the latest versions of desktop and server components from the Azure index (a blob storage we use to store build artifacts), then determine whether to generate a new Store package.
+
+It's like asking yourself: Is it time to do this now?
+
+### Workspace Management Layer
+
+AppX builds depend on source-level configuration and runtime layout, so you can't simply repackage existing build artifacts. We need to check out code from a specific tag in the desktop repository to ensure the correct source code state is used for the build.
+
+After all, if the source code is wrong, all subsequent efforts are in vain.
+
+### Runtime Packaging Layer
+
+This is the core part. We need to inject the server payload into the desktop app's packaging layout. This way, when the application starts, it will detect the packaged runtime and enter Steam mode (offline mode).
+
+If this step isn't done well, all previous efforts are wasted.
+
+### Build Output Layer
+
+Use electron-builder to generate an MSIX package that meets Store requirements. This step needs to run in a Windows environment because AppX builds require the Windows SDK.
+
+Some things just need to be done in the right place—change the location and it won't work.
+
+### Publishing and Distribution Layer
+
+Finally, publish to GitHub Releases and Microsoft Store. GitHub Release serves as backup and version tracking, while Microsoft Store targets end users.
+
+Everything is ready, just waiting for this final push.
+
+## Overall Architecture Design
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    package-release workflow                  │
+├─────────────────────────────────────────────────────────────┤
+│  ┌─────────────────┐    ┌─────────────────┐                │
+│  │ resolve_plan    │───▶│   build         │                │
+│  │ (version resolution & skip)│   │   (MSIX build)  │                │
+│  └─────────────────┘    └────────┬────────┘                │
+│         │                       │                          │
+│         ▼                       ▼                          │
+│  ┌─────────────────┐    ┌─────────────────┐                │
+│  │ skip_summary    │    │   publish       │                │
+│  │ (skip report)   │    │   (publish)     │                │
+│  └─────────────────┘    └────────┬────────┘                │
+│                                 │                          │
+│                                 ▼                          │
+│                        ┌─────────────────┐                 │
+│                        │ publish_store   │                 │
+│                        │ (Store publish) │                 │
+│                        └─────────────────┘                 │
+└─────────────────────────────────────────────────────────────┘
+```
+
+The entire process is driven by GitHub Actions and can be triggered on a schedule (every 4 hours) or manually. When triggered manually, you can specify specific desktop and server versions, or force a rebuild.
+
+Actually, once every 4 hours isn't that frequent—after all, code updates vary in speed, but this is safer.
+
+## Implementation Details
+
+### 1. Build Plan Resolution
+
+The first step is to determine whether to build a new version. We need to parse the current versions of desktop and server components, then check if a corresponding release already exists.
+
+```javascript
+// scripts/resolve-dispatch-build-plan.mjs
+export async function resolveDispatchBuildPlan({
+  eventName,
+  eventPayload,
+  desktopAzureSasUrl,
+  serverAzureSasUrl,
+}) {
+  // Parse trigger inputs
+  const trigger = normalizeTriggerInputs({ eventName, eventPayload });
+  
+  // Parse desktop and server versions from Azure index
+  const [desktopRelease, serverRelease] = await Promise.all([
+    resolveIndexRelease({ 
+      azureSasUrl: desktopAzureSasUrl,
+      platformId: 'win-x64' 
+    }),
+    resolveIndexRelease({ 
+      azureSasUrl: serverAzureSasUrl,
+      platformId: 'win-x64' 
+    })
+  ]);
+  
+  // Generate release tag
+  const desktopTag = normalizeGitTag(desktopRelease.version);
+  const releaseTag = deriveStoreReleaseTag(desktopRelease.version, serverRelease.version);
+  // For example: desktop-v1.2.3-server-v4.5.6
+  
+  // Check if already exists (avoid duplicate builds)
+  const existingRelease = await findReleaseByTag(packerRepository, releaseTag);
+  const shouldBuild = !existingRelease || trigger.forceRebuild;
+  
+  return {
+    release: { tag: releaseTag, exists: Boolean(existingRelease) },
+    build: { shouldBuild, skipReason },
+    upstream: { desktop: { tag: desktopTag }, server }
+  };
+}
+```
+
+The key to this step is the skip logic—if a combination of the same versions has already been built, there's no need to run the complete build process again. This saves CI costs and time.
+
+Doing the same thing repeatedly is probably pointless. After all, time and resources are limited.
+
+### 2. Workspace Preparation
+
+Once you decide to build, you need to prepare a clean build environment. We use git worktree to check out code from a specific tag.
+
+```javascript
+// scripts/prepare-packaging-workspace.mjs
+export async function preparePackagingWorkspace({
+  planPath,
+  platformId,
+  workspacePath,
+  desktopSourcePath
+}) {
+  // Use git worktree to check out desktop code from specific tag
+  await runCommand('git', [
+    '-C', resolvedDesktopSourcePath,
+    'worktree', 'add', '--detach',
+    desktopWorkspace,
+    `refs/tags/${plan.upstream.desktop.tag}`
+  ]);
+  
+  // Validate workspace
+  const validation = await validateDesktopWorkspace({
+    desktopWorkspace,
+    storePackageConfig
+  });
+  
+  // Create workspace manifest
+  const workspaceManifest = {
+    desktopWorkspace,
+    runtimeInjectionRoot: validation.runtimeRoot,
+    desktopTag: plan.upstream.desktop.tag,
+    desktopRef,
+  };
+  
+  return workspaceManifest;
+}
+```
+
+The benefit of using worktree is that it doesn't affect the main working directory, builds can run in parallel, and it's easy to clean up after the build completes.
+
+After all, no one wants their main working directory to be messed up due to builds.
+
+### 3. Server Payload Injection
+
+This step downloads and injects the server payload into the correct location.
+
+```javascript
+// scripts/stage-server-payload.mjs
+export async function stageServerPayload({
+  planPath,
+  workspacePath,
+  platformId,
+  azureSasUrl
+}) {
+  // Download server payload from Azure index
+  const assetSource = resolveAssetDownloadUrl({ asset, sasUrl: azureSasUrl });
+  await downloadFromSource({ 
+    sourceUrl: assetSource, 
+    destinationPath: downloadPath 
+  });
+  
+  // Extract and validate
+  await extractArchive(downloadPath, extractionPath);
+  const runtimeRoot = await resolveRuntimeRoot(extractionPath);
+  const validation = await validateServerPayloadRoot(runtimeRoot, platformId);
+  
+  // Inject into packaging runtime layout
+  // Target path is resources/portable-fixed/current
+  // This path will be mapped to extra/portable-fixed/current inside AppX
+  await copyDir(runtimeRoot, targetPath);
+}
+```
+
+The key is path mapping—`resources/portable-fixed/current` will be packaged into AppX's `extra/portable-fixed/current`, so when the app starts, it will detect the local runtime and enter offline mode.
+
+Paths are unforgiving—one wrong character and it might not be found.
+
+### 4. MSIX Build
+
+With the prepared workspace and server payload, you can build the MSIX package.
+
+```javascript
+// scripts/build-appx.mjs
+export async function buildAppx({
+  planPath,
+  workspacePath,
+  platformId
+}) {
+  // Generate Store-specific electron-builder config override
+  const overlayConfig = await writeStoreElectronBuilderConfig({
+    desktopWorkspace: workspaceManifest.desktopWorkspace,
+    sourceConfigPath: storePackageConfig.desktop.electronBuilderConfigPath,
+    outputConfigPath: 'electron-builder.store.yml'
+  });
+  
+  // Run desktop build command
+  await runShellCommand(
+    buildDesktopStoreCommand(overlayConfig.outputPath, desktopScripts),
+    workspaceManifest.desktopWorkspace
+  );
+  
+  // Collect MSIX output
+  const storeOutputs = await findStoreOutputs(pkgDirectory);
+  const artifactPath = path.join(
+    workspaceManifest.outputDirectory, 
+    artifactFileName
+  );
+  await copySingleFile(primaryOutput, artifactPath);
+}
+```
+
+The electron-builder configuration needs to include Store-specific metadata, such as package identity, publisher display name, etc. This information will be used during Store submission.
+
+If the configuration is wrong, the package won't build. There's nothing more to say.
+
+### 5. Publishing to GitHub
+
+After the build is complete, you need to publish the artifacts to GitHub Releases.
+
+```javascript
+// scripts/publish-release.mjs
+export async function publishRelease({
+  planPath,
+  artifactsDir,
+  outputDir,
+  forceDryRun
+}) {
+  // Build release artifact manifest
+  const publicationArtifacts = await buildPublicationArtifacts({
+    plan,
+    artifactsDir,
+    outputDir
+  });
+  
+  if (!dryRun) {
+    // Create or update GitHub Release
+    const releaseResult = await upsertReleaseNotes(
+      plan.release.repository,
+      plan.release.tag,
+      token,
+      { name, body }
+    );
+    
+    // Upload assets
+    for (const upload of publicationArtifacts.uploads) {
+      await uploadReleaseAsset({
+        release: releaseResult.release,
+        filePath: upload.filePath,
+        fileName: upload.fileName
+      });
+    }
+  }
+}
+```
+
+GitHub Release serves as version tracking and backup—even if Store publishing fails, the build artifacts are preserved.
+
+It's always good to have a backup plan. What if you need to roll back someday?
+
+### 6. Publishing to Microsoft Store
+
+The final step is using the Microsoft Store CLI to publish to the Store.
+
+```yaml
+# .github/workflows/package-release.yml
+publish_store:
+  runs-on: windows-latest
+  steps:
+    - name: Configure Microsoft Store CLI
+      uses: microsoft/microsoft-store-apppublisher@v1.2
+    
+    - name: Publish MSIX packages to Store
+      shell: pwsh
+      run: |
+        msstore reconfigure --tenantId $env:AZURE_AD_TENANT_ID ...
+        msstore publish "$($package.FullName)" -id $env:MICROSOFT_STORE_PRODUCT_ID
+```
+
+This step needs to run on a Windows runner because the Microsoft Store CLI requires a Windows environment.
+
+Some things just need to be done in the right place—change the environment and it won't work.
+
+## Practical Guide
+
+### Configuration File
+
+The Store package configuration file defines package identity and build settings:
+
+```json
+{
+  "packageIdentity": {
+    "displayName": "Hagicode",
+    "publisherDisplayName": "newbe36524",
+    "publisher": "CN=8B6C8A94-AAE5-4C8B-9202-A29EA42B042F",
+    "identityName": "newbe36524.Hagicode",
+    "backgroundColor": "transparent",
+    "languages": ["en-US", "zh-CN", "zh-Hant"]
+  },
+  "supportedWindowsTargets": ["win-x64"],
+  "desktop": {
+    "submodulePath": "inputs/hagicode-desktop",
+    "electronBuilderConfigPath": "electron-builder.yml",
+    "buildScript": "build:appx",
+    "runtimeInjectionPath": "resources/portable-fixed/current"
+  }
+}
+```
+
+Configuration is a headache to change, so it's best to get it right the first time.
+
+### Workflow Triggers
+
+Can be triggered on schedule or manually:
+
+```yaml
+on:
+  schedule:
+    - cron: '0 */4 * * *'  # Run every 4 hours
+  workflow_dispatch:
+    inputs:
+      desktop_version:
+        description: 'Desktop version selector'
+        required: false
+      server_version:
+        description: 'Server version selector'
+        required: false
+      force_rebuild:
+        description: 'Force rebuild even if already exists'
+        type: boolean
+      dry_run:
+        description: 'Build only, do not publish'
+        type: boolean
+```
+
+Automatic or manual, either way is fine—as long as it runs in the end.
+
+### Key Considerations
+
+1. **Git Tag Requirements**: The desktop repository must contain tags corresponding to release versions (e.g., v1.2.3), otherwise the build will fail
+
+2. **Azure SAS URL**: Need to configure `DESKTOP_AZURE_SAS_URL` and `SERVER_AZURE_SAS_URL` environment variables to access the index
+
+3. **Microsoft Store Credentials**: Need to configure the following secrets:
+   - `AZURE_AD_APPLICATION_CLIENT_ID`
+   - `AZURE_AD_APPLICATION_SECRET`
+   - `AZURE_AD_TENANT_ID`
+   - `SELLER_ID`
+   - `MICROSOFT_STORE_PRODUCT_ID`
+
+4. **Runtime Validation**: Server payload must contain required runtime files, otherwise packaging will fail
+
+5. **Windows Runner**: AppX builds and Store publishing need to run on a Windows runner
+
+6. **Duplicate Detection**: Scheduled runs check if the same release tag exists to avoid unnecessary builds
+
+We've probably stepped on all these pits once, so we wrote them down as a reminder. After all, who wants to repeat mistakes?
+
+## Summary
+
+Windows Store automated publishing looks complex, but when broken down into independent steps, each step isn't difficult. The key is:
+- Use git worktree to manage build environment
+- Inject server payload to the correct path
+- Use electron-builder to generate MSIX packages
+- Use Store CLI to complete final publishing
+
+This solution has been running stably in the HagiCode project for several months, basically achieving the goal of "complete automation"—except for the initial credential and setup configuration, subsequent version releases require no manual intervention.
+
+Actually, many things are like this—they look difficult but are actually manageable once you start. It just requires a little patience and experimentation.
+
+If you're doing similar automation work, I hope this article provides some reference. Of course, every project is different and may need adjustments based on specific requirements.
+
+After all, all roads lead to Rome—some are just easier to travel, others a bit more winding...
+
+## References
+
+- [Microsoft Store CLI Documentation](https://github.com/microsoft/AppPublisher)
+- [electron-builder Documentation](https://www.electron.build/)
+- [HagiCode GitHub Repository](https://github.com/HagiCode-org/site)
+- [HagiCode Official Website](https://hagicode.com)

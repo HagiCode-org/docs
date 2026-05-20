@@ -1,0 +1,429 @@
+---
+title: Pratique d'automatisation de la publication Windows sur Microsoft Store
+date: 2026-05-20
+tags: [Windows, Microsoft Store, Automatisation, Electron, CI/CD]
+---
+
+## Pratique d'automatisation de la publication Windows sur Microsoft Store
+
+> Comment réaliser l'automatisation complète du flux de travail, de l'analyse de version à la publication sur le Store, en disant adieu aux processus manuels fastidieux.
+
+## Contexte
+
+Si vous avez une application Electron à publier sur Microsoft Store, vous rencontrerez probablement ce problème : le Store ne prend pas en charge les processus d'installation séparés — vous devez empaqueter l'application de bureau et la charge utile du serveur dans un seul package AppX/MSIX complet.
+
+Ce n'est pas trop grave. Le problème vient ensuite. À chaque nouvelle version, vous devez :
+
+1. Vérifier si les versions de bureau et serveur sont mises à jour
+2. Extraire le code du tag correspondant
+3. Télécharger et injecter la charge utile du serveur
+4. Construire le package MSIX
+5. Télécharger manuellement sur Microsoft Store
+6. Configurer les informations et la tarification du magasin
+
+Si chaque étape nécessite une intervention manuelle, c'est trop fastidieux. De plus, c'est sujet aux erreurs, et on ne se souvient pas toujours de ce qui a été fait ou pas.
+
+En fait, on ne peut blâmer personne, car les opérations manuelles sont facilement oubliables. Mais nous ne voulions vraiment pas subir ce processus à chaque fois, nous avons donc décidé de résoudre ce problème définitivement — en laissant tout le processus fonctionner automatiquement.
+
+## À propos de HagiCode
+
+La solution présentée dans cet article provient de notre expérience pratique dans le projet [HagiCode](https://hagicode.com). En tant qu'assistant de code IA, HagiCode propose des interfaces de bureau et Web qui doivent prendre en charge plusieurs canaux de distribution. Lors de la mise en œuvre de la publication automatique sur Windows Store, nous avons élaboré une solution d'automatisation complète.
+
+C'est, en quelque sorte, une découverte inattendue. Au départ, nous voulions juste gagner du temps, et nous avons fini par créer tout cet ensemble d'outils.
+
+## Analyse de l'architecture technique
+
+Ce problème implique en réalité la coordination de plusieurs niveaux techniques. Nous pouvons le diviser en cinq couches :
+
+### Couche de coordination des versions
+
+Tout d'abord, nous devons savoir quand une nouvelle version doit être publiée. Nous devons analyser les dernières versions des composants de bureau et serveur à partir de l'index Azure (notre stockage blob utilisé pour stocker les artefacts de construction), puis déterminer s'il est nécessaire de générer un nouveau package Store.
+
+C'est comme se demander à soi-même : est-ce le moment de faire cela ?
+
+### Couche de gestion de l'espace de travail
+
+La construction d'AppX dépend de la configuration au niveau du code source et de la disposition d'exécution, nous ne pouvons donc pas simplement réempaqueter les artefacts de construction existants. Nous devons extraire le code du tag spécifique du dépôt de bureau pour nous assurer que l'état du code source utilisé pour la construction est correct.
+
+Après tout, si le code source est incorrect, tous les efforts ultérieurs sont vains.
+
+### Couche de packaging d'exécution
+
+C'est la partie principale. Nous devons injecter la charge utile du serveur dans la disposition de packaging de l'application de bureau. Ainsi, au démarrage, l'application détectera l'exécution empaquetée et passera en mode Steam (mode hors ligne).
+
+Si cette étape est mal faite, tous les efforts précédents seront gaspillés.
+
+### Couche de sortie de construction
+
+Utiliser electron-builder pour générer un package MSIX conforme aux exigences du Store. Cette étape doit être exécutée dans un environnement Windows, car la construction AppX nécessite le Windows SDK.
+
+Certaines choses doivent être faites au bon endroit, et cela ne fonctionne pas ailleurs.
+
+### Couche de publication et distribution
+
+Enfin, la publication sur GitHub Releases et Microsoft Store. GitHub Release sert de sauvegarde et de suivi des versions, tandis que Microsoft Store s'adresse aux utilisateurs finaux.
+
+Une fois tout prêt, il ne reste plus que ce dernier pas.
+
+## Conception de l'architecture globale
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    package-release workflow                  │
+├─────────────────────────────────────────────────────────────┤
+│  ┌─────────────────┐    ┌─────────────────┐                │
+│  │ resolve_plan    │───▶│   build         │                │
+│  │ (Analyse de     │    │   (Construction │                │
+│  │  version et     │    │    MSIX)        │                │
+│  │  saut)          │    └────────┬────────┘                │
+│  └─────────────────┘             │                          │
+│         │                       │                          │
+│         ▼                       ▼                          │
+│  ┌─────────────────┐    ┌─────────────────┐                │
+│  │ skip_summary    │    │   publish       │                │
+│  │ (Rapport de     │    │   (Publication) │                │
+│  │  saut)          │    └────────┬────────┘                │
+│  └─────────────────┘             │                          │
+│                                 │                          │
+│                                 ▼                          │
+│                        ┌─────────────────┐                 │
+│                        │ publish_store   │                 │
+│                        │ (Publication sur │                 │
+│                        │  Store)         │                 │
+│                        └─────────────────┘                 │
+└─────────────────────────────────────────────────────────────┘
+```
+
+L'ensemble du processus est piloté par GitHub Actions et peut être déclenché périodiquement (toutes les 4 heures) ou manuellement. Lors du déclenchement manuel, vous pouvez spécifier des versions de bureau et serveur spécifiques, ou forcer une reconstruction.
+
+Une fois toutes les 4 heures n'est pas vraiment fréquent, après tout les mises à jour de code sont toujours plus ou moins rapides, mais c'est plus sûr ainsi.
+
+## Explication détaillée de la mise en œuvre
+
+### 1. Analyse du plan de construction
+
+La première étape consiste à déterminer s'il est nécessaire de construire une nouvelle version. Nous devons analyser les versions actuelles des composants de bureau et serveur, puis vérifier si une publication correspondante existe déjà.
+
+```javascript
+// scripts/resolve-dispatch-build-plan.mjs
+export async function resolveDispatchBuildPlan({
+  eventName,
+  eventPayload,
+  desktopAzureSasUrl,
+  serverAzureSasUrl,
+}) {
+  // Analyser les entrées du déclencheur
+  const trigger = normalizeTriggerInputs({ eventName, eventPayload });
+  
+  // Analyser les versions de bureau et serveur à partir de l'index Azure
+  const [desktopRelease, serverRelease] = await Promise.all([
+    resolveIndexRelease({ 
+      azureSasUrl: desktopAzureSasUrl,
+      platformId: 'win-x64' 
+    }),
+    resolveIndexRelease({ 
+      azureSasUrl: serverAzureSasUrl,
+      platformId: 'win-x64' 
+    })
+  ]);
+  
+  // Générer le tag de publication
+  const desktopTag = normalizeGitTag(desktopRelease.version);
+  const releaseTag = deriveStoreReleaseTag(desktopRelease.version, serverRelease.version);
+  // Par exemple : desktop-v1.2.3-server-v4.5.6
+  
+  // Vérifier si elle existe déjà (éviter les constructions en double)
+  const existingRelease = await findReleaseByTag(packerRepository, releaseTag);
+  const shouldBuild = !existingRelease || trigger.forceRebuild;
+  
+  return {
+    release: { tag: releaseTag, exists: Boolean(existingRelease) },
+    build: { shouldBuild, skipReason },
+    upstream: { desktop: { tag: desktopTag }, server }
+  };
+}
+```
+
+La clé de cette étape réside dans la logique de saut — si la combinaison de mêmes versions a déjà été construite, il n'est pas nécessaire de relancer tout le processus de construction complet. Cela permet d'économiser les coûts et le temps de CI.
+
+Refaire la même chose n'a probablement pas beaucoup de sens. Après tout, le temps et les ressources sont limités.
+
+### 2. Préparation de l'espace de travail
+
+Une fois la construction décidée, il faut préparer un environnement de construction propre. Nous utilisons git worktree pour extraire le code à partir d'un tag spécifique.
+
+```javascript
+// scripts/prepare-packaging-workspace.mjs
+export async function preparePackagingWorkspace({
+  planPath,
+  platformId,
+  workspacePath,
+  desktopSourcePath
+}) {
+  // Utiliser git worktree pour extraire le code de bureau à partir d'un tag spécifique
+  await runCommand('git', [
+    '-C', resolvedDesktopSourcePath,
+    'worktree', 'add', '--detach',
+    desktopWorkspace,
+    `refs/tags/${plan.upstream.desktop.tag}`
+  ]);
+  
+  // Valider l'espace de travail
+  const validation = await validateDesktopWorkspace({
+    desktopWorkspace,
+    storePackageConfig
+  });
+  
+  // Créer le manifeste de l'espace de travail
+  const workspaceManifest = {
+    desktopWorkspace,
+    runtimeInjectionRoot: validation.runtimeRoot,
+    desktopTag: plan.upstream.desktop.tag,
+    desktopRef,
+  };
+  
+  return workspaceManifest;
+}
+```
+
+L'avantage d'utiliser worktree est de ne pas affecter le répertoire de travail principal, les constructions peuvent être parallélisées, et facilement nettoyées après la construction.
+
+Après tout, personne ne veut que le répertoire de travail principal soit en désordre à cause de la construction.
+
+### 3. Injection de la charge utile du serveur
+
+Cette étape consiste à télécharger et injecter la charge utile du serveur au bon endroit.
+
+```javascript
+// scripts/stage-server-payload.mjs
+export async function stageServerPayload({
+  planPath,
+  workspacePath,
+  platformId,
+  azureSasUrl
+}) {
+  // Télécharger la charge utile du serveur à partir de l'index Azure
+  const assetSource = resolveAssetDownloadUrl({ asset, sasUrl: azureSasUrl });
+  await downloadFromSource({ 
+    sourceUrl: assetSource, 
+    destinationPath: downloadPath 
+  });
+  
+  // Extraire et valider
+  await extractArchive(downloadPath, extractionPath);
+  const runtimeRoot = await resolveRuntimeRoot(extractionPath);
+  const validation = await validateServerPayloadRoot(runtimeRoot, platformId);
+  
+  // Injecter dans la disposition d'exécution de packaging
+  // Le chemin cible est resources/portable-fixed/current
+  // Ce chemin sera mappé vers extra/portable-fixed/current dans AppX
+  await copyDir(runtimeRoot, targetPath);
+}
+```
+
+La clé est le mappage des chemins — `resources/portable-fixed/current` sera empaqueté dans `extra/portable-fixed/current` de l'AppX, donc au démarrage l'application détectera l'exécution locale et passera en mode hors ligne.
+
+Pour les chemins, la moindre erreur n'est pas acceptable. Un petit écart, et on ne peut plus le trouver.
+
+### 4. Construction MSIX
+
+Avec l'espace de travail préparé et la charge utile du serveur, nous pouvons construire le package MSIX.
+
+```javascript
+// scripts/build-appx.mjs
+export async function buildAppx({
+  planPath,
+  workspacePath,
+  platformId
+}) {
+  // Générer la configuration de superposition electron-builder spécifique au Store
+  const overlayConfig = await writeStoreElectronBuilderConfig({
+    desktopWorkspace: workspaceManifest.desktopWorkspace,
+    sourceConfigPath: storePackageConfig.desktop.electronBuilderConfigPath,
+    outputConfigPath: 'electron-builder.store.yml'
+  });
+  
+  // Exécuter la commande de construction de bureau
+  await runShellCommand(
+    buildDesktopStoreCommand(overlayConfig.outputPath, desktopScripts),
+    workspaceManifest.desktopWorkspace
+  );
+  
+  // Collecter les sorties MSIX
+  const storeOutputs = await findStoreOutputs(pkgDirectory);
+  const artifactPath = path.join(
+    workspaceManifest.outputDirectory, 
+    artifactFileName
+  );
+  await copySingleFile(primaryOutput, artifactPath);
+}
+```
+
+La configuration electron-builder doit inclure les métadonnées spécifiques au Store, telles que l'identité du package, le nom d'affichage de l'éditeur, etc. Ces informations seront utilisées lors de la soumission au Store.
+
+Si la configuration est incorrecte, le package ne peut pas être généré. Il n'y a rien d'autre à dire.
+
+### 5. Publication sur GitHub
+
+Une fois la construction terminée, les artefacts doivent être publiés sur GitHub Releases.
+
+```javascript
+// scripts/publish-release.mjs
+export async function publishRelease({
+  planPath,
+  artifactsDir,
+  outputDir,
+  forceDryRun
+}) {
+  // Construire le manifeste des artefacts de publication
+  const publicationArtifacts = await buildPublicationArtifacts({
+    plan,
+    artifactsDir,
+    outputDir
+  });
+  
+  if (!dryRun) {
+    // Créer ou mettre à jour la GitHub Release
+    const releaseResult = await upsertReleaseNotes(
+      plan.release.repository,
+      plan.release.tag,
+      token,
+      { name, body }
+    );
+    
+    // Télécharger les actifs
+    for (const upload of publicationArtifacts.uploads) {
+      await uploadReleaseAsset({
+        release: releaseResult.release,
+        filePath: upload.filePath,
+        fileName: upload.fileName
+      });
+    }
+  }
+}
+```
+
+GitHub Release sert de suivi de version et de sauvegarde, même si la publication sur le Store échoue, les artefacts de construction sont conservés.
+
+Il est toujours bon de garder une porte de sortie. Au cas où il faudrait revenir en arrière un jour ?
+
+### 6. Publication sur Microsoft Store
+
+La dernière étape consiste à utiliser le CLI Microsoft Store pour publier sur le magasin.
+
+```yaml
+# .github/workflows/package-release.yml
+publish_store:
+  runs-on: windows-latest
+  steps:
+    - name: Configure Microsoft Store CLI
+      uses: microsoft/microsoft-store-apppublisher@v1.2
+    
+    - name: Publish MSIX packages to Store
+      shell: pwsh
+      run: |
+        msstore reconfigure --tenantId $env:AZURE_AD_TENANT_ID ...
+        msstore publish "$($package.FullName)" -id $env:MICROSOFT_STORE_PRODUCT_ID
+```
+
+Cette étape doit être exécutée sur un runner Windows, car le CLI Microsoft Store nécessite un environnement Windows.
+
+Certaines choses doivent être faites au bon endroit, changer d'environnement ne fonctionne pas.
+
+## Guide pratique
+
+### Fichier de configuration
+
+Le fichier de configuration du package Store définit l'identité du package et les paramètres de construction :
+
+```json
+{
+  "packageIdentity": {
+    "displayName": "Hagicode",
+    "publisherDisplayName": "newbe36524",
+    "publisher": "CN=8B6C8A94-AAE5-4C8B-9202-A29EA42B042F",
+    "identityName": "newbe36524.Hagicode",
+    "backgroundColor": "transparent",
+    "languages": ["en-US", "zh-CN", "zh-Hant"]
+  },
+  "supportedWindowsTargets": ["win-x64"],
+  "desktop": {
+    "submodulePath": "inputs/hagicode-desktop",
+    "electronBuilderConfigPath": "electron-builder.yml",
+    "buildScript": "build:appx",
+    "runtimeInjectionPath": "resources/portable-fixed/current"
+  }
+}
+```
+
+Pour la configuration, la modifier une fois est déjà assez pénible, il vaut mieux tout faire correctement du premier coup.
+
+### Déclenchement du workflow
+
+Peut être déclenché périodiquement ou manuellement :
+
+```yaml
+on:
+  schedule:
+    - cron: '0 */4 * * *'  # Exécuter toutes les 4 heures
+  workflow_dispatch:
+    inputs:
+      desktop_version:
+        description: 'Sélecteur de version Desktop'
+        required: false
+      server_version:
+        description: 'Sélecteur de version Server'
+        required: false
+      force_rebuild:
+        description: 'Forcer la reconstruction même si elle existe déjà'
+        type: boolean
+      dry_run:
+        description: 'Construire uniquement, ne pas publier'
+        type: boolean
+```
+
+Automatique ou manuel, tant que ça finit par fonctionner.
+
+### Points d'attention clés
+
+1. **Exigences de Git Tag** : Le dépôt de bureau doit contenir un tag correspondant à la version de publication (comme v1.2.3), sinon la construction échouera
+
+2. **Azure SAS URL** : Il faut configurer les variables d'environnement `DESKTOP_AZURE_SAS_URL` et `SERVER_AZURE_SAS_URL` pour accéder à l'index
+
+3. **Informations d'identification Microsoft Store** : Il faut configurer les clés suivantes :
+   - `AZURE_AD_APPLICATION_CLIENT_ID`
+   - `AZURE_AD_APPLICATION_SECRET`
+   - `AZURE_AD_TENANT_ID`
+   - `SELLER_ID`
+   - `MICROSOFT_STORE_PRODUCT_ID`
+
+4. **Validation de l'exécution** : La charge utile du serveur doit contenir les fichiers d'exécution requis, sinon le packaging échouera
+
+5. **Windows Runner** : La construction AppX et la publication sur Store doivent être exécutées sur un runner Windows
+
+6. **Détection de duplication** : L'exécution planifiée vérifiera s'il existe un tag de publication identique pour éviter les constructions inutiles
+
+Nous avons probablement rencontré tous ces pièges, donc nous les avons notés pour vous rappeler. Après tout, personne ne veut répéter les mêmes erreurs ?
+
+## Résumé
+
+La publication automatique sur Windows Store semble complexe, mais une fois décomposée en étapes indépendantes, chacune n'est pas difficile. Les points clés sont :
+- Utiliser git worktree pour gérer l'environnement de construction
+- Injecter la charge utile du serveur dans le bon chemin
+- Utiliser electron-builder pour générer le package MSIX
+- Utiliser le CLI Store pour effectuer la publication finale
+
+Cette solution fonctionne stablement dans le projet HagiCode depuis plusieurs mois, réalisant essentiellement l'objectif de "pleine automatisation" — à part la première configuration des informations d'identification et des paramètres, les publications de versions ultérieures ne nécessitent aucune intervention humaine.
+
+En fait, beaucoup de choses sont comme ça, elles semblent difficiles, mais une fois faites, c'est comme ça. Il faut juste un peu de patience et d'essais.
+
+Si vous faites également un travail d'automatisation similaire, j'espère que cet article pourra vous donner quelques références. Bien sûr, chaque projet est différent, il faudra peut-être ajuster la solution en fonction des besoins spécifiques.
+
+Après tout, tous les chemins mènent à Rome, certains sont juste plus faciles à parcourir, d'autres un peu plus détournés......
+
+## Références
+
+- [Documentation du CLI Microsoft Store](https://github.com/microsoft/AppPublisher)
+- [Documentation electron-builder](https://www.electron.build/)
+- [Dépôt GitHub HagiCode](https://github.com/HagiCode-org/site)
+- [Site officiel HagiCode](https://hagicode.com)
