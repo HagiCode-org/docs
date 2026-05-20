@@ -1,0 +1,492 @@
+---
+title: ユーザー設定管理のベストプラクティス
+date: 2026-05-19
+tags: [設定管理, フロントエンドアーキテクチャ, バックエンドアーキテクチャ, DLC, ベストプラクティス, HagiCode]
+---
+
+## ユーザー設定管理のベストプラクティス
+
+> 特別なことじゃないよ。設定管理の仕組みを共有するだけ。アーキテクチャから実践まで、まあ、少しでも役に立って、落とし穴を回避できればと思って。
+
+## 背景
+
+設定管理って、重要といえば重要、細々してるといえば細々してる。生活の中の小さな習慣みたいなもの——朝早く起きてコーヒーを飲むのが好きな人もいれば、夜更かししてコードを書くのが好きな人もいる。こうした一見ささいな好みが、実はあなたが誰であるかを静かに定義している。ユーザー設定も同じで、テーマ切り替え、言語選択、ショートカットキーのカスタマイズ、これらの機能をちゃんと作ってこそ、ユーザーはこの製品が「自分を理解してくれている」と感じて、自然とリテンションが上がる。
+
+ただ、このシステムを完璧にするのは、想像したほど簡単じゃない。バージョン管理、後方互換性、データ検証、同時実行制御、DLC 機能ゲーティング——これらの問題は、青春期の悩みみたいに一つずつ出てきて、避けられない。私たちは HagiCode の開発過程でも、これらの問題に悩まされたけど、最終的には何とか解決策を見つけられた。
+
+## HagiCode について
+
+この仕組みは、実は私たちが HagiCode で摸索して出したものだ。HagiCode は AI コードアシスタントで、機能は多い——インターフェース言語、AI 言語設定、テーマ、音声認識、通知、クイック操作、設定できるものは少なくない。ユーザーの要望が多かったからこそ、このシステムを作らざるを得なかった。
+
+プロジェクトアドレス：[github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+
+## アーキテクチャ設計
+
+### レイヤードアーキテクチャ
+
+HagiCode の設定管理システムは、どういうわけか、いくつかの階層に分かれていて、それぞれが役割を果たしている：
+
+```
+┌─────────────────────────────────────────┐
+│         Frontend (React + Redux)        │
+│  - 設定状態管理                          │
+│  - UI フォームレンダリング               │
+│  - グループごとの設定永続化              │
+└─────────────────────────────────────────┘
+                    ↓ HTTP/REST API
+┌─────────────────────────────────────────┐
+│   Application Service Layer             │
+│  - FrontendConfigAppService             │
+│  - ビジネスロジック処理                  │
+│  - 権限制御                              │
+└─────────────────────────────────────────┘
+                    ↓
+┌─────────────────────────────────────────┐
+│   Domain Layer (Config Store)           │
+│  - FrontendConfigStore                  │
+│  - 設定読み取り/書き込み                 │
+│  - データ検証と正規化                    │
+└─────────────────────────────────────────┘
+                    ↓
+┌─────────────────────────────────────────┐
+│   Infrastructure Layer                  │
+│  - YAML ファイル保存                     │
+│  - ISystemManagedVaultService           │
+│  - 同時実行制御 (SemaphoreSlim)         │
+└─────────────────────────────────────────┘
+```
+
+このように階層化することのメリットは結構明確：
+- **責任の明確化**：各階層が自分の担当を管理し、干渉しない
+- **テスト容易性**：各階層を個別にテストできて、修正するときも安心
+- **柔軟な拡張**：保存方法を変えたくなっても API を変えたくなっても、他の階層はそのまま動く
+
+### コアインターフェース設計
+
+バックエンドの設定保存インターフェースは、だいたいこう定義されている：
+
+```csharp
+public interface IFrontendConfigStore
+{
+    // ユーザー設定全体を取得
+    Task<FrontendConfigStoreResult> GetAsync(CancellationToken cancellationToken = default);
+    
+    // 設定更新（部分更新サポート）
+    Task<FrontendConfigStoreResult> UpdateAsync(
+        UpdateFrontendConfigRequestDto input,
+        CancellationToken cancellationToken = default);
+    
+    // AI 言語ステータス管理
+    Task<FrontendConfigAiLanguageState> GetAiLanguageStateAsync(
+        string userId,
+        CancellationToken cancellationToken = default);
+        
+    Task<FrontendConfigAiLanguageState> SetAiLanguageAsync(
+        string userId,
+        string language,
+        CancellationToken cancellationToken = default);
+}
+```
+
+このインターフェースのいくつかの重要なポイントは、実は結構理解しやすい：
+- **非同期操作**：全部非同期だ、誰も待ちたくないからね
+- **キャンセレーショントークン**：操作が長すぎたらタイムアウト、ずっと待ち続けないで
+- **部分更新**：必要な部分だけ更新して、設定全体を引っくり返す必要はない
+
+## 設定データ構造
+
+### 設定グループ設計
+
+HagiCode は機能別に設定をグループ化していて、各グループを独立して更新でき、相互干渉がない：
+
+```csharp
+public class FrontendConfigSnapshotDto
+{
+    // 汎用設定
+    public FrontendConfigGeneralSettingsDto GeneralSettings { get; set; }
+    
+    // AI 言語設定
+    public FrontendConfigAILanguageDto AiLanguage { get; set; }
+    
+    // プロジェクトスコープ
+    public FrontendConfigProjectScopeDto ProjectScope { get; set; }
+    
+    // UI 言語
+    public string UiLanguage { get; set; }
+    
+    // テーマ
+    public string Theme { get; set; }
+    
+    // 音声認識
+    public FrontendConfigVoiceRecognitionDto VoiceRecognition { get; set; }
+    
+    // 通知設定
+    public FrontendConfigNotificationsDto Notifications { get; set; }
+    
+    // セッション並び替え
+    public FrontendConfigSessionSortingDto SessionSorting { get; set; }
+    
+    // クイック操作
+    public FrontendConfigQuickActionsDto QuickActions { get; set; }
+    
+    // 確認ダイアログ
+    public FrontendConfigConfirmDialogDto ConfirmDialog { get; set; }
+    
+    // セッションプリセット
+    public FrontendConfigSessionPresetsDto SessionPresets { get; set; }
+    
+    // プロジェクトアイコン設定
+    public FrontendConfigProjectIconConfigDto ProjectIconConfig { get; set; }
+    
+    // 汎用コメント
+    public FrontendConfigCommonCommentsDto CommonComments { get; set; }
+}
+```
+
+設定グループ化って、実は生活の中の雑事を分類するみたいなもの——仕事は仕事、遊びは遊び、感情は感情。混ぜると乱雑になるけど、分ければすっきりする：
+- **オンデマンド更新**：どれを変えるかだけ更新すれば、一つ変えるために全部引っ張る必要はない
+- **権限制御**：異なる設定に異なる権限を設定できる、誰でも勝手に触れていいわけじゃない
+- **DLC ゲーティング**：高度な機能を DLC にバインドして、良いものを使いたいなら払ってもらう
+
+### フロントエンド設定グループ定義
+
+フロントエンド側では、永続化可能なすべての設定グループを列挙している：
+
+```typescript
+export const ALL_PERSISTABLE_FRONTEND_CONFIG_GROUPS = [
+  'generalSettings',
+  'aiLanguage',
+  'projectScope',
+  'uiLanguage',
+  'theme',
+  'voiceRecognition',
+  'notifications',
+  'sessionSorting',
+  'quickActions',
+  'confirmDialog',
+  'sessionPresets',
+  'projectIconConfig',
+  'commonComments',
+] as const;
+
+export type PersistableFrontendConfigGroup = 
+  typeof ALL_PERSISTABLE_FRONTEND_CONFIG_GROUPS[number];
+```
+
+## データ検証と正規化
+
+### 言語正規化の例
+
+設定正規化って、要はデータの一貫性を保つこと。言語設定を例にすると：
+
+```csharp
+public static class FrontendConfigLanguageRules
+{
+    // サポートされる UI 言語リスト
+    public static readonly HashSet<string> ValidUiLanguages = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "zh-CN", "zh-Hant", "en-US", "ja-JP", "ko-KR", 
+        "de-DE", "fr-FR", "es-ES", "pt-BR", "ru-RU"
+    };
+    
+    public static string NormalizeUiLanguage(string? value)
+    {
+        // 空値処理：デフォルト言語を返す
+        if (string.IsNullOrWhiteSpace(value)) return "en-US";
+        
+        var normalized = value.Trim();
+        
+        // エイリアス処理：一般的なエイリアスを標準コードに変換
+        normalized = normalized.ToLower() switch
+        {
+            "zh" or "chinese" or "cn" => "zh-CN",
+            "en" or "english" => "en-US",
+            "ja" or "japanese" => "ja-JP",
+            "ko" or "korean" => "ko-KR",
+            _ => normalized
+        };
+        
+        // 方言変体処理
+        if (normalized.StartsWith("zh-Hans", StringComparison.OrdinalIgnoreCase))
+            return "zh-CN";
+        if (normalized.StartsWith("zh-TW", StringComparison.OrdinalIgnoreCase))
+            return "zh-Hant";
+            
+        // 検証して返す
+        return ValidUiLanguages.Contains(normalized) ? normalized : "en-US";
+    }
+}
+```
+
+正規化って、実は部屋の掃除みたいなもの——物が散らかったら整理しないと、最後には自分でも見つけられなくなる：
+1. **空値のフォールバック**：空値に合理的なデフォルト値を与える、空のままにしておくわけにはいかない
+2. **エイリアスマッピング**：一般的なエイリアス、略語を標準形式に統一変換
+3. **方言統一**：方言変体を標準コードに統合、コードを書くのは方言研究じゃないから
+4. **最終検証**：返す値が必ず有効リストにあることを保証、じゃないと無駄骨になる
+
+### 設定バージョン管理
+
+バージョン番号って、実は後方互換性のため——既存ユーザーのデータがバージョンアップで消えちゃったら困る：
+
+```csharp
+public const string CurrentSchemaVersion = "1.0";
+
+private static FrontendConfigGeneralSettingsDto NormalizeGeneralSettings(
+    FrontendConfigGeneralSettingsDto settings)
+{
+    return new FrontendConfigGeneralSettingsDto
+    {
+        // バージョン番号が最新であることを保証
+        Version = settings.Version > 0 ? Math.Max(settings.Version, 37) : 37,
+        
+        // 新規フィールドのデフォルト値処理
+        NewFeatureEnabled = settings.NewFeatureEnabled ?? true,
+        
+        // ... 他のフィールド
+    };
+}
+```
+
+## DLC 機能ゲーティング
+
+HagiCode は DLC 機能スイッチをサポートしていて、一部の高度な設定項目は DLC を買わないと使えない。これは商用ソフトウェアでは一般的——基本機能は無料、良いものを使いたいなら払ってもらう、開発者も飯を食わなきゃいけないから。
+
+### DLC アクセスチェック
+
+```csharp
+private async Task<PreparedFrontendConfigUpdate> PrepareUpdateAsync(
+    UpdateFrontendConfigRequestDto input,
+    FrontendConfigStoreResult current,
+    CancellationToken cancellationToken)
+{
+    // DLC アクセス権限をチェック
+    var accessState = await _grainFactory
+        .GetDlcAccessStateGrain(TurboEngineDlcId)
+        .GetAccessStateAsync();
+        
+    var blockedFields = new List<string>();
+    
+    if (!accessState.IsActive)
+    {
+        // DLC が有効化されていない、現在の設定を保持
+        if (input.GeneralSettings?.BrandingLogo != null)
+        {
+            blockedFields.Add("brandingLogo");
+            // 古い値を保持
+            input.GeneralSettings.BrandingLogo = current.Snapshot.GeneralSettings.BrandingLogo;
+        }
+        
+        if (input.GeneralSettings?.BrandingTitle != null)
+        {
+            blockedFields.Add("brandingTitle");
+            input.GeneralSettings.BrandingTitle = current.Snapshot.GeneralSettings.BrandingTitle;
+        }
+    }
+    
+    return new PreparedFrontendConfigUpdate(
+        input,
+        new FrontendConfigUpdateDiagnosticsDto
+        {
+            Status = blockedFields.Count > 0 ? "partially-applied" : "success",
+            BlockedFields = blockedFields,
+        });
+}
+```
+
+### 診断情報の表示
+
+フロントエンドは診断情報を通じてユーザーに、どの設定が阻止または変更されたかを伝える——何が起きたのかは知らせるべきだ：
+
+```typescript
+{hasPartialSaveWarning ? (
+  <Alert data-testid="general-settings-partial-save-alert">
+    <AlertTitle>設定保存時に DLC 制限を受けました</AlertTitle>
+    <AlertDescription>
+      {hasBlockedBranding && (
+        <p>ブランドカスタマイズの変更がスキップされました。Logo とタイトルの更新を保存するには、{dlcName} をインストールまたは有効化してください。</p>
+      )}
+      {hasNormalizedTheme && (
+        <p>選択したドキュメントテーマは利用不可で、ベーステーマとして保存されました。</p>
+      )}
+    </AlertDescription>
+  </Alert>
+) : null}
+```
+
+## フロントエンド状態管理
+
+### Redux Slice
+
+フロントエンドは Redux で設定状態を管理していて、実は結構一般的：
+
+```typescript
+export const frontendConfigSlice = createSlice({
+  name: 'frontendConfig',
+  initialState,
+  reducers: {
+    setConfigStatus(state, action: PayloadAction<FrontendConfigStatus>) {
+      state.status = action.payload;
+    },
+    updateConfigGroups(state, action: PayloadAction<Partial<FrontendConfigSnapshot>>) {
+      // 設定更新をマージ
+      Object.assign(state.snapshot, action.payload);
+    },
+  },
+  extraReducers: (builder) => {
+    builder
+      .addCase(fetchConfig.pending, (state) => {
+        state.status = 'loading';
+      })
+      .addCase(fetchConfig.fulfilled, (state, action) => {
+        state.status = 'succeeded';
+        state.snapshot = action.payload;
+      })
+      .addCase(fetchConfig.rejected, (state, action) => {
+        state.status = 'failed';
+        state.error = action.error.message;
+      });
+  },
+});
+```
+
+### 設定サービスカプセル化
+
+```typescript
+export const frontendConfigService = {
+  getConfig(): Promise<FrontendConfigResponse> {
+    return createRequest<FrontendConfigResponse>({
+      method: 'GET',
+      url: '/api/frontend-config',
+    });
+  },
+  
+  updateConfig(requestBody: UpdateFrontendConfigRequest): Promise<FrontendConfigResponse> {
+    return createRequest<FrontendConfigResponse>({
+      method: 'PUT',
+      url: '/api/frontend-config',
+      body: requestBody,
+      mediaType: 'application/json',
+    });
+  },
+  
+  // グループごとに設定を永続化
+  persistConfigGroup(
+    group: PersistableFrontendConfigGroup,
+    value: unknown
+  ): Promise<FrontendConfigResponse> {
+    return this.updateConfig({
+      configGroup: group,
+      value: value,
+    });
+  },
+};
+```
+
+## 同時実行制御
+
+設定更新操作はスレッドセーフを保証しないと、二人が同時に設定を変えたら、最後に保存されるのは誰のか？ HagiCode は `SemaphoreSlim` で同時実行制御をしていて、どういうわけか、一般的な手だ：
+
+```csharp
+private readonly SemaphoreSlim _semaphore = new(1, 1);
+
+public async Task<FrontendConfigStoreResult> UpdateAsync(
+    UpdateFrontendConfigRequestDto input,
+    CancellationToken cancellationToken = default)
+{
+    await _semaphore.WaitAsync(cancellationToken);
+    try
+    {
+        // 現在の設定を読み取り
+        var current = await GetAsync(cancellationToken);
+        
+        // 更新を準備
+        var prepared = await PrepareUpdateAsync(input, current, cancellationToken);
+        
+        // 設定を書き込み
+        await WriteConfigAsync(prepared.UpdatedConfig, cancellationToken);
+        
+        return new FrontendConfigStoreResult(prepared.UpdatedConfig, prepared.Diagnostics);
+    }
+    finally
+    {
+        _semaphore.Release();
+    }
+}
+```
+
+## 実践ガイド
+
+### 新規設定項目追加の手順
+
+新しい設定項目を追加したいなら、この順番でやればいい：
+
+1. **バックエンド DTO にプロパティ追加**
+
+```csharp
+public class FrontendConfigGeneralSettingsDto
+{
+    // ... 既存プロパティ
+    public string? NewFeatureEnabled { get; set; }
+}
+```
+
+2. **正規化ロジック追加**
+
+```csharp
+private static FrontendConfigGeneralSettingsDto NormalizeGeneralSettings(
+    FrontendConfigGeneralSettingsDto settings)
+{
+    return new FrontendConfigGeneralSettingsDto
+    {
+        // ... 既存プロパティ
+        NewFeatureEnabled = NormalizeOptionalString(settings.NewFeatureEnabled),
+    };
+}
+```
+
+3. **フロントエンドにフォームコントロール追加**
+
+```typescript
+<SettingsCard
+  icon={<Star className="h-5 w-5" />}
+  title="新機能設定"
+  description="新機能の有効状態を制御"
+>
+  <NewFeatureToggle />
+</SettingsCard>
+```
+
+4. **設定グループ定義更新**（新規グループを追加する場合）
+
+```typescript
+export const ALL_PERSISTABLE_FRONTEND_CONFIG_GROUPS = [
+  // ... 既存グループ
+  'newFeatureSettings',
+] as const;
+```
+
+### 一般的な問題の対処
+
+1. **設定消失**：バックアップと復元メカニズム、備えあれば憂いなし
+2. **同時実行競合**：楽観ロックか悲観ロック、例えば SemaphoreSlim
+3. **パフォーマンス問題**：部分更新をサポート、毎回設定オブジェクト全体を持ち運ぶ必要はない
+4. **セキュリティ**：機密設定（例えば API キー）は暗号化保存、盗まれたら面倒なことに
+
+## まとめ
+
+完璧な設定管理システムって、どういうわけか、考えるべきことは結構多い——データ構造、検証正規化、バージョン管理、DLC ゲーティング、同時実行制御、一つも欠かせない。HagiCode のこの仕組みは、本番環境でもそこそこうまく動いていて、少なくとも複雑な設定管理ニーズを満たせる。
+
+本文がここまできて、自分の経験を少し共有できたと思う。良い設定管理は、ユーザー体験が良いだけでなく、メンテナンスコストも下げられるし、製品の反復開発も楽になるだけだ。
+
+## 参考資料
+
+- HagiCode プロジェクトアドレス：[github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- HagiCode 公式サイト：[hagicode.com](https://hagicode.com)
+- ワンクリックインストール体験：[docs.hagicode.com/installation/docker-compose](https://docs.hagicode.com/installation/docker-compose)
+- Desktop デスクトップ版クイックインストール：[hagicode.com/desktop/](https://hagicode.com/desktop/)
+- 正式版デモ動画を視聴：[www.bilibili.com/video/BV1z4oWB3EpY/](https://www.bilibili.com/video/BV1z4oWB3EpY/)
+
+もし本文が役に立ったなら：
+- GitHub で Star をください：[github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)
+- 公式サイトにアクセスして詳細へ：[hagicode.com](https://hagicode.com)
+- ベータテストはすでに開始、ぜひ遊びに来て
