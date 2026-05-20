@@ -96,6 +96,26 @@ function SteamIcon({ className }: { className?: string }) {
   );
 }
 
+function WindowsStoreIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      fill="none"
+      xmlns="http://www.w3.org/2000/svg"
+      aria-hidden="true"
+      data-windows-store-icon="true"
+    >
+      <path
+        d="M4 5.5L10.25 4v7.25H4V5.5Zm9.75-1.9L20 2v9.25h-6.25V3.6ZM4 12.75h6.25V20L4 18.5v-5.75Zm9.75 0H20V22l-6.25-1.5v-7.75Z"
+        fill="currentColor"
+      />
+    </svg>
+  );
+}
+
+const WINDOWS_STORE_URL = 'https://apps.microsoft.com/detail/9N3PM0N3SVDW';
+
 interface InstallButtonProps {
   variant?: 'full' | 'compact';
   className?: string;
@@ -324,6 +344,10 @@ export default function InstallButton({
   const steamShortcutLabel = 'Steam';
   const steamShortcutAriaLabel =
     locale === 'en' ? 'Open Hagicode on Steam' : '打开 Hagicode Steam 商店页';
+  const windowsStoreShortcutLabel = locale === 'en' ? 'Store' : '商店';
+  const windowsStoreShortcutAriaLabel =
+    locale === 'en' ? 'Open Hagicode on Microsoft Store' : '打开 Hagicode Microsoft Store 页面';
+  const showWindowsStoreShortcut = variant === 'compact';
 
   const loadRuntimeVersionData = useCallback(() => {
     let mounted = true;
@@ -664,6 +688,20 @@ export default function InstallButton({
             );
           })}
         </div>
+
+        {showWindowsStoreShortcut && (
+          <a
+            href={WINDOWS_STORE_URL}
+            className={`btn-download-source btn-download-source--windows-store btn-download-source--store-shortcut ${showDropdownToggle ? '' : showSteamShortcut ? '' : 'btn-download-source--store-shortcut-last'}`.trim()}
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label={windowsStoreShortcutAriaLabel}
+            data-windows-store-entry="docs-header-install"
+          >
+            <WindowsStoreIcon className="download-icon" />
+            <span className="btn-text">{windowsStoreShortcutLabel}</span>
+          </a>
+        )}
 
         {showSteamShortcut && (
           <a
