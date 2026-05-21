@@ -31,7 +31,7 @@ export function getAllProviderConfigs(): ProviderConfig[] {
     // 使用 import.meta.glob 读取所有 provider JSON 文件
     // eager: true 确保在构建时立即加载所有模块
     const providerModules = import.meta.glob<{ default: unknown }>(
-      '../../public/presets/claude-code/providers/*.json',
+      '../../../index/public/presets/claude-code/providers/*.json',
       {
         eager: true,
       }

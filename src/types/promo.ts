@@ -29,7 +29,7 @@ export interface PromotionMetadata {
 /**
  * Provider 配置接口（扩展现有 provider 结构）
  *
- * 对应 public/presets/claude-code/providers/*.json 的数据结构
+ * 对应 repos/index/public/presets/claude-code/providers/*.json 的数据结构
  */
 export interface ProviderConfig {
   /** 提供商 ID */

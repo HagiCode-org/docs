@@ -51,61 +51,17 @@ repos/docs/
 │   ├── layouts/              # Page layouts
 │   └── pages/                # Additional pages
 ├── public/                   # Static assets
-│   └── presets/               # AI service configuration presets
-│       ├── index.json         # Preset index
-│       └── claude-code/      # Claude Code AI presets
-│           └── providers/    # Provider preset files
 ├── illustration-management.md # Image management guidelines
 └── ...
 ```
 
 ## Presets Configuration
 
-The `public/presets/` directory contains AI service configuration presets, designed for quick setup of Anthropic-compatible API providers in various applications.
+Preset 资源由 Index 站点 (`repos/index/public/presets/`) 统一托管和维护。Docs 站点通过 `import.meta.glob` 在构建时从 `repos/index/public/presets/` 读取 provider 数据，不再自行托管 preset 文件。
 
-### Presets Structure
-
-```
-public/presets/
-├── index.json              # Global preset index
-└── claude-code/
-    └── providers/          # Claude Code AI provider presets
-        ├── anthropic.json  # Official Anthropic API
-        ├── zai.json        # 智谱 AI (Recommended)
-        ├── aliyun.json     # 阿里云 DashScope (Recommended)
-        └── minimax.json    # MiniMax (Recommended)
-```
-
-### Accessing Presets
-
-**Production URL**: `https://docs.hagicode.com/presets/`
-
-#### Get Preset Index
-```bash
-curl https://docs.hagicode.com/presets/index.json
-```
-
-#### Load Specific Provider Preset
-```bash
-curl https://docs.hagicode.com/presets/claude-code/providers/zai.json
-```
-
-### Available Providers
-
-| Provider | Description | Recommended | Region |
-|----------|-------------|-------------|--------|
-| **智谱 AI** | 智谱 AI 提供的 Claude API 兼容服务 | ✅ | CN |
-| **阿里云 DashScope** | 阿里云灵积平台提供的 Claude API 兼容服务 | ✅ | CN |
-| **MiniMax** | MiniMax 提供的 Claude API 兼容服务 | ✅ | CN |
-| **Anthropic Official** | 官方 Anthropic API | - | Global |
-
-### Adding New Providers
-
-1. Create provider preset file in `public/presets/claude-code/providers/`
-2. Update `presets/index.json` with the new provider entry
-3. Validate JSON format
-
-For detailed documentation, see [presets/README.md](public/presets/README.md)
+- **源文件位置**: `repos/index/public/presets/`
+- **生产 URL**: `https://index.hagicode.com/presets/`
+- **详细文档**: `repos/index/public/presets/README.md`
 
 ## Agent Behavior
 
