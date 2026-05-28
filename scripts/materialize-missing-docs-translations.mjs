@@ -286,7 +286,7 @@ function transformContentLine(line, locale, registry) {
     return line.replace(/locale="en"/u, `locale="${locale}"`);
   }
 
-  if (line.includes('<ProductHuntBadge ') || line.includes('<ProductVideoShowcase ') || line.includes('<InstallButton ')) {
+  if (line.includes('<ProductVideoShowcase ') || line.includes('<InstallButton ')) {
     return line;
   }
 
