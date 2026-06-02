@@ -631,6 +631,9 @@ export function inferAssetType(filename: string): AssetType {
   if (name.includes('setup') && name.endsWith('.exe')) {
     return AssetType.WindowsSetup;
   }
+  if (name.endsWith('.msix')) {
+    return AssetType.WindowsMsix;
+  }
   if (name.endsWith('.exe')) {
     return AssetType.WindowsPortable;
   }
@@ -675,6 +678,7 @@ export function inferArchitecture(assetType: AssetType): CpuArchitecture {
       return CpuArchitecture.ARM64;
     case AssetType.WindowsSetup:
     case AssetType.WindowsPortable:
+    case AssetType.WindowsMsix:
     case AssetType.WindowsStore:
     case AssetType.MacOSIntel:
     case AssetType.LinuxAppImage:
@@ -706,6 +710,7 @@ export function getArchitectureLabel(assetType: AssetType, locale: 'zh' | 'en' =
     [AssetType.MacOSIntel]: 'x64',
     [AssetType.WindowsSetup]: 'x64',
     [AssetType.WindowsPortable]: 'x64',
+    [AssetType.WindowsMsix]: 'x64',
     [AssetType.WindowsStore]: '',
     [AssetType.LinuxAppImage]: '通用',
     [AssetType.LinuxArm64AppImage]: 'ARM64',
@@ -720,6 +725,7 @@ export function getArchitectureLabel(assetType: AssetType, locale: 'zh' | 'en' =
     [AssetType.MacOSIntel]: 'x64',
     [AssetType.WindowsSetup]: 'x64',
     [AssetType.WindowsPortable]: 'x64',
+    [AssetType.WindowsMsix]: 'x64',
     [AssetType.WindowsStore]: '',
     [AssetType.LinuxAppImage]: 'Universal',
     [AssetType.LinuxArm64AppImage]: 'ARM64',
@@ -737,6 +743,7 @@ export function getFileExtension(assetType: AssetType): string {
   const extensions: Record<AssetType, string> = {
     [AssetType.WindowsSetup]: '.exe',
     [AssetType.WindowsPortable]: '.exe',
+    [AssetType.WindowsMsix]: '.msix',
     [AssetType.WindowsStore]: '.appx',
     [AssetType.MacOSApple]: '.dmg',
     [AssetType.MacOSIntel]: '.dmg',
@@ -754,6 +761,7 @@ export function getAssetTypeLabel(assetType: AssetType, locale: 'zh' | 'en' = 'z
   const labelsZh: Record<AssetType, string> = {
     [AssetType.WindowsSetup]: '安装程序',
     [AssetType.WindowsPortable]: '便携版',
+    [AssetType.WindowsMsix]: 'MSIX',
     [AssetType.WindowsStore]: 'Microsoft Store',
     [AssetType.MacOSApple]: 'Apple Silicon',
     [AssetType.MacOSIntel]: 'Intel 版',
@@ -768,6 +776,7 @@ export function getAssetTypeLabel(assetType: AssetType, locale: 'zh' | 'en' = 'z
   const labelsEn: Record<AssetType, string> = {
     [AssetType.WindowsSetup]: 'Installer',
     [AssetType.WindowsPortable]: 'Portable',
+    [AssetType.WindowsMsix]: 'MSIX',
     [AssetType.WindowsStore]: 'Microsoft Store',
     [AssetType.MacOSApple]: 'Apple Silicon',
     [AssetType.MacOSIntel]: 'Intel',
@@ -841,6 +850,7 @@ export function groupAssetsByPlatform(
     switch (assetType) {
       case AssetType.WindowsSetup:
       case AssetType.WindowsPortable:
+      case AssetType.WindowsMsix:
       case AssetType.WindowsStore:
         platform = 'windows';
         break;

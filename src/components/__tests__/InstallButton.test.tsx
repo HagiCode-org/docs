@@ -170,6 +170,39 @@ describe('InstallButton runtime states', () => {
     ]);
   });
 
+  it('keeps Windows MSIX downloads available in precomputed platform groups', () => {
+    const filtered = filterSupportedPlatformGroups([
+      {
+        platform: 'windows',
+        architectures: [CpuArchitecture.X64],
+        downloads: [
+          {
+            url: 'https://desktop.dl.hagicode.com/v1.2.4/Hagicode.Desktop.Setup.1.2.4.exe',
+            size: '120 MB',
+            filename: 'Hagicode.Desktop.Setup.1.2.4.exe',
+            assetType: AssetType.WindowsSetup,
+            architecture: CpuArchitecture.X64,
+            sourceActions: [],
+          },
+          {
+            url: 'https://desktop.dl.hagicode.com/v1.2.4/Hagicode.Desktop.msix',
+            size: '122 MB',
+            filename: 'Hagicode.Desktop.msix',
+            assetType: AssetType.WindowsMsix,
+            architecture: CpuArchitecture.X64,
+            sourceActions: [],
+          },
+        ],
+      },
+    ]);
+
+    expect(filtered).toHaveLength(1);
+    expect(filtered[0]?.downloads.map((download) => download.filename)).toEqual([
+      'Hagicode.Desktop.Setup.1.2.4.exe',
+      'Hagicode.Desktop.msix',
+    ]);
+  });
+
   it('renders separate accelerated and GitHub buttons while keeping torrent in the version menu', async () => {
     vi.mocked(versionManager.getDesktopVersionData).mockResolvedValue(
       createVersionData({
