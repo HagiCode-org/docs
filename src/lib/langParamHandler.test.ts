@@ -151,18 +151,32 @@ describe('docs language route resolution', () => {
     expect(result.targetUrl).toBe('https://docs.hagicode.com/en-US/installation/');
   });
 
-  it('resolves newly added supported locales from query and browser preferences', () => {
+  it('resolves supported locales from query and browser preferences', () => {
     const queryDriven = route(
-      'https://docs.hagicode.com/product-overview/?lang=es-latam',
+      'https://docs.hagicode.com/product-overview/?lang=pt',
       null,
       ['en-US'],
     );
-    expect(queryDriven.resolvedLocale).toBe('es-419');
-    expect(queryDriven.targetUrl).toBe('https://docs.hagicode.com/es-419/product-overview/');
+    expect(queryDriven.resolvedLocale).toBe('pt-BR');
+    expect(queryDriven.targetUrl).toBe('https://docs.hagicode.com/pt-BR/product-overview/');
 
-    const browserDriven = route('https://docs.hagicode.com/installation/', null, ['pt-PT']);
-    expect(browserDriven.resolvedLocale).toBe('pt-PT');
-    expect(browserDriven.targetUrl).toBe('https://docs.hagicode.com/pt-PT/installation/');
+    const browserDriven = route('https://docs.hagicode.com/installation/', null, ['ru-RU']);
+    expect(browserDriven.resolvedLocale).toBe('ru-RU');
+    expect(browserDriven.targetUrl).toBe('https://docs.hagicode.com/ru-RU/installation/');
+  });
+
+  it('treats removed locale inputs as unsupported and falls back to the configured default path', () => {
+    const queryDriven = route(
+      'https://docs.hagicode.com/product-overview/?lang=xx-XX',
+      null,
+      ['en-US'],
+    );
+    expect(queryDriven.resolvedLocale).toBe('en-US');
+    expect(queryDriven.targetUrl).toBe('https://docs.hagicode.com/en-US/product-overview/');
+
+    const browserDriven = route('https://docs.hagicode.com/installation/', null, ['xx-XX']);
+    expect(browserDriven.resolvedLocale).toBe('en-US');
+    expect(browserDriven.targetUrl).toBe('https://docs.hagicode.com/en-US/installation/');
   });
 
   it('uses landing metadata when resolving root and English landing pages', () => {

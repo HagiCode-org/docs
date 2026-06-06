@@ -119,8 +119,8 @@ export default defineConfig({
       title: DEFAULT_DOCS_UI.site.title,
       description: DEFAULT_DOCS_UI.site.description,
       favicon: "/favicon.ico",
-      // i18n configuration - Enable multi-language support
-      // Use "root" for Chinese to serve at / paths (no /zh-cn/ prefix)
+      // i18n configuration - Use the desktop-aligned locale catalog.
+      // Keep Chinese on / and English on /en-US/.
       defaultLocale: "root",
       locales: DOCS_LOCALES,
       social: [

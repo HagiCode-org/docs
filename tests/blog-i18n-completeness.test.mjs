@@ -77,7 +77,7 @@ test('reports a missing localized counterpart file', async () => {
 test('reports unsupported explicit language metadata', async () => {
   await withFixture(async (root) => {
     await writeCompleteSet(root);
-    await writePost(root, REQUIRED_BLOG_LOCALES[0], '2026-04-29-example', { language: 'it-IT' });
+    await writePost(root, REQUIRED_BLOG_LOCALES[0], '2026-04-29-example', { language: 'xx-XX' });
     const result = await validateBlogI18nCompleteness({ contentRoot: root });
 
     assert.equal(result.ok, false);

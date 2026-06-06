@@ -9,33 +9,14 @@ const docsRoot = path.resolve(scriptDirectory, '..');
 const defaultConfigPath = path.join(docsRoot, 'hagi18n.yaml');
 const defaultGeneratedPath = path.join(docsRoot, 'src/i18n/generated/docs-locale-resources.mjs');
 const EXPECTED_DOCS_LOCALES = [
-  'bg-BG',
-  'cs-CZ',
-  'da-DK',
   'de-DE',
-  'el-GR',
   'en-US',
-  'es-419',
   'es-ES',
-  'fi-FI',
   'fr-FR',
-  'hu-HU',
-  'id-ID',
-  'it-IT',
   'ja-JP',
   'ko-KR',
-  'nb-NO',
-  'nl-NL',
-  'pl-PL',
   'pt-BR',
-  'pt-PT',
-  'ro-RO',
   'ru-RU',
-  'sv-SE',
-  'th-TH',
-  'tr-TR',
-  'uk-UA',
-  'vi-VN',
   'zh-CN',
   'zh-Hant',
 ];
@@ -43,32 +24,13 @@ const EXPECTED_DOCS_ROUTE_LOCALES = [
   'root',
   'en-US',
   'zh-Hant',
-  'fr-FR',
-  'it-IT',
-  'de-DE',
-  'es-ES',
-  'bg-BG',
-  'cs-CZ',
-  'da-DK',
-  'nl-NL',
-  'fi-FI',
-  'el-GR',
-  'hu-HU',
-  'id-ID',
   'ja-JP',
   'ko-KR',
-  'nb-NO',
-  'pl-PL',
+  'de-DE',
+  'fr-FR',
+  'es-ES',
   'pt-BR',
-  'pt-PT',
-  'ro-RO',
   'ru-RU',
-  'es-419',
-  'sv-SE',
-  'th-TH',
-  'tr-TR',
-  'uk-UA',
-  'vi-VN',
 ];
 
 function isPlainObject(value) {
@@ -139,7 +101,7 @@ async function resolveConfig(options = {}) {
   assert.deepEqual(
     expectedLocales,
     EXPECTED_DOCS_LOCALES,
-    'Docs generated resources must match the 29-language site catalog',
+    'Docs generated resources must match the desktop-aligned 10-language catalog',
   );
 
   return {
@@ -265,7 +227,7 @@ function buildRouteLocales(resources) {
   assert.deepEqual(
     Object.keys(routeLocales),
     EXPECTED_DOCS_ROUTE_LOCALES,
-    'metadata.locales must list the canonical 29 docs route locales',
+    'metadata.locales must list the canonical desktop-aligned docs route locales',
   );
 
   for (const [routeLocale, metadata] of Object.entries(routeLocales)) {

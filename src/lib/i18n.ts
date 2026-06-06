@@ -15,32 +15,13 @@ export type DocsLocale =
   | 'root'
   | 'en-US'
   | 'zh-Hant'
-  | 'fr-FR'
-  | 'it-IT'
-  | 'de-DE'
-  | 'es-ES'
-  | 'bg-BG'
-  | 'cs-CZ'
-  | 'da-DK'
-  | 'nl-NL'
-  | 'fi-FI'
-  | 'el-GR'
-  | 'hu-HU'
-  | 'id-ID'
   | 'ja-JP'
   | 'ko-KR'
-  | 'nb-NO'
-  | 'pl-PL'
+  | 'de-DE'
+  | 'fr-FR'
+  | 'es-ES'
   | 'pt-BR'
-  | 'pt-PT'
-  | 'ro-RO'
-  | 'ru-RU'
-  | 'es-419'
-  | 'sv-SE'
-  | 'th-TH'
-  | 'tr-TR'
-  | 'uk-UA'
-  | 'vi-VN';
+  | 'ru-RU';
 
 export type DocsLanguageParam = string;
 
@@ -144,6 +125,10 @@ export const DOCS_ENTRY_PATHS: Partial<Record<DocsLocale, string>> = {
   'en-US': '/en-US/',
 };
 
+function shouldResolveDocsLocaleByLanguageFamily(normalized: string): boolean {
+  return !normalized.includes('-') || normalized.startsWith('en-');
+}
+
 /**
  * Parses the language parameter from a URL.
  */
@@ -173,6 +158,10 @@ export function parseDocsLocale(lang: string | null | undefined): DocsLocale | n
   const directRouteLocale = DOCS_ROUTE_LOCALE_BY_NORMALIZED_KEY[normalized];
   if (directRouteLocale) {
     return directRouteLocale;
+  }
+
+  if (!shouldResolveDocsLocaleByLanguageFamily(normalized)) {
+    return null;
   }
 
   const [languagePart] = normalized.split('-');

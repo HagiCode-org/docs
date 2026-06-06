@@ -16,7 +16,7 @@
     'de': 'de-DE', 'de-de': 'de-DE', 'de-at': 'de-DE', 'de-ch': 'de-DE',
     'fr': 'fr-FR', 'fr-fr': 'fr-FR', 'fr-ca': 'fr-FR', 'fr-be': 'fr-FR',
     'es': 'es-ES', 'es-es': 'es-ES', 'es-mx': 'es-ES', 'es-ar': 'es-ES',
-    'pt': 'pt-BR', 'pt-br': 'pt-BR', 'pt-pt': 'pt-BR',
+    'pt': 'pt-BR', 'pt-br': 'pt-BR',
     'ru': 'ru-RU', 'ru-ru': 'ru-RU',
   };
 

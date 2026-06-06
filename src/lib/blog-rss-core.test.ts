@@ -56,10 +56,10 @@ describe('blog RSS helpers', () => {
         id: 'en-US/blog/2026-04-29-invalid',
         data: {
           title: 'invalid',
-          language: 'it-IT',
+          language: 'xx-XX',
         },
       }),
-    ).toThrow(/Unsupported blog language "it-IT"/);
+    ).toThrow(/Unsupported blog language "xx-XX"/);
   });
 
   it('filters posts by desktop language scope and preserves normalized item language', () => {

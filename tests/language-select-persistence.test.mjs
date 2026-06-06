@@ -16,17 +16,17 @@ test('StarlightLanguageSelect mounts the modal switcher with generated locale op
   assert.match(source, /selectedStateLabel=/);
 });
 
-test('generated locale resources expose all 29 docs languages for the chooser', async () => {
+test('generated locale resources expose the desktop-aligned 10 docs languages for the chooser', async () => {
   const generatedModuleUrl = pathToFileURL(
     path.join(testDir, '..', 'src', 'i18n', 'generated', 'docs-locale-resources.mjs'),
   );
   generatedModuleUrl.search = String(Date.now());
   const generatedModule = await import(generatedModuleUrl.href);
 
-  assert.equal(generatedModule.DOCS_LOCALE_SELECTOR_OPTIONS.length, 29);
+  assert.equal(generatedModule.DOCS_LOCALE_SELECTOR_OPTIONS.length, 10);
   assert.equal(generatedModule.DOCS_LOCALE_SELECTOR_OPTIONS[0]?.code, 'root');
   assert.equal(
-    generatedModule.DOCS_LOCALE_SELECTOR_OPTIONS.find((locale) => locale.code === 'es-419')?.label,
-    'Español (Latinoamérica)',
+    generatedModule.DOCS_LOCALE_SELECTOR_OPTIONS.find((locale) => locale.code === 'pt-BR')?.label,
+    'Português (Brasil)',
   );
 });
