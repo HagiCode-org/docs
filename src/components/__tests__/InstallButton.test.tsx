@@ -12,8 +12,6 @@ import InstallButton, { filterSupportedPlatformGroups } from '../InstallButton';
 
 const fallbackUrl = 'https://index.hagicode.com/desktop/history/';
 const fallbackSteamUrl = 'https://store.steampowered.com/app/4625540/Hagicode/';
-const windowsStoreUrl = 'https://apps.microsoft.com/detail/9N3PM0N3SVDW';
-
 vi.mock('@shared/version-manager', async () => {
   const actual = await vi.importActual<typeof import('@shared/version-manager')>('@shared/version-manager');
   return {
@@ -351,10 +349,9 @@ describe('InstallButton runtime states', () => {
     });
     expect(container.querySelector('[data-segment-role="primary-actions"]')).toBeInTheDocument();
     expect(container.querySelector('[data-segment-role="toggle"]')).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'Open Hagicode on Microsoft Store' })).toHaveAttribute(
-      'href',
-      windowsStoreUrl,
-    );
+    const windowsStoreBadge = container.querySelector('ms-store-badge[data-windows-store-entry="docs-header-install"]');
+    expect(windowsStoreBadge).toHaveAttribute('productid', '9N3PM0N3SVDW');
+    expect(windowsStoreBadge).toHaveAttribute('language', 'en-us');
 
     fireEvent.click(screen.getByRole('button', { name: 'Select Other Version' }));
     expect(await screen.findByRole('menu')).toBeInTheDocument();
