@@ -1,137 +1,49 @@
-# HagiCode Mono - Documentation Site - Agent Configuration
+# HagiCode Docs - Agent Configuration
 
 ## Root Configuration
-Inherits all behavior from `/AGENTS.md` at monorepo root.
+
+Inherits all behavior from `/AGENTS.md` at the monorepo root. Local rules extend or override the root file for this repository.
 
 ## Project Context
 
-The `repos/docs` directory contains the standalone documentation site for the HagiCode ecosystem. This is an Astro 5 site built with Starlight, designed to provide user documentation, tutorials, and blog content for the entire HagiCode platform.
+This repository is the standalone HagiCode documentation site built with Astro and Starlight.
 
-Key features:
-- **Documentation site**: Technical documentation for the entire HagiCode ecosystem
-- **Blog integration**: Date-stamped blog posts with MDX support
-- **Multi-language**: Support for internationalization (currently zh-CN)
-- **SEO optimized**: With sitemap generation and meta tags
-- **Custom components**: Reusable UI components for documentation content
+- User docs, guides, and reference pages live here.
+- Blog content and release-note related flows also run here.
+- The marketing website lives in `repos/site`.
 
-## Tech Stack
+## Working Directory
 
-### Core Framework
-- **Astro**: 5.x with Starlight theme
-- **Starlight**: Official documentation theme for Astro
-- **TypeScript**: 5.x for type safety
-- **MDX**: Rich documentation with JSX components
+Run commands from `repos/docs/`.
 
-### Styling
-- **Tailwind CSS**: Utility-first CSS framework
-- **Starlight UI**: Pre-built documentation components
+## Key Commands
 
-### Development Tools
-- **Vite**: Fast development server with HMR
-- **esbuild**: Fast bundling for development
-
-### Deployment
-- **Static site**: Pre-built HTML/CSS/JS output
-- **CDN-ready**: Optimized for edge delivery
-
-## Project Structure
-
-```
-repos/docs/
-├── astro.config.mjs           # Astro configuration
-├── package.json              # Project dependencies
-├── src/
-│   ├── assets/               # Static assets
-│   ├── components/           # Custom Astro components
-│   ├── content/
-│   │   ├── docs/             # Documentation pages
-│   │   │   ├── blog/         # Blog posts with date prefixes
-│   │   │   └── ...           # Documentation topics
-│   │   └── config.ts         # Content configuration
-│   ├── layouts/              # Page layouts
-│   └── pages/                # Additional pages
-├── public/                   # Static assets
-├── illustration-management.md # Image management guidelines
-└── ...
-```
-
-## Presets Configuration
-
-Preset 资源由 Index 站点 (`repos/index/public/presets/`) 统一托管和维护。Docs 站点通过 `import.meta.glob` 在构建时从 `repos/index/public/presets/` 读取 provider 数据，不再自行托管 preset 文件。
-
-- **源文件位置**: `repos/index/public/presets/`
-- **生产 URL**: `https://index.hagicode.com/presets/`
-- **详细文档**: `repos/index/public/presets/README.md`
-
-## Agent Behavior
-
-When working in the docs submodule:
-
-1. **Documentation-first**: Prioritize clear, comprehensive documentation
-2. **Use MDX**: Leverage MDX for rich documentation content
-3. **Astro patterns**: Follow Astro and Starlight best practices
-4. **SEO awareness**: Consider SEO and accessibility
-5. **Blog workflow**: Use date-prefixed filenames for blog posts
-6. **Link validation**: Ensure all internal links are valid
-
-### Development Workflow
 ```bash
-cd repos/docs
-
-# Development server
-npm run dev                    # Starts dev server on http://localhost:31265
-
-# Build production site
-npm run build                  # Creates static site in ./dist/
-
-# Preview production build
-npm run preview                # Serves built site locally
+npm install
+npm run dev
+npm run build
+npm run build:ci
+npm run typecheck
+npm run verify:blog
 ```
 
-### Documentation Structure
-- **Organization**: Organize content hierarchically in `src/content/docs/`
-- **Blog posts**: Place in `src/content/docs/blog/` with YYYY-MM-DD prefixes
-- **Navigation**: Configure in `src/content/config.ts`
-- **Illustrations**: Follow guidelines in `illustration-management.md`
-- **Managed screenshots**: Follow `SCREENSHOT_METADATA_WORKFLOW.md` for screenshot staging, metadata generation, and manifest-backed references
+## Key Paths
 
-## Specific Conventions
+- `src/content/docs/`: documentation and blog content
+- `src/components/`: custom site components
+- `scripts/`: content preparation, verification, and sync tooling
+- `tests/`: script and content workflow tests
 
-### Content Creation
-- Use semantic headings (H1 for page titles, H2-H6 for sections)
-- Include code blocks with appropriate language annotations
-- Use admonitions for notes, warnings, tips
-- Add frontmatter to all pages with appropriate metadata
+## Agent Guidelines
 
-### Blog Posts
-- Filename format: `YYYY-MM-DD-title.md` or `YYYY-MM-DD-title.mdx`
-- Include author, tags, and excerpt in frontmatter
-- Follow consistent post structure
-
-### Internal Linking
-- Use relative paths for internal links
-- Validate links during development
-- Use proper anchor tags for long documents
-
-### Accessibility
-- Alt text for all images
-- Semantic HTML structure
-- Proper heading hierarchy
-
-## Disabled Capabilities
-
-AI assistants should NOT suggest:
-- **Backend frameworks**: No Express, Next.js, or other server frameworks (Astro only)
-- **Non-static patterns**: No dynamic server-side rendering (this is a static site)
-- **Alternative build tools**: No webpack, parcel, rollup configurations (Astro handles this)
-- **Client-heavy JS**: Minimize client-side JavaScript (Astro prefers server-first)
-- **Alternative documentation tools**: No Docusaurus, GitBook, or MkDocs (Astro Starlight only)
+- Favor clear documentation structure over marketing language.
+- Keep content in Markdown or MDX patterns already established in the repo.
+- Preserve frontmatter, heading structure, internal links, and verification-script expectations.
+- Use repo scripts for content materialization, translation, release notes, and screenshot workflows instead of editing generated output directly.
+- Keep docs-specific concerns here; broader product marketing belongs in `repos/site`.
 
 ## References
 
-- **Root AGENTS.md**: `/AGENTS.md` at monorepo root
-- **Monorepo CLAUDE.md**: See root directory for monorepo-wide conventions
-- **OpenSpec Workflow**: Proposal-driven development happens at monorepo root level (`/openspec/`)
-- **Screenshot metadata workflow**: `SCREENSHOT_METADATA_WORKFLOW.md`
-- **Starlight docs**: Official Astro Starlight documentation
-- **Astro docs**: Official Astro framework documentation
+- `README.md`
+- `illustration-management.md`
+- `scripts/`
