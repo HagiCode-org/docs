@@ -1,0 +1,320 @@
+---
+title: 將 Pi Agent 接入 HagiCode 的實踐之路
+date: 2026-06-08
+tags: [ai-integration, hagicode, pi-agent, thin-adapter, cli]
+---
+
+## 將 Pi Agent 接入 HagiCode 的實踐之路
+
+> 本文分享我們在 HagiCode 專案中將 Pi agent 作為一等工作流入口接入的實踐經驗，包括架構設計、核心組件實現和前後端適配細節。
+
+## 背景
+
+其實一切都要從那個問題說起：在 HagiCode Mono 專案中，雖然 `repos/Hagicode.Libs` 已經實現了可複用的 `PiProvider`，可是 `repos/hagicode-core` 和 `repos/web` 還沒有將 Pi 提升為專案級一等 Agent CLI。這就像你有了一雙好鞋，卻還沒繫好鞋帶，雖然能走路，但總覺得差點什麼。
+
+現有的 `PiProvider` 位於 `HagiCode.Libs/src/HagiCode.Libs.Providers/Pi/PiProvider.cs`，它實現了基於行分隔 JSON（`--mode json --print`）的 CLI 通訊協議，支援會話管理、工具調用和串流輸出。這部分代碼寫得很好，只是它還躺在那裡，沒有被喚醒。
+
+這種狀況造成了一個斷層：Pi 的底層能力是完整的，但專案級的接入鏈路（從用戶配置到執行監控）是缺失的。這就像畫了一幅好畫，卻沒掛在牆上讓人欣賞。所以需要將 Pi 作為新的活躍 provider `PiCli` 接入整個系統，使其成為與其他 Agent CLI 一等的工作流入口。
+
+畢竟，我們想要的是完整的體驗，而不是零散的片段。
+
+## 關於 HagiCode
+
+本文分享的方案來自我們在 [HagiCode](https://hagicode.com) 專案中的實踐經驗。HagiCode 是一個智能代碼助手專案，在開發過程中我們需要整合多種 AI 能力提供商。本文所述的 Pi agent 接入方案，正是我們在實踐中總結出來的一套可複用的集成模式，對於類似的多 provider 集成場景具有參考價值。專案的 GitHub 地址是 [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site)。
+
+## 架構設計
+
+Pi agent 對接採用了 **thin adapter 模式**，而不是在 core 層重新實現 Pi 進程協議。這個設計決策其實也沒什麼複雜的，就是想了想，何必重複造輪子呢？
+
+畢竟：
+
+1. **避免重複實現**：`PiProvider` 中的參數構建、進程啟動、JSON 解析和錯誤處理邏輯已經很完整，重複實現會製造兩套行為源和兩套測試矩陣。這也罷了，但維護起來會很麻煩。
+2. **保持一致性**：與 Kimi、Gemini、Reasonix、DeepAgents 等現有 CLI 的接入方式保持一致，都是通過 thin adapter 委託給 libs 層的實現。大家都這麼做，跟著走就是了。
+3. **關注點分離**：`hagicode-core` 專注於運行時契約和業務邏輯，進程細節交給 `HagiCode.Libs` 處理。各司其職，豈不美哉？
+
+這種設計讓 HagiCode 在保持核心層簡潔的同時，能夠快速集成新的 AI 能力提供商。畢竟，簡潔是美，效率是錢。
+
+## 核心組件實現
+
+### Provider 枚舉和 Factory
+
+在 `hagicode-core/src/PCode.Models/AIProviderType.cs` 中新增了 `PiCli = 13` 枚舉值：
+
+```csharp
+public enum AIProviderType
+{
+    ClaudeCodeCli = 0,
+    // ... 其他 provider
+    PiCli = 13,
+}
+```
+
+這個枚舉值是 provider 身份的根源，會影響 OpenAPI 生成的 `PCode_Models_AIProviderType.ts` 前端枚舉、`AIProviderFactory` 的創建分支，以及 Provider 解析和活躍 provider 判斷邏輯。在 `AIProviderFactory` 中註冊新的創建分支：
+
+```csharp
+case AIProviderType.PiCli:
+    provider = new PiCliProvider(
+        logger,
+        configuration,
+        providerFactory.GetRequiredService<ICliProvider<PiOptions>>(),
+        providerFactory.GetService<IAgentCliRuntimeEnvironmentResolver>());
+    break;
+```
+
+其實這些代碼也沒什麼特別的，就是一個枚舉加一個 switch case 而已。只是它們很重要，就像樂譜上的音符，一個個加起來才能演奏出完整的曲子。
+
+### Thin Adapter 實現
+
+`PiCliProvider.cs` 是核心的 thin adapter，它實現了 `IAIProvider`、`IVersionedAIProvider` 和 `IAsyncDisposable` 接口。通過構造函數接收 `ICliProvider<PiOptions>`（來自 `HagiCode.Libs`），將 `AIRequest` / `ProviderConfiguration` 映射到 `PiOptions`，然後委託執行、ping、版本查詢等操作給底層 provider。
+
+關鍵是要處理 Pi 特有的 JSON 事件流，包括 `assistant.thought`、`assistant`、`terminal.completed` 等事件。這些事件在串流輸出過程中需要被正確解析和轉換為系統的標準格式。這有點像翻譯，把一種語言翻譯成另一種語言，意思要傳達到位才行。
+
+### 主職業預設
+
+在 `main-professions.yaml` 中增加了 `profession-pi` 主職業條目：
+
+```yaml
+- Id: "profession-pi"
+  Name: "Pi"
+  Family: "pi"
+  Summary: "hero.professionCopy.primary.pi.summary"
+  Icon: "executor-avatar:Pi"
+  SourceLabel: "hero.professionCopy.sources.aiProvidersPiCli"
+  ProviderType: "PiCli"
+  SortOrder: 59
+  DefaultEnabled: true
+  DefaultParameters:
+    binary: "pi"
+    provider: "omniroute"
+    thinking: "balanced"
+```
+
+這確保了後端快照與前端 fallback 目錄有一致的 Pi 身份，可以通過現有 Hero 編輯器管理 Pi 配置，而且 Pi 的加入不會破壞現有主職業條目的可消費性。畢竟，我們不想因為新增一個功能就把原來的東西弄亂了，那樣就因小失大了。
+
+### 監控註冊表
+
+`AgentCliMonitoringRegistry` 需要增加 Pi 的監控 descriptor，使系統能夠解析可執行路徑、展示品牌名、進行健康探測，並在狀態欄和健康詳情中顯示 Pi 狀態：
+
+```csharp
+new AgentCliMonitoringDescriptor(
+    CliId: "pi",
+    DisplayName: "Pi",
+    ProviderType: AIProviderType.PiCli,
+    DisplayOrder: 13,
+    Strategy: AgentCliMonitoringStrategy.Grain,
+    NotConfiguredMessage: "Pi CLI is not configured or executable not found.",
+    EnabledPaths: [],
+    ExecutablePathConfigPaths: ["Hero:PrimaryProfessions:Pi:ExecutablePath"],
+    DefaultExecutablePath: "pi")
+```
+
+監控系統就像儀表盤，告訴你車子跑得怎麼樣。Pi 的狀態一目了然，這樣用戶就能知道一切是否正常。
+
+## 前端適配
+
+### 執行器類型適配
+
+前端需要更新 `executorTypeAdapter.ts`，添加 Pi 的類型識別邏輯：
+
+```typescript
+const PI_IDS = new Set<string>([
+  PCode_Models_AIProviderType.PI_CLI,
+  'Pi',
+  'PiCli',
+  'pi',
+  'picli',
+  'pi-cli',
+]);
+
+export function isPi(value: string): boolean {
+  const normalized = normalize(value);
+  const normalizedLower = normalized.toLowerCase();
+  return PI_IDS.has(normalized)
+    || normalizedLower.includes('pi-cli')
+    || normalizedLower.includes('picli')
+    || normalizedLower === 'pi';
+}
+```
+
+這就像給 Pi 起了好幾個名字，不管你怎麼叫它，它都知道你是在叫它。畢竟，叫什麼名字不重要，重要的是知道你是誰。
+
+### Fallback Hero 目錄
+
+在 `hero.ts` 中添加 Pi 的 fallback 條目，確保即使後端數據未加載，前端也能正常顯示 Pi 配置：
+
+```typescript
+{
+  id: "profession-pi",
+  name: "Pi",
+  family: "pi",
+  summary: "hero.professionCopy.primary.pi.summary",
+  icon: "executor-avatar:Pi",
+  sourceLabel: "hero.professionCopy.sources.aiProvidersPiCli",
+  providerType: AIProviderType.PI_CLI,
+  sortOrder: 59,
+  isReadOnly: true,
+  managedParameterKeys: {
+    // 首版支持的參數 key
+  },
+  defaultParameters: {
+    binary: "pi",
+    provider: "omniroute",
+    thinking: "balanced",
+  },
+}
+```
+
+Fallback 就像備用計劃，萬一後端掛了或者數據沒加載出來，前端也能正常工作。畢竟，誰也不想到時候手忙腳亂。
+
+### 本地化文案和表單
+
+在 `locales/*/common/{hero,settings}.yml` 中增加 Pi 相關的翻譯，並在 `HeroCliEquipmentForm.tsx` 中為 Pi 新增配置字段區塊，支援 binary、provider、thinking、sessionDirectory 和工具/會話開關字段。
+
+首版 Pi 只暴露最小必要字段，複雜功能如工具 allowlist/denylist 和環境變量編輯器被明確延後到後續變更。畢竟，一口吃不成胖子，慢慢來比較快。
+
+## 配置示例
+
+### 後端配置
+
+在 `appsettings.yml` 中配置 Pi 參數：
+
+```yaml
+Hero:
+  PrimaryProfessions:
+    Pi:
+      ExecutablePath: /usr/local/bin/pi
+      Provider: omniroute
+      Thinking: balanced
+      SessionDirectory: ~/.pi/sessions
+      NoSession: false
+      DisableAllTools: false
+      DisableBuiltinTools: false
+```
+
+### 前端配置
+
+在 Hero 編輯器中配置 Pi profession：
+
+```typescript
+{
+  id: "my-pi-profession",
+  name: "My Pi Profession",
+  family: "pi",
+  providerType: AIProviderType.PI_CLI,
+  primaryModel: {
+    provider: "PiCli",
+    model: "glm-4.7",
+    providerSettings: {
+      provider: "omniroute",
+      thinking: "balanced",
+      sessionDirectory: "/Users/username/.pi/sessions",
+      noSession: false,
+      disableAllTools: false,
+      disableBuiltinTools: false,
+    },
+  },
+}
+```
+
+配置文件就像菜譜，照著做就能做出好菜。只是有時候，就算照著菜譜，也會把菜做糊......不過這次的配置倒是很清晰，應該沒什麼問題。
+
+## 驗證和測試
+
+### 後端驗證
+
+在測試中驗證主職業預設：
+
+```csharp
+var snapshot = await presetProvider.GetSnapshotAsync();
+var piProfession = snapshot.FindById("profession-pi");
+piProfession.ShouldNotBeNull();
+piProfession.ProviderType.ShouldBe(AIProviderType.PiCli);
+piProfession.Family.ShouldBe("pi");
+```
+
+還需要驗證 Pi 可用性和健康檢查：
+
+```bash
+# 檢查 Pi 可執行文件
+which pi
+pi --version
+
+# 驗證後端 provider 註冊
+curl http://localhost:35168/api/health/agent-cli/pi
+```
+
+測試就像考試，考過了才能說明真的會了。只是有時候，考試過了也未必真的懂了，不過至少說明你能做對題。
+
+### 前端驗證
+
+```typescript
+// 驗證類型解析和顯示名稱
+expect(resolveExecutorVisualType('pi-cli')).toBe('Pi');
+expect(resolveExecutorVisualType(PCode_Models_AIProviderType.PI_CLI)).toBe('Pi');
+expect(resolveExecutorDisplayName('PiCli')).toBe('Pi');
+
+// 驗證 fallback 目錄
+const piFallback = findFallbackProfessionById('profession-pi');
+expect(piFallback?.providerType).toBe(AIProviderType.PI_CLI);
+```
+
+這些測試用例覆蓋了主要的邏輯路徑，確保 Pi 能被正確識別和顯示。畢竟，展示給用戶的東西，不能出差錯。
+
+## 常見問題排查
+
+### Pi 可執行文件找不到
+
+如果健康檢查返回 "Pi executable was not found."，需要檢查 PATH 中是否有 pi，或確認配置的路徑是否正確。解決方法是確保 `pi` 已安裝並在 PATH 中，或在 `appsettings.yml` 中配置正確的 `ExecutablePath`。
+
+這就像找不到家門鑰匙，得想想是不是放錯地方了。其實解決辦法也挺簡單的，要麼把鑰匙放回原來的地方，要麼換把新鎖。
+
+### 配置字段不識別
+
+如果啟動時拋出 "PiCli runtime settings [...] are not supported" 錯誤，檢查是否只使用了首版支持的配置字段。首版支持的字段包括：`provider`、`thinking`、`sessionDirectory`、`noSession`、`disableAllTools`、`disableBuiltinTools`。
+
+有時候就是貪心，想要的功能太多，結果系統不支持。其實首版的功能已經夠用了，貪多嚼不爛。
+
+### 前端無法選擇 Pi
+
+如果 Hero 編輯器中沒有 Pi 選項，檢查是否已運行 `npm run generate:api` 重新生成前端枚舉，`hero.ts` 中是否有 `profession-pi` 條目，以及本地化文案是否正確添加。
+
+排查問題就像找丟失的物品，得一步步來。畢竟，瞎找是找不到的，得有邏輯地找。
+
+## 最佳實踐
+
+1. **使用 thin adapter 模式**：不要在 core 層重新實現進程協議，委託給 libs 層的 provider。這樣可以避免重複實現，保持代碼一致性。畢竟，重複造輪子不僅累，還容易出問題。
+
+2. **保持命名一致性**：前後端使用統一的命名約定，避免混淆。Provider 枚舉用 `PiCli`，CLI ID 用 `"pi"`，顯示名稱用 `"Pi"`。名字取得好，溝通成本就低。
+
+3. **優先使用預設**：首版應基於 `profession-pi` 預設，而不是要求用戶手工配置。這樣可以讓用戶快速上手，減少配置複雜度。用戶喜歡簡單的事情，複雜的讓他們來找我。
+
+4. **關注錯誤信息**：確保錯誤信息清晰、可操作，幫助用戶快速定位問題。錯誤信息寫得清楚，用戶就不會因為一個錯誤就抓狂。
+
+5. **版本兼容性**：考慮到 `AIProviderType` 枚舉值的序列化穩定性，變更需要謹慎處理。`AIProviderType.PiCli = 13` 的枚舉值不能輕易修改。畢竟，改了這個值，可能會破壞向後兼容性，那就麻煩了。
+
+## 總結
+
+通過 thin adapter 模式，我們成功將 Pi agent 接入 HagiCode 系統，使其成為與其他 Agent CLI 一等的工作流入口。這套方案的核心優勢在於：
+
+- 避免了重複實現，複用了 libs 層已有的 `PiProvider`
+- 與現有 provider 保持一致的接入方式，降低了維護成本
+- 實現了從用戶配置到執行監控的完整鏈路
+
+HagiCode 的這次實踐證明，thin adapter 模式是集成 AI 能力提供商的有效方案。它讓我們能夠快速支持新的 agent，同時保持系統的穩定性和可維護性。
+
+其實做技術就是這樣，找到一個好的模式，然後複用它。這樣既能快速前進，又不會迷失方向。就像走路，找到了一條好路，就一直走下去，只是偶爾也會停下來看看風景......
+
+如果你也在做多 provider 的 AI 能力集成，希望這套方案能給你一些啟發。如果你對 HagiCode 專案感興趣，歡迎來 GitHub 交流。畢竟，技術這東西，多交流才有進步。
+
+## 參考資料
+
+- [HagiCode GitHub 倉庫](https://github.com/HagiCode-org/site)
+- [HagiCode 官網](https://hagicode.com)
+- [HagiCode 安裝指南](https://docs.hagicode.com/installation/docker-compose)
+- [Pi Agent 文檔](https://github.com/earendil-works/pi-coding-agent)
+
+## 總結
+
+圍繞「將 Pi Agent 接入 HagiCode 的實踐之路」，更穩妥的推進方式是先把關鍵配置、依賴邊界和落地路徑逐步跑通，再補齊優化細節。
+
+當目標、步驟和驗收點都明確之後，這類方案通常就能更順暢地進入實際交付。

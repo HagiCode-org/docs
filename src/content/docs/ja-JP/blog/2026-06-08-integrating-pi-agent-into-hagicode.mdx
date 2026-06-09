@@ -1,0 +1,320 @@
+---
+title: HagiCode に Pi Agent を統合する実践の道
+date: 2026-06-08
+tags: [ai-integration, hagicode, pi-agent, thin-adapter, cli]
+---
+
+## HagiCode に Pi Agent を統合する実践の道
+
+> この記事は、HagiCode プロジェクトで Pi agent を第一級ワークフローエントリとして統合した実践経験を共有します。アーキテクチャ設計、コアコンポーネントの実装、フロントエンドとバックエンドの適応詳細を含みます。
+
+## 背景
+
+実はすべてはあの問題から始まりました：HagiCode Mono プロジェクトでは、`repos/Hagicode.Libs` はすでに再利用可能な `PiProvider` を実装していますが、`repos/hagicode-core` と `repos/web` はまだ Pi をプロジェクトレベルの第一級 Agent CLI に昇格させていません。これは良い靴を持っているのに靴紐を結んでいないようなもので、歩けはしますが、何かが足りない気がします。
+
+既存の `PiProvider` は `HagiCode.Libs/src/HagiCode.Libs.Providers/Pi/PiProvider.cs` にあり、行区切り JSON（`--mode json --print`）に基づく CLI 通信プロトコルを実装し、セッション管理、ツール呼び出し、ストリーミング出力をサポートしています。このコードはよく書かれていますが、まだそこに眠っていて、目覚めさせられていません。
+
+この状況は断層を作り出しています：Pi の基盤能力は完全ですが、プロジェクトレベルの統合チェーン（ユーザー設定から実行監視まで）が欠落しています。これは良い絵を描いたのに、壁に掛けて人々に鑑賞させていないようなものです。したがって、Pi を新しいアクティブな provider `PiCli` としてシステム全体に統合し、他の Agent CLI と同等の第一級ワークフローエントリにする必要があります。
+
+結局のところ、私たちが望んでいるのは完全な体験であり、断片的な断片ではありません。
+
+## HagiCode について
+
+この記事で共有するソリューションは、[HagiCode](https://hagicode.com) プロジェクトでの実践経験から来ています。HagiCode はインテリジェントコードアシスタントプロジェクトであり、開発プロセスで複数の AI 能力プロバイダーを統合する必要があります。この記事で述べる Pi agent 統合ソリューションは、実践でまとめた再利用可能な統合パターンであり、同様のマルチプロバイダー統合シナリオに参照価値があります。プロジェクトの GitHub アドレスは [github.com/HagiCode-org/site](https://github.com/HagiCode-org/site) です。
+
+## アーキテクチャ設計
+
+Pi agent の統合には **thin adapter パターン** を採用し、core レイヤーで Pi プロセスプロトコルを再実装しませんでした。この設計決定は特に複雑ではなく、ただ考えました：なぜ車輪を再発明する必要があるのでしょうか？
+
+結局のところ：
+
+1. **再実装の回避**：`PiProvider` のパラメータ構築、プロセス起動、JSON 解析、エラー処理ロジックはすでに完全であり、再実装は 2 つの動作ソースと 2 つのテスト行列を作成します。それはともかく、メンテナンスが面倒になります。
+2. **一貫性の維持**：Kimi、Gemini、Reasonix、DeepAgents などの既存 CLI の統合方式と一致し、すべて thin adapter を通じて libs レイヤーの実装に委譲します。みんなそうしているので、従えばいいのです。
+3. **関心の分離**：`hagicode-core` はランタイム契約とビジネスロジックに集中し、プロセスの詳細は `HagiCode.Libs` に任せます。それぞれの役割を果たすのが良いのでは？
+
+この設計により、HagiCode はコアレイヤーの簡潔性を維持しながら、新しい AI 能力プロバイダーを迅速に統合できます。結局のところ、簡潔さは美であり、効率はお金です。
+
+## コアコンポーネントの実装
+
+### Provider 列挙型と Factory
+
+`hagicode-core/src/PCode.Models/AIProviderType.cs` に `PiCli = 13` 列挙値を追加しました：
+
+```csharp
+public enum AIProviderType
+{
+    ClaudeCodeCli = 0,
+    // ... その他の provider
+    PiCli = 13,
+}
+```
+
+この列挙値は provider のアイデンティティの根源であり、OpenAPI が生成する `PCode_Models_AIProviderType.ts` フロントエンド列挙型、`AIProviderFactory` の作成ブランチ、Provider 解析とアクティブな provider 判断ロジックに影響します。`AIProviderFactory` に新しい作成ブランチを登録します：
+
+```csharp
+case AIProviderType.PiCli:
+    provider = new PiCliProvider(
+        logger,
+        configuration,
+        providerFactory.GetRequiredService<ICliProvider<PiOptions>>(),
+        providerFactory.GetService<IAgentCliRuntimeEnvironmentResolver>());
+    break;
+```
+
+実はこれらのコードも特別なものではなく、単なる列挙と switch case です。ただ、それらは重要であり、楽譜の音符のように、一つ一つ追加して初めて完全な曲を演奏できます。
+
+### Thin Adapter の実装
+
+`PiCliProvider.cs` はコアの thin adapter であり、`IAIProvider`、`IVersionedAIProvider`、`IAsyncDisposable` インターフェースを実装しています。コンストラクターを通じて `ICliProvider<PiOptions>`（`HagiCode.Libs` から）を受け取り、`AIRequest` / `ProviderConfiguration` を `PiOptions` にマッピングし、実行、ping、バージョンクエリなどの操作を下層の provider に委譲します。
+
+重要なのは Pi 固有の JSON イベントストリームを処理することで、`assistant.thought`、`assistant`、`terminal.completed` などのイベントが含まれます。これらのイベントはストリーミング出力プロセス中に正しく解析され、システムの標準形式に変換される必要があります。これは翻訳に似ており、一つの言語を別の言語に翻訳し、意味を正しく伝える必要があります。
+
+### メイン職業プリセット
+
+`main-professions.yaml` に `profession-pi` メイン職業エントリを追加しました：
+
+```yaml
+- Id: "profession-pi"
+  Name: "Pi"
+  Family: "pi"
+  Summary: "hero.professionCopy.primary.pi.summary"
+  Icon: "executor-avatar:Pi"
+  SourceLabel: "hero.professionCopy.sources.aiProvidersPiCli"
+  ProviderType: "PiCli"
+  SortOrder: 59
+  DefaultEnabled: true
+  DefaultParameters:
+    binary: "pi"
+    provider: "omniroute"
+    thinking: "balanced"
+```
+
+これにより、バックエンドスナップショットとフロントエンド fallback ディレクトリが一貫した Pi アイデンティティを持ち、既存の Hero エディターで Pi 設定を管理でき、Pi の追加が既存のメイン職業エントリの消費可能性を破壊しないことが保証されます。結局のところ、新しい機能を追加するために既存のものを台無しにしたくありません。
+
+### 監視レジストリ
+
+`AgentCliMonitoringRegistry` に Pi の監視 descriptor を追加し、システムが実行可能パスを解析し、ブランド名を表示し、ヘルスチェックを行い、ステータスバーとヘルス詳細に Pi のステータスを表示できるようにする必要があります：
+
+```csharp
+new AgentCliMonitoringDescriptor(
+    CliId: "pi",
+    DisplayName: "Pi",
+    ProviderType: AIProviderType.PiCli,
+    DisplayOrder: 13,
+    Strategy: AgentCliMonitoringStrategy.Grain,
+    NotConfiguredMessage: "Pi CLI is not configured or executable not found.",
+    EnabledPaths: [],
+    ExecutablePathConfigPaths: ["Hero:PrimaryProfessions:Pi:ExecutablePath"],
+    DefaultExecutablePath: "pi")
+```
+
+監視システムはダッシュボードのようなもので、車がどれくらい走っているか教えてくれます。Pi のステータスが一目でわかるので、ユーザーはすべてが正常かどうかを知ることができます。
+
+## フロントエンド適応
+
+### エグゼキュータータイプ適応
+
+フロントエンドは `executorTypeAdapter.ts` を更新し、Pi のタイプ認識ロジックを追加する必要があります：
+
+```typescript
+const PI_IDS = new Set<string>([
+  PCode_Models_AIProviderType.PI_CLI,
+  'Pi',
+  'PiCli',
+  'pi',
+  'picli',
+  'pi-cli',
+]);
+
+export function isPi(value: string): boolean {
+  const normalized = normalize(value);
+  const normalizedLower = normalized.toLowerCase();
+  return PI_IDS.has(normalized)
+    || normalizedLower.includes('pi-cli')
+    || normalizedLower.includes('picli')
+    || normalizedLower === 'pi';
+}
+```
+
+これは Pi にいくつかの名前を付けたようなもので、どのように呼んでも、自分を呼んでいることを知ります。結局のところ、名前が重要なのではなく、誰であるかを知ることが重要です。
+
+### Fallback Hero ディレクトリ
+
+`hero.ts` に Pi の fallback エントリを追加し、バックエンドデータがロードされていない場合でも、フロントエンドが Pi 設定を正常に表示できるようにします：
+
+```typescript
+{
+  id: "profession-pi",
+  name: "Pi",
+  family: "pi",
+  summary: "hero.professionCopy.primary.pi.summary",
+  icon: "executor-avatar:Pi",
+  sourceLabel: "hero.professionCopy.sources.aiProvidersPiCli",
+  providerType: AIProviderType.PI_CLI,
+  sortOrder: 59,
+  isReadOnly: true,
+  managedParameterKeys: {
+    // 初版でサポートするパラメータ key
+  },
+  defaultParameters: {
+    binary: "pi",
+    provider: "omniroute",
+    thinking: "balanced",
+  },
+}
+```
+
+Fallback は予備計画のようなもので、バックエンドがダウンしたかデータがロードされない場合でも、フロントエンドは正常に動作できます。結局のところ、誰もそのときに慌てたくありません。
+
+### ローカライゼーションテキストとフォーム
+
+`locales/*/common/{hero,settings}.yml` に Pi 関連の翻訳を追加し、`HeroCliEquipmentForm.tsx` で Pi に設定フィールドブロックを追加し、binary、provider、thinking、sessionDirectory、ツール/セッションスイッチフィールドをサポートします。
+
+初版 Pi は最小限の必要なフィールドのみを公開し、ツール allowlist/denylist や環境変数エディターなどの複雑な機能は明示的に以降の変更に延期されます。結局のところ、一口で太ることはできず、ゆっくり進む方が速いです。
+
+## 設定例
+
+### バックエンド設定
+
+`appsettings.yml` で Pi パラメータを設定します：
+
+```yaml
+Hero:
+  PrimaryProfessions:
+    Pi:
+      ExecutablePath: /usr/local/bin/pi
+      Provider: omniroute
+      Thinking: balanced
+      SessionDirectory: ~/.pi/sessions
+      NoSession: false
+      DisableAllTools: false
+      DisableBuiltinTools: false
+```
+
+### フロントエンド設定
+
+Hero エディターで Pi profession を設定します：
+
+```typescript
+{
+  id: "my-pi-profession",
+  name: "My Pi Profession",
+  family: "pi",
+  providerType: AIProviderType.PI_CLI,
+  primaryModel: {
+    provider: "PiCli",
+    model: "glm-4.7",
+    providerSettings: {
+      provider: "omniroute",
+      thinking: "balanced",
+      sessionDirectory: "/Users/username/.pi/sessions",
+      noSession: false,
+      disableAllTools: false,
+      disableBuiltinTools: false,
+    },
+  },
+}
+```
+
+設定ファイルはレシピのようなもので、従えば良い料理ができます。ただ、時々レシピに従っても料理を焦がしてしまうことがありますが...今回の設定は非常に明確で、問題はないはずです。
+
+## 検証とテスト
+
+### バックエンド検証
+
+テストでメイン職業プリセットを検証します：
+
+```csharp
+var snapshot = await presetProvider.GetSnapshotAsync();
+var piProfession = snapshot.FindById("profession-pi");
+piProfession.ShouldNotBeNull();
+piProfession.ProviderType.ShouldBe(AIProviderType.PiCli);
+piProfession.Family.ShouldBe("pi");
+```
+
+Pi の可用性とヘルスチェックも検証する必要があります：
+
+```bash
+# Pi 実行可能ファイルを確認
+which pi
+pi --version
+
+# バックエンド provider 登録を検証
+curl http://localhost:35168/api/health/agent-cli/pi
+```
+
+テストは試験のようなもので、合格して初めて本当にできることがわかります。ただ、時々試験に合格しても本当に理解しているとは限りませんが、少なくとも問題を正解できることは示しています。
+
+### フロントエンド検証
+
+```typescript
+// タイプ解析と表示名を検証
+expect(resolveExecutorVisualType('pi-cli')).toBe('Pi');
+expect(resolveExecutorVisualType(PCode_Models_AIProviderType.PI_CLI)).toBe('Pi');
+expect(resolveExecutorDisplayName('PiCli')).toBe('Pi');
+
+// fallback ディレクトリを検証
+const piFallback = findFallbackProfessionById('profession-pi');
+expect(piFallback?.providerType).toBe(AIProviderType.PI_CLI);
+```
+
+これらのテストケースは主な論理パスをカバーし、Pi が正しく認識され表示されることを保証します。結局のところ、ユーザーに表示するものは間違いがあってはなりません。
+
+## 一般的な問題のトラブルシューティング
+
+### Pi 実行可能ファイルが見つからない
+
+ヘルスチェックが "Pi executable was not found." を返す場合、PATH に pi があるか、設定されたパスが正しいかを確認する必要があります。解決方法は、`pi` がインストールされ PATH にあることを確認するか、`appsettings.yml` で正しい `ExecutablePath` を設定することです。
+
+これは家の鍵が見つからないようなもので、間違った場所に置いたか考える必要があります。実際、解決方法は簡単で、鍵を元の場所に戻すか、新しい錠に交換するだけです。
+
+### 設定フィールドが認識されない
+
+起動時に "PiCli runtime settings [...] are not supported" エラーがスローされる場合、初版でサポートされる設定フィールドのみを使用しているか確認してください。初版でサポートされるフィールドは：`provider`、`thinking`、`sessionDirectory`、`noSession`、`disableAllTools`、`disableBuiltinTools` です。
+
+時々欲張りすぎて、欲しい機能が多すぎると、システムがサポートしません。実際、初版の機能で十分であり、欲張ると消化不良を起こします。
+
+### フロントエンドで Pi を選択できない
+
+Hero エディターに Pi オプションがない場合、`npm run generate:api` を実行してフロントエンド列挙型を再生成したか、`hero.ts` に `profession-pi` エントリがあるか、ローカライゼーションテキストが正しく追加されているかを確認してください。
+
+問題のトラブルシューティングは失くした物を探すようなもので、一歩一歩進める必要があります。結局のところ、適当に探しても見つからず、論理的に探す必要があります。
+
+## ベストプラクティス
+
+1. **thin adapter パターンを使用する**：core レイヤーでプロセスプロトコルを再実装せず、libs レイヤーの provider に委譲します。これにより再実装を回避し、コードの一貫性を維持できます。結局のところ、車輪の再発明は面倒で問題を起こしやすくなります。
+
+2. **命名の一貫性を維持する**：フロントエンドとバックエンドで統一された命名規約を使用し、混乱を回避します。Provider 列挙は `PiCli`、CLI ID は `"pi"`、表示名は `"Pi"` を使用します。良い名前を付ければ、コミュニケーションコストが下がります。
+
+3. **プリセットを優先的に使用する**：初版は `profession-pi` プリセットに基づくべきであり、ユーザーに手動設定を要求すべきではありません。これにより、ユーザーはすぐに始めることができ、設定の複雑さが減ります。ユーザーはシンプルなことが好きで、複雑なことは私に来てください。
+
+4. **エラーメッセージに注目する**：エラーメッセージが明確でアクション可能であることを確認し、ユーザーが問題を迅速に特定できるようにします。エラーメッセージが明確に書かれていれば、ユーザーは一つのエラーでパニックになりません。
+
+5. **バージョン互換性**：`AIProviderType` 列挙値のシリアル化安定性を考慮し、変更は慎重に処理する必要があります。`AIProviderType.PiCli = 13` の列挙値は容易に変更できません。結局のところ、この値を変更すると、後方互換性が破壊される可能性があり、それは面倒です。
+
+## まとめ
+
+thin adapter パターンを通じて、Pi agent を HagiCode システムに正常に統合し、他の Agent CLI と同等の第一級ワークフローエントリにしました。このソリューションの核心的优势は次のとおりです：
+
+- 再実装を回避し、libs レイヤーの既存の `PiProvider` を再利用
+- 既存の provider と一致する統合方式を維持し、メンテナンスコストを削減
+- ユーザー設定から実行監視までの完全なチェーンを実現
+
+HagiCode のこの実践は、thin adapter パターンが AI 能力プロバイダーを統合する有効なソリューションであることを証明しています。これにより、新しい agent を迅速にサポートしながら、システムの安定性と保守性を維持できます。
+
+実は技術とは、良いパターンを見つけて、それを再利用することです。これにより、迅速に進歩しながら、方向を見失いません。歩くように、良い道を見つけて、ずっと進んで、時々立ち止まって風景を見ることもあります...
+
+もしマルチプロバイダーの AI 能力統合をしているなら、このソリューションがいくつかのインスピレーションを与えることを願っています。HagiCode プロジェクトに興味があるなら、GitHub で交流してください。結局のところ、技術は交流があってこそ進歩します。
+
+## 参考資料
+
+- [HagiCode GitHub リポジトリ](https://github.com/HagiCode-org/site)
+- [HagiCode 公式サイト](https://hagicode.com)
+- [HagiCode インストールガイド](https://docs.hagicode.com/installation/docker-compose)
+- [Pi Agent ドキュメント](https://github.com/earendil-works/pi-coding-agent)
+
+## まとめ
+
+「HagiCode に Pi Agent を統合する実践の道」をめぐり、より確実な推進方法は、まず重要な設定、依存境界、実装パスを徐々に通し、その後最適化の詳細を補完することです。
+
+目標、手順、検収点が明確になると、この種のソリューションは通常、よりスムーズに実際のデリバリーに入ることができます。
