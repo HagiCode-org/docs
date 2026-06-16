@@ -50,10 +50,6 @@ export interface DocsPromoteBannerControllerOptions extends LoadActivePromotions
 
 type BannerVisibilityState = 'dismissed' | 'footer-hidden' | 'hidden' | 'ready';
 
-function defaultBadgeText(locale: PromoteLocale): string {
-  return locale === 'en' ? 'Promoted' : '推荐';
-}
-
 function serializeSignaturePart(value: string): string {
   return encodeURIComponent(value);
 }
@@ -66,7 +62,7 @@ function createRemotePromotion(
   promotion: NormalizedPromotion,
   locale: PromoteLocale,
 ): ActivePromotion {
-  const badgeText = promotion.platform ?? defaultBadgeText(locale);
+  const badgeText = promotion.platform ?? (locale === 'en' ? 'Promoted' : '推荐');
 
   return {
     id: promotion.id,
@@ -466,11 +462,6 @@ export class DocsPromoteBannerController {
 
       const copy = document.createElement('div');
       copy.className = 'docs-promote-banner__copy';
-
-      const badge = document.createElement('p');
-      badge.className = 'docs-promote-banner__badge';
-      badge.textContent = promotion.badgeText;
-      copy.append(badge);
 
       const title = document.createElement('h2');
       title.className = 'docs-promote-banner__title';

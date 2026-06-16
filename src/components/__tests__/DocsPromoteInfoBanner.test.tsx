@@ -287,7 +287,7 @@ describe('DocsPromoteBannerController', () => {
     expect(root.dataset.mode).toBe('fallback');
     expect(getActiveSlideTitle(root)).toBe('查看 HagiCode 产品概览');
     expect(screen.getByText('从文档入口快速了解产品能力、版本关系与常见上手路径。')).toBeInTheDocument();
-    expect(screen.getByText('文档')).toBeInTheDocument();
+    expect(root.querySelector('.docs-promote-banner__badge')).toBeNull();
     expect(root.querySelector('[data-promote-banner-controls]')).toHaveAttribute('hidden');
 
     fireEvent.click(screen.getByRole('button', { name: /查看文档/i }));
@@ -331,7 +331,7 @@ describe('DocsPromoteBannerController', () => {
     expect(root.dataset.mode).toBe('remote');
     expect(getActiveSlideTitle(root)).toBe('Wishlist Now');
     expect(screen.getByText('Coming April 29, 2026. Add to your Steam wishlist now!')).toBeInTheDocument();
-    expect(screen.getByText('Steam')).toBeInTheDocument();
+    expect(root.querySelector('.docs-promote-banner__badge')).toBeNull();
     expect(screen.getByRole('button', { name: 'Dismiss promotion message' })).toBeInTheDocument();
     const promoImage = root.querySelector<HTMLImageElement>('.docs-promote-banner__image');
     expect(promoImage).not.toBeNull();
