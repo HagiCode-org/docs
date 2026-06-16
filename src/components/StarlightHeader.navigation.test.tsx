@@ -33,18 +33,12 @@ describe('docs navigation support entry', () => {
     expect(linkKeys).not.toContain('discord');
   });
 
-  it('exposes the builder site as a crawlable header path in both locales', () => {
+  it('removes the builder/deployment-generator entry from the header navigation', () => {
     const chineseBuilderLink = getLocalizedNavLinks('zh-CN').find((link) => link.href === 'https://builder.hagicode.com/');
     const englishBuilderLink = getLocalizedNavLinks('en').find((link) => link.href === 'https://builder.hagicode.com/');
 
-    expect(chineseBuilderLink).toMatchObject({
-      href: 'https://builder.hagicode.com/',
-      displayLabel: '部署生成器',
-    });
-    expect(englishBuilderLink).toMatchObject({
-      href: 'https://builder.hagicode.com/',
-      displayLabel: 'Builder',
-    });
+    expect(chineseBuilderLink).toBeUndefined();
+    expect(englishBuilderLink).toBeUndefined();
   });
 
   it('provides localized header labels for every supported docs locale', () => {
@@ -53,7 +47,7 @@ describe('docs navigation support entry', () => {
     for (const locale of locales) {
       const localizedLinks = getLocalizedNavLinks(locale);
 
-      expect(localizedLinks).toHaveLength(4);
+      expect(localizedLinks).toHaveLength(3);
       expect(localizedLinks.every((link) => link.displayLabel.trim().length > 0)).toBe(true);
       expect(localizedLinks.find((link) => link.linkKey === 'blog')?.href).toBe(
         buildDocsRoutePath(locale, '/blog/'),

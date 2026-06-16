@@ -59,21 +59,6 @@ export const navLinks: NavLink[] = [
     linkKey: 'website',
   },
   {
-    label: "部署生成器",
-    translations: {
-      'en-US': 'Builder',
-      'zh-Hant': '部署產生器',
-      'ja-JP': 'デプロイビルダー',
-      'ko-KR': '배포 빌더',
-      'de-DE': 'Deployment-Builder',
-      'fr-FR': 'Générateur de déploiement',
-      'es-ES': 'Generador de despliegue',
-      'pt-BR': 'Gerador de implantação',
-      'ru-RU': 'Генератор развертывания',
-    },
-    href: 'https://builder.hagicode.com/',
-  },
-  {
     label: "博客",
     translations: {
       'en-US': 'Blog',
