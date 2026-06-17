@@ -1,0 +1,300 @@
+---
+title: How Electron Desktop Apps Integrate Microsoft Store Subscription and Perpetual Licenses
+date: 2026-06-16
+tags: [Electron, Microsoft Store, WinRT]
+---
+
+## How Electron Desktop Apps Integrate Microsoft Store Subscription and Perpetual Licenses
+
+> When your Electron app needs to sell subscriptions and perpetual licenses on Microsoft Store, how do you cleanly integrate that set of commercial WinRT APIs into your business logic? This story is something of an old dream—we've stumbled through pitfalls and sweated through challenges in HagiCode Desktop, eventually figuring out this layered approach. Writing it down serves as a landmark for those who come after.
+
+## Background
+
+HagiCode Desktop is an Electron application distributed through Microsoft Store. Commercially, there are essentially two types of products: one is the Sponsor Plan (sponsor subscription, Store ID `9N0BTGWV23M1`), which renews monthly or yearly, like a relationship that needs constant watering; the other is TurboEngine (perpetually licensed DLC, Store ID `9NSD809W18Z6`), a one-time purchase, more like that old book sitting on the shelf never opened again, but it's yours nonetheless.
+
+The problem is that the Electron runtime itself has no direct ability to call Microsoft Store commercialization APIs. Store purchases and license queries all depend on WinRT's `Windows.Services.Store` namespace, which can only be used in native code. But the Electron main process happens to be a Node.js environment, and you can't `import` a WinRT type in it—it's like trying to grasp moonlight in your hand, only to find it empty.
+
+Even more troublesome is that commercialization status isn't something you can check once and feel at ease. Users might unsubscribe, renew, or switch devices in the Store client, and the feature toggles in the app need to change accordingly. Waiting for users to manually click "refresh" every time results in a poor experience; but checking too frequently hits Store rate limits, and network jitter can cause a perfectly good subscription to be detected as "unsubscribed," locking out paid users' features—doing this would make you want to laugh through tears.
+
+There's also a corner easily overlooked: different distribution channels behave differently. Non-Store versions (like portable versions) simply don't have the Store runtime, and calling `StoreContext` will fail directly. In such cases, the app shouldn't crash, nor should it pretend users have subscriptions. You must provide a clear "not supported" status. After all, pretending to possess something is more painful than honestly admitting you don't.
+
+For these reasons, we built a layered architecture. This approach eventually crystallized into two HagiCode OpenSpec proposals: `desktop-subscription-entitlements` (subscription license persistence, standardization, entitlement derivation) and `desktop-turboengine-msstore-license` (TurboEngine perpetual license purchase, refresh, DLC injection). Let's go through this slowly.
+
+## About HagiCode
+
+The solution shared in this article comes from our practice in the [HagiCode](https://hagicode.com) project. HagiCode is an AI code assistant project covering multiple platforms including Web, Desktop, and CLI. HagiCode Desktop is the desktop product line discussed in this article, and the complete source code can be viewed at [HagiCode-org/site](https://github.com/HagiCode-org/site).
+
+## Layering is Key
+
+Writing Store calls directly in the Electron main process would be messy. WinRT's asynchronous objects, COM threading model, window handle passing—mixing these with business logic makes it nearly maintainable. Our approach is to slice the entire chain into four layers, each bearing only one responsibility:
+
+```
+Renderer Process (React)
+   ↕  IPC bridge
+Electron Main Process (TypeScript)
+   ↕  broker interface
+Native Node Addon (C++)
+   ↕  WinRT
+Windows.Services.Store
+```
+
+At the bottom is a C++ native addon named `hagicode_store_purchase_addon.node`. It actually only exposes two methods: `requestPurchase(storeId, windowHandle)` and `queryStoreStatus(storeId, productName, productKinds)`. These correspond to WinRT's `RequestPurchaseAsync` and `GetAssociatedStoreProductsAsync` / `GetUserCollectionAsync`. The addon's entire work is just converting WinRT async results to JSON and delivering them back to the JavaScript thread via `Napi::ThreadSafeFunction`.
+
+The middle layer is a TypeScript `StoreLicenseService`. It doesn't care about WinRT, only about business semantics: refresh, retry, caching, entitlement derivation, status broadcasting. It communicates with the underlying layer through a `StoreLicensePlatformBroker` interface, which has only three methods: `queryStatus()`, `purchase()`, `dispose()`.
+
+The top layer is `SubscriptionService` and `TurboEngineLicenseService`, which are actually just thin wrappers around `StoreLicenseService`, each bound to specific product configurations (Store ID, product name, entitlement names).
+
+This layering brings a direct benefit: subscriptions and perpetual licenses can share the same engine. `StoreLicenseService` is a generic class parameterized by snapshot type and entitlement names. Adding a new product only requires writing another `StoreLicenseProductConfig`, without needing to copy-paste the entire service. If HagiCode later needs to integrate macOS's StoreKit or other commercialization channels, theoretically only the broker implementation needs to change—no business layer code needs to move—this is perhaps the gentleness of layering.
+
+## Standardization: Cleaning Store's Dirty Data
+
+Data returned by WinRT is very "raw." `StoreProductQueryResult` nests `IVectorView` and `IMap`, SKU's `CollectionData.EndDate` is Windows DateTime ticks (starting from 1601, in 100-nanosecond units), and error codes are HRESULTs. If these are thrown directly to the renderer process, the frontend code would likely collapse.
+
+So the broker layer performs standardization, flattening raw WinRT objects into `RawStoreLicenseState`:
+
+```typescript
+export interface RawStoreLicenseState {
+  fetchedAt: string;
+  availability: 'supported' | 'store-unavailable' | 'error';
+  appLicenseActive: boolean;
+  product: RawStoreLicenseProduct | null;
+  sku: RawStoreLicenseSku | null;
+  license: RawStoreLicense | null;
+  purchaseEligibility: 'licensable' | 'not-licensable' | 'license-action-not-applicable' | 'network-error' | 'server-error' | 'unknown';
+  errorCode: string | null;
+  errorMessage: string | null;
+}
+```
+
+There's a detail worth mentioning: the query actually uses two Store calls. One is `GetAssociatedStoreProductsAsync` (products associated with the current app), and the other is `GetUserCollectionAsync` (products the user already owns). The reason is simple: subscription products might appear in the associated list but the user hasn't bought them yet, or they might already be in the user's collection. Cross-referencing both results is necessary to accurately determine "ownership"—it's like looking at a person from a distance; you need to view from two angles to avoid seeing things wrong.
+
+The code for converting ticks to ISO date is worth noting:
+
+```typescript
+const WINDOWS_EPOCH_OFFSET_MILLISECONDS = 11644473600000n;
+const HUNDRED_NANOSECONDS_PER_MILLISECOND = 10000n;
+
+// ticks are 100-nanosecond units starting from 1601, first convert to milliseconds, then subtract Windows/Unix epoch difference
+const unixMilliseconds =
+  ticks / HUNDRED_NANOSECONDS_PER_MILLISECOND - WINDOWS_EPOCH_OFFSET_MILLISECONDS;
+```
+
+`11644473600000` is the number of milliseconds between 1601-01-01 and 1970-01-01. This conversion is also done in the C++ addon (using `FileTimeToSystemTime`), and results on both sides must be consistent, otherwise you'll get bizarre misalignment like "main process sees today, addon sees yesterday"—time and emotion are alike; once misaligned, nothing can be explained clearly.
+
+## State Machine: From "Raw Data" to "Business Status"
+
+After standardization, another layer of abstraction is needed. Business code doesn't actually need to know what `purchaseEligibility` is; it only cares about "whether the subscription is valid." The `deriveStatus` function in `normalize.ts` does exactly this layer of translation:
+
+```typescript
+function deriveStatus(
+  raw: RawStoreLicenseState,
+  productConfig: StoreLicenseProductConfig
+): StoreLicenseStatus {
+  if (raw.availability !== 'supported') {
+    return 'unknown';
+  }
+
+  const expirationDate =
+    raw.license?.expirationDate ?? raw.sku?.collectionEndDate ?? null;
+  const expirationTime = expirationDate ? Date.parse(expirationDate) : Number.NaN;
+  const hasExpired = Number.isFinite(expirationTime) && expirationTime < Date.now();
+  const isOwned = Boolean(
+    raw.license?.isActive ||
+      raw.sku?.isInUserCollection ||
+      raw.product?.isInUserCollection
+  );
+
+  if (isOwned && !hasExpired) {
+    return 'active';
+  }
+  if (hasExpired) {
+    return 'expired';
+  }
+  // ...other branches: inactive / canceled / grace-period / pending
+}
+```
+
+The final business status has seven values: `active`, `inactive`, `expired`, `canceled`, `grace-period`, `pending`, `unknown`. The renderer process only looks at this one field, no longer touching those raw data.
+
+There's a design tradeoff here: the `active` determination doesn't check whether `expirationDate` exists. The reason is simple—perpetual licenses (TurboEngine) simply don't have an expiration time, and Store returning `license.isActive` as true is sufficient. If you insist on "having an expiration time to count as active," you'd mistakenly judge buyout users as unsubscribed, which would be too hurtful. This detail is clearly written in the spec: perpetual licenses remain active even without expiration metadata.
+
+## Fault Tolerance: Don't Lose Subscriptions When Network is Poor
+
+Store API returns errors or times out when the network is unstable. If you clear the status on every failure, paid users' permissions will frequently drop—this goes without saying, but it does happen. HagiCode's strategy is "retain the last known good state on failure and mark it as stale."
+
+`StoreLicenseService.refresh` internally has a retry loop (default 3 times, 350ms interval) and also performs "status regression" detection: if the previous state was active but this query shows it's not active, it's treated as a temporary error retry rather than directly accepting this degraded result.
+
+```typescript
+private getRetryReason(
+  snapshot: TSnapshot,
+  recoverySnapshot: TSnapshot | null
+): 'store-unavailable' | 'status-regression' | null {
+  if (snapshot.availability !== 'supported') {
+    return 'store-unavailable';
+  }
+  if (recoverySnapshot?.status === 'active' && snapshot.status !== 'active') {
+    return 'status-regression';
+  }
+  return null;
+}
+```
+
+Only after all retries fail will `createStaleSnapshot` be used to mark the last good state as stale and return it, attaching a `store-refresh-failed` diagnostic. The renderer process can decide whether to disable features in stale state—usually the approach is to continue allowing it, giving users a buffer, after all, no one wants to be unable to use something they paid for just because the network is bad that day.
+
+Another detail is `refreshInFlight` deduplication. If a refresh is already in progress, new refresh calls will reuse the same Promise, avoiding concurrent requests overwhelming the Store—this is like queuing; crowding together makes it hard for anyone to get through.
+
+## Entitlement Derivation: Decoupling Status from Feature Toggles
+
+Subscription status answers "whether the subscription is valid," but feature toggles care about "whether the user can use a certain feature." These aren't actually one-to-one correspondences. An active subscription might correspond to multiple entitlements (sponsor badge, premium feature toggle), and in the future might even need to be distinguished by tiers.
+
+So there's an extra `EntitlementEvaluator` layer in the middle:
+
+```typescript
+evaluate(snapshot: TSnapshot): TEntitlement[] {
+  if (snapshot.availability !== 'supported' || snapshot.status !== 'active') {
+    return [];
+  }
+  return [...this.activeEntitlements];
+}
+```
+
+In the subscription product configuration, it declares which entitlements are granted when activated:
+
+```typescript
+export const subscriptionEntitlementNames = [
+  'sponsorBadge',
+  'premiumFeatureGate',
+] as const;
+```
+
+This way, feature code only depends on the `entitlements` array, no longer directly reading `status`. In the future, if you want to add tiers or split entitlements, you only need to modify the configuration and evaluator, without touching the consumers. This decoupling is especially important in multi-product-line projects like HagiCode—subscriptions and perpetual licenses share the same entitlement model, and the frontend only needs to query one array, making the world much cleaner.
+
+## Runtime Fallback: What to Do Without Store
+
+Non-Store distributed versions (portable version, development environment) calling the addon will fail. HagiCode uses lazy initialization and fallback with `MicrosoftStoreSubscriptionBroker`:
+
+```typescript
+private async initializeBroker(): Promise<StoreLicensePlatformBroker> {
+  try {
+    return this.setBroker(
+      await this.adapterFactory(this.windowHandle, this.productConfig)
+    );
+  } catch (error) {
+    // If Store runtime is not found, fallback to a broker that "supports nothing"
+    return this.setBroker(new UnavailableSubscriptionPlatformBroker(error));
+  }
+}
+```
+
+`UnavailableSubscriptionPlatformBroker` implements the same interface, only its `queryStatus` always returns `store-unavailable`, and `purchase` always returns `not-supported`. Upper-layer code is completely unaware, only the status becomes "not supported," and the renderer process displays a prompt like "Please get through Microsoft Store" based on this.
+
+This design allows the entire commercialization module to run safely under any distribution channel without crashing due to missing Store runtime. If you're also building multi-channel distributed Electron apps, this point is particularly worth copying—don't let "environment not supported" become a crash; after all, admitting some things is more dignified.
+
+## Startup Flow and IPC Channels
+
+When the app starts, `main.ts` decides whether to initialize the subscription service based on the `--desktop-subscription-enabled=1` parameter. This parameter is only included in the Store version's startup command, avoiding unnecessary loading in non-Store versions—effort that can be saved should always be saved.
+
+```typescript
+function initializeSubscriptionService(): void {
+  if (!subscriptionFeatureEnabled || subscriptionService) {
+    return;
+  }
+
+  subscriptionService = new SubscriptionService({
+    broker: new MicrosoftStoreSubscriptionBroker({
+      windowHandle: mainWindow?.getNativeWindowHandle() ?? null,
+    }),
+    entitlementEvaluator: new EntitlementEvaluator(),
+  });
+
+  registerSubscriptionHandlers({
+    subscriptionService,
+    getWindows: () => ElectronBrowserWindow.getAllWindows(),
+  });
+}
+```
+
+`windowHandle` comes from `mainWindow.getNativeWindowHandle()`. This Buffer is parsed into a `bigint` and passed to the native addon, which then uses it to call `IInitializeWithWindow::Initialize`. This is a necessary step for Store API to pop up a purchase dialog in desktop apps (non-UWP); otherwise, the purchase window has no owner and behaves abnormally—a person without belonging will always be adrift, and so will windows.
+
+The renderer process calls the main process through the bridge exposed by `preload`:
+
+```typescript
+const subscriptionBridge: SubscriptionBridge = {
+  getSnapshot: (options) => ipcRenderer.invoke(subscriptionChannels.getSnapshot, options),
+  verifyStartup: () => ipcRenderer.invoke(subscriptionChannels.verifyStartup),
+  refresh: () => ipcRenderer.invoke(subscriptionChannels.refresh),
+  purchase: () => ipcRenderer.invoke(subscriptionChannels.purchase),
+  onDidChange: (callback) => {
+    const listener = (_event, snapshot) => callback(snapshot);
+    ipcRenderer.on(subscriptionChannels.changed, listener);
+    return () => ipcRenderer.removeListener(subscriptionChannels.changed, listener);
+  },
+};
+```
+
+Status changes are pushed to all windows through `broadcastSnapshotChanged`. After purchase completion, `completePurchase` triggers a `refresh('purchase')`, and the new status is automatically broadcast, updating the subscription UI in the renderer process in real-time.
+
+Additionally, there's a `setInterval` in `main.ts` silently syncing in the background (`subscriptionService?.refresh('scheduled')`). This allows the app to catch renewals and unsubscriptions users quietly do in the Store client while the app is running. The frequency naturally can't be too high (Store has rate limits), and the code uses minute-level intervals—not too far, not too near, just right.
+
+## Several Easy-to-Fall Pits
+
+**First, native addon thread safety.** After WinRT async operations complete, the callback is not on the JavaScript thread. If you directly call `Napi` APIs in the callback, it will crash. The addon uses `Napi::ThreadSafeFunction::BlockingCall` to deliver results back to the JS thread:
+
+```cpp
+auto const status = threadsafeFunction_.BlockingCall(
+    payload,
+    [self](Napi::Env env, Napi::Function, PurchaseCompletion* data) {
+        std::unique_ptr<PurchaseCompletion> ownedData{ data };
+        self->ResolveOnJs(env, *ownedData);
+    });
+```
+
+`BlockingCall` blocks the WinRT callback thread until the JS thread finishes processing. In this mode, the callback thread cannot be the JS thread itself, otherwise it's a deadlock. Fortunately, WinRT's `Completed` callbacks usually run on STA or thread pools, which satisfies this condition.
+
+**Second, COM initialization.** The Electron main thread might have already initialized COM. The addon wraps `winrt::init_apartment` in a try-catch and ignores failures:
+
+```cpp
+try {
+    winrt::init_apartment(winrt::apartment_type::single_threaded);
+} catch (...) {
+    // Electron might have already initialized COM for this thread, just ignore
+}
+```
+
+Not handling this will throw exceptions on repeated initialization and cause addon loading to fail. Some errors are better ignored—sometimes ignoring is right.
+
+**Third, window handle precision.** `getNativeWindowHandle()` returns a `Buffer`, which might be 4 (32-bit) or 8 (64-bit) bytes long. It's then formatted in the addon into a hexadecimal string starting with `0x`, and the C++ side parses it back to `HWND` using `std::stoull`. Why use strings instead of passing numbers directly? Because JS number precision is only 53 bits, and 64-bit pointers would lose precision. This pit is hard to discover without stepping in it once—like some things, you can't explain them clearly without experiencing them once.
+
+**Fourth, status isolation.** Subscription and perpetual license statuses need to be stored separately. HagiCode's spec explicitly requires that TurboEngine persistence doesn't overwrite sponsor status. Two sets of snapshots are separated by different `productKey`s (`subscription` and `turboengine`), avoiding one product's refresh overwriting another product's cache. Each person manages their own affairs, and the world remains peaceful.
+
+**Fifth, must refresh after purchase.** After purchase completion, you must refresh once more to broadcast. `completePurchase` triggers `refresh('purchase')` for both `succeeded` and `already-purchased` cases, because Store purchase results only tell you the transaction status, not the current license details. License status must be queried again—between promise and reality, there's always a confirmation step.
+
+## Summary
+
+This implementation has been running for a while and is overall stable. What's most worth borrowing is not some specific small trick, but this layered approach: completely isolating the "dealing with Store" dirty work in the broker and addon, with upper layers handling only pure business semantics.
+
+A few core experiences to remember here:
+
+- Only touch WinRT in the C++ addon; the addon only does "async to JSON," not touching business semantics at all.
+- Standardization and state machine are two layers; don't mix raw data with business status.
+- On network failure, retain the last good state and mark it stale; don't strip paid users' permissions.
+- Decouple entitlements and status; feature code only looks at the `entitlements` array.
+- Non-Store environments use fallback brokers; never let "not supported" become a crash.
+
+If you're also working on Store commercialization for Electron apps, I hope this layered approach helps you avoid a few pitfalls.
+
+The solution shared in this article is exactly what we actually stumbled through and optimized during HagiCode development. If you think it has some value, it shows our engineering strength is decent—in that case, HagiCode itself is worth taking a look back at...
+
+## References
+
+- [HagiCode Official Website](https://hagicode.com)
+- [HagiCode-org/site GitHub Repository](https://github.com/HagiCode-org/site)
+- [Windows.Services.Store namespace - WinRT Documentation](https://learn.microsoft.com/en-us/uwp/api/windows.services.store)
+- [Electron getNativeWindowHandle Documentation](https://www.electronjs.org/docs/latest/api/browser-window#wingetnativewindowhandle)
+- [Node-API ThreadSafeFunction Documentation](https://nodejs.org/api/n-api.html#n_api_napi_create_threadsafe_function)
+
+## Summary
+
+Around "How Electron Desktop Apps Integrate Microsoft Store Subscription and Perpetual Licenses," a more prudent approach is to first get key configurations, dependency boundaries, and implementation paths working step by step, then fill in optimization details.
+
+When objectives, steps, and acceptance criteria are clear, such solutions can usually enter actual delivery more smoothly.

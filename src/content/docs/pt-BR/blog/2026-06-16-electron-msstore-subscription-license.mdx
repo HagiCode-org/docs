@@ -1,0 +1,300 @@
+---
+title: Como integrar assinaturas e licenças permanentes do Microsoft Store em aplicativos Electron desktop
+date: 2026-06-16
+tags: [Electron, Microsoft Store, WinRT]
+---
+
+## Como integrar assinaturas e licenças permanentes do Microsoft Store em aplicativos Electron desktop
+
+> Quando seu aplicativo Electron precisa vender assinaturas e licenças permanentes no Microsoft Store, como integrar de forma limpa as APIs comerciais do WinRT no seu negócio? Essa é uma questão antiga. No HagiCode Desktop, passamos por dificuldades e aprendemos, desenvolvendo essa abordagem em camadas. Escrevemos isso aqui como um farol para quem vier depois.
+
+## Contexto
+
+HagiCode Desktop é um aplicativo Electron distribuído pelo Microsoft Store. Na verdade, existem apenas dois tipos de produtos comerciais: um é o Sponsor Plan (assinatura de patrocinador, Store ID `9N0BTGWV23M1`), que renova mensalmente ou anualmente, como um relacionamento que precisa de cuidado constante; o outro é o TurboEngine (DLC com licença permanente, Store ID `9NSD809W18Z6`), compra única, como aquele livro na estante que nunca mais foi aberto, mas é seu.
+
+O problema é que o runtime Electron não tem capacidade nativa de chamar as APIs comerciais do Microsoft Store. A compra e consulta de licenças na Store dependem todas do namespace `Windows.Services.Store` do WinRT, que só pode ser usado em código nativo. Mas o processo principal do Electron é um ambiente Node.js, você não pode fazer `import` de um tipo WinRT nele — como tentar segurar a luz da lua, as mãos ficam sempre vazias.
+
+Pior ainda, o estado comercial não é algo que você possa verificar uma vez e ficar tranquilo. Os usuários podem cancelar, renovar ou trocar dispositivos no cliente da Store, e as alternâncias de funcionalidades do aplicativo precisam acompanhar isso. Se você sempre esperar o usuário clicar "atualizar", a experiência fica ruim; mas se consultar com muita frequência, você bate no limite da Store, a rede oscila, e uma assinatura perfeitamente válida é considerada "não assinada", desligando as funcionalidades de usuários pagantes — fazer isso realmente faria você rir para disfarçar as lágrimas.
+
+Há também um canto facilmente ignorado: diferentes canais de distribuição se comportam de forma diferente. Versões não Store (como a versão portátil) não têm o runtime Store, chamar `StoreContext` falha diretamente. Nesse caso, você não pode deixar o aplicativo travar, nem fingir que o usuário tem assinatura; precisa fornecer um estado "não suportado" claro. Afinal, fingir ter algo é mais triste do que admitir honestamente que não tem.
+
+Por isso, criamos uma arquitetura em camadas. Mais tarde, essa abordagem se consolidou em duas propostas OpenSpec do HagiCode: `desktop-subscription-entitlements` (persistência, padronização e derivação de direitos de licenças de assinatura) e `desktop-turboengine-msstore-license` (compra, atualização e injeção de DLC da licença permanente TurboEngine). Vamos explicar gradualmente.
+
+## Sobre o HagiCode
+
+A abordagem compartilhada neste artigo vem da nossa prática no projeto [HagiCode](https://hagicode.com). HagiCode é um projeto de assistente de código IA, abrangendo Web, Desktop, CLI e outros canais. A linha de produtos HagiCode Desktop é o objeto de discussão deste artigo; o código-fonte completo pode ser visto em [HagiCode-org/site](https://github.com/HagiCode-org/site).
+
+## Camadas são a chave
+
+Escrever chamadas da Store diretamente no processo principal do Electron fica muito bagunçado. Objetos assíncronos do WinRT, modelo de threads COM, passagem de handles de janela — misturando isso com lógica de negócios, é quase impossível manter. Nossa abordagem é dividir toda a cadeia em quatro camadas, cada uma com uma responsabilidade:
+
+```
+Processo de renderização (React)
+   ↕  IPC bridge
+Processo principal do Electron (TypeScript)
+   ↕  broker interface
+Addon nativo Node (C++)
+   ↕  WinRT
+Windows.Services.Store
+```
+
+Na base está um addon nativo C++ chamado `hagicode_store_purchase_addon.node`. Na verdade, expõe apenas dois métodos: `requestPurchase(storeId, windowHandle)` e `queryStoreStatus(storeId, productName, productKinds)`. Eles correspondem ao `RequestPurchaseAsync` e `GetAssociatedStoreProductsAsync` / `GetUserCollectionAsync` do WinRT. O trabalho do addon é converter os resultados assíncronos do WinRT em JSON e enviá-los de volta ao thread JavaScript via `Napi::ThreadSafeFunction`.
+
+No meio está um `StoreLicenseService` em TypeScript. Ele não se importa com WinRT, apenas com semântica de negócios: atualização, repetição, cache, derivação de direitos, broadcast de estado. Ele se comunica com a camada inferior através da interface `StoreLicensePlatformBroker`, que também tem apenas três métodos: `queryStatus()`, `purchase()`, `dispose()`.
+
+No topo estão `SubscriptionService` e `TurboEngineLicenseService`, que são apenas uma camada fina de encapsulamento do `StoreLicenseService`, cada um vinculado à configuração de produto específica (Store ID, nome do produto, nomes de direitos).
+
+Esse tipo de camadas traz um benefício direto: assinaturas e licenças permanentes podem compartilhar o mesmo mecanismo. `StoreLicenseService` é uma classe genérica, parametrizada por tipo de snapshot e nomes de direitos. Para adicionar um novo produto, basta escrever outra `StoreLicenseProductConfig`, sem precisar copiar e colar todo o serviço. Se o HagiCode quiser integrar StoreKit do macOS ou outros canais comerciais no futuro, teoricamente só precisa trocar a implementação do broker, sem tocar uma linha na camada de negócios — essa é a gentileza das camadas.
+
+## Padronização: limpando os dados sujos da Store
+
+Os dados retornados pelo WinRT são muito "crus". `StoreProductQueryResult` contém `IVectorView`, `IMap`, o `CollectionData.EndDate` do SKU são ticks de DateTime do Windows (começando em 1601, em unidades de 100 nanossegundos), códigos de erro são HRESULT. Se jogar isso diretamente no processo de renderização, o código frontal provavelmente vai quebrar.
+
+Então a camada broker faz uma padronização, achatando os objetos WinRT brutos em `RawStoreLicenseState`:
+
+```typescript
+export interface RawStoreLicenseState {
+  fetchedAt: string;
+  availability: 'supported' | 'store-unavailable' | 'error';
+  appLicenseActive: boolean;
+  product: RawStoreLicenseProduct | null;
+  sku: RawStoreLicenseSku | null;
+  license: RawStoreLicense | null;
+  purchaseEligibility: 'licensable' | 'not-licensable' | 'license-action-not-applicable' | 'network-error' | 'server-error' | 'unknown';
+  errorCode: string | null;
+  errorMessage: string | null;
+}
+```
+
+Há um detalhe que vale mencionar: a consulta usa duas chamadas da Store. Uma é `GetAssociatedStoreProductsAsync` (produtos associados ao aplicativo atual), outra é `GetUserCollectionAsync` (produtos que o usuário já possui). O motivo é simples: produtos de assinatura podem aparecer na lista associada, mas o usuário ainda não os comprou, ou já podem estar na coleção do usuário. Cruzando os dois resultados, você pode determinar com precisão "se possui ou não" — é como observar uma pessoa à distância, de dois ângulos, para não errar.
+
+O código para converter ticks para data ISO vale atenção:
+
+```typescript
+const WINDOWS_EPOCH_OFFSET_MILLISECONDS = 11644473600000n;
+const HUNDRED_NANOSECONDS_PER_MILLISECOND = 10000n;
+
+// ticks são unidades de 100 nanossegundos a partir de 1601, primeiro convertemos para milissegundos, depois subtraímos a diferença de épocas Windows/Unix
+const unixMilliseconds =
+  ticks / HUNDRED_NANOSECONDS_PER_MILLISECOND - WINDOWS_EPOCH_OFFSET_MILLISECONDS;
+```
+
+`11644473600000` é o número de milissegundos entre 1601-01-01 e 1970-01-01. Essa conversão também é feita no addon C++ (usando `FileTimeToSystemTime`), os resultados dos dois lados devem ser consistentes, caso contrário aparecerá um deslocamento bizarro como "o processo principal vê hoje, o addon vê ontem" — tempo e sentimentos, quando desalinhados, nada fica claro.
+
+## Máquina de estados: de "dados brutos" a "estado de negócios"
+
+Depois da padronização, precisamos de mais uma camada de abstração. O código de negócios realmente não precisa saber o que é `purchaseEligibility`, apenas se preocupa se "a assinatura é válida ou não". A função `deriveStatus` em `normalize.ts` faz exatamente essa tradução:
+
+```typescript
+function deriveStatus(
+  raw: RawStoreLicenseState,
+  productConfig: StoreLicenseProductConfig
+): StoreLicenseStatus {
+  if (raw.availability !== 'supported') {
+    return 'unknown';
+  }
+
+  const expirationDate =
+    raw.license?.expirationDate ?? raw.sku?.collectionEndDate ?? null;
+  const expirationTime = expirationDate ? Date.parse(expirationDate) : Number.NaN;
+  const hasExpired = Number.isFinite(expirationTime) && expirationTime < Date.now();
+  const isOwned = Boolean(
+    raw.license?.isActive ||
+      raw.sku?.isInUserCollection ||
+      raw.product?.isInUserCollection
+  );
+
+  if (isOwned && !hasExpired) {
+    return 'active';
+  }
+  if (hasExpired) {
+    return 'expired';
+  }
+  // ...outros ramos: inactive / canceled / grace-period / pending
+}
+```
+
+O estado de negócios final tem sete tipos: `active`, `inactive`, `expired`, `canceled`, `grace-period`, `pending`, `unknown`. O processo de renderização só olha esse campo, não toca mais nos dados brutos.
+
+Há uma escolha de design aqui: a determinação de `active` não verifica se `expirationDate` existe. O motivo é simples — licenças permanentes (TurboEngine) não têm data de expiração, o `license.isActive` retornado pela Store sendo true já é suficiente. Se você exigir rigorosamente "só é active se tiver data de expiração", você vai julgar erroneamente usuários de compra única como não assinantes, o que é muito doloroso. Esse detalhe está claro na spec: licenças permanentes mantêm active quando não há metadados de expiração.
+
+## Tolerância a falhas: não perca a assinatura quando a rede estiver ruim
+
+A API da Store retorna erros ou tempos limite quando a rede oscila. Se cada falha limpar o estado, as permissões de usuários pagantes caem frequentemente — isso é óbvio, mas realmente acontece. A estratégia do HagiCode é "manter o último estado conhecido em caso de falha, marcando como stale".
+
+Internamente, `StoreLicenseService.refresh` tem um loop de repetição (padrão 3 vezes, intervalo 350ms), e também faz detecção de "regressão de estado": se a última vez era active, desta vez não é, trata como um erro temporário e repete, em vez de aceitar diretamente esse resultado degradado.
+
+```typescript
+private getRetryReason(
+  snapshot: TSnapshot,
+  recoverySnapshot: TSnapshot | null
+): 'store-unavailable' | 'status-regression' | null {
+  if (snapshot.availability !== 'supported') {
+    return 'store-unavailable';
+  }
+  if (recoverySnapshot?.status === 'active' && snapshot.status !== 'active') {
+    return 'status-regression';
+  }
+  return null;
+}
+```
+
+Apenas quando todas as repetições falharem, `createStaleSnapshot` será usado para marcar o último bom estado como stale e retornar, anexando um diagnóstico `store-refresh-failed`. O processo de renderização pode decidir se desabilita funcionalidades em estado stale — geralmente continua permitindo, dando ao usuário um buffer, afinal, ninguém quer não poder usar o que comprou só porque a rede está ruim.
+
+Outro detalhe é a deduplicação de `refreshInFlight`. Se uma atualização já está em andamento, novas chamadas de refresh reutilizam o mesmo Promise, evitando que solicitações concorrentes derrubem a Store — a lógica é a mesma de uma fila, todos apertados ninguém passa.
+
+## Derivação de direitos: desacoplando estado e alternâncias de funcionalidades
+
+O estado de assinatura responde "a assinatura é válida ou não", mas as alternâncias de funcionalidades se preocupam com "o usuário pode usar uma certa funcionalidade". Os dois não são correspondentemente equivalentes. Uma assinatura active pode corresponder a vários direitos (emblema de patrocinador, alternância de funcionalidades premium), futuramente talvez também por níveis.
+
+Por isso há uma camada extra `EntitlementEvaluator`:
+
+```typescript
+evaluate(snapshot: TSnapshot): TEntitlement[] {
+  if (snapshot.availability !== 'supported' || snapshot.status !== 'active') {
+    return [];
+  }
+  return [...this.activeEntitlements];
+}
+```
+
+Na configuração do produto de assinatura, declare quais direitos concede quando ativado:
+
+```typescript
+export const subscriptionEntitlementNames = [
+  'sponsorBadge',
+  'premiumFeatureGate',
+] as const;
+```
+
+Assim, o código de funcionalidade só depende do array `entitlements`, não lê mais `status` diretamente. No futuro, se quiser adicionar níveis, dividir direitos, basta modificar a configuração e o evaluator, sem tocar o consumidor. Esse desacoplamento é especialmente importante em projetos como HagiCode com múltiplas linhas de produtos — assinaturas e licenças permanentes compartilham o mesmo modelo de direitos, o frontal só precisa consultar um array, o mundo fica muito mais limpo.
+
+## Degradação em tempo de execução: e se não houver Store?
+
+Versões distribuídas não Store (versão portátil, ambiente de desenvolvimento) chamando o addon falham. HagiCode usa `MicrosoftStoreSubscriptionBroker` para inicialização tardia e degradação:
+
+```typescript
+private async initializeBroker(): Promise<StoreLicensePlatformBroker> {
+  try {
+    return this.setBroker(
+      await this.adapterFactory(this.windowHandle, this.productConfig)
+    );
+  } catch (error) {
+    // Se não encontrar o runtime Store, degrada para um broker que "não suporta nada"
+    return this.setBroker(new UnavailableSubscriptionPlatformBroker(error));
+  }
+}
+```
+
+`UnavailableSubscriptionPlatformBroker` implementa a mesma interface, apenas seu `queryStatus` sempre retorna `store-unavailable`, `purchase` sempre retorna `not-supported`. O código superior totalmente sem percepção, apenas o estado se torna "não suportado", o processo de renderização exibe uma orientação "obtenha através do Microsoft Store".
+
+Esse design permite que todo o módulo comercial execute com segurança em qualquer canal de distribuição, sem travar por falta do runtime Store. Se você também está fazendo um aplicativo Electron de múltiplos canais, isso especialmente vale copiar — não deixe "ambiente não suportado" se tornar uma falha, afinal, admitir certas coisas é mais elegante.
+
+## Fluxo de inicialização e canais IPC
+
+Ao iniciar o aplicativo, `main.ts` decide se deve inicializar o serviço de assinatura com base no parâmetro `--desktop-subscription-enabled=1`. Esse parâmetro só está incluído no comando de inicialização da versão Store, evitando carregamento desnecessário em versões não Store — o esforço que pode ser economizado, sempre economize.
+
+```typescript
+function initializeSubscriptionService(): void {
+  if (!subscriptionFeatureEnabled || subscriptionService) {
+    return;
+  }
+
+  subscriptionService = new SubscriptionService({
+    broker: new MicrosoftStoreSubscriptionBroker({
+      windowHandle: mainWindow?.getNativeWindowHandle() ?? null,
+    }),
+    entitlementEvaluator: new EntitlementEvaluator(),
+  });
+
+  registerSubscriptionHandlers({
+    subscriptionService,
+    getWindows: () => ElectronBrowserWindow.getAllWindows(),
+  });
+}
+```
+
+`windowHandle` vem de `mainWindow.getNativeWindowHandle()`, esse Buffer será analisado em `bigint` e passado para o addon nativo, que o usa para chamar `IInitializeWithWindow::Initialize`. Esta é uma etapa necessária para a API da Store exibir a janela de compra em aplicativos desktop (não UWP), caso contrário a janela de compra não tem proprietário, o comportamento é anormal — uma pessoa sem pertença, as ações flutuam, janelas também.
+
+O processo de renderização chama o processo principal através da bridge exposta por `preload`:
+
+```typescript
+const subscriptionBridge: SubscriptionBridge = {
+  getSnapshot: (options) => ipcRenderer.invoke(subscriptionChannels.getSnapshot, options),
+  verifyStartup: () => ipcRenderer.invoke(subscriptionChannels.verifyStartup),
+  refresh: () => ipcRenderer.invoke(subscriptionChannels.refresh),
+  purchase: () => ipcRenderer.invoke(subscriptionChannels.purchase),
+  onDidChange: (callback) => {
+    const listener = (_event, snapshot) => callback(snapshot);
+    ipcRenderer.on(subscriptionChannels.changed, listener);
+    return () => ipcRenderer.removeListener(subscriptionChannels.changed, listener);
+  },
+};
+```
+
+Mudanças de estado são enviadas para todas as janelas através de `broadcastSnapshotChanged`. Após a compra ser concluída, `completePurchase` aciona uma `refresh('purchase')`, o novo estado é automaticamente transmitido, e a UI de assinatura do processo de renderização é atualizada em tempo real.
+
+Além disso, há um `setInterval` em `main.ts` sincronizando silenciosamente em segundo plano (`subscriptionService?.refresh('scheduled')`). Isso permite que, com o aplicativo aberto, você capture renovações e cancelamentos que os usuários fazem discretamente no cliente da Store. A frequência não pode ser muito alta (a Store tem limite), o código usa intervalos de nível de minuto — nem longe, nem perto, perfeito.
+
+## Algumas armadilhas fáceis de cair
+
+**Primeiro, segurança de threads do addon nativo.** Após a conclusão da operação assíncrona do WinRT, o callback não está no thread JavaScript. Se chamar diretamente as APIs do `Napi` no callback, vai travar. O addon usa `Napi::ThreadSafeFunction::BlockingCall` para enviar os resultados de volta ao thread JS:
+
+```cpp
+auto const status = threadsafeFunction_.BlockingCall(
+    payload,
+    [self](Napi::Env env, Napi::Function, PurchaseCompletion* data) {
+        std::unique_ptr<PurchaseCompletion> ownedData{ data };
+        self->ResolveOnJs(env, *ownedData);
+    });
+```
+
+`BlockingCall` bloqueia o thread de callback do WinRT até que o thread JS termine o processamento. Nesse modo, o thread de callback não pode ser o próprio thread JS, caso contrário é um deadlock. Felizmente, os callbacks `Completed` do WinRT geralmente estão em STA ou pool de threads, atendendo a essa condição.
+
+**Segundo, inicialização COM.** O thread principal do Electron pode já ter inicializado COM. O addon envolve `winrt::init_apartment` com try-catch, falha ignora:
+
+```cpp
+try {
+    winrt::init_apartment(winrt::apartment_type::single_threaded);
+} catch (...) {
+    // O Electron pode já ter inicializado COM para este thread, basta ignorar
+}
+```
+
+Sem tratar isso, inicialização repetida lança exceção, o carregamento do addon falha. Alguns erros, ignorando, estão corretos.
+
+**Terceiro, precisão do handle de janela.** `getNativeWindowHandle()` retorna um `Buffer`, comprimento pode ser 4 (32 bits) ou 8 (64 bits). Depois, no addon, é formatado como string hexadecimal começando com `0x`, o lado C++ usa `std::stoull` para analisar de volta para `HWND`. Por que usar string em vez de passar número diretamente? Porque a precisão do number JS é apenas 53 bits, ponteiros de 64 bits perdem precisão. Essa armadilha, sem pisar uma vez, é difícil descobrir — como algumas coisas, sem experimentar uma vez, não se pode explicar claramente.
+
+**Quarto, isolamento de estado.** Os estados de assinatura e licença permanente devem ser armazenados separadamente. A spec do HagiCode exige explicitamente que a persistência do TurboEngine não sobrescreva o estado do sponsor. Dois conjuntos de snapshots são separados por diferentes `productKey` (`subscription` e `turboengine`), evitando que a atualização de um produto sobrescreva o cache de outro. Cada um cuida de suas coisas, o mundo fica em paz.
+
+**Quinto, deve atualizar após a compra.** Após a compra ser concluída, deve atualizar novamente para transmitir. Em `completePurchase`, `succeeded` e `already-purchased` acionam `refresh('purchase')`, porque o resultado da compra da Store apenas informa o estado da transação, não os detalhes da licença atual. O estado da licença deve ser consultado novamente — entre promessa e realidade, sempre há uma confirmação.
+
+## Conclusão
+
+Essa implementação rodou por um tempo, geralmente estável. O que mais vale aprender não é alguma técnica específica, mas essa abordagem em camadas: isolar completamente o "trabalho sujo de falar com a Store" no broker e no addon, a camada superior apenas lida com semântica de negócios pura.
+
+Algumas experiências principais, registradas aqui:
+
+- WinRT apenas no addon C++, o addon só faz "assíncrono para JSON", não toca em semântica de negócios.
+- Padronização e máquina de estados em duas camadas, dados brutos e estado de negócios não misturados.
+- Quando a rede falha, mantenha o último bom estado e marque como stale, não desabilite as permissões de usuários pagantes.
+- Direitos e estado desacoplados, código de funcionalidades apenas olha o array `entitlements`.
+- Ambiente não Store usa broker de degradação, nunca deixe "não suportado" se tornar uma falha.
+
+Se você também está fazendo comercialização da Store em aplicativos Electron, espero que esse tipo de camadas ajude você a evitar algumas armadilhas.
+
+A abordagem compartilhada neste artigo é exatamente aquela que desenvolvemos através de dificuldades reais e otimizações práticas durante o desenvolvimento do HagiCode. Se você acha que ainda tem algum valor, isso mostra que nossa capacidade de engenharia é decente — com isso, o próprio HagiCode vale uma olhada sua...
+
+## Referências
+
+- [Site oficial do HagiCode](https://hagicode.com)
+- [Repositório GitHub HagiCode-org/site](https://github.com/HagiCode-org/site)
+- [Namespace Windows.Services.Store - Documentação WinRT](https://learn.microsoft.com/en-us/uwp/api/windows.services.store)
+- [Documentação Electron getNativeWindowHandle](https://www.electronjs.org/docs/latest/api/browser-window#wingetnativewindowhandle)
+- [Documentação Node-API ThreadSafeFunction](https://nodejs.org/api/n-api.html#n_api_napi_create_threadsafe_function)
+
+## Conclusão
+
+Em torno de "Como integrar assinaturas e licenças permanentes do Microsoft Store em aplicativos Electron desktop", uma maneira mais segura é primeiro configurar, limitar dependências e gradualmente implementar o caminho, depois preencher os detalhes de otimização.
+
+Quando os objetivos, passos e pontos de aceitação estão claros, esse tipo de solução geralmente pode entrar mais suavemente na entrega real.

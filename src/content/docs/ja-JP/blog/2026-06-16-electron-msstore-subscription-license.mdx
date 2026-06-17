@@ -1,0 +1,300 @@
+---
+title: Electron デスクトップアプリで Microsoft Store のサブスクリプションと永久ライセンスを導入する方法
+date: 2026-06-16
+tags: [Electron, Microsoft Store, WinRT]
+---
+
+## Electron デスクトップアプリで Microsoft Store のサブスクリプションと永久ライセンスを導入する方法
+
+> Electron アプリを Microsoft Store で販売し、サブスクリプションと永久ライセンスを提供する場合、WinRT の一連の商用 API をどのようにクリーンに業務に統合するのでしょうか？これは一種の古い夢のような話で、HagiCode Desktop で私たちが落とし穴にはまり、汗をかきながらも、最終的にこのような階層化アプローチを見つけ出しました。後から来る人のために道標として残しておきます。
+
+## 背景
+
+HagiCode Desktop は Electron アプリであり、Microsoft Store 経由で配布されています。商業的には実は 2 種類の製品しかありません：1 つは Sponsor Plan（スポンサー向けサブスクリプション、Store ID `9N0BTGWV23M1`）、月払い・年払いで更新され、絶えず水をやる必要がある感情のようなものです。もう 1 つは TurboEngine（永久ライセンスの DLC、Store ID `9NSD809W18Z6`）、一度の買い切りで、本棚に置いたまま一度もめくらなかった本のようなものですが、とにかくあなたのものです。
+
+問題は、Electron ランタイム自体には Microsoft Store の商用 API を直接呼び出す機能がないことです。Store の購入、ライセンスのクエリはすべて WinRT の `Windows.Services.Store` 名前空間に依存しており、この API はネイティブコードでしか使用できません。しかし Electron のメインプロセスは Node.js 環境であり、そこで WinRT 型を `import` することはできません——まるで月光を握ろうとしても、手の中はいつも空っぽのようです。
+
+さらに厄介なのは、商業化の状態というものは、一度確認すれば安心できるものではないことです。ユーザーは Store クライアントでサブスクリプションを解約、更新、デバイスの切り替えを行う可能性があり、アプリ内の機能スイッチもそれに応じて変化する必要があります。毎回ユーザーに「更新」を押させるようにすれば、体験は当然悪くなります。しかし頻繁に確認すれば、Store のレート制限にぶつかり、ネットワークが揺れると、立派なサブスクリプションが「未サブスクライブ」として誤って判定され、有料ユーザーの機能をオフにしてしまうのです——このようなことをすると、泣き落としを笑で隠したくなるでしょう。
+
+見落とされがちなもう一つの点は、異なる配布チャネルの動作が異なることです。Store 以外のバージョン（ポータブル版など）にはそもそも Store ランタイムがないため、`StoreContext` を呼び出すと直接失敗します。この場合、アプリをクラッシュさせることもできず、ユーザーがサブスクリプションを持っていると偽ることもできず、「サポートされていない」という明確な状態を提供する必要があります。結局、持っているふりをするのは、正直に認めるよりも悲しいものです。
+
+そのために、私たちは一連の階層化アーキテクチャを作りました。後になって、このアプローチは HagiCode の 2 つの OpenSpec 提案として具体化されました：`desktop-subscription-entitlements`（サブスクリプションライセンスの永続化、標準化、権利派生）と `desktop-turboengine-msstore-license`（TurboEngine 永久ライセンスの購入、更新、DLC 注入）。以下でゆっくりと説明します。
+
+## HagiCode について
+
+この記事で共有するアプローチは、[HagiCode](https://hagicode.com) プロジェクトでの私たちの実践に基づいています。HagiCode は AI コードアシスタントプロジェクトで、Web、Desktop、CLI などの複数の端末をカバーしています。HagiCode Desktop というデスクトップ製品ラインこそが、この記事で議論する対象であり、完全なソースコードは [HagiCode-org/site](https://github.com/HagiCode-org/site) で確認できます。
+
+## 階層化が重要
+
+Electron メインプロセスに直接 Store 呼び出しを書くと、非常に混乱します。WinRT の非同期オブジェクト、COM スレッドモデル、ウィンドウハンドルの受け渡しなど、これらのものが業務ロジックと混ざると、保守がほぼ不可能になります。私たちのアプローチは、チェーン全体を 4 層に分割し、各層が単一の責任を担うようにすることです：
+
+```
+レンダリングプロセス (React)
+   ↕  IPC bridge
+Electron メインプロセス (TypeScript)
+   ↕  broker インターフェース
+ネイティブ Node アドオン (C++)
+   ↕  WinRT
+Windows.Services.Store
+```
+
+最下層は C++ ネイティブアドオンで、名前は `hagicode_store_purchase_addon.node` です。実は 2 つのメソッドしか公開していません：`requestPurchase(storeId, windowHandle)` と `queryStoreStatus(storeId, productName, productKinds)`。これらは WinRT の `RequestPurchaseAsync` と `GetAssociatedStoreProductsAsync` / `GetUserCollectionAsync` に対応しています。アドオンの仕事は、WinRT の非同期結果を JSON に変換し、`Napi::ThreadSafeFunction` を通じて JavaScript スレッドに送り返すだけです。
+
+中間層は TypeScript の `StoreLicenseService` です。WinRT には関心がなく、業務セマンティクスだけを気にします：更新、再試行、キャッシュ、権利派生、状態ブロードキャスト。`StoreLicensePlatformBroker` インターフェースを通じて下層と通信し、このインターフェースも 3 つのメソッドしかありません：`queryStatus()`、`purchase()`、`dispose()`。
+
+最上層は `SubscriptionService` と `TurboEngineLicenseService` で、これらは実は `StoreLicenseService` の薄いラッパーであり、それぞれ具体的な製品の設定（Store ID、製品名、権利名）にバインドされているだけです。
+
+このような階層化は、サブスクリプションと永久ライセンスが同じエンジンを共有できるという直接的な利点をもたらします。`StoreLicenseService` はジェネリッククラスで、パラメータ化されるのはスナップショットタイプと権利名です。新しい製品を追加するには、もう 1 つ `StoreLicenseProductConfig` を書くだけで、サービス全体をコピー＆ペーストする必要はありません。HagiCode が将来 macOS の StoreKit や他の商業化チャネルに統合する場合、理論上は broker の実装を変更するだけでよく、業務層は 1 行も変更する必要がありません——これが階層化の優しさでしょう。
+
+## 標準化：Store の汚れたデータをきれいにする
+
+WinRT が返すデータは非常に「原始的」です。`StoreProductQueryResult` には `IVectorView`、`IMap` が埋め込まれており、SKU の `CollectionData.EndDate` は Windows DateTime ticks（1601 年を起点とし、100 ナノ秒単位）、エラーコードは HRESULT です。これらをそのままレンダリングプロセスに渡せば、フロントエンドのコードはおそらく崩壊するでしょう。
+
+そのため、broker 層では標準化を行い、生の WinRT オブジェクトを `RawStoreLicenseState` に平坦化します：
+
+```typescript
+export interface RawStoreLicenseState {
+  fetchedAt: string;
+  availability: 'supported' | 'store-unavailable' | 'error';
+  appLicenseActive: boolean;
+  product: RawStoreLicenseProduct | null;
+  sku: RawStoreLicenseSku | null;
+  license: RawStoreLicense | null;
+  purchaseEligibility: 'licensable' | 'not-licensable' | 'license-action-not-applicable' | 'network-error' | 'server-error' | 'unknown';
+  errorCode: string | null;
+  errorMessage: string | null;
+}
+```
+
+ここで注目すべき詳細があります：クエリは実は 2 回の Store 呼び出しを使用しています。1 回は `GetAssociatedStoreProductsAsync`（現在のアプリに関連する製品）、もう 1 回は `GetUserCollectionAsync`（ユーザーが既に所有している製品）です。理由は、サブスクリプション製品は関連リストに現れるかもしれないがユーザーはまだ購入していないかもしれないし、あるいは既にユーザーコレクションに入っているかもしれないからです。2 つの結果を交叉して比較することで、「所有しているか」を正確に判断できます——これは距離を隔てて人を見るようなもので、2 つの角度から見て初めて見誤らないようにできます。
+
+ticks を ISO 日付に変換するコードは注目に値します：
+
+```typescript
+const WINDOWS_EPOCH_OFFSET_MILLISECONDS = 11644473600000n;
+const HUNDRED_NANOSECONDS_PER_MILLISECOND = 10000n;
+
+// ticks は 1601 起点の 100 ナノ秒単位、まずミリ秒に変換し、次に Windows/Unix 紀元の差を引く
+const unixMilliseconds =
+  ticks / HUNDRED_NANOSECONDS_PER_MILLISECOND - WINDOWS_EPOCH_OFFSET_MILLISECONDS;
+```
+
+`11644473600000` は 1601-01-01 から 1970-01-01 までのミリ秒数です。この変換は C++ アドオンでも行われています（`FileTimeToSystemTime` を使用）、両方の結果は一致している必要があります。そうしないと、「メインプロセスから見ると今日、アドオンから見ると昨日」というような奇妙なズレが生じます——時間と感情同様、ズレると何も言えなくなります。
+
+## 状態マシン：「生データ」から「業務状態」へ
+
+標準化の後、さらに抽象化層が必要です。業務コードは実際には `purchaseEligibility` が何であるかを知る必要がなく、単に「サブスクリプションが有効かどうか」だけを気にします。`normalize.ts` の `deriveStatus` 関数は、この層の変換を行います：
+
+```typescript
+function deriveStatus(
+  raw: RawStoreLicenseState,
+  productConfig: StoreLicenseProductConfig
+): StoreLicenseStatus {
+  if (raw.availability !== 'supported') {
+    return 'unknown';
+  }
+
+  const expirationDate =
+    raw.license?.expirationDate ?? raw.sku?.collectionEndDate ?? null;
+  const expirationTime = expirationDate ? Date.parse(expirationDate) : Number.NaN;
+  const hasExpired = Number.isFinite(expirationTime) && expirationTime < Date.now();
+  const isOwned = Boolean(
+    raw.license?.isActive ||
+      raw.sku?.isInUserCollection ||
+      raw.product?.isInUserCollection
+  );
+
+  if (isOwned && !hasExpired) {
+    return 'active';
+  }
+  if (hasExpired) {
+    return 'expired';
+  }
+  // ...その他の分岐：inactive / canceled / grace-period / pending
+}
+```
+
+最終的な業務状態は 7 つあります：`active`、`inactive`、`expired`、`canceled`、`grace-period`、`pending`、`unknown`。レンダリングプロセスはこの 1 つのフィールドだけを見て、生データには触れません。
+
+ここで設計上のトレードオフがあります：`active` の判定は、`expirationDate` が存在するかどうかを見ません。理由は、永久ライセンス（TurboEngine）にはそもそも有効期限がないため、Store が返す `license.isActive` が true で十分だからです。「有効期限があって初めて active」と硬く要求すると、買い切りユーザーが未サブスクライブと誤判定されてしまい、それはあまりにも傷つけることです。この詳細は spec にはっきりと書かれています：永久ライセンスは有効期限メタデータがない場合でも、active を維持します。
+
+## 耐障害性：ネットワークが悪くてもサブスクリプションを失わないように
+
+Store API はネットワークが揺れると、エラーやタイムアウトを返します。毎回失敗したときに状態をクリアすると、有料ユーザーの権限が頻繁に落ちます——これは無駄話のようですが、実際に起こります。HagiCode の戦略は「失敗したときに最後の既知状態を保持し、stale とマークする」です。
+
+`StoreLicenseService.refresh` 内部には再試行ループ（デフォルト 3 回、間隔 350ms）があり、「状態回帰」検出も行います：前回が active で、今回は active でない場合、一時的なエラーとして再試行し、退化した結果を直接受け入れません。
+
+```typescript
+private getRetryReason(
+  snapshot: TSnapshot,
+  recoverySnapshot: TSnapshot | null
+): 'store-unavailable' | 'status-regression' | null {
+  if (snapshot.availability !== 'supported') {
+    return 'store-unavailable';
+  }
+  if (recoverySnapshot?.status === 'active' && snapshot.status !== 'active') {
+    return 'status-regression';
+  }
+  return null;
+}
+```
+
+再試行がすべて失敗した後にのみ、`createStaleSnapshot` を使用して前回の良い状態を stale としてマークして返し、同時に `store-refresh-failed` の診断を添えます。レンダリングプロセスは stale 状態で機能を無効にするかどうかを自分で決定できます——通常は通し続け、ユーザーにバッファを提供します。毕竟、誰もネットワークが悪い日に、自分がお金で買ったものを使えなくなるようなことは望みません。
+
+もう一つの詳細は `refreshInFlight` の重複排除です。更新が既に進行中の場合、新しい refresh 呼び出しは同じ Promise を再利用し、並列リクエストで Store を崩壊させないようにします——これは行列と同じ理屈で、一団に詰まると逆に誰も通れません。
+
+## 権利派生：状態と機能スイッチの分離
+
+サブスクリプション状態が答えるのは「サブスクリプションが有効かどうか」ですが、機能スイッチが気にするのは「ユーザーが特定の機能を使用できるかどうか」です。これらは実は一対一ではありません。有効なサブスクリプションは、複数の権利（スポンサーバッジ、高級機能スイッチ）に対応する可能性があり、将来は等級によって区別する必要があるかもしれません。
+
+そのため、中間に `EntitlementEvaluator` 層を追加しました：
+
+```typescript
+evaluate(snapshot: TSnapshot): TEntitlement[] {
+  if (snapshot.availability !== 'supported' || snapshot.status !== 'active') {
+    return [];
+  }
+  return [...this.activeEntitlements];
+}
+```
+
+サブスクリプション製品の設定では、アクティベート時にどの権利を付与するかを宣言します：
+
+```typescript
+export const subscriptionEntitlementNames = [
+  'sponsorBadge',
+  'premiumFeatureGate',
+] as const;
+```
+
+これにより、機能コードは `entitlements` という配列だけに依存し、`status` を直接読まなくなります。将来等級を追加したり、権利を分割したりする場合、設定と evaluator を変更するだけでよく、消費側を変更する必要がありません。このような分離は、HagiCode のような複数の製品ラインを持つプロジェクトでは特に重要です——サブスクリプションと永久ライセンスが同じ権利モデルを共有し、フロントエンドは配列を 1 つクエリするだけでよく、世界は一気に爽快になります。
+
+## ランタイム降格：Store がない場合はどうするか
+
+Store 以外で配布されるバージョン（ポータブル版、開発環境）がアドオンを呼び出すと、失敗します。HagiCode は `MicrosoftStoreSubscriptionBroker` で遅延初期化と降級を行いました：
+
+```typescript
+private async initializeBroker(): Promise<StoreLicensePlatformBroker> {
+  try {
+    return this.setBroker(
+      await this.adapterFactory(this.windowHandle, this.productConfig)
+    );
+  } catch (error) {
+    // Store ランタイムが見つからない場合、「何もサポートしない」broker に降級
+    return this.setBroker(new UnavailableSubscriptionPlatformBroker(error));
+  }
+}
+```
+
+`UnavailableSubscriptionPlatformBroker` は同じインターフェースを実装していますが、その `queryStatus` は常に `store-unavailable` を返し、`purchase` は常に `not-supported` を返します。上層のコードは完全に無感知で、状態が「サポートされていない」に変わるだけで、レンダリングプロセスはそれに基づいて「Microsoft Store を通じて取得してください」というガイダンスを表示します。
+
+この設計により、商業化モジュール全体をどの配布チャネルでも安全に実行でき、Store ランタイムがないためにクラッシュすることはありません。複数のチャネルで配布される Electron アプリを作成している場合、この点は特にコピーする価値があります——「環境がサポートされていない」をクラッシュにしないでください。毕竟、あること、認めてこそ、むしろ体面が良いものです。
+
+## 起動プロセスと IPC チャネル
+
+アプリ起動時、`main.ts` は `--desktop-subscription-enabled=1` パラメータに基づいてサブスクリプションサービスを初期化するかどうかを決定します。このパラメータは Store バージョンの起動コマンドでのみ渡され、Store 以外のバージョンが白白にロードされるのを防ぎます——省ける力は、省いておくものです。
+
+```typescript
+function initializeSubscriptionService(): void {
+  if (!subscriptionFeatureEnabled || subscriptionService) {
+    return;
+  }
+
+  subscriptionService = new SubscriptionService({
+    broker: new MicrosoftStoreSubscriptionBroker({
+      windowHandle: mainWindow?.getNativeWindowHandle() ?? null,
+    }),
+    entitlementEvaluator: new EntitlementEvaluator(),
+  });
+
+  registerSubscriptionHandlers({
+    subscriptionService,
+    getWindows: () => ElectronBrowserWindow.getAllWindows(),
+  });
+}
+```
+
+`windowHandle` は `mainWindow.getNativeWindowHandle()` から来ており、この Buffer は `bigint` として解析されてネイティブアドオンに渡され、アドオンはそれを使って `IInitializeWithWindow::Initialize` を呼び出します。これは Store API がデスクトップアプリ（非 UWP）で購入ダイアログをポップアップするための必要な手順です。そうしないと、購入ウィンドウに所有者がなくなり、動作が異常になります——一人が帰属を失えば、行動は浮つき、ウィンドウも同じです。
+
+レンダリングプロセスは `preload` で公開された bridge を通じてメインプロセスを呼び出します：
+
+```typescript
+const subscriptionBridge: SubscriptionBridge = {
+  getSnapshot: (options) => ipcRenderer.invoke(subscriptionChannels.getSnapshot, options),
+  verifyStartup: () => ipcRenderer.invoke(subscriptionChannels.verifyStartup),
+  refresh: () => ipcRenderer.invoke(subscriptionChannels.refresh),
+  purchase: () => ipcRenderer.invoke(subscriptionChannels.purchase),
+  onDidChange: (callback) => {
+    const listener = (_event, snapshot) => callback(snapshot);
+    ipcRenderer.on(subscriptionChannels.changed, listener);
+    return () => ipcRenderer.removeListener(subscriptionChannels.changed, listener);
+  },
+};
+```
+
+状態の変化は `broadcastSnapshotChanged` を通じてすべてのウィンドウにプッシュされます。購入完了後、`completePurchase` は `refresh('purchase')` をトリガーし、新しい状態が自動的にブロードキャストされ、レンダリングプロセスのサブスクリプション UI もリアルタイムで更新されます。
+
+また、`main.ts` には `setInterval` がバックグラウンドで黙々と同期（`subscriptionService?.refresh('scheduled')`）しています。これにより、アプリが開いている間、ユーザーが Store クライアントで静かに行った更新、解約を捕捉できます。頻度は当然高すぎてはいけません（Store にはレート制限があります）、コードでは分単位の間隔を使用しています——遠すぎず、近すぎず、ちょうど良いです。
+
+## よく踏む穴
+
+**第一に、ネイティブアドオンのスレッド安全性。** WinRT の非同期操作が完了した後、コールバックは JavaScript スレッドにはありません。コールバックで直接 `Napi` の API を呼び出すと、クラッシュします。アドオンは `Napi::ThreadSafeFunction::BlockingCall` を使って結果を JS スレッドに配送します：
+
+```cpp
+auto const status = threadsafeFunction_.BlockingCall(
+    payload,
+    [self](Napi::Env env, Napi::Function, PurchaseCompletion* data) {
+        std::unique_ptr<PurchaseCompletion> ownedData{ data };
+        self->ResolveOnJs(env, *ownedData);
+    });
+```
+
+`BlockingCall` は WinRT のコールバックスレッドをブロックし、JS スレッドが処理を完了するまで待ちます。このモードでは、コールバックスレッドが JS スレッドそのものであってはならず、そうでなければデッドロックになります。幸い、WinRT の `Completed` コールバックは通常 STA またはスレッドプールで発生し、この条件を満たしています。
+
+**第二に、COM 初期化。** Electron メインスレッドは既に COM を初期化している可能性があります。アドオンでは `winrt::init_apartment` の外に try-catch を重ね、失敗すれば無視します：
+
+```cpp
+try {
+    winrt::init_apartment(winrt::apartment_type::single_threaded);
+} catch (...) {
+    // Electron は既にこのスレッドの COM を初期化している可能性があり、無視すればよい
+}
+```
+
+これを処理しないと、重複初期化が例外をスローし、アドオンのロードが失敗します。一部の間違いは、無視する方が正しいことがあります。
+
+**第三に、ウィンドウハンドル精度。** `getNativeWindowHandle()` が返すのは `Buffer` で、長さは 4（32 ビット）または 8（64 ビット）です。そしてアドオンで `0x` で始まる 16 進数文字列にフォーマットされ、C++ 側で `std::stoull` を使って `HWND` に解析されます。なぜ文字列を使って直接数値を渡さないのでしょうか？JS の number 精度は 53 ビットしかなく、64 ビットのポインタは精度を失うからです。この穴は、一度踏まないと発見が難しいです——あることは、一度経験しないと説明できないのと同じです。
+
+**第四に、状態分離。** サブスクリプションと永久ライセンスの状態は、分けて保存する必要があります。HagiCode の spec は、TurboEngine の永続化が sponsor の状態を上書きしてはならないと明確に要求しています。2 つのスナップショットは異なる `productKey`（`subscription` と `turboengine`）で分離され、ある製品の更新が別の製品のキャッシュを上書きするのを防ぎます。各人は各人のことを管轄し、世界は平穏です。
+
+**第五に、購入後は必ず更新する。** 購入完了後、必ずもう一度更新してからブロードキャストする必要があります。`completePurchase` では `succeeded` と `already-purchased` の 2 つの状況で `refresh('purchase')` をトリガーします。なぜなら、Store の購入結果はトランザクション状態を教えるだけで、現在のライセンス詳細を教えてくれないからです。ライセンス状態は、再クエリする必要があります——約束と現実の間には、常に一回の確認が隔たっています。
+
+## 結論
+
+この実装はしばらく走っていて、全体的には安定しています。最も参考になるのは、実は特定の小さな技巧ではなく、このような階層化の方法です：「Store とやり取りする」という汚い作業を、完全に broker とアドオンに隔離し、上層は純粋な業務セマンティクスだけを処理します。
+
+いくつかの核心的な経験をここに記します：
+
+- WinRT は C++ アドオンでのみ触れ、アドオンは「非同期から JSON」だけを行い、業務セマンティクスには一切触れない。
+- 標準化と状態マシンを 2 層に分け、生データと業務状態を混ぜない。
+- ネットワーク失敗時に最後の良い状態を保持して stale とマークし、有料ユーザーの権限を失わないようにする。
+- 権利と状態を分離し、機能コードは `entitlements` 配列だけを見る。
+- Store 以外の環境は降格 broker を通じ、「サポートされていない」を決してクラッシュにしない。
+
+もしあなたも Electron アプリの Store 商業化を行っているなら、この階層化がいくつかの穴を回避できることを願っています。
+
+この記事で共有したアプローチは、私たちが HagiCode を開発する過程で、実際に踏んだ穴で、実際に最適化したものです。もしこれにまだ価値があると思うなら、私たちのエンジニアリング能力もまともだということです——そうすると、HagiCode 自体も、振り返って見る価値があるかもしれません......
+
+## 参考資料
+
+- [HagiCode 公式サイト](https://hagicode.com)
+- [HagiCode-org/site GitHub リポジトリ](https://github.com/HagiCode-org/site)
+- [Windows.Services.Store namespace - WinRT ドキュメント](https://learn.microsoft.com/en-us/uwp/api/windows.services.store)
+- [Electron getNativeWindowHandle ドキュメント](https://www.electronjs.org/docs/latest/api/browser-window#wingetnativewindowhandle)
+- [Node-API ThreadSafeFunction ドキュメント](https://nodejs.org/api/n-api.html#n_api_napi_create_threadsafe_function)
+
+## 結論
+
+「Electron デスクトップアプリで Microsoft Store のサブスクリプションと永久ライセンスを導入する方法」について、より確実な推進方式は、まず重要な設定、依存境界、実装パスを段階的に通し、その後で最適化の詳細を補完することです。
+
+目標、手順、検収点が明確になった後、このようなアプローチは通常よりスムーズに実際の配信に入ることができます。

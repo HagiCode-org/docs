@@ -1,0 +1,300 @@
+---
+title: Electron 桌面應用如何接入 Microsoft Store 訂閱與永久許可證
+date: 2026-06-16
+tags: [Electron, Microsoft Store, WinRT]
+---
+
+## Electron 桌面應用如何接入 Microsoft Store 訂閱與永久許可證
+
+> 當你的 Electron 應用要進 Microsoft Store 賣訂閱和永久授權，WinRT 那一套商業 API 到底怎麼乾淨地接到業務裡？這事兒說起來也算一樁舊夢，我們在 HagiCode Desktop 裡踩過坑、也擦過汗，最後摸索出這麼一套分層方案，寫下來，算是給後來的人留個路標。
+
+## 背景
+
+HagiCode Desktop 是個 Electron 應用，通過 Microsoft Store 分發。商業化上其實也就兩類產品：一類是 Sponsor Plan（贊助者訂閱，Store ID `9N0BTGWV23M1`），按月、按年續費，像一段需要不斷澆水的感情；另一類是 TurboEngine（永久授權的 DLC，Store ID `9NSD809W18Z6`），一次買斷，倒像是那本放在書架上再沒翻動過的舊書，但總歸是你的。
+
+問題在於，Electron 運行時本身並沒有直接調用 Microsoft Store 商業化 API 的本事。Store 的購買、許可證查詢，全都依賴 WinRT 的 `Windows.Services.Store` 命名空間，這套 API 只能在原生代碼裡用。可 Electron 主進程偏偏是 Node.js 環境，你沒法在它身上 `import` 一個 WinRT 類型——就像你想握住月光，手心裡卻總是一空。
+
+更麻煩的是，商業化狀態這東西，並不是查一次就能心安的。用戶可能在 Store 客戶端裡退訂、續費、換設備，應用裡的功能開關也得跟著變。要每次都等用戶自己去點「刷新」，體驗自然是難看的；可若頻繁去查，又會撞上 Store 的限流，網絡一抖，好好的一段訂閱愣是被查成「未訂閱」，把付費用戶的功能給關了——這種事做出來，真叫人想笑來掩飾掉下的淚。
+
+還有個容易被忽略的角落：不同分發渠道的行為並不一樣。非 Store 版本（比如便攜版）压根沒有 Store 運行時，調用 `StoreContext` 會直接失敗。這種情況下，不能讓應用崩掉，也不能假裝用戶有訂閱，總得給一個明確的「不支持」狀態。畢竟，假裝擁有，終究比誠實承認更讓人難過。
+
+為了這些，我們做了一套分層架構。後來這套方案沉澱成了 HagiCode 的兩個 OpenSpec 提案：`desktop-subscription-entitlements`（訂閱許可證的持久化、標準化、權益派生）和 `desktop-turboengine-msstore-license`（TurboEngine 永久許可證的購買、刷新、DLC 注入）。下面慢慢說。
+
+## 關於 HagiCode
+
+本文分享的方案，來自我們在 [HagiCode](https://hagicode.com) 項目裡的實踐。HagiCode 是一個 AI 代碼助手項目，涵蓋 Web、Desktop、CLI 等多個端。HagiCode Desktop 這條桌面產品線，便是這篇文章討論的對象，完整源碼可以看 [HagiCode-org/site](https://github.com/HagiCode-org/site)。
+
+## 分層是關鍵
+
+直接在 Electron 主進程裡寫 Store 調用，會很亂。WinRT 的異步對象、COM 線程模型、窗口句柄傳遞，這些東西和業務邏輯攪在一起，幾乎沒法維護。我們的做法是把整條鏈路切成四層，每一層只擔一份責：
+
+```
+渲染進程 (React)
+   ↕  IPC bridge
+Electron 主進程 (TypeScript)
+   ↕  broker 接口
+原生 Node addon (C++)
+   ↕  WinRT
+Windows.Services.Store
+```
+
+最底下是一層 C++ 原生 addon，名字叫 `hagicode_store_purchase_addon.node`。它其實只露兩個方法：`requestPurchase(storeId, windowHandle)` 和 `queryStoreStatus(storeId, productName, productKinds)`。這兩個對應 WinRT 的 `RequestPurchaseAsync` 和 `GetAssociatedStoreProductsAsync` / `GetUserCollectionAsync`。addon 的全部工作，不過是把 WinRT 異步的結果轉成 JSON，再通過 `Napi::ThreadSafeFunction` 送回 JavaScript 線程罷了。
+
+中間一層是一個 TypeScript 的 `StoreLicenseService`。它不關心 WinRT，只關心業務語義：刷新、重試、緩存、權益派生、狀態廣播。它通過一個 `StoreLicensePlatformBroker` 接口與底層通信，這個接口也不過三個方法：`queryStatus()`、`purchase()`、`dispose()`。
+
+最上面一層是 `SubscriptionService` 和 `TurboEngineLicenseService`，它們其實只是 `StoreLicenseService` 的薄薄一層封裝，各自綁了具體產品的配置（Store ID、產品名、權益名稱）而已。
+
+這樣的分層，帶來的一個直接好處是：訂閱和永久許可證可以共用同一套引擎。`StoreLicenseService` 是個泛型類，參數化的是快照類型和權益名稱。加一個新產品，只需要再寫一份 `StoreLicenseProductConfig`，不必把整個服務複製粘貼一遍。HagiCode 日後若要接入 macOS 的 StoreKit 或別的商業化渠道，理論上也只要換一個 broker 實現，業務層一行都不用動——這大概就是分層的溫柔之處吧。
+
+## 標準化：把 Store 的髒數據洗乾淨
+
+WinRT 返回的數據，是很「原始」的。`StoreProductQueryResult` 裡嵌著 `IVectorView`、`IMap`，SKU 的 `CollectionData.EndDate` 是 Windows DateTime ticks（以 1601 年為起點，100 納秒為單位），錯誤碼是 HRESULT。這些東西若直接丟給渲染進程，前端的代碼大概是要垮的。
+
+所以 broker 層做了一道標準化，把原始 WinRT 對象拍平成 `RawStoreLicenseState`：
+
+```typescript
+export interface RawStoreLicenseState {
+  fetchedAt: string;
+  availability: 'supported' | 'store-unavailable' | 'error';
+  appLicenseActive: boolean;
+  product: RawStoreLicenseProduct | null;
+  sku: RawStoreLicenseSku | null;
+  license: RawStoreLicense | null;
+  purchaseEligibility: 'licensable' | 'not-licensable' | 'license-action-not-applicable' | 'network-error' | 'server-error' | 'unknown';
+  errorCode: string | null;
+  errorMessage: string | null;
+}
+```
+
+這裡有個細節值得一說：查詢其實用了兩次 Store 調用。一次是 `GetAssociatedStoreProductsAsync`（與當前應用關聯的產品），一次是 `GetUserCollectionAsync`（用戶已經擁有的產品）。原因無他，訂閱產品可能出現在關聯列表裡、但用戶還沒買，也可能早就在用戶集合裡了。兩個結果交叉比對，才能準確判斷「是否擁有」——這就像隔著距離看一個人，從兩個角度看過去，才不至於看走眼。
+
+ticks 轉 ISO 日期的代碼，值得留意：
+
+```typescript
+const WINDOWS_EPOCH_OFFSET_MILLISECONDS = 11644473600000n;
+const HUNDRED_NANOSECONDS_PER_MILLISECOND = 10000n;
+
+// ticks 是 1601 起點的 100 納秒單位，先換算成毫秒，再減去 Windows/Unix 紀元差
+const unixMilliseconds =
+  ticks / HUNDRED_NANOSECONDS_PER_MILLISECOND - WINDOWS_EPOCH_OFFSET_MILLISECONDS;
+```
+
+`11644473600000` 是 1601-01-01 到 1970-01-01 之間的毫秒數。這個轉換在 C++ addon 裡也做了一遍（用 `FileTimeToSystemTime`），兩邊結果必須一致，不然便會出現「主進程看是今天、addon 看是昨天」這種詭異的錯位——時間和感情一樣，錯位了，就什麼都說不清了。
+
+## 狀態機：從「原始數據」到「業務狀態」
+
+標準化之後，還得再抽象一層。業務代碼其實並不需要知道 `purchaseEligibility` 是個什麼東西，它只關心「訂閱到底有沒有效」。`normalize.ts` 裡的 `deriveStatus` 函數，做的就是這一層翻譯：
+
+```typescript
+function deriveStatus(
+  raw: RawStoreLicenseState,
+  productConfig: StoreLicenseProductConfig
+): StoreLicenseStatus {
+  if (raw.availability !== 'supported') {
+    return 'unknown';
+  }
+
+  const expirationDate =
+    raw.license?.expirationDate ?? raw.sku?.collectionEndDate ?? null;
+  const expirationTime = expirationDate ? Date.parse(expirationDate) : Number.NaN;
+  const hasExpired = Number.isFinite(expirationTime) && expirationTime < Date.now();
+  const isOwned = Boolean(
+    raw.license?.isActive ||
+      raw.sku?.isInUserCollection ||
+      raw.product?.isInUserCollection
+  );
+
+  if (isOwned && !hasExpired) {
+    return 'active';
+  }
+  if (hasExpired) {
+    return 'expired';
+  }
+  // ...其它分支：inactive / canceled / grace-period / pending
+}
+```
+
+最終的業務狀態有七個：`active`、`inactive`、`expired`、`canceled`、`grace-period`、`pending`、`unknown`。渲染進程只看這一個字段，不再去碰那些原始數據。
+
+這裡有個設計上的取舍：`active` 的判定，並不去看 `expirationDate` 是否存在。原因無他——永久許可證（TurboEngine）压根沒有過期時間這一說，Store 返回的 `license.isActive` 為 true 便足夠了。若硬要要求「有過期時間才算 active」，反倒會把買斷用戶誤判成未訂閱，那就太傷人了。這個細節在 spec 裡寫得很明白：永久許可證在沒有過期元數據時，仍保持 active。
+
+## 容錯：網絡不好時別把訂閱搞丟
+
+Store API 在網絡抖動的時候，會返回錯誤或超時。如果每次失敗都把狀態清空，付費用戶的權限就會頻繁地掉下去——這無異於廢話，可它確實是會發生的。HagiCode 的策略是「失敗時保留上次已知狀態，標記為 stale」。
+
+`StoreLicenseService.refresh` 內部有一個重試循環（默認 3 次，間隔 350ms），還會做「狀態回歸」檢測：如果上一次是 active，這次查出來卻不是 active，那就當成一次臨時錯誤重試，而不是直接接受這個退化的結果。
+
+```typescript
+private getRetryReason(
+  snapshot: TSnapshot,
+  recoverySnapshot: TSnapshot | null
+): 'store-unavailable' | 'status-regression' | null {
+  if (snapshot.availability !== 'supported') {
+    return 'store-unavailable';
+  }
+  if (recoverySnapshot?.status === 'active' && snapshot.status !== 'active') {
+    return 'status-regression';
+  }
+  return null;
+}
+```
+
+只有當重試全部失敗之後，才會用 `createStaleSnapshot` 把上次的好狀態標成 stale 返回，同時附上一條 `store-refresh-failed` 的診斷。渲染進程可以自己決定 stale 狀態下要不要禁用功能——通常的做法是繼續放行，給用戶一個緩衝，畢竟誰也不想在網不好的那天，連自己花錢買的東西都用不上。
+
+另一個細節是 `refreshInFlight` 的去重。如果一次刷新已經在進行，新的 refresh 調用會復用同一個 Promise，避免並發請求把 Store 打爆——這道理和排隊一樣，擠成一團反而誰也過不去。
+
+## 權益派生：狀態和功能開關解耦
+
+訂閱狀態回答的是「訂閱有沒有效」，但功能開關關心的卻是「用戶能不能用某個功能」。這兩者其實並不是一一對應的。一個 active 的訂閱，可能對應好幾個權益（贊助者徽章、高級功能開關），未來說不定還要按檔位區分。
+
+所以中間多了一層 `EntitlementEvaluator`：
+
+```typescript
+evaluate(snapshot: TSnapshot): TEntitlement[] {
+  if (snapshot.availability !== 'supported' || snapshot.status !== 'active') {
+    return [];
+  }
+  return [...this.activeEntitlements];
+}
+```
+
+訂閱產品配置裡，聲明它在激活時會授予哪些權益：
+
+```typescript
+export const subscriptionEntitlementNames = [
+  'sponsorBadge',
+  'premiumFeatureGate',
+] as const;
+```
+
+這樣一來，功能代碼只依賴 `entitlements` 這個數組，不再去直接讀 `status`。以後想加檔位、拆分權益，只改配置和 evaluator 就好，不必去動消費方。這種解耦，在 HagiCode 這種多產品線的項目裡，尤其重要——訂閱和永久許可證共享同一套權益模型，前端只需要查一個數組就夠了，世界一下子清爽了許多。
+
+## 運行時降級：沒有 Store 怎麼辦
+
+非 Store 分發的版本（便攜版、開發環境）去調 addon，是會失敗的。HagiCode 用 `MicrosoftStoreSubscriptionBroker` 做了延遲初始化和降級：
+
+```typescript
+private async initializeBroker(): Promise<StoreLicensePlatformBroker> {
+  try {
+    return this.setBroker(
+      await this.adapterFactory(this.windowHandle, this.productConfig)
+    );
+  } catch (error) {
+    // 找不到 Store 運行時就降級到一個「什麼都不支持」的 broker
+    return this.setBroker(new UnavailableSubscriptionPlatformBroker(error));
+  }
+}
+```
+
+`UnavailableSubscriptionPlatformBroker` 實現的是同一個接口，只是它的 `queryStatus` 永遠返回 `store-unavailable`，`purchase` 永遠返回 `not-supported`。上層代碼完全無感知，只是狀態變成了「不支持」，渲染進程據此顯示一句「請通過 Microsoft Store 獲取」的引導而已。
+
+這個設計，讓整個商業化模塊可以在任何分發渠道下安全運行，不會因為缺了 Store 運行時就崩潰。如果你也在做多渠道分發的 Electron 應用，這點特別值得抄一份——別讓「環境不支持」變成一次崩潰，畢竟有些事，承認下來，反而體面。
+
+## 啟動流程與 IPC 通道
+
+應用啟動時，`main.ts` 會根據 `--desktop-subscription-enabled=1` 參數決定要不要初始化訂閱服務。這個參數只在 Store 版本的啟動命令裡帶，避免非 Store 版本白白加載——能省的力氣，總是要省的。
+
+```typescript
+function initializeSubscriptionService(): void {
+  if (!subscriptionFeatureEnabled || subscriptionService) {
+    return;
+  }
+
+  subscriptionService = new SubscriptionService({
+    broker: new MicrosoftStoreSubscriptionBroker({
+      windowHandle: mainWindow?.getNativeWindowHandle() ?? null,
+    }),
+    entitlementEvaluator: new EntitlementEvaluator(),
+  });
+
+  registerSubscriptionHandlers({
+    subscriptionService,
+    getWindows: () => ElectronBrowserWindow.getAllWindows(),
+  });
+}
+```
+
+`windowHandle` 來自 `mainWindow.getNativeWindowHandle()`，這個 Buffer 會被解析成 `bigint` 傳給原生 addon，addon 再拿它去調 `IInitializeWithWindow::Initialize`。這是 Store API 在桌面應用（非 UWP）裡彈出購買框的必要步驟，否則購買窗口就沒有所有者，行為會異常——一個人若是沒了歸屬，做事總歸是飄的，窗口也是。
+
+渲染進程通過 `preload` 暴露的 bridge 去調主進程：
+
+```typescript
+const subscriptionBridge: SubscriptionBridge = {
+  getSnapshot: (options) => ipcRenderer.invoke(subscriptionChannels.getSnapshot, options),
+  verifyStartup: () => ipcRenderer.invoke(subscriptionChannels.verifyStartup),
+  refresh: () => ipcRenderer.invoke(subscriptionChannels.refresh),
+  purchase: () => ipcRenderer.invoke(subscriptionChannels.purchase),
+  onDidChange: (callback) => {
+    const listener = (_event, snapshot) => callback(snapshot);
+    ipcRenderer.on(subscriptionChannels.changed, listener);
+    return () => ipcRenderer.removeListener(subscriptionChannels.changed, listener);
+  },
+};
+```
+
+狀態變化通過 `broadcastSnapshotChanged` 推給所有窗口。購買完成之後，`completePurchase` 會觸發一次 `refresh('purchase')`，新狀態便自動廣播出去，渲染進程的訂閱 UI 也就實時更新了。
+
+另外，`main.ts` 裡還有一個 `setInterval` 在後台默默同步（`subscriptionService?.refresh('scheduled')`）。這讓應用開著的時候，能捕捉到用戶在 Store 客戶端裡悄悄做的續費、退訂。頻率自然不能太高（Store 是有限流的），代碼裡用的是分鐘級的間隔——遠不遠，近不近，剛剛好。
+
+## 幾個容易踩的坑
+
+**第一，原生 addon 的線程安全。** WinRT 的異步操作完成之後，回調並不在 JavaScript 線程上。若直接在回調裡去調 `Napi` 的 API，是會崩的。addon 用 `Napi::ThreadSafeFunction::BlockingCall` 把結果投遞回 JS 線程：
+
+```cpp
+auto const status = threadsafeFunction_.BlockingCall(
+    payload,
+    [self](Napi::Env env, Napi::Function, PurchaseCompletion* data) {
+        std::unique_ptr<PurchaseCompletion> ownedData{ data };
+        self->ResolveOnJs(env, *ownedData);
+    });
+```
+
+`BlockingCall` 會阻塞 WinRT 的回調線程，直到 JS 線程處理完。這個模式下，回調線程不能是 JS 線程本身，否則就是一場死鎖。好在 WinRT 的 `Completed` 回調通常在 STA 或線程池上，是滿足這個條件的。
+
+**第二，COM 初始化。** Electron 主線程可能早就初始化過 COM 了。addon 裡 `winrt::init_apartment` 外面套了一層 try-catch，失敗就忽略：
+
+```cpp
+try {
+    winrt::init_apartment(winrt::apartment_type::single_threaded);
+} catch (...) {
+    // Electron 可能已經為這個線程初始化過 COM，忽略即可
+}
+```
+
+不處理這個，重複初始化便會拋異常，addon 加載也就失敗了。有些錯，忽略一下，反而是對的。
+
+**第三，窗口句柄精度。** `getNativeWindowHandle()` 返回的是一個 `Buffer`，長度可能是 4（32 位）或 8（64 位）。然後在 addon 裡被格式化成 `0x` 開頭的十六進制字符串，C++ 端再用 `std::stoull` 解析回 `HWND`。為什麼用字符串而不直接傳數字？因為 JS 的 number 精度只有 53 位，64 位的指針會丟精度。這個坑，不踩一次是很難發現的——就像有些事，不經歷一次，是說不清的。
+
+**第四，狀態隔離。** 訂閱和永久許可證的狀態，是要分開存儲的。HagiCode 的 spec 明確要求 TurboEngine 的持久化不能覆蓋 sponsor 的狀態。兩套快照用不同的 `productKey`（`subscription` 與 `turboengine`）隔開，避免一個產品的刷新把另一個產品的緩存給覆蓋掉。各人管各人的事，世界才太平。
+
+**第五，購買後必須刷新。** 購買完成之後，必須再刷新一次才能廣播。`completePurchase` 裡對 `succeeded` 和 `already-purchased` 兩種情況都觸發 `refresh('purchase')`，因為 Store 的購買結果只告訴你交易狀態，並不告訴你當前的許可證詳情。許可證狀態，必須重新查詢一遍——承諾和現實之間，總還隔著一次確認。
+
+## 總結
+
+這套實現跑了一段時間，整體還算穩。最值得借鑒的，其實不是某個具體的小技巧，而是這種分層的方式：把「和 Store 打交道」這件髒活，徹底隔離在 broker 和 addon 裡，上層只處理純粹的業務語義。
+
+幾條核心的經驗，記在這裡：
+
+- WinRT 只在 C++ addon 裡碰，addon 只做「異步轉 JSON」，業務語義一概不沾。
+- 標準化和狀態機分兩層，原始數據和業務狀態別混在一起。
+- 網絡失敗時保留上次的好狀態並標 stale，別把付費用戶的權限搞掉。
+- 權益和狀態解耦，功能代碼只看 `entitlements` 數組。
+- 非 Store 環境走降級 broker，永遠不讓「不支持」變成一次崩潰。
+
+如果你也在做 Electron 應用的 Store 商業化，希望這套分層能讓你少踩幾個坑。
+
+本文分享的這套方案，正是我們在開發 HagiCode 的過程裡，實際踩過坑、也實際優化出來的。如果你覺得它還有點價值，那說明我們的工程實力也還過得去——這麼一來，HagiCode 本身，也值得你回頭看一眼......
+
+## 參考資料
+
+- [HagiCode 官網](https://hagicode.com)
+- [HagiCode-org/site GitHub 倉庫](https://github.com/HagiCode-org/site)
+- [Windows.Services.Store namespace - WinRT 文檔](https://learn.microsoft.com/en-us/uwp/api/windows.services.store)
+- [Electron getNativeWindowHandle 文檔](https://www.electronjs.org/docs/latest/api/browser-window#wingetnativewindowhandle)
+- [Node-API ThreadSafeFunction 文檔](https://nodejs.org/api/n-api.html#n_api_napi_create_threadsafe_function)
+
+## 總結
+
+圍繞「Electron 桌面應用如何接入 Microsoft Store 訂閱與永久許可證」，更穩妥的推進方式是先把關鍵配置、依賴邊界和落地路徑逐步跑通，再補齊優化細節。
+
+當目標、步驟和驗收點都明確之後，這類方案通常就能更順暢地進入實際交付。
