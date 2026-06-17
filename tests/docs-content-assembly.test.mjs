@@ -137,3 +137,162 @@ Recovered body.
     assert.match(output, /Recovered body\./u);
   });
 });
+
+test('content assembly generates structured article FAQ shells from the snapshot tree', async () => {
+  await withFixture(async (rootDir) => {
+    await writeFile(
+      rootDir,
+      'src/content/docs/guides/example.mdx',
+      `---
+title: 基线文档
+---
+
+内容
+`,
+    );
+
+    await writeFile(
+      rootDir,
+      'src/data/articles.snapshot/index.json',
+      `${JSON.stringify({
+        schemaVersion: '1.0.0',
+        generatedAt: '2026-06-17T00:00:00.000Z',
+        localeIndexes: [
+          {
+            locale: 'zh-CN',
+            path: '/articles/zh-CN/index.json',
+            updatedAt: '2026-06-17T00:00:00.000Z',
+          },
+          {
+            locale: 'en-US',
+            path: '/articles/en-US/index.json',
+            updatedAt: '2026-06-17T00:00:00.000Z',
+          },
+        ],
+      }, null, 2)}
+`,
+    );
+    await writeFile(
+      rootDir,
+      'src/data/articles.snapshot/zh-CN/index.json',
+      `${JSON.stringify({
+        schemaVersion: '1.0.0',
+        locale: 'zh-CN',
+        generatedAt: '2026-06-17T00:00:00.000Z',
+        articles: [
+          {
+            slug: 'claude-vs-hagicode',
+            category: 'vs-hagicode',
+            path: '/articles/zh-CN/claude-vs-hagicode.json',
+            updatedAt: '2026-06-17T00:00:00.000Z',
+            title: 'Claude Vs HagiCode 中文版',
+            summary: '中文摘要',
+          },
+        ],
+      }, null, 2)}
+`,
+    );
+    await writeFile(
+      rootDir,
+      'src/data/articles.snapshot/en-US/index.json',
+      `${JSON.stringify({
+        schemaVersion: '1.0.0',
+        locale: 'en-US',
+        generatedAt: '2026-06-17T00:00:00.000Z',
+        articles: [
+          {
+            slug: 'claude-vs-hagicode',
+            category: 'vs-hagicode',
+            path: '/articles/en-US/claude-vs-hagicode.json',
+            updatedAt: '2026-06-17T00:00:00.000Z',
+            title: 'Claude Vs HagiCode',
+            summary: 'English summary',
+          },
+        ],
+      }, null, 2)}
+`,
+    );
+    await writeFile(
+      rootDir,
+      'src/data/articles.snapshot/zh-CN/claude-vs-hagicode.json',
+      `${JSON.stringify({
+        schemaVersion: '1.0.0',
+        slug: 'claude-vs-hagicode',
+        category: 'vs-hagicode',
+        locale: 'zh-CN',
+        updatedAt: '2026-06-17T00:00:00.000Z',
+        seo: {
+          title: 'Claude Vs HagiCode 中文版',
+          description: '中文描述',
+        },
+        summary: '中文摘要',
+        sections: [
+          {
+            id: 'summary',
+            title: '概述',
+            blocks: [
+              {
+                id: 'intro',
+                type: 'rich-text',
+                content: ['内容'],
+              },
+            ],
+          },
+        ],
+      }, null, 2)}
+`,
+    );
+    await writeFile(
+      rootDir,
+      'src/data/articles.snapshot/en-US/claude-vs-hagicode.json',
+      `${JSON.stringify({
+        schemaVersion: '1.0.0',
+        slug: 'claude-vs-hagicode',
+        category: 'vs-hagicode',
+        locale: 'en-US',
+        updatedAt: '2026-06-17T00:00:00.000Z',
+        seo: {
+          title: 'Claude Vs HagiCode',
+          description: 'English description',
+        },
+        summary: 'English summary',
+        sections: [
+          {
+            id: 'summary',
+            title: 'Summary',
+            blocks: [
+              {
+                id: 'intro',
+                type: 'rich-text',
+                content: ['Content'],
+              },
+            ],
+          },
+        ],
+      }, null, 2)}
+`,
+    );
+
+    await materializeDocsContentTree({ docsRoot: rootDir });
+
+    const rootShell = await fs.readFile(
+      path.join(rootDir, 'src/content/.generated/docs/faq/claude-vs-hagicode.mdx'),
+      'utf8',
+    );
+    const englishShell = await fs.readFile(
+      path.join(rootDir, 'src/content/.generated/docs/en-US/faq/claude-vs-hagicode.mdx'),
+      'utf8',
+    );
+    const japaneseShell = await fs.readFile(
+      path.join(rootDir, 'src/content/.generated/docs/ja-JP/faq/claude-vs-hagicode.mdx'),
+      'utf8',
+    );
+
+    assert.match(rootShell, /^title: "Claude Vs HagiCode 中文版"$/mu);
+    assert.match(rootShell, /<StructuredArticlePage slug="claude-vs-hagicode" locale="zh-CN" \/>/u);
+    assert.match(englishShell, /^description: "English description"$/mu);
+    assert.match(englishShell, /<StructuredArticlePage slug="claude-vs-hagicode" locale="en-US" \/>/u);
+    assert.match(japaneseShell, /^title: "Claude Vs HagiCode"$/mu);
+    assert.match(japaneseShell, /<StructuredArticlePage slug="claude-vs-hagicode" locale="ja-JP" \/>/u);
+  });
+});

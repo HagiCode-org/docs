@@ -19,10 +19,42 @@ import {
   normalizeDocRoutePathFromRelativePath,
   toPosixPath,
 } from '../src/lib/docs-content-paths.mjs';
+import { getStructuredArticleViewModel } from '../src/lib/articles.mjs';
 
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const docsRoot = path.resolve(scriptDirectory, '..');
 const YAML_FRONTMATTER_KEYS_PATTERN = /^(title|date|description|tags|sidebar):/mu;
+const STRUCTURED_ARTICLE_FAQ_DIRECTORY = 'faq';
+const STRUCTURED_ARTICLE_SIDEBAR_ORDER_BY_SLUG = new Map([
+  ['claude-vs-hagicode', 28],
+  ['copilot-vs-hagicode', 29],
+  ['codex-vs-hagicode', 30],
+  ['gemini-vs-hagicode', 31],
+  ['opencode-vs-hagicode', 32],
+  ['hermes-vs-hagicode', 33],
+  ['deepagents-vs-hagicode', 34],
+  ['kimi-vs-hagicode', 35],
+  ['codebuddy-vs-hagicode', 36],
+  ['qoder-vs-hagicode', 37],
+  ['kiro-vs-hagicode', 38],
+]);
+
+function yamlQuote(value) {
+  return JSON.stringify(String(value ?? ''));
+}
+
+function buildStructuredArticleShellSource({ slug, locale, title, description, order }) {
+  const componentLocale = locale === 'root' ? 'zh-CN' : locale;
+
+  return `---\n`
+    + `title: ${yamlQuote(title)}\n`
+    + `description: ${yamlQuote(description)}\n`
+    + 'sidebar:\n'
+    + `  order: ${order}\n`
+    + '---\n\n'
+    + "import StructuredArticlePage from '@/components/StructuredArticlePage.astro';\n\n"
+    + `<StructuredArticlePage slug=${yamlQuote(slug)} locale=${yamlQuote(componentLocale)} />\n`;
+}
 
 function shouldQuoteFrontmatterValue(value) {
   const trimmedValue = value.trim();
@@ -196,6 +228,14 @@ async function pathExists(targetPath) {
   } catch {
     return false;
   }
+}
+
+async function readJsonIfPresent(filePath) {
+  if (!await pathExists(filePath)) {
+    return null;
+  }
+
+  return JSON.parse(await readFile(filePath, 'utf8'));
 }
 
 async function copyBaselineTree(currentSource, currentTarget, isTopLevel = false) {
@@ -382,6 +422,86 @@ function createDocsContentRewriter({
       });
 }
 
+async function materializeStructuredArticleShells({ docsRepoRoot }) {
+  const snapshotRoot = path.join(docsRepoRoot, 'src', 'data', 'articles.snapshot');
+  const rootManifest = await readJsonIfPresent(path.join(snapshotRoot, 'index.json'));
+  if (!rootManifest || !Array.isArray(rootManifest.localeIndexes) || rootManifest.localeIndexes.length === 0) {
+    return { articles: 0, shells: 0 };
+  }
+
+  const articleSlugs = [];
+  const seenSlugs = new Set();
+
+  for (const localeEntry of rootManifest.localeIndexes) {
+    const localeManifest = await readJsonIfPresent(path.join(snapshotRoot, localeEntry.locale, 'index.json'));
+    if (!localeManifest || !Array.isArray(localeManifest.articles)) {
+      continue;
+    }
+
+    for (const article of localeManifest.articles) {
+      if (typeof article?.slug !== 'string' || seenSlugs.has(article.slug)) {
+        continue;
+      }
+
+      seenSlugs.add(article.slug);
+      articleSlugs.push(article.slug);
+    }
+  }
+
+  articleSlugs.sort((left, right) => {
+    const leftOrder = STRUCTURED_ARTICLE_SIDEBAR_ORDER_BY_SLUG.get(left);
+    const rightOrder = STRUCTURED_ARTICLE_SIDEBAR_ORDER_BY_SLUG.get(right);
+
+    if (leftOrder !== undefined && rightOrder !== undefined) {
+      return leftOrder - rightOrder;
+    }
+
+    if (leftOrder !== undefined) {
+      return -1;
+    }
+
+    if (rightOrder !== undefined) {
+      return 1;
+    }
+
+    return left.localeCompare(right);
+  });
+
+  const routeLocales = ['root', ...DOCS_ROUTE_LOCALE_OPTIONS.map((locale) => locale.code).filter((locale) => locale !== 'root')];
+  let shellCount = 0;
+
+  for (const routeLocale of routeLocales) {
+    const articleLocale = routeLocale === 'root' ? 'zh-CN' : routeLocale;
+
+    for (const [index, slug] of articleSlugs.entries()) {
+      const article = getStructuredArticleViewModel(slug, articleLocale, { snapshotRoot });
+      const outputPath = path.join(
+        docsRepoRoot,
+        buildGeneratedContentPath(routeLocale, path.posix.join(STRUCTURED_ARTICLE_FAQ_DIRECTORY, `${slug}.mdx`)),
+      );
+
+      await mkdir(path.dirname(outputPath), { recursive: true });
+      await writeFile(
+        outputPath,
+        buildStructuredArticleShellSource({
+          slug,
+          locale: routeLocale,
+          title: article.title,
+          description: article.description,
+          order: STRUCTURED_ARTICLE_SIDEBAR_ORDER_BY_SLUG.get(slug) ?? 100 + index,
+        }),
+        'utf8',
+      );
+      shellCount += 1;
+    }
+  }
+
+  return {
+    articles: articleSlugs.length,
+    shells: shellCount,
+  };
+}
+
 export async function materializeDocsContentTree(options = {}) {
   const docsRepoRoot = path.resolve(options.docsRoot ?? docsRoot);
   const baselineRoot = path.join(docsRepoRoot, DOCS_BASELINE_AUTHORING_ROOT);
@@ -447,17 +567,23 @@ export async function materializeDocsContentTree(options = {}) {
     }
   }
 
+  const structuredArticleShellResult = await materializeStructuredArticleShells({
+    docsRepoRoot,
+  });
+
   return {
     generatedRoot: DOCS_GENERATED_CONTENT_ROOT,
     baselineDocs: baselineMarkdownFiles.length,
     locales: DOCS_ROUTE_LOCALE_OPTIONS.length,
+    structuredArticleArticles: structuredArticleShellResult.articles,
+    structuredArticleShells: structuredArticleShellResult.shells,
   };
 }
 
 async function main() {
   const result = await materializeDocsContentTree();
   console.log(
-    `Materialized docs content tree at ${result.generatedRoot} from ${result.baselineDocs} baseline docs across ${result.locales} locales.`,
+    `Materialized docs content tree at ${result.generatedRoot} from ${result.baselineDocs} baseline docs across ${result.locales} locales with ${result.structuredArticleShells} structured article shells.`,
   );
 }
 
