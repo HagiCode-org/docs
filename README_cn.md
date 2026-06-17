@@ -35,6 +35,20 @@ npm run preview
 
 本地文档站默认运行在 `http://localhost:31265`。
 
+## 结构化文章 snapshot
+
+`npm run sync:articles-snapshot` 会刷新 `*-vs-hagicode` FAQ 路由使用的按语言目录组织的结构化文章 snapshot。
+默认会从 `https://index.hagicode.com` 拉取已发布的数据，因此 `repos/docs` 不依赖相邻的 `repos/index` checkout。
+推荐的校验路径是：
+
+```bash
+cd repos/docs && npm run sync:articles-snapshot
+```
+
+只有在你明确想对某个本地发布产物做联调时，才使用 `DOCS_ARTICLES_PUBLISHED_ROOT=/absolute/or/relative/path/to/dist` 或 `npm run sync:articles-snapshot -- --published-root <path>`。
+如果明确需要离线或固定快照校验，仍然可以用 `npm run sync:articles-snapshot -- --no-remote` 复用已提交的 snapshot。
+`npm run prepare:docs-runtime` 现在会先同步文章 snapshot，再执行 `npm run prepare:docs-content`；后者会把 `faq/*-vs-hagicode.mdx` 壳页直接生成到 `src/content/.generated/docs/`，不再把这些壳页保留在源 authoring 目录中。
+
 ## GitHub Actions
 
 - `.github/workflows/docs-ci.yml` 负责对 `main` 的 push 与 pull request 做校验。
