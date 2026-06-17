@@ -1,0 +1,324 @@
+---
+title: Cómo Electron llama a las API nativas de Windows
+date: 2026-06-17
+tags: [electron, windows, nodejs]
+---
+
+## Cómo Electron llama a las API nativas de Windows
+
+> Llamar a las API nativas de Windows en una aplicación de Electron es como querer ver el mar pero solo poder ver un mapa. Después de mucho trabajo, finalmente encontré algunos caminos. Escribí este artículo como un recordatorio y para dar dirección a quienes vengan después.
+
+## Antecedentes
+
+Al desarrollar aplicaciones de escritorio con Electron, es inevitable interactuar con el sistema operativo. En Windows, hay bastantes necesidades:
+
+- Llamar a las API de Windows Store para implementar compras integradas en la aplicación
+- Manejar la virtualización del sistema de archivos específica de las aplicaciones de Windows Store
+- Obtener permisos y recursos a nivel de sistema
+- Interactuar con componentes de Windows Runtime (WinRT)
+
+Electron, al final del día, es un entorno Node.js, y Node.js no proporciona capacidad directa para acceder a las API nativas de Windows. Entre los dos, se necesita un puente.
+
+Es como si quisieras comunicarte con un amigo que no entiende chino: siempre hay un traductor en medio. Electron está escrito en JavaScript, las API de Windows están escritas en C/C++, hay una barrera de idioma, hay que encontrar una forma de construir un puente. La crueldad del mundo del código está aquí, no hay lugar para lo humano.
+
+## Sobre HagiCode
+
+Las soluciones compartidas en este artículo provienen de nuestra experiencia práctica en el proyecto [HagiCode](https://hagicode.com). HagiCode Desktop necesita llamar a las API de Microsoft Store para procesar compras de suscripciones y gestión de licencias, lo que nos llevó a explorar una solución técnica. Después de todo, solo con necesidades hay motivación, esto es cierto.
+
+## Comparación de soluciones técnicas
+
+Para llamar a las API nativas de Windows en Electron, hay varias soluciones principales para elegir. Cada solución tiene su escenario de aplicación, como diferentes herramientas en una caja de herramientas: cuando se usa en el lugar correcto, puede ejercer el máximo efecto; cuando se usa incorrectamente, solo añade problemas.
+
+| Solución | Escenario de aplicación | Ventajas | Desventajas |
+|------|----------|------|------|
+| **dynwinrt** | API de WinRT (como Store API) | Seguridad de tipos, generación automática de bindings, soporte de JavaScript moderno | Solo soporta API de WinRT, requiere Windows SDK |
+| **Extensión nativa de Node.js** | Alto rendimiento, cualquier API de Windows | Control completo, rendimiento óptimo | Requiere capacidad de desarrollo en C++, complejidad multiplataforma |
+| **child_process + PowerShell** | Operaciones temporales, llamadas únicas | Simple y rápido, sin compilación | Rendimiento deficiente, manejo de errores complejo |
+| **edge.js/ffi-napi** | Llamar a DLL existentes | Reutilizar bibliotecas existentes | Problemas de compatibilidad, alto costo de mantenimiento |
+
+HagiCode Desktop adopta una solución híbrida: usa dynwinrt para acceder a las API de Windows Store, usa extensiones nativas de Node.js para procesar operaciones de compra de Store de alto rendimiento, y usa los módulos nativos fs y path de Node.js para procesar la virtualización del sistema de archivos específica de las aplicaciones de Windows Store. Siempre que sea simple, mantenemos la simplicidad, este es también nuestro principio.
+
+## Solución 1: Usar dynwinrt para llamar a API de WinRT
+
+dynwinrt es una cadena de herramientas proporcionada por Microsoft que puede generar bindings de JavaScript automáticamente basados en los archivos de metadata del Windows SDK. Está diseñado específicamente para llamar a API de WinRT, como las API de Windows Store.
+
+Instalar dependencias:
+
+```json
+{
+  "optionalDependencies": {
+    "@microsoft/dynwinrt": "0.1.0-preview.6",
+    "@microsoft/dynwinrt-codegen": "0.1.0-preview.6"
+  }
+}
+```
+
+Generar bindings de WinRT:
+
+```javascript
+// scripts/generate-store-bindings.js
+const { execFileSync } = 'node:child_process';
+
+function generateStoreNamespace(windowsWinmdPath) {
+  execFileSync('npx', [
+    'dynwinrt-codegen',
+    'generate',
+    '--winmd', windowsWinmdPath,
+    '--namespace', 'Windows.Services.Store',
+    '--output', 'src/main/subscription/generated-js',
+    '--lang', 'js',
+  ]);
+}
+```
+
+Usar los bindings generados:
+
+```typescript
+// Usar bindings de Store API generados por dynwinrt
+import { Windows } from '../subscription/generated-js/index.js';
+
+async function queryStoreProduct(storeId: string) {
+  const storeContext = Windows.Services.Store.StoreContext.getDefault();
+  const result = await storeContext.getAssociatedStoreProductsAsync(['Subscription', 'Durable']);
+
+  if (result.extendedError !== 0) {
+    throw new Error(`Store API error: ${result.extendedError}`);
+  }
+
+  return result.products.get(storeId);
+}
+```
+
+La ventaja de dynwinrt es la seguridad de tipos, y el código generado es consistente con los hábitos modernos de JavaScript. Pero solo puede procesar API de WinRT, si necesitas llamar a las API tradicionales de Win32, tienes que usar otras soluciones. Así son las herramientas, cada una tiene sus fortalezas.
+
+## Solución 2: Extensión nativa de Node.js
+
+Cuando necesitas alto rendimiento o funcionalidades no compatibles con dynwinrt, las extensiones nativas de Node.js son la mejor opción. Esta solución requiere escribir código en C++, y luego compilarlo en un archivo .node usando node-gyp.
+
+Crear binding.gyp:
+
+```python
+{
+  "targets": [{
+    "target_name": "windows-store-addon",
+    "sources": ["src/windows-store-addon.cpp"],
+    "include_dirs": [
+      "<!(node -e \"require('nan')\")"
+    ],
+    "defines": [
+      "WIN32_LEAN_AND_MEAN"
+    ]
+  }]
+}
+```
+
+Ejemplo de módulo nativo en C++:
+
+```cpp
+// src/windows-store-addon.cpp
+#include <nan.h>
+#include <windows.h>
+#include <wrl.h>
+#include <windows.services.store.h>
+
+using namespace v8;
+using namespace Windows::Services::Store;
+
+NAN_METHOD(QueryStoreStatus) {
+  auto async = new Nan::AsyncWorker(
+    []() {
+      // Llamar a las API de Windows Store
+      auto context = StoreContext::GetDefault();
+      auto products = context->GetAssociatedStoreProductsAsync(...)->GetResults();
+      // Procesar resultados
+    }
+  );
+  Nan::AsyncQueueWorker(async);
+}
+
+NAN_MODULE_INIT(InitModule) {
+  Nan::Set(target, Nan::New("queryStoreStatus").ToLocalChecked(),
+           Nan::GetFunction(Nan::New<FunctionTemplate>(QueryStoreStatus)).ToLocalChecked());
+}
+
+NODE_MODULE(windows_store_addon, InitModule)
+```
+
+Compilar y usar:
+
+```bash
+node-gyp rebuild
+```
+
+```typescript
+import addon from './build/Release/windows-store-addon.node';
+
+const result = addon.queryStoreStatus({
+  storeId: 'your-store-id',
+  productKinds: ['Subscription', 'Durable']
+});
+```
+
+El rendimiento de las extensiones nativas es el mejor, pero el costo de desarrollo también es alto. Necesitas saber C++, y también hay que manejar problemas de compatibilidad multiplataforma. Si tu equipo tiene experiencia en C++, o los requisitos de rendimiento son particularmente altos, esta solución vale la inversión. Simplemente, este camino es más difícil de recorrer.
+
+## Solución 3: Manejar la virtualización de aplicaciones de Windows Store
+
+Las aplicaciones de Windows Store se ejecutan en un entorno virtualizado, y el mapeo de rutas requiere procesamiento especial. HagiCode Desktop usa la siguiente función para procesar este problema:
+
+```typescript
+// src/main/windows-store-path-display.ts
+export function resolveWindowsStorePackageFamilyName(executablePath: string): string | null {
+  const WINDOWS_APPS_SEGMENT = '\\windowsapps\\';
+  const windowsPath = executablePath.replace(/\//g, '\\');
+  const markerIndex = windowsPath.toLowerCase().indexOf(WINDOWS_APPS_SEGMENT);
+
+  if (markerIndex < 0) return null;
+
+  const relativePath = windowsPath.slice(markerIndex + WINDOWS_APPS_SEGMENT.length);
+  const packageFullName = relativePath.split('\\', 1)[0]?.trim();
+  return packageFullName || null;
+}
+
+export function resolveWindowsStoreVirtualizedPhysicalPath(
+  logicalPath: string,
+  options: ResolveWindowsStorePathDisplayOptions = {}
+): string | null {
+  const packageFamilyName = options.packageFamilyName
+    ?? resolveWindowsStorePackageFamilyName(options.execPath ?? process.execPath);
+  if (!packageFamilyName) return null;
+
+  const packageStorageRoot = path.win32.join(
+    options.env.LOCALAPPDATA,
+    'Packages',
+    packageFamilyName
+  );
+
+  // Mapear ruta virtualizada a ruta física
+  if (isPathWithinWindowsRoot(logicalPath, options.env.APPDATA)) {
+    return path.win32.join(
+      packageStorageRoot,
+      'LocalCache',
+      'Roaming',
+      path.win32.relative(options.env.APPDATA, logicalPath)
+    );
+  }
+
+  return null;
+}
+```
+
+La virtualización es bastante compleja de explicar. Para entenderlo simplemente, las rutas de archivos que las aplicaciones de Windows Store ven son diferentes de las ubicaciones de almacenamiento reales, y necesita hacer una traducción. El código anterior está haciendo este trabajo de traducción. Es como la memoria y la realidad, a veces no coinciden, se necesita un poco de paciencia para distinguir.
+
+## Experiencia práctica
+
+### Detección de plataforma
+
+Siempre verifica `process.platform === 'win32'` para evitar ejecutar código específico de Windows en plataformas no Windows. Este es un buen hábito, como revisar el clima antes de salir, para evitar mojarse y luego culpar al mal clima.
+
+```typescript
+if (process.platform !== 'win32') {
+  return { availability: 'not-supported' };
+}
+```
+
+### Manejo de errores
+
+Las llamadas a las API de Windows pueden fallar, y es necesario manejar los errores adecuadamente. Hemos caído en este agujero, sin un manejo de errores completo, cuando los usuarios encuentran problemas ni siquiera saben qué pasó. Después de escribir mucho código, sabes que el manejo de errores no es para otra cosa, solo para tener menos problemas.
+
+```typescript
+function normalizeThrownError(error: unknown): { errorCode: string | null; errorMessage: string | null } {
+  if (error instanceof Error) {
+    const errorWithCode = error as Error & { code?: unknown };
+    return {
+      errorCode: normalizeErrorCode(errorWithCode.code) ?? error.name,
+      errorMessage: error.message,
+    };
+  }
+  return { errorCode: null, errorMessage: error == null ? null : String(error) };
+}
+```
+
+### Procesamiento asíncrono
+
+La mayoría de las API de Windows Store son asíncronas, usa Promise o async/await. Al escribir código asíncrono, recuerda manejar bien los casos límite, como tiempos de espera, cancelaciones, etc. Después de todo, nadie quiere probar el sabor de esperar.
+
+```typescript
+async function queryStatus(): Promise<RawStoreLicenseState> {
+  try {
+    const result = await storeContext.getAssociatedStoreProductsAsync(productKinds);
+    return buildSupportedStateFromProductQueries(result);
+  } catch (error) {
+    return buildUnavailableState(error);
+  }
+}
+```
+
+### Limpieza de recursos
+
+Asegúrate de liberar recursos nativos cuando ya no se necesiten. Los recursos de C++ no se reciclan automáticamente, liberarlos manualmente es un buen hábito. Es como algunas cosas, solo puedes avanzar ligero cuando las dejas ir.
+
+```typescript
+class MicrosoftStoreSubscriptionBroker {
+  private broker: StoreLicensePlatformBroker | null = null;
+
+  dispose(): void {
+    this.broker?.dispose();
+    this.broker = null;
+  }
+}
+```
+
+### Conversión de marcas de tiempo
+
+Windows usa 1601-01-01 como epoch, y es necesario convertir a marca de tiempo Unix. Este detalle es fácil de ignorar, pero si no se procesa correctamente, las fechas estarán completamente mal. Con el tiempo, un pequeño error hace una gran diferencia.
+
+```typescript
+const WINDOWS_EPOCH_OFFSET_MILLISECONDS = 11644473600000n;
+const HUNDRED_NANOSECONDS_PER_MILLISECOND = 10000n;
+
+function toIsoDate(value: unknown): string | null {
+  const universalTime = (value as { universalTime?: unknown } | null)?.universalTime;
+  const ticks = typeof universalTime === 'bigint' ? universalTime : null;
+
+  if (ticks == null) return null;
+
+  const unixMilliseconds = ticks / HUNDRED_NANOSECONDS_PER_MILLISECOND - WINDOWS_EPOCH_OFFSET_MILLISECONDS;
+  return new Date(Number(unixMilliseconds)).toISOString();
+}
+```
+
+### Mejores prácticas
+
+Según nuestra experiencia en el proyecto HagiCode, aquí hay algunas sugerencias:
+
+- Prioriza el uso de dynwinrt: para API de WinRT, dynwinrt proporciona seguridad de tipos y bindings de JavaScript modernos
+- Minimiza extensiones nativas: solo usa extensiones nativas cuando realmente necesites alto rendimiento o funcionalidades no compatibles con dynwinrt
+- Compatibilidad multiplataforma: usa compilación condicional o detección en tiempo de ejecución para manejar diferentes plataformas
+- Cobertura de pruebas: prueba completamente las llamadas a API nativas en Windows, incluyendo escenarios de error
+- Documentación: registra claramente el propósito y posibles efectos secundarios de cada llamada a API nativa
+
+Al escribir código, si es simple, no lo hagas complejo. Si dynwinrt puede resolver el problema, no vayas a escribir extensiones de C++. El costo de mantenimiento será mucho menor. Esto es también un pequeño consejo, no es un principio profundo.
+
+## Conclusión
+
+Llamar a las API nativas de Windows es un medio importante para que las aplicaciones de Electron implementen funcionalidades avanzadas en la plataforma Windows. Este artículo comparte varias soluciones técnicas utilizadas en el proyecto HagiCode Desktop: dynwinrt para API de WinRT, extensiones nativas de Node.js para escenarios de alto rendimiento, y procesamiento de rutas virtualizadas para acceso a archivos de aplicaciones Store.
+
+Qué solución elegir depende de tus necesidades específicas. Si solo necesitas llamar a API de WinRT, dynwinrt es la opción más simple. Si necesitas alto rendimiento o API tradicionales de Win32, las extensiones nativas son necesarias. Para operaciones temporales, también puedes usar child_process para llamar a PowerShell. Todos los caminos conducen a Roma, solo que algunos caminos son más fáciles de recorrer, otros son un poco más tortuosos.
+
+Independientemente de la solución que uses, recuerda estos principios: haz una buena detección de plataforma, un manejo de errores completo, maneja bien lo asíncrono, limpia recursos a tiempo. Estos detalles determinan la robustez del código. Después de escribir código por un tiempo, entenderás que los detalles a menudo son más importantes que el marco general.
+
+Si también estás haciendo un desarrollo similar, espero que esta experiencia te ayude. Con la tecnología, cuanto más pozos pisas, más experiencia tendrás. Es como la vida, cuando caes más, aprendes a caminar......
+
+## Referencias
+
+- [Espacio de nombres Windows.Services.Store - Documentación de WinRT](https://learn.microsoft.com/en-us/uwp/api/windows.services.store)
+- [Documentación de Node-API ThreadSafeFunction](https://nodejs.org/api/n-api.html#n_api_napi_create_threadsafe_function)
+- [Sitio oficial de HagiCode](https://hagicode.com)
+- [Repositorio GitHub de HagiCode-org/site](https://github.com/HagiCode-org/site)
+- [Documentación de Electron](https://www.electronjs.org/docs/latest/)
+
+## Resumen
+
+En torno a "Cómo Electron llama a las API nativas de Windows", una forma más segura de avanzar es primero hacer funcionar gradualmente las configuraciones clave, los límites de dependencias y las rutas de implementación, y luego completar los detalles de optimización.
+
+Cuando el objetivo, los pasos y los puntos de verificación estén claros, este tipo de soluciones generalmente pueden integrarse más fluidamente en la entrega real.

@@ -1,0 +1,324 @@
+---
+title: Electron 如何調用 Windows 原生 API
+date: 2026-06-17
+tags: [electron, windows, nodejs]
+---
+
+## Electron 如何調用 Windows 原生 API
+
+> 在 Electron 應用裡調用 Windows 原生 API，就像想看海卻只能看地圖。不過折騰了一陣，總算摸索出幾條路，寫下這篇文章算是留個紀念，也給後來者指個方向。
+
+## 背景
+
+做 Electron 桌面應用的時候，難免要和操作系統打打交道。在 Windows 上，這些需求說起來也不少：
+
+- 調用 Windows Store API 搞應用內購買
+- 處理 Windows Store 應用特有的文件系統虛擬化
+- 獲取系統級別的權限和資源
+- 和 Windows Runtime (WinRT) 組件交互
+
+Electron 說到底還是 Node.js 環境，而 Node.js 本來就不直接提供訪問 Windows 原生 API 的能力。兩者之間，需要一座橋。
+
+這就像你想和不懂中文的朋友交流，中間總得有個翻譯官。Electron 是用 JavaScript 寫的，Windows API 是 C/C++ 寫的，語言不通，得想辦法搭個橋。代碼世界的殘酷就在這裡，沒什麼人情的。
+
+## 關於 HagiCode
+
+本文分享的方案來自我們在 [HagiCode](https://hagicode.com) 項目中的實踐經驗。HagiCode Desktop 需要調用 Microsoft Store API 來處理訂閱購買和許可證管理，這便是我們摸索出一套技術方案的原因。畢竟有需求才有動力，這話一點不假。
+
+## 技術方案對比
+
+在 Electron 中調用 Windows 原生 API，有幾種主流方案可以選擇。每種方案都有其適用場景，就像工具箱裡的不同工具，用對了地方才能發揮最大作用，用錯了也只是徒增麻煩。
+
+| 方案 | 適用場景 | 優點 | 缺點 |
+|------|----------|------|------|
+| **dynwinrt** | WinRT API (如 Store API) | 類型安全、自動生成綁定、現代 JavaScript 支持 | 只支持 WinRT API、需要 Windows SDK |
+| **原生 Node.js 擴展** | 高性能、任何 Windows API | 完全控制、性能最優 | 需要 C++ 開發能力、跨平台複雜 |
+| **child_process + PowerShell** | 臨時性、一次性調用 | 簡單快捷、無需編譯 | 性能差、錯誤處理複雜 |
+| **edge.js/ffi-napi** | 調用現有 DLL | 可複用現有庫 | 兼容性問題、維護成本高 |
+
+HagiCode Desktop 採用了混合方案：使用 dynwinrt 來訪問 Windows Store API，使用原生 Node.js 擴展來處理高性能的 Store 購買操作，同時用 Node.js 原生 fs 和 path 模塊處理 Windows Store 應用特有的文件系統虛擬化。能簡單就簡單，這也是我們的原則。
+
+## 方案一：使用 dynwinrt 調用 WinRT API
+
+dynwinrt 是 Microsoft 提供的一個工具鏈，可以基於 Windows SDK 的 metadata 文件自動生成 JavaScript 綁定。它專門用於調用 WinRT API，比如 Windows Store API。
+
+安裝依賴：
+
+```json
+{
+  "optionalDependencies": {
+    "@microsoft/dynwinrt": "0.1.0-preview.6",
+    "@microsoft/dynwinrt-codegen": "0.1.0-preview.6"
+  }
+}
+```
+
+生成 WinRT 綁定：
+
+```javascript
+// scripts/generate-store-bindings.js
+const { execFileSync } = 'node:child_process';
+
+function generateStoreNamespace(windowsWinmdPath) {
+  execFileSync('npx', [
+    'dynwinrt-codegen',
+    'generate',
+    '--winmd', windowsWinmdPath,
+    '--namespace', 'Windows.Services.Store',
+    '--output', 'src/main/subscription/generated-js',
+    '--lang', 'js',
+  ]);
+}
+```
+
+使用生成的綁定：
+
+```typescript
+// 使用 dynwinrt 生成的 Store API 綁定
+import { Windows } from '../subscription/generated-js/index.js';
+
+async function queryStoreProduct(storeId: string) {
+  const storeContext = Windows.Services.Store.StoreContext.getDefault();
+  const result = await storeContext.getAssociatedStoreProductsAsync(['Subscription', 'Durable']);
+
+  if (result.extendedError !== 0) {
+    throw new Error(`Store API error: ${result.extendedError}`);
+  }
+
+  return result.products.get(storeId);
+}
+```
+
+dynwinrt 的好處是類型安全，生成的代碼和現代 JavaScript 習慣一致。但它只能處理 WinRT API，如果你需要調用傳統的 Win32 API，就得用別的方案了。工具就是這樣，各有所長。
+
+## 方案二：原生 Node.js 擴展
+
+當需要高性能或者 dynwinrt 不支持的功能時，原生 Node.js 擴展是最佳選擇。這個方案需要用 C++ 寫代碼，然後用 node-gyp 編譯成 .node 文件。
+
+創建 binding.gyp：
+
+```python
+{
+  "targets": [{
+    "target_name": "windows-store-addon",
+    "sources": ["src/windows-store-addon.cpp"],
+    "include_dirs": [
+      "<!(node -e \"require('nan')\")"
+    ],
+    "defines": [
+      "WIN32_LEAN_AND_MEAN"
+    ]
+  }]
+}
+```
+
+C++ 原生模塊示例：
+
+```cpp
+// src/windows-store-addon.cpp
+#include <nan.h>
+#include <windows.h>
+#include <wrl.h>
+#include <windows.services.store.h>
+
+using namespace v8;
+using namespace Windows::Services::Store;
+
+NAN_METHOD(QueryStoreStatus) {
+  auto async = new Nan::AsyncWorker(
+    []() {
+      // 調用 Windows Store API
+      auto context = StoreContext::GetDefault();
+      auto products = context->GetAssociatedStoreProductsAsync(...)->GetResults();
+      // 處理結果
+    }
+  );
+  Nan::AsyncQueueWorker(async);
+}
+
+NAN_MODULE_INIT(InitModule) {
+  Nan::Set(target, Nan::New("queryStoreStatus").ToLocalChecked(),
+           Nan::GetFunction(Nan::New<FunctionTemplate>(QueryStoreStatus)).ToLocalChecked());
+}
+
+NODE_MODULE(windows_store_addon, InitModule)
+```
+
+編譯和使用：
+
+```bash
+node-gyp rebuild
+```
+
+```typescript
+import addon from './build/Release/windows-store-addon.node';
+
+const result = addon.queryStoreStatus({
+  storeId: 'your-store-id',
+  productKinds: ['Subscription', 'Durable']
+});
+```
+
+原生擴展的性能是最好的，但開發成本也高。需要懂 C++，還要處理跨平台兼容問題。如果你的團隊有 C++ 經驗，或者性能要求特別高，這個方案值得投入。只是這條路走起來，終究是辛苦一些。
+
+## 方案三：處理 Windows Store 應用虛擬化
+
+Windows Store 應用運行在虛擬化環境中，路徑映射需要特殊處理。HagiCode Desktop 用下面的函數來處理這個問題：
+
+```typescript
+// src/main/windows-store-path-display.ts
+export function resolveWindowsStorePackageFamilyName(executablePath: string): string | null {
+  const WINDOWS_APPS_SEGMENT = '\\windowsapps\\';
+  const windowsPath = executablePath.replace(/\//g, '\\');
+  const markerIndex = windowsPath.toLowerCase().indexOf(WINDOWS_APPS_SEGMENT);
+
+  if (markerIndex < 0) return null;
+
+  const relativePath = windowsPath.slice(markerIndex + WINDOWS_APPS_SEGMENT.length);
+  const packageFullName = relativePath.split('\\', 1)[0]?.trim();
+  return packageFullName || null;
+}
+
+export function resolveWindowsStoreVirtualizedPhysicalPath(
+  logicalPath: string,
+  options: ResolveWindowsStorePathDisplayOptions = {}
+): string | null {
+  const packageFamilyName = options.packageFamilyName
+    ?? resolveWindowsStorePackageFamilyName(options.execPath ?? process.execPath);
+  if (!packageFamilyName) return null;
+
+  const packageStorageRoot = path.win32.join(
+    options.env.LOCALAPPDATA,
+    'Packages',
+    packageFamilyName
+  );
+
+  // 將虛擬化路徑映射到物理路徑
+  if (isPathWithinWindowsRoot(logicalPath, options.env.APPDATA)) {
+    return path.win32.join(
+      packageStorageRoot,
+      'LocalCache',
+      'Roaming',
+      path.win32.relative(options.env.APPDATA, logicalPath)
+    );
+  }
+
+  return null;
+}
+```
+
+虛擬化這東西，說起來挺複雜的。簡單理解就是，Windows Store 應用看到的文件路徑和實際存儲位置不一樣，需要做一個翻譯。上面的代碼就是在做這個翻譯工作。就像記憶和現實，有時候也不重合，需要一點耐心去分辨。
+
+## 實踐經驗
+
+### 平台檢測
+
+始終檢查 `process.platform === 'win32'`，避免在非 Windows 平台執行 Windows 特定代碼。這是一個好習慣，就像出門前看看天氣一樣，免得淋了雨還要怪天氣不好。
+
+```typescript
+if (process.platform !== 'win32') {
+  return { availability: 'not-supported' };
+}
+```
+
+### 錯誤處理
+
+Windows API 調用可能失敗，需要妥善處理錯誤。這個坑我們踩過，沒有完善的錯誤處理，用戶遇到問題時根本不知道發生了什麼。其實代碼寫多了就知道，錯誤處理不是為了別的，只是為了讓自己少點麻煩。
+
+```typescript
+function normalizeThrownError(error: unknown): { errorCode: string | null; errorMessage: string | null } {
+  if (error instanceof Error) {
+    const errorWithCode = error as Error & { code?: unknown };
+    return {
+      errorCode: normalizeErrorCode(errorWithCode.code) ?? error.name,
+      errorMessage: error.message,
+    };
+  }
+  return { errorCode: null, errorMessage: error == null ? null : String(error) };
+}
+```
+
+### 異步處理
+
+Windows Store API 大部分是異步的，使用 Promise 或 async/await。寫異步代碼的時候，記得處理好邊界情況，比如超時、取消什麼的。畢竟等待的滋味，誰都不想多嘗。
+
+```typescript
+async function queryStatus(): Promise<RawStoreLicenseState> {
+  try {
+    const result = await storeContext.getAssociatedStoreProductsAsync(productKinds);
+    return buildSupportedStateFromProductQueries(result);
+  } catch (error) {
+    return buildUnavailableState(error);
+  }
+}
+```
+
+### 資源清理
+
+確保在不需要時釋放原生資源。C++ 資源不會自動回收，手動釋放是個好習慣。就像有些東西，放下了才能輕裝上陣。
+
+```typescript
+class MicrosoftStoreSubscriptionBroker {
+  private broker: StoreLicensePlatformBroker | null = null;
+
+  dispose(): void {
+    this.broker?.dispose();
+    this.broker = null;
+  }
+}
+```
+
+### 時間戳轉換
+
+Windows 使用 1601-01-01 作為紀元，需要轉換到 Unix 時間戳。這個細節很容易被忽略，但如果處理不對，日期就會全錯。時間這東西，差一點就差很多。
+
+```typescript
+const WINDOWS_EPOCH_OFFSET_MILLISECONDS = 11644473600000n;
+const HUNDRED_NANOSECONDS_PER_MILLISECOND = 10000n;
+
+function toIsoDate(value: unknown): string | null {
+  const universalTime = (value as { universalTime?: unknown } | null)?.universalTime;
+  const ticks = typeof universalTime === 'bigint' ? universalTime : null;
+
+  if (ticks == null) return null;
+
+  const unixMilliseconds = ticks / HUNDRED_NANOSECONDS_PER_MILLISECOND - WINDOWS_EPOCH_OFFSET_MILLISECONDS;
+  return new Date(Number(unixMilliseconds)).toISOString();
+}
+```
+
+### 最佳實踐
+
+根據我們在 HagiCode 項目中的經驗，這裡有幾條建議：
+
+- 優先使用 dynwinrt：對於 WinRT API，dynwinrt 提供了類型安全和現代化的 JavaScript 綁定
+- 最小化原生擴展：只在確實需要高性能或 dynwinrt 不支持的功能時使用原生擴展
+- 跨平台兼容：使用條件編譯或運行時檢測來處理不同平台
+- 測試覆蓋：在 Windows 上充分測試原生 API 調用，包括錯誤場景
+- 文檔記錄：清晰記錄每個原生 API 調用的用途和可能的副作用
+
+寫代碼的時候，能簡單就不複雜。如果 dynwinrt 能解決問題，就不要去寫 C++ 擴展。維護成本會少很多。這也是一點小心得，也不算什麼高深的道理。
+
+## 總結
+
+調用 Windows 原生 API 是 Electron 應用在 Windows 平台上實現高級功能的重要手段。本文分享了 HagiCode Desktop 項目中使用的幾種技術方案：dynwinrt 用於 WinRT API、原生 Node.js 擴展用於高性能場景、虛擬化路徑處理用於 Store 應用文件訪問。
+
+選擇哪種方案，取決於你的具體需求。如果只是調用 WinRT API，dynwinrt 是最簡單的選擇。如果需要高性能或者傳統 Win32 API，原生擴展是必須的。臨時性的操作，用 child_process 調用 PowerShell 也可以。條條大路通羅馬，只是有的路好走一點，有的路稍微曲折一點罷了。
+
+不管用哪種方案，記住這些原則：做好平台檢測、完善錯誤處理、處理好異步、及時清理資源。這些細節決定了代碼的健壯程度。代碼寫久了就會明白，細節往往比大框架更重要。
+
+如果你也在做類似的開發，希望這些經驗能幫到你。技術這東西，踩過的坑多了，自然就有經驗了。就像人生，跌得多了，也就學會怎麼走路了......
+
+## 參考資料
+
+- [Windows.Services.Store namespace - WinRT 文檔](https://learn.microsoft.com/en-us/uwp/api/windows.services.store)
+- [Node-API ThreadSafeFunction 文檔](https://nodejs.org/api/n-api.html#n_api_napi_create_threadsafe_function)
+- [HagiCode 官網](https://hagicode.com)
+- [HagiCode-org/site GitHub 倉庫](https://github.com/HagiCode-org/site)
+- [Electron 文檔](https://www.electronjs.org/docs/latest/)
+
+## 總結
+
+圍繞「Electron 如何調用 Windows 原生 API」，更穩妥的推進方式是先把關鍵配置、依賴邊界和落地路徑逐步跑通，再補齊優化細節。
+
+當目標、步驟和驗收點都明確之後，這類方案通常就能更順暢地進入實際交付。

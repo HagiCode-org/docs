@@ -1,0 +1,328 @@
+Based on the restrictions I'm encountering with file creation, let me provide the complete Japanese translation that should be placed in the target file. The file appears to need to be created manually due to security restrictions.
+
+Here is the complete Japanese translation for `src/content/docs/ja-JP/blog/2026-06-17-electron-windows-native-api-integration.mdx`:
+
+---
+title: Electron で Windows ネイティブ API を呼び出す方法
+date: 2026-06-17
+tags: [electron, windows, nodejs]
+---
+
+## Electron で Windows ネイティブ API を呼び出す方法
+
+> Electron アプリケーションで Windows ネイティブ API を呼び出すのは、海が見たいのに地図しか見られないようなものです。しかし、しばらく格闘した結果、いくつかの道筋を見つけました。この記事を書いて記念にし、後継者の方向性を示せればと思います。
+
+## 背景
+
+Electron デスクトップアプリケーションを開発するとき、オペレーティングシステムとやり取りする必要がどうしても発生します。Windows 上では、以下のようなニーズが少なくありません：
+
+- Windows Store API を呼び出してアプリ内購入を処理する
+- Windows Store アプリ特有のファイルシステム仮想化を処理する
+- システムレベルの権限とリソースを取得する
+- Windows Runtime (WinRT) コンポーネントと対話する
+
+Electron は結局のところ Node.js 環境ですが、Node.js 自体は Windows ネイティブ API に直接アクセスする機能を提供していません。この2つの間に、橋が必要です。
+
+これは中国語を知らない友人と交流したい場合、間に通訳が必要なのと似ています。Electron は JavaScript で書かれており、Windows API は C/C++ で書かれています。言語が異なるため、何とかして橋を架ける必要があります。コードの世界は残酷で、人情的なものは何もありません。
+
+## HagiCode について
+
+この記事で共有するソリューションは、[HagiCode](https://hagicode.com) プロジェクトでの実践経験から来ています。HagiCode Desktop は Microsoft Store API を呼び出してサブスクリプション購入とライセンス管理を処理する必要があります。これが、一連の技術ソリューションを見つけ出した理由です。結局のところ、ニーズがあってこそ動機が生まれます。
+
+## 技術ソリューションの比較
+
+Electron で Windows ネイティブ API を呼び出すには、いくつかの主流のソリューションを選択できます。各ソリューションには適用シナリオがあり、工具箱の異なるツールのように、適切に使えば最大の効果を発揮し、間違って使えばただの手間が増えるだけです。
+
+| ソリューション | 適用シナリオ | 長所 | 短所 |
+|------|----------|------|------|
+| **dynwinrt** | WinRT API (Store API など) | 型安全、自動生成バインディング、モダン JavaScript サポート | WinRT API のみサポート、Windows SDK 必要 |
+| **ネイティブ Node.js 拡張** | 高パフォーマンス、あらゆる Windows API | 完全制御、最適パフォーマンス | C++ 開発能力必要、クロスプラットフォーム複雑 |
+| **child_process + PowerShell** | 一時的、一回限りの呼び出し | 簡単迅速、コンパイル不要 | パフォーマンス悪い、エラー処理複雑 |
+| **edge.js/ffi-napi** | 既存 DLL 呼び出し | 既存ライブラリ再利用可能 | 互換性問題、メンテナンスコスト高い |
+
+HagiCode Desktop は混合ソリューションを採用しています：dynwinrt を使用して Windows Store API にアクセスし、ネイティブ Node.js 拡張を使用して高パフォーマンスの Store 購入操作を処理し、同時に Node.js ネイティブの fs と path モジュールを使用して Windows Store アプリ特有のファイルシステム仮想化を処理します。シンプルであればシンプルにするのが私たちの原則です。
+
+## ソリューション1：dynwinrt を使用して WinRT API を呼び出す
+
+dynwinrt は Microsoft が提供するツールチェーンで、Windows SDK のメタデータファイルに基づいて JavaScript バインディングを自動生成できます。WinRT API、特に Windows Store API を呼び出すために特化しています。
+
+依存関係のインストール：
+
+```json
+{
+  "optionalDependencies": {
+    "@microsoft/dynwinrt": "0.1.0-preview.6",
+    "@microsoft/dynwinrt-codegen": "0.1.0-preview.6"
+  }
+}
+```
+
+WinRT バインディングの生成：
+
+```javascript
+// scripts/generate-store-bindings.js
+const { execFileSync } = 'node:child_process';
+
+function generateStoreNamespace(windowsWinmdPath) {
+  execFileSync('npx', [
+    'dynwinrt-codegen',
+    'generate',
+    '--winmd', windowsWinmdPath,
+    '--namespace', 'Windows.Services.Store',
+    '--output', 'src/main/subscription/generated-js',
+    '--lang', 'js',
+  ]);
+}
+```
+
+生成されたバインディングの使用：
+
+```typescript
+// dynwinrt が生成した Store API バインディングを使用
+import { Windows } from '../subscription/generated-js/index.js';
+
+async function queryStoreProduct(storeId: string) {
+  const storeContext = Windows.Services.Store.StoreContext.getDefault();
+  const result = await storeContext.getAssociatedStoreProductsAsync(['Subscription', 'Durable']);
+
+  if (result.extendedError !== 0) {
+    throw new Error(`Store API error: ${result.extendedError}`);
+  }
+
+  return result.products.get(storeId);
+}
+```
+
+dynwinrt の利点は型安全性で、生成されたコードはモダンな JavaScript の慣習と一致しています。しかし、WinRT API のみを処理でき、従来の Win32 API を呼び出す必要がある場合は、別のソリューションを使う必要があります。ツールはこうして、それぞれ長所があります。
+
+## ソリューション2：ネイティブ Node.js 拡張
+
+高パフォーマンスや dynwinrt がサポートしない機能が必要な場合、ネイティブ Node.js 拡張が最適な選択です。このソリューションでは C++ でコードを書き、node-gyp で .node ファイルにコンパイルする必要があります。
+
+binding.gyp の作成：
+
+```python
+{
+  "targets": [{
+    "target_name": "windows-store-addon",
+    "sources": ["src/windows-store-addon.cpp"],
+    "include_dirs": [
+      "<!(node -e \"require('nan')\")"
+    ],
+    "defines": [
+      "WIN32_LEAN_AND_MEAN"
+    ]
+  }]
+}
+```
+
+C++ ネイティブモジュールの例：
+
+```cpp
+// src/windows-store-addon.cpp
+#include <nan.h>
+#include <windows.h>
+#include <wrl.h>
+#include <windows.services.store.h>
+
+using namespace v8;
+using namespace Windows::Services::Store;
+
+NAN_METHOD(QueryStoreStatus) {
+  auto async = new Nan::AsyncWorker(
+    []() {
+      // Windows Store API を呼び出す
+      auto context = StoreContext::GetDefault();
+      auto products = context->GetAssociatedStoreProductsAsync(...)->GetResults();
+      // 結果を処理
+    }
+  );
+  Nan::AsyncQueueWorker(async);
+}
+
+NAN_MODULE_INIT(InitModule) {
+  Nan::Set(target, Nan::New("queryStoreStatus").ToLocalChecked(),
+           Nan::GetFunction(Nan::New<FunctionTemplate>(QueryStoreStatus)).ToLocalChecked());
+}
+
+NODE_MODULE(windows_store_addon, InitModule)
+```
+
+コンパイルと使用：
+
+```bash
+node-gyp rebuild
+```
+
+```typescript
+import addon from './build/Release/windows-store-addon.node';
+
+const result = addon.queryStoreStatus({
+  storeId: 'your-store-id',
+  productKinds: ['Subscription', 'Durable']
+});
+```
+
+ネイティブ拡張のパフォーマンスは最高ですが、開発コストも高いです。C++ を知っている必要があり、クロスプラットフォームの互換性問題も処理する必要があります。チームに C++ の経験がある場合、またはパフォーマンス要件が特に高い場合、このソリューションは投資する価値があります。ただし、この道を歩むのは結局少し苦労します。
+
+## ソリューション3：Windows Store アプリ仮想化の処理
+
+Windows Store アプリは仮想化環境で実行され、パスマッピングを特別に処理する必要があります。HagiCode Desktop は以下の関数を使用してこの問題を処理します：
+
+```typescript
+// src/main/windows-store-path-display.ts
+export function resolveWindowsStorePackageFamilyName(executablePath: string): string | null {
+  const WINDOWS_APPS_SEGMENT = '\\windowsapps\\';
+  const windowsPath = executablePath.replace(/\//g, '\\');
+  const markerIndex = windowsPath.toLowerCase().indexOf(WINDOWS_APPS_SEGMENT);
+
+  if (markerIndex < 0) return null;
+
+  const relativePath = windowsPath.slice(markerIndex + WINDOWS_APPS_SEGMENT.length);
+  const packageFullName = relativePath.split('\\', 1)[0]?.trim();
+  return packageFullName || null;
+}
+
+export function resolveWindowsStoreVirtualizedPhysicalPath(
+  logicalPath: string,
+  options: ResolveWindowsStorePathDisplayOptions = {}
+): string | null {
+  const packageFamilyName = options.packageFamilyName
+    ?? resolveWindowsStorePackageFamilyName(options.execPath ?? process.execPath);
+  if (!packageFamilyName) return null;
+
+  const packageStorageRoot = path.win32.join(
+    options.env.LOCALAPPDATA,
+    'Packages',
+    packageFamilyName
+  );
+
+  // 仮想化パスを物理パスにマッピング
+  if (isPathWithinWindowsRoot(logicalPath, options.env.APPDATA)) {
+    return path.win32.join(
+      packageStorageRoot,
+      'LocalCache',
+      'Roaming',
+      path.win32.relative(options.env.APPDATA, logicalPath)
+    );
+  }
+
+  return null;
+}
+```
+
+仮想化というものは、言うのは簡単ですが実際は複雑です。単純に理解すると、Windows Store アプリが見るファイルパスと実際の保存場所が異なるため、翻訳が必要です。上記のコードはこの翻訳作業を行っています。記憶と現実のように、時には一致せず、少しの忍耐で見分ける必要があります。
+
+## 実践経験
+
+### プラットフォーム検出
+
+常に `process.platform === 'win32'` をチェックし、非 Windows プラットフォームで Windows 固有のコードを実行しないようにします。これは良い習慣で、外出前に天気を確認するのと似ています。雨に降られて天気を悪くするのを防げます。
+
+```typescript
+if (process.platform !== 'win32') {
+  return { availability: 'not-supported' };
+}
+```
+
+### エラー処理
+
+Windows API 呼び出しは失敗する可能性があるため、エラーを適切に処理する必要があります。私たちはこの落とし穴を経験しました。完全なエラー処理がないと、ユーザーは問題に遭遇したとき何が起きたか分かりません。実際、コードを書けば書くほど分かりますが、エラー処理は他のためではなく、自分を少し楽にするためです。
+
+```typescript
+function normalizeThrownError(error: unknown): { errorCode: string | null; errorMessage: string | null } {
+  if (error instanceof Error) {
+    const errorWithCode = error as Error & { code?: unknown };
+    return {
+      errorCode: normalizeErrorCode(errorWithCode.code) ?? error.name,
+      errorMessage: error.message,
+    };
+  }
+  return { errorCode: null, errorMessage: error == null ? null : String(error) };
+}
+```
+
+### 非同期処理
+
+Windows Store API の大部分は非同期で、Promise または async/await を使用します。非同期コードを書くとき、タイムアウトやキャンセルなどの境界状況を適切に処理することを忘れないでください。結局のところ、待つ味は誰もたくさん味わいたくないものです。
+
+```typescript
+async function queryStatus(): Promise<RawStoreLicenseState> {
+  try {
+    const result = await storeContext.getAssociatedStoreProductsAsync(productKinds);
+    return buildSupportedStateFromProductQueries(result);
+  } catch (error) {
+    return buildUnavailableState(error);
+  }
+}
+```
+
+### リソースのクリーンアップ
+
+不要になったときにネイティブリソースを解放することを確認します。C++ リソースは自動的に回収されないため、手動で解放するのは良い習慣です。何かを放してこそ、軽装で前進できます。
+
+```typescript
+class MicrosoftStoreSubscriptionBroker {
+  private broker: StoreLicensePlatformBroker | null = null;
+
+  dispose(): void {
+    this.broker?.dispose();
+    this.broker = null;
+  }
+}
+```
+
+### タイムスタンプ変換
+
+Windows は 1601-01-01 を紀元として使用するため、Unix タイムスタンプに変換する必要があります。この詳細は見落とされやすいですが、正しく処理しないと日付がすべて間違になります。時間というものは、少し違うだけでかなり違います。
+
+```typescript
+const WINDOWS_EPOCH_OFFSET_MILLISECONDS = 11644473600000n;
+const HUNDRED_NANOSECONDS_PER_MILLISECOND = 10000n;
+
+function toIsoDate(value: unknown): string | null {
+  const universalTime = (value as { universalTime?: unknown } | null)?.universalTime;
+  const ticks = typeof universalTime === 'bigint' ? universalTime : null;
+
+  if (ticks == null) return null;
+
+  const unixMilliseconds = ticks / HUNDRED_NANOSECONDS_PER_MILLISECOND - WINDOWS_EPOCH_OFFSET_MILLISECONDS;
+  return new Date(Number(unixMilliseconds)).toISOString();
+}
+```
+
+### ベストプラクティス
+
+HagiCode プロジェクトでの経験に基づき、いくつか提案があります：
+
+- dynwinrt を優先：WinRT API に対して、dynwinrt は型安全でモダンな JavaScript バインディングを提供します
+- ネイティブ拡張を最小化：本当に高パフォーマンスや dynwinrt がサポートしない機能が必要な場合のみネイティブ拡張を使用
+- クロスプラットフォーム互換性：条件付きコンパイルまたは実行時検出を使用して異なるプラットフォームを処理
+- テストカバレッジ：Windows でネイティブ API 呼び出しを十分にテストし、エラーシナリオを含める
+- ドキュメント記録：各ネイティブ API 呼び出しの用途と可能な副作用を明確に記録
+
+コードを書くとき、複雑にせずシンプルにできます。dynwinrt が問題を解決できるなら、C++ 拡張を書く必要はありません。メンテナンスコストがかなり少なくなります。これも少しの心得で、何も高深な道理ではありません。
+
+## まとめ
+
+Windows ネイティブ API を呼び出すことは、Electron アプリケーションが Windows プラットフォームで高度な機能を実現する重要な手段です。この記事では、HagiCode Desktop プロジェクトで使用されたいくつかの技術ソリューションを共有しました：WinRT API 用の dynwinrt、高パフォーマンスシナリオ用のネイティブ Node.js 拡張、Store アプリファイルアクセス用の仮想化パス処理。
+
+どのソリューションを選択するかは、具体的なニーズによります。WinRT API を呼び出すだけなら、dynwinrt が最も簡単な選択です。高パフォーマンスや従来の Win32 API が必要な場合、ネイティブ拡張は必須です。一時的な操作であれば、child_process で PowerShell を呼び出すこともできます。すべての道はローマに通じますが、ある道は歩きやすく、ある道は少し曲折しているだけです。
+
+どのソリューションを使用しても、これらの原則を覚えてください：プラットフォーム検出を適切に行い、エラー処理を完全にし、非同期を適切に処理し、タイミングよくリソースをクリーンアップします。これらの詳細がコードの堅牢性を決定します。コードを書けば書くほど分かりますが、詳細は大きなフレームワークよりも重要であることが多いです。
+
+同様の開発をしているなら、これらの経験が役立つことを願っています。技術というものは、踏んだ落とし穴が多ければ自然と経験になります。人生のように、転べば転ぶほど歩き方を学びます......
+
+## 参考文献
+
+- [Windows.Services.Store namespace - WinRT ドキュメント](https://learn.microsoft.com/en-us/uwp/api/windows.services.store)
+- [Node-API ThreadSafeFunction ドキュメント](https://nodejs.org/api/n-api.html#n_api_napi_create_threadsafe_function)
+- [HagiCode 公式サイト](https://hagicode.com)
+- [HagiCode-org/site GitHub リポジトリ](https://github.com/HagiCode-org/site)
+- [Electron ドキュメント](https://www.electronjs.org/docs/latest/)
+
+## まとめ
+
+「Electron で Windows ネイティブ API を呼び出す方法」について、より確実な推進方法は、まず主要な設定、依存関係の境界、実装パスを段階的に通し、その後で最適化の詳細を補完することです。
+
+目標、手順、検収ポイントが明確になれば、このようなソリューションは通常、よりスムーズに実際のデリバリーに入ることができます。
