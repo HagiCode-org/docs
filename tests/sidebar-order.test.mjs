@@ -120,3 +120,29 @@ test('related software installation direct links provide locale-specific labels'
   assert.equal(omniRouteEntry?.translations?.['en-US'], 'OmniRoute Local Installation and Startup Validation');
   assert.equal(omniRouteEntry?.translations?.['fr-FR'], "Installation locale et validation du démarrage d'OmniRoute");
 });
+
+test('faq sidebar includes structured article pages generated from the remote snapshot', () => {
+  const faqEntry = DOCS_SIDEBAR.find((entry) => entry.label === '常见问题');
+
+  assert.ok(faqEntry);
+  assert.ok(Array.isArray(faqEntry.items));
+
+  const claudeEntry = faqEntry.items.find(
+    (item) => 'slug' in item && item.slug === 'faq/claude-vs-hagicode',
+  );
+  const codexEntry = faqEntry.items.find(
+    (item) => 'slug' in item && item.slug === 'faq/codex-vs-hagicode',
+  );
+
+  assert.ok(claudeEntry, 'expected faq/claude-vs-hagicode in sidebar');
+  assert.ok(codexEntry, 'expected faq/codex-vs-hagicode in sidebar');
+  assert.equal(
+    claudeEntry?.label,
+    'Claude Vs HagiCode —— 为什么 Claude 配合 HagiCode 才能发挥全部实力',
+  );
+  assert.equal(claudeEntry?.translations?.['en-US'], 'Claude Vs HagiCode');
+  assert.equal(
+    codexEntry?.translations?.['en-US'],
+    'Codex Vs HagiCode —— 为什么 OpenAI Codex 配合 HagiCode 才能发挥极速编码的全部实力',
+  );
+});
