@@ -389,7 +389,7 @@ const runtime = {
       "starlight": {
         "site": {
           "title": "Hagicode Docs",
-          "description": "Hagicode project documentation"
+          "description": "Hagicode documentation, installation guides, release notes, and engineering articles for using and operating the AI coding platform."
         },
         "social": {
           "githubRepository": "GitHub repository"
@@ -1782,7 +1782,7 @@ const runtime = {
       "starlight": {
         "site": {
           "title": "Hagicode Docs",
-          "description": "Hagicode 项目文档"
+          "description": "Hagicode 产品文档、安装指南、版本更新说明与工程博客，集中收录 AI 编码平台的使用方法和实践经验。"
         },
         "social": {
           "githubRepository": "GitHub 仓库"
