@@ -1,0 +1,259 @@
+---
+title: Comment utiliser Upptime pour créer gratuitement votre propre page de statut
+date: 2026-06-18
+tags: [Upptime, GitHub Actions, Surveillance de statut, Page de statut, GitHub Pages, HagiCode, DevOps]
+---
+
+## Comment utiliser Upptime pour créer gratuitement votre propre page de statut
+
+> Déplacez toute la surveillance vers un dépôt GitHub — Actions comme sonde, le dépôt comme base de données, Pages comme CDN, et Issues comme registre d'événements. Zéro serveur, zéro frais mensuels, mais une page de statut fonctionnelle, consultable et avec traçabilité. Appelez ça de la magie noire ou la sagesse des pauvres, de toute façon ça marche.
+
+## Contexte
+
+Lors de l'exploitation d'une petite matrice de produits composée d'une douzaine de services externes, la question "est-ce que ça marche" devient souvent un mantra. Les clients signalent qu'ils ne peuvent pas accéder au service, vous vous connectez en SSH et faites un `curl` et découvrez que ça marche ; quelques minutes plus tard, ça plante, mais vous ne l'avez pas vu cette fois. Les solutions de surveillance commerciale (Pingdom, le niveau supérieur d'UptimeRobot, Datadog) peuvent bien sûr résoudre ce problème, mais elles facturent soit par site, soit par nombre de requêtes, ce qui n'est pas très rentable ni mentalement supportable pour un développeur indépendant.
+
+Plus critique encore, la page de statut elle-même doit être consultable par les utilisateurs. L'idéal serait : un nom de domaine (par exemple `status.hagicode.com`), affichant en temps réel le taux de disponibilité de chaque service, les courbes de temps de réponse, les événements historiques, avec enregistrement automatique des pannes et notifications automatiques. L'approche traditionnelle nécessite quatre éléments — un serveur exécutant cron, une base de données pour les données historiques, un site frontal, un CDN. Une fois ces quatre éléments en place, les coûts d'exploitation dépassent immédiatement ceux des services surveillés eux-mêmes — c'est comme utiliser un canon pour tuer une mouche, et la mouche trouve même ça exigu.
+
+Pour résoudre ces points de douleur, nous avons pris une décision : déplacer l'ensemble de la solution de surveillance directement vers GitHub. Les changements apportés par cette décision pourraient être plus importants que vous ne le pensez — j'y reviendrai plus tard.
+
+## À propos de HagiCode
+
+La solution partagée dans cet article provient de notre expérience acquise en trébuchant dans le projet [HagiCode](https://hagicode.com). HagiCode est un projet d'assistant de code IA qui expose plus d'une douzaine de services publics, notamment le site web, le site de documentation et les points de terminaison de téléchargement, tous pilotés par le dépôt principal [HagiCode-org/site](https://github.com/HagiCode-org/site). Ces sites doivent être stables et disponibles, donc la surveillance de statut pour nous n'est pas une option, mais une nécessité absolue. La solution Upptime ci-dessous est exactement celle utilisée par HagiCode dans son environnement de production — ce n'est pas quelque chose que j'ai inventé.
+
+## Analyse : comment Upptime fonctionne-t-il vraiment
+
+L'essence d'Upptime est en fait un modèle de dépôt GitHub, plus six workflows générés par le modèle. La clé pour le comprendre est de voir clairement "qui appelle qui, quand, produit quoi et où ça atterrit". Une fois décomposé, ce n'est plus si mystérieux.
+
+### Flux de données : un fichier de configuration pilotant tout
+
+L'ensemble du système tourne autour d'un seul fichier de configuration déclaratif `.upptimerc.yml`. La structure de configuration réelle de HagiCode ressemble à peu près à ceci :
+
+```yaml
+owner: HagiCode-org
+repo: upptime
+
+sites:
+  - name: HagiCode Website
+    url: https://hagicode.com
+  - name: HagiCode Docs
+    url: https://docs.hagicode.com
+  - name: Server Package Index
+    url: https://index.hagicode.com/server/index.json
+  # ... 14 sites au total
+
+status-website:
+  cname: status.hagicode.com
+  logoUrl: https://raw.githubusercontent.com/HagiCode-org/upptime/master/assets/upptime-icon.svg
+  name: HagiCode Status
+  introTitle: "**HagiCode Status**"
+  introMessage: Real-time availability tracking for public HagiCode websites and download endpoints.
+  navbar:
+    - title: Status
+      href: /
+    - title: GitHub
+      href: https://github.com/$OWNER/$REPO
+```
+
+Il y a deux points qui méritent d'être soulignés. Premièrement, `sites` peut surveiller à la fois des pages web (retournant HTML) et des points de terminaison JSON purs (comme `index.json`), Upptime ne regarde que le code d'état HTTP et le temps de réponse, sans valider le contenu. Deuxièmement, `cname` pointe vers `status.hagicode.com`, ce qui nécessite que vous possédiez ce domaine et que vous pointiez le DNS vers GitHub Pages — après tout, même si c'est gratuit, le domaine doit être payé par vous-même.
+
+### La division des six workflows
+
+Tous les fichiers dans `.github/workflows/` ont un avertissement en haut `Do not edit this file directly!` — ils sont mis à jour automatiquement chaque semaine par le modèle, vous ne devez modifier que `.upptimerc.yml`. Chaque workflow est déclenché par cron, appelle différentes sous-commandes de la même action `upptime/uptime-monitor@v1.42.6`, avec une division claire du travail, ce qui est rassurant :
+
+| Workflow | cron | Commande | Rôle |
+|---|---|---|---|
+| `uptime.yml` | `*/5 * * * *` | `update` | Vérification toutes les 5 minutes, écriture dans `history/*.yml` |
+| `response-time.yml` | — | `response-time` | Calcul des statistiques de temps de réponse |
+| `graphs.yml` | — | `graphs` | Génération des courbes PNG jour/semaine/mois/année |
+| `summary.yml` | — | `summary` | Mise à jour du tableau de statut dans README |
+| `site.yml` | `0 1 * * *` | `site` | Construction quotidienne du site statique, déploiement vers Pages |
+| `update-template.yml` | `0 0 * * *` | — | Synchronisation hebdomadaire du modèle en amont |
+
+Le fragment central de `uptime.yml` montre comment fonctionne la "sonde" :
+
+```yaml
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GH_PAT || github.token }}
+      - name: Check endpoint status
+        uses: upptime/uptime-monitor@v1.42.6
+        with:
+          command: "update"
+        env:
+          GH_PAT: ${{ secrets.GH_PAT || github.token }}
+          SECRETS_CONTEXT: ${{ toJson(secrets) }}
+```
+
+`site.yml` ajoute une étape supplémentaire, utilisant `peaceiris/actions-gh-pages@v4` pour pousser les artefacts de construction vers la branche `gh-pages` :
+
+```yaml
+- uses: peaceiris/actions-gh-pages@v4
+  with:
+    github_token: ${{ secrets.GH_PAT || github.token }}
+    publish_dir: "site/status-page/__sapper__/export/"
+    user_name: "Upptime Bot"
+    user_email: "73812536+upptime-bot@users.noreply.github.com"
+```
+
+### Stockage des données : fichiers comme base de données
+
+Les résultats de surveillance ne sont pas stockés dans une base de données, mais directement commités dans le dépôt sous forme de fichiers. Cela peut sembler sauvage, mais c'est rassurant en pratique. Chaque site a trois types d'artefacts.
+
+Instantané de statut `history/{slug}.yml`, par exemple `history/hagi-code-website.yml` :
+
+```yaml
+url: https://hagicode.com
+status: up
+code: 200
+responseTime: 96
+lastUpdated: 2026-06-17T00:22:34.485Z
+startTime: 2026-03-24T10:07:32.531Z
+```
+
+Source de données de badge endpoint shields.io `api/{slug}/response-time.json`, `uptime.json` :
+
+```json
+{"schemaVersion":1,"label":"response time","message":"739 ms","color":"yellow"}
+```
+
+Et les graphiques de temps de réponse `graphs/{slug}/response-time-{day,week,month,year}.png`.
+
+Ce compromis "fichiers comme base de données" est en fait bien pensé : plus d'écritures que de lectures, échelle contrôlable (environ 288 échantillons par jour par site, stockage incrémental plutôt que complet), historique de version intégré, zéro infrastructure. Le prix à payer, c'est que le dépôt continue de grandir, il faut occasionnellement y jeter un œil.
+
+### Événements et notifications : Issues comme registre d'événements
+
+L'enregistrement des pannes se fait via GitHub Issues, avec deux modèles intégrés au dépôt : `.github/ISSUE_TEMPLATE/bug_report.md` (signalement d'incident par l'utilisateur) et `maintainance-event.md` (maintenance planifiée). Le modèle de maintenance utilise frontmatter pour exprimer la fenêtre de temps :
+
+```markdown
+<!--
+start: 2021-08-24T13:00:00.220Z
+end: 2021-08-24T14:00:00.220Z
+expectedDown: google, hacker-news
+-->
+```
+
+Upptime analysera ces Issues et rendra "maintenance en cours" et "événements passés" sur la page de statut et le README. Les notifications reposent sur le mécanisme de watch des Issues lui-même, plus des webhook configurables, Slack, Telegram (en déclarant `notifications` en haut de `.upptimerc.yml`, le dépôt d'exemple de HagiCode ne l'a pas activé pour l'instant, après tout moins il y en a mieux c'est).
+
+## Solution : répliquer une page de statut en cinq étapes
+
+Répliquer une page de statut similaire à celle de HagiCode, de zéro à la mise en ligne, prend cinq étapes. Cinq étapes, mais chacune n'est pas longue, prenez votre temps.
+
+### Étape 1 : créer un dépôt à partir du modèle
+
+Ne faites pas `git clone` puis modifiez, utilisez directement "Use this template" de GitHub pour créer un dépôt (par exemple `your-org/upptime`). Le modèle intègre déjà tous les workflows, modèles d'Issue et la structure du site statique. Après avoir cloné localement, la seule chose à modifier manuellement est `.upptimerc.yml` — le reste, laissez tel quel.
+
+### Étape 2 : modifier `.upptimerc.yml`
+
+Changez `owner`/`repo` pour les vôtres, listez les adresses à surveiller dans `sites`, configurez le site dans `status-website`. La version minimale fonctionnelle ressemble à ceci :
+
+```yaml
+owner: your-org
+repo: upptime
+
+sites:
+  - name: Main Site
+    url: https://example.com
+  - name: API Health
+    url: https://api.example.com/health
+    expectedStatusCodes:
+      - 200
+
+status-website:
+  cname: status.example.com   # Supprimez si vous n'avez pas de domaine, utilisez le défaut your-org.github.io/upptime
+  name: Example Status
+  introTitle: "**Example Status**"
+  introMessage: Surveillance de disponibilité des services en temps réel
+  navbar:
+    - title: Status
+      href: /
+    - title: GitHub
+      href: https://github.com/$OWNER/$REPO
+```
+
+Éléments avancés : `expectedStatusCodes` limite les codes d'état acceptables (par défaut 200-399) ; `headers` personnalise les en-têtes de requête (pour les endpoints nécessitant une authentification) ; `maxResponseTime` marque les réponses lentes. Tout cela dépend de vos besoins, prenez ce dont vous avez besoin.
+
+### Étape 3 : configurer les Secrets et les permissions
+
+Le workflow utilise par défaut `${{ secrets.GH_PAT || github.token }}`. `github.token` peut faire fonctionner le flux de base, mais il y a deux limitations qui vous mordront :
+
+1. Le workflow déclenché par le token par défaut ne déclenchera plus les workflows en aval (pour éviter les boucles), ce qui brise la chaîne "sonde → créer Issue → notifier" au milieu.
+2. Permissions insuffisantes pour les opérations inter-dépôts (par exemple multi-organisations).
+
+Il est recommandé de créer un nouveau PAT (nécessitant les permissions `repo` + `workflow`), stocké comme Secret de dépôt `GH_PAT`. `update-template.yml` a une section de vérification dédiée : sans `GH_PAT`, il saute la mise à jour automatique du modèle et affiche un avertissement, donc ce secret n'est pas seulement une option, c'est la clé pour la tranquillité d'esprit.
+
+### Étape 4 : activer GitHub Pages
+
+Dans les paramètres du dépôt → Pages → Source, choisissez `Deploy from a branch`, branche `gh-pages`, répertoire `/root`. `site.yml` poussera automatiquement les artefacts de construction vers cette branche chaque jour à 1h du matin. Si vous avez configuré `cname`, ajoutez un enregistrement CNAME pointant vers `your-org.github.io` chez votre fournisseur DNS.
+
+La première fois, déclenchez manuellement aussi : allez sur la page Actions, trouvez "Static Site CI" → Run workflow, n'attendez pas bêtement la tâche planifiée, après tout voir le résultat une seconde plus tôt, c'est l'esprit plus tranquille une seconde plus tôt.
+
+### Étape 5 : vérification et maintenance
+
+Après avoir poussé la configuration, allez voir dans Actions si "Uptime CI" s'exécute toutes les 5 minutes, si `history/` commence à avoir des fichiers `*.yml`. L'adresse de la page de statut est `https://<your-org>.github.io/upptime/` ou votre domaine personnalisé. Par la suite, ajouter des sites, modifier le domaine, il suffit de modifier un seul fichier `.upptimerc.yml`, les workflows sont entièrement automatiques. HagiCode s'est appuyé sur ce mécanisme pendant plus d'un an pour maintenir la disponibilité de 14 points de terminaison, sans s'inquiéter trop.
+
+## Pratique : nous avons déjà traversé les pièges pour vous
+
+Les points suivants sont l'expérience accumulée par HagiCode lors de son fonctionnement réel, écrits pour vous aider à éviter les détours.
+
+### Pratique 1 : choix de la granularité de surveillance
+
+HagiCode place les pages web (`https://hagicode.com`) et les points de terminaison de données pures (`https://index.hagicode.com/server/index.json`) dans la même liste `sites`. Pour les endpoints JSON, Upptime fera une requête et analysera le code d'état HTTP, mais ne validera pas la structure du contenu. Si vous avez besoin d'une vérification approfondie comme "retourne 200 mais contenu erroné", vous devez utiliser `expectedStatusCodes` plus des sondes externes pour compléter, Upptime lui-même ne fait que des vérifications HTTP en boîte noire — il ne regarde que le visage, ne lit pas les pensées.
+
+### Pratique 2 : l'utilisation astucieuse des badges de temps de réponse
+
+`api/{slug}/response-time.json` est la source de données de [badge endpoint](https://shields.io/endpoint) de shields.io. Le README de HagiCode utilise massivement ce type d'URL :
+
+```
+https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FHagiCode-org%2Fupptime%2FHEAD%2Fapi%2Fhagi-code-website%2Fresponse-time.json
+```
+
+Ainsi, vous pouvez intégrer des badges de temps de réponse en temps réel dans n'importe quel Markdown (README du projet, blog, pages tierces), la couleur étant pilotée par la valeur dans `message` et le champ `color`. Notez l'utilisation de `HEAD` plutôt que `master`/`main` pour référencer les fichiers raw, cela évite les pannes massives après renommage de branche — dans les détails se cache la stabilité.
+
+### Pratique 3 : contrôle du volume du dépôt
+
+Un échantillonnage toutes les 5 minutes, sur un an `history/` accumulera un volume considérable. Upptime utilise un YAML incrémental plutôt que des journaux complets, ce qui est relativement modéré, mais il est toujours recommandé de jeter régulièrement un œil à la taille du dépôt. Si la valeur de surveillance d'un certain site diminue, supprimez-le simplement de `sites`, les fichiers historiques correspondants peuvent aussi être nettoyés manuellement, après tout si vous n'osez pas supprimer, le dépôt finira par devenir bientôt encombrant.
+
+### Pratique 4 : utilisation réelle des événements de maintenance
+
+`maintainance-event.md` n'est pas juste décoratif. Avant une planification de publication, ouvrez un Issue selon le modèle, remplissez `start/end/expectedDown`, Upptime marquera les sites correspondants pendant cette période comme "maintenance planifiée", sans compter dans les statistiques de disponibilité, évitant qu'une publication normale ne fasse chuter le SLA annuel. Le `expectedDown` de HagiCode prend en charge une liste de noms de sites séparés par des virgules, correspondant un par un à `sites[].name`.
+
+### Pratique 5 : frontière entre mise à jour du modèle et personnalisation
+
+Le `Do not edit this file directly!` en haut de tous les `.github/workflows/*.yml` n'est pas pour vous effrayer. `update-template.yml` écrasera ces fichiers chaque semaine avec le modèle en amont. Lorsque vous avez besoin de personnaliser le comportement, la bonne approche est d'utiliser les éléments de configuration officiellement supportés dans `.upptimerc.yml` (comme `skipTopics`, `customStatusWebsite`, `runnerSettings`), plutôt que de modifier le workflow. Si vous devez vraiment modifier le workflow, soit désactivez `update-template.yml`, soit fork et maintenez votre propre modèle — ce dernier perdra les mises à niveau sans douleur, à vous de peser le pour et le contre.
+
+### Pratique 6 : contraintes réelles des quotas gratuits
+
+GitHub Actions est gratuit et illimité dans le temps pour les dépôts publics, Upptime est conçu pour exploiter exactement ce point. Les dépôts privés ont 2000 minutes de quota gratuit par mois, tandis que `uptime.yml` s'exécute toutes les 5 minutes, environ 1 minute chaque fois, ce seul élément représente environ 8640 minutes par mois, ce qui dépassera le quota. Par conséquent, le dépôt Upptime doit être public, c'est la précondition pour "gratuit" — ne cherchez pas la confidentialité en le rendant privé, puis recevez une facture, ce serait gênant.
+
+## Conclusion
+
+Revenons à la question initiale : surveiller un tas de services externes, y a-t-il vraiment une solution pas chère ? La réponse de HagiCode est — oui, et si peu chère que vous douterez que c'est vrai. Upptime décompose la surveillance en quatre composants natifs GitHub :
+
+- Sonde = cron de GitHub Actions
+- Base de données = fichiers YAML/JSON dans le dépôt
+- CDN = GitHub Pages
+- Registre d'événements = GitHub Issues
+
+Vous obtenez : taux de disponibilité en temps réel, courbes de temps de réponse, événements historiques, badges de disponibilité, domaine personnalisé, notifications automatiques, le tout zéro serveur, zéro frais mensuels. Le prix à payer est de maintenir le dépôt public, et de s'occuper occasionnellement du volume du dépôt. En fait, ce prix, par rapport à la création manuelle d'un système de surveillance, est déjà beaucoup plus léger.
+
+La raison pour laquelle cette solution fonctionne, c'est grâce au soutien sincère de l'écosystème GitHub aux projets open source. Si vous maintenez aussi une petite matrice de produits multi-sites, je recommande fortement d'y consacrer un après-midi pour la mettre en place, c'est beaucoup plus reposant que de créer manuellement une surveillance.
+
+## Références
+
+- [Dépôt officiel Upptime](https://github.com/upptime/upptime)
+- [Documentation des badges endpoint shields.io](https://shields.io/endpoint)
+- [Documentation des tâches planifiées GitHub Actions](https://docs.github.com/en/actions/using-workflows/events-that-trigger-workflows#schedule)
+- [Exemple de page de statut HagiCode](https://status.hagicode.com)
+
+## Conclusion
+
+Autour de "comment utiliser Upptime pour créer gratuitement votre propre page de statut", une approche plus sûre consiste d'abord à faire fonctionner progressivement les configurations clés, les frontières de dépendances et les chemins de déploiement, puis à compléter les détails d'optimisation.
+
+Une fois que les objectifs, les étapes et les points de validation sont clairs, ce type de solution peut généralement entrer plus facilement dans la livraison effective.
