@@ -1,0 +1,292 @@
+---
+title: How to Publish an Electron App to Microsoft Store: From MSIX Packaging to Store Submission
+date: 2026-06-18
+tags: [Electron, Microsoft Store, MSIX, Windows, Publishing]
+---
+
+## How to Publish an Electron App to Microsoft Store: From MSIX Packaging to Store Submission
+
+> At the end of the day, Electron is just an ordinary Win32 desktop application, but Microsoft Store only recognizes MSIX. This article, borrowing from the build configuration we actually ran through in HagiCode Desktop, breaks down the entire "register developer account → build MSIX package → submit to store" chain from start to finish, and shares the pitfalls we encountered along the way—after all, once you've stepped in the holes, they become stories.
+
+## Background
+
+We have an Electron application that needs to be distributed to end users on Windows. In addition to the NSIS installer and portable version we've always used, we also want it to appear in Microsoft Store. The reasons are actually quite practical:
+
+1. **Trusted Distribution Channel**: Apps in the store are signed and reviewed, so users won't be blocked by SmartScreen during installation, and they won't have to face that cold "Unknown Publisher" message.
+2. **Automatic Updates and Commercialization**: Store handles updates for you; subscriptions and permanent licenses can be directly integrated.
+3. **Cover Windows 10/11 Built-in Entry Points**: winget, store search, Start menu recommendations... these entry points are genuinely useful for user acquisition.
+
+However, Electron is ultimately not UWP. To publish to Microsoft Store, the core requirement is to repackage the Electron build output into an **MSIX package** that Microsoft Store recognizes, then properly complete the registration and submission process. It sounds simple, but there are quite a few pitfalls when you actually get started. To fill these gaps, we spent a lot of time thoroughly understanding the entire chain, and now we'll break down each step in detail.
+
+## About HagiCode
+
+The approach discussed in this article comes from our practice in the [HagiCode](https://hagicode.com) project. HagiCode Desktop is an Electron-based desktop application that needs to be distributed to users through three channels simultaneously: official website, GitHub Release, and Microsoft Store. How we opened up the store channel is exactly what this article covers. There's more information about HagiCode at the end—if you're interested, feel free to scroll down.
+
+## Analysis: Four Key Questions to Clarify Before Publishing
+
+Publishing to Microsoft Store involves four key technical considerations. Once you've thought through these clearly, you won't need to repeatedly redo work later—after all, nobody wants to redo their work.
+
+### 1. Microsoft Store Only Accepts MSIX / AppX, Not Traditional NSIS/EXE
+
+Microsoft Store's support for desktop applications (Desktop Bridge) is built on the MSIX format. Traditional NSIS installers cannot be directly submitted; they must first be repackaged into MSIX using `MakeAppx`. Fortunately, Electron Forge provides a `@electron-forge/maker-msix` maker that can output MSIX directly during the packaging phase, saving you the hassle of reverse-engineering packaging from installed directories.
+
+We have such a maker in our project:
+
+```js
+{
+  name: '@electron-forge/maker-msix',
+  platforms: ['win32'],
+  config: {
+    appManifest: msixManifestPath,
+    packageAssets: msixAssetsPath,
+    logLevel: 'warn',
+    ...(windowsKitPath ? { windowsKitPath } : {}),
+    ...(windowsKitVersion ? { windowsKitVersion } : {}),
+    ...msixSigningConfig,
+  },
+},
+```
+
+The key inputs are just two: `appManifest` (which is AppxManifest.xml, defining package identity and capabilities) and `packageAssets` (store icon assets). If either of these is wrong, everything else you do is in vain.
+
+### 2. Package Identity Must Be Reserved in Partner Center in Advance
+
+The `Identity` field (`Name`, `Publisher`) in the MSIX package cannot be filled arbitrarily—it must match the application identity reserved in Partner Center exactly, character by character, or it will be rejected. Our reserved identity is recorded in `forge.store-config.json`:
+
+```json
+{
+  "packageIdentity": {
+    "displayName": "Hagicode",
+    "publisherDisplayName": "newbe36524",
+    "publisher": "CN=8B6C8A94-AAE5-4C8B-9202-A29EA42B042F",
+    "identityName": "newbe36524.Hagicode",
+    "backgroundColor": "transparent",
+    "languages": ["en-US", "zh-CN", "zh-TW", "ja-JP", "ko-KR", "de-DE", "fr-FR", "es-ES", "pt-BR", "ru-RU"]
+  }
+}
+```
+
+The `publisher` string comes from the certificate subject issued by Microsoft after developer account registration and must match character by character. The `identityName` is the package name prefix you reserved. This string must be copied exactly from Partner Center—never type it manually—we'll discuss this again in the "Common Pitfalls" section later.
+
+### 3. Desktop Applications Must Declare `runFullTrust` Capability
+
+Electron applications need full file system access, need to spawn child processes, and need to run the Node runtime—all of which can only be achieved in "full trust" mode. Therefore, the MSIX manifest must honestly declare the `runFullTrust` capability, otherwise the application will be blocked by the sandbox as soon as it starts, manifesting as various confusing crashes. Our configuration looks like this:
+
+```json
+{
+  "msix": {
+    "minVersion": "10.0.17763.0",
+    "maxVersionTested": "10.0.19045.0",
+    "capabilities": [
+      "runFullTrust",
+      "internetClient",
+      "internetClientServer",
+      "privateNetworkClientsServer"
+    ]
+  }
+}
+```
+
+`runFullTrust` is the standard requirement for desktop applications. Setting `minVersion` to 17763 (which is Windows 10 1809) is because MSIX only started stably supporting desktop Win32 applications from this version onwards; setting it lower means users can't install it, while setting it higher means you can't cover those older machines.
+
+### 4. Store Submission Requires Windows Environment + Microsoft Store CLI
+
+Packaging can be done on cross-platform CI, but store submission (`msstore publish`) cannot—it must run Microsoft Store CLI in a Windows environment with proper Azure AD application credentials configured. This is why the `publish_store` job in our automation pipeline must run on a `windows-latest` runner. This is a hard constraint that cannot be bypassed, unlike packaging which can be stuffed into a Linux container.
+
+## Solution: Complete Eight-Step Publishing Process
+
+Putting the above analysis together, the complete steps to publish an Electron application to Microsoft Store are roughly as follows.
+
+### Step 1: Register Developer Account
+
+First, go to [Partner Center](https://partner.microsoft.com/) to register a developer account (individual or company), and pay the one-time fee. After the account is activated, you'll receive a **Publisher certificate subject string**, which looks like this: `CN=XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX`. This is the sole source for the `publisher` field later on.
+
+### Step 2: Reserve Application Identity in Store
+
+Create a new application in Partner Center and fill in the name you want to reserve. The system will assign you an `identityName`, and when combined with your own Publisher, the complete package identity is formed. Copy this identity exactly into your local configuration:
+
+```json
+// forge.store-config.json
+{
+  "packageIdentity": {
+    "displayName": "Hagicode",
+    "publisherDisplayName": "newbe36524",
+    "publisher": "CN=8B6C8A94-AAE5-4C8B-9202-A29EA42B042F",
+    "identityName": "newbe36524.Hagicode"
+  }
+}
+```
+
+### Step 3: Prepare Store Icon Assets
+
+Microsoft Store requires a set of fixed-size PNG images: `StoreLogo.png`, `Square44x44Logo.png`, `Square150x150Logo.png`, `Wide310x150Logo.png`, etc. Our `prepare-msix.js` script verifies that all these assets are present before packaging:
+
+```js
+// Verify required store icon assets, missing any one won't do
+const requiredAssets = ['StoreLogo.png', 'Square44x44Logo.png', 'Square150x150Logo.png', 'Wide310x150Logo.png'];
+for (const assetName of requiredAssets) {
+  const assetPath = path.join(paths.generatedAssetsPath, assetName);
+  if (!fs.existsSync(assetPath)) {
+    throw new Error(`Missing required MSIX asset after preparation: ${assetPath}`);
+  }
+}
+```
+
+Why do this? Because if you're missing a size, MakeAppx won't tell you exactly what's wrong during packaging, and you'll only find out during store review—at which point you've already waited several days. Early verification is a very effective defense.
+
+### Step 4: Generate AppxManifest.xml
+
+The manifest needs to include package identity, capabilities, visual assets, and entry executable. We use an override configuration (`forge.store-config.json`) to drive `prepare-msix.js` to generate the manifest, ensuring identity matches the store. The key sections of the manifest look roughly like this:
+
+```xml
+<!-- Package identity: must match Partner Center exactly -->
+<Identity Name="newbe36524.Hagicode"
+          Publisher="CN=8B6C8A94-AAE5-4C8B-9202-A29EA42B042F"
+          Version="1.2.3.0" />
+
+<Applications>
+  <Application Id="Hagicode" Executable="Hagicode.exe" EntryPoint="Windows.FullTrustApplication">
+    <uap:VisualElements ... />
+  </Application>
+</Applications>
+
+<!-- Capability declaration: runFullTrust is key for desktop applications -->
+<Capabilities>
+  <rescap:Capability Name="runFullTrust" />
+  <Capability Name="internetClientServer" />
+</Capabilities>
+```
+
+Note that line `EntryPoint="Windows.FullTrustApplication"`—this is the critical marker for desktop applications. Combined with the `runFullTrust` capability, it allows the app to run with full permissions. Without it, the application is stuck in the sandbox, very frustrated.
+
+### Step 5: Package with maker-msix
+
+The build command is in `package.json`:
+
+```json
+{
+  "scripts": {
+    "build:win:store": "npm run generate:store-bindings && node scripts/build-store-package.js"
+  }
+}
+```
+
+It ultimately calls Electron Forge, passing in `forge.store-config.json` as an override configuration, and maker-msix will call the Windows SDK's `MakeAppx` to output the `.msix` file. There's a hard constraint here: **packaging must be done on Windows** (or in a container with Windows SDK), as it depends on `MakeAppx`, which can't be bypassed.
+
+### Step 6: Signing (Can be unsigned for store submission)
+
+This step is easily overlooked—packages submitted to the store will be re-signed by Microsoft with their own certificate, so for development self-testing outside of "formal submission," you can skip signing. However, if you want to install it locally for testing, you need to sign it with a trusted certificate, otherwise Windows will refuse to install it. Our `resolveMsixSigningConfig` returns an empty object when no signing materials are configured, allowing the process to continue:
+
+```js
+// Don't sign if no signing materials are configured, let the store re-sign uniformly
+function resolveMsixSigningConfig() {
+  if (!process.env.MSIX_CERT_FILE) return {};
+  return {
+    signMethod: 'signtool',
+    certFilePath: process.env.MSIX_CERT_FILE,
+    certPassword: process.env.MSIX_CERT_PASSWORD,
+  };
+}
+```
+
+Separating "self-testing signing" from "submitting unsigned" is a very critical practice.
+
+### Step 7: Configure Microsoft Store CLI Credentials
+
+Go to the Azure portal to create an Azure AD application, grant it permission to access Partner Center, and then get the following set of credentials:
+
+- `AZURE_AD_APPLICATION_CLIENT_ID`
+- `AZURE_AD_APPLICATION_SECRET`
+- `AZURE_AD_TENANT_ID`
+- `SELLER_ID` (Seller ID in Partner Center)
+- `MICROSOFT_STORE_PRODUCT_ID` (Product ID of the reserved application)
+
+This step is a bit convoluted, but the documentation in Azure portal and Partner Center explains it in detail—just follow along.
+
+### Step 8: Submit to Store
+
+In a Windows environment, submit using Microsoft Store CLI:
+
+```powershell
+# Configure credentials
+msstore reconfigure --tenantId $env:AZURE_AD_TENANT_ID `
+  --clientId $env:AZURE_AD_APPLICATION_CLIENT_ID `
+  --clientSecret $env:AZURE_AD_APPLICATION_SECRET `
+  --sellerId $env:SELLER_ID
+
+# Submit MSIX package to reserved product
+msstore publish "$packagePath" -id $env:MICROSOFT_STORE_PRODUCT_ID
+```
+
+After submission, you need to go back to Partner Center to fill in store details (description, screenshots, pricing, rating), and finally click submit for review. Review typically takes 1-3 business days—the first review always takes a bit longer.
+
+## Practice: Documenting Configuration and Lessons Learned
+
+After completing the process once, the following practices can help you avoid some detours—after all, once you've taken enough detours, you don't feel they're detours anymore, but some things can be skipped if possible.
+
+### Store Configuration Files Separately
+
+Separating "common build configuration" from "store-specific configuration" is key. Our approach is: `forge.config.js` runs daily builds (NSIS, portable, macOS dmg), while `forge.store-config.json` is only used for store builds, inheriting and overriding via `extends`:
+
+```json
+{
+  "extends": "forge.config.js",
+  "buildVersion": "0.1.0.0",
+  "packageIdentity": { /* Store reserved identity */ },
+  "msix": {
+    "minVersion": "10.0.17763.0",
+    "maxVersionTested": "10.0.19045.0",
+    "capabilities": ["runFullTrust", "internetClient", "internetClientServer", "privateNetworkClientsServer"]
+  }
+}
+```
+
+This way, the store version and the release version won't contaminate each other. HagiCode Desktop maintains three distribution channels simultaneously, and configuration separation is the prerequisite for our stable iteration.
+
+### Version Number Must Be Four Segments
+
+MSIX version numbers must be four segments (`Major.Minor.Build.Revision`, such as `1.2.3.0`), but Electron's `package.json` typically only writes three segments. That `buildVersion` field is used to supplement the last segment—when submitting to the store, version numbers must increment, and the fourth segment is very convenient for distinguishing multiple submissions under the same semantic version. If you've encountered this, you understand; if you haven't, you will eventually.
+
+### Multi-language Declaration
+
+The store supports multi-language listings, which correspond to `<Resource Language="..." />` entries in the manifest. We declared ten languages, and the store requires a description for each language (you can use machine translation to pass review first, then localize gradually). The corresponding rendering logic in `prepare-msix.js` looks like this:
+
+```js
+// Render language list into Resource tags in MSIX manifest
+function renderResourceTags(languages) {
+  return languages
+    .map((language) => `    <Resource Language="${escapeXml(language)}" />`)
+    .join('\n');
+}
+```
+
+### Common Pitfalls (Important)
+
+Here are the pitfalls that HagiCode Desktop has encountered almost every one:
+
+1. **Publisher Mismatch**: When copying the publisher string from Partner Center, it's easy to accidentally lose spaces or get the case wrong, and the submission will be rejected immediately. Suggestion: write it directly into a configuration file, don't type it manually.
+2. **Missing `runFullTrust`**: After the app starts, it can't access the file system or spawn child processes, manifesting as various bizarre crashes. Troubleshooting this is quite exhausting.
+3. **Incomplete Icon Sizes**: MakeAppx doesn't validate this, but store review will reject it. Early validation in `prepare-msix.js` is an effective defense.
+4. **Non-incrementing Version Numbers**: The store refuses to accept the same or lower version numbers, so the CI pipeline must guarantee a bump for each build.
+5. **Running maker-msix in Non-Windows Environment**: It won't find `MakeAppx`, so you must use a `windows-latest` runner.
+6. **Signing Confusion**: Use self-signed certificates for self-testing, and submit unsigned for Microsoft to re-sign. These two paths must be separate—don't stuff self-signed certificates into submission packages.
+
+### Automation Recommendations
+
+After manually completing the entire process and understanding each step clearly, I strongly recommend connecting GitHub Actions for automation. We finally chained version parsing, MSIX building, GitHub Release publishing, and store publishing into one pipeline, checking for new versions every 4 hours. For complete details on this, check our other article "Automation Practice for Automatically Publishing Windows Applications to Microsoft Store."
+
+If you just want to get your app on the store first and then handle commercialization (subscriptions / permanent licenses), you can also check our article "How Electron Desktop Applications Integrate Microsoft Store Subscriptions and Permanent Licenses," which covers commercial capability integration after store publishing.
+
+## References
+
+- [Microsoft Store CLI Documentation](https://github.com/microsoft/AppPublisher)
+- [electron-forge maker-msix](https://www.electronforge.io/config/makers/maker-msix)
+- [MSIX Documentation](https://learn.microsoft.com/en-us/windows/msix/)
+- [HagiCode Official Website](https://hagicode.com)
+- [HagiCode-org/site GitHub Repository](https://github.com/HagiCode-org/site)
+
+## Summary
+
+Focusing on "How to Publish an Electron App to Microsoft Store: From MSIX Packaging to Store Submission," a more prudent approach is to first gradually get the key configurations, dependency boundaries, and implementation path working, then fill in optimization details.
+
+When goals, steps, and acceptance criteria are clearly defined, such solutions typically can more smoothly enter actual delivery.

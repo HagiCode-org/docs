@@ -1,0 +1,292 @@
+---
+title: Electron 應用如何上架微軟商店：從 MSIX 打包到商店提交
+date: 2026-06-18
+tags: [Electron, Microsoft Store, MSIX, Windows, 上架]
+---
+
+## Electron 應用如何上架微軟商店：從 MSIX 打包到商店提交
+
+> 其實 Electron 說到底，不過是個普普通通的 Win32 桌面應用罷了，可微軟商店它只認 MSIX。這篇文章，就藉著我們 HagiCode Desktop 實打實跑通的那套構建配置，把「註冊開發者帳號 → 打 MSIX 包 → 提交商店」這條鏈路從頭到尾拆給你看，順便聊聊我們踩過的那些坑——畢竟坑踩過了，也就成了故事。
+
+## 背景
+
+手裡有這麼一個 Electron 應用，要在 Windows 上分發給最終用戶。除了一直以來都在用的 NSIS 安裝包、便攜版之外，我們還盼著它能出現在微軟商店裡。說起來原因其實挺現實的：
+
+1. **可信分發渠道**：商店裡的應用都是簽過名、審過的，用戶安裝的時候不會再被 SmartScreen 攔，也不必去面對那一句冷冰冰的「未知發行者」。
+2. **自動更新與商業化**：更新的事，商店替你接管了；訂閱、永久許可證，也都能直接對接上。
+3. **覆蓋 Windows 10/11 自帶的入口**：winget、商店搜索、開始菜單推薦……這些入口，對拉新是實打實有用的。
+
+只是 Electron 它終究不是 UWP。要想上架微軟商店，其實核心也就一件事——把 Electron 的產物重新打包成微軟商店認得下的 **MSIX 包**，再老老實實把註冊、提交流程走完。聽起來輕巧，可真上手了，坑還不少。為了把這些坑填平，我們花了不少功夫把整條鏈路摸了個通透，下面就把每一步掰開來揉碎了講。
+
+## 關於 HagiCode
+
+這篇文章裡講的方案，來自我們在 [HagiCode](https://hagicode.com) 專案裡的實踐。HagiCode Desktop 是一個基於 Electron 的桌面端，要同時透過官網、GitHub Release、還有微軟商店這三個渠道分發給用戶。商店這條渠道是怎麼打通的，就是這篇文章要講的事。文末有更多關於 HagiCode 的資訊，要是你感興趣，不妨拉到底看看。
+
+## 分析：上架之前必須想清楚的四個問題
+
+上架微軟商店這件事，技術鏈條上有四個關鍵判斷。想清楚了，後面也就不必反覆返工了——畢竟誰也不想返工呢。
+
+### 1. 微軟商店只接受 MSIX / AppX，不接受傳統 NSIS/EXE
+
+微軟商店對桌面應用（Desktop Bridge）的支援，是建立在 MSIX 格式之上的。傳統的 NSIS 安裝包沒法直接提交，得先用 `MakeAppx` 重新打包成 MSIX。好在 Electron Forge 提供了一個 `@electron-forge/maker-msix` maker，它能在打包階段就直接產出 MSIX，省下了從已安裝目錄反推打包那一通折騰。
+
+我們專案裡就掛著這麼一個 maker：
+
+```js
+{
+  name: '@electron-forge/maker-msix',
+  platforms: ['win32'],
+  config: {
+    appManifest: msixManifestPath,
+    packageAssets: msixAssetsPath,
+    logLevel: 'warn',
+    ...(windowsKitPath ? { windowsKitPath } : {}),
+    ...(windowsKitVersion ? { windowsKitVersion } : {}),
+    ...msixSigningConfig,
+  },
+},
+```
+
+關鍵輸入其實就兩個：`appManifest`（也就是 AppxManifest.xml，定義包身份和能力）和 `packageAssets`（商店圖標資產）。這兩個要是錯了，後面做得再漂亮，也是白搭。
+
+### 2. 包身份必須提前在合作夥伴中心預留
+
+MSIX 包裡那個 `Identity` 欄位（`Name`、`Publisher`），可不是隨便填填就行的，必須和合作夥伴中心裡預留的應用身份分毫不差，差一個字符都會被打回來。我們預留的身份，記在 `forge.store-config.json` 裡：
+
+```json
+{
+  "packageIdentity": {
+    "displayName": "Hagicode",
+    "publisherDisplayName": "newbe36524",
+    "publisher": "CN=8B6C8A94-AAE5-4C8B-9202-A29EA42B042F",
+    "identityName": "newbe36524.Hagicode",
+    "backgroundColor": "transparent",
+    "languages": ["en-US", "zh-CN", "zh-TW", "ja-JP", "ko-KR", "de-DE", "fr-FR", "es-ES", "pt-BR", "ru-RU"]
+  }
+}
+```
+
+這裡頭那個 `publisher` 字串，是從開發者帳號註冊之後微軟簽發的證書主題裡來的，必須逐字符匹配。`identityName` 呢，則是你預留的包名前綴。這個字串，一定要從合作夥伴中心原樣複製下來，千萬別自己手敲——這件事我們在後面「常見坑」裡還會再嘮一遍。
+
+### 3. 桌面應用必須聲明 `runFullTrust` 能力
+
+Electron 應用要用到完整的檔案系統存取、要拉起子進程、還要跑 Node 執行時，這些只能在「完全信任」模式下才能實現。所以 MSIX 清單裡，必須老老實實聲明 `runFullTrust` 能力，不然應用一啟動，就被沙箱給攔下了，表現出來的，就是各種讓人摸不著頭腦的崩潰。我們的配置長這樣：
+
+```json
+{
+  "msix": {
+    "minVersion": "10.0.17763.0",
+    "maxVersionTested": "10.0.19045.0",
+    "capabilities": [
+      "runFullTrust",
+      "internetClient",
+      "internetClientServer",
+      "privateNetworkClientsServer"
+    ]
+  }
+}
+```
+
+`runFullTrust` 是桌面應用上架的標配。`minVersion` 設到 17763（也就是 Windows 10 1809），是因為從這個版本起，MSIX 才穩定支援桌面 Win32 應用，設低了，用戶裝不上；設高了，又覆蓋不到那些上了年紀的老機器。
+
+### 4. 商店提交需要 Windows 環境 + Microsoft Store CLI
+
+打包這件事，倒是可以在跨平台的 CI 上做，可商店提交（`msstore publish`）就不行了，必須在 Windows 環境裡跑 Microsoft Store CLI，還得配好 Azure AD 應用憑證。這也就是為什麼自動化流水線裡那個 `publish_store` 作業，非得跑在 `windows-latest` runner 上不可。這一點是繞不開的硬約束，不像打包那樣可以塞進 Linux 容器裡去。
+
+## 解決：完整上架的八步流程
+
+把上面的分析串起來，要把一個 Electron 應用上架到微軟商店，完整的步驟大概是這樣的。
+
+### 步驟 1：註冊開發者帳號
+
+先到 [Partner Center](https://partner.microsoft.com/) 註冊一個開發者帳號（個人或公司都行），把那筆一次性的費用給交了。帳號啟動之後，你會拿到一個 **Publisher 證書主題字串**，大概長這樣：`CN=XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX`。這，就是後面 `publisher` 欄位唯一的來源。
+
+### 步驟 2：在商店裡預留應用身份
+
+在合作夥伴中心新建一個應用，填上你想保留的名稱。系統會分配給你 `identityName`，再和你自己的 Publisher 一組合，完整的包身份就成型了。把這個身份，原樣抄到本地配置裡：
+
+```json
+// forge.store-config.json
+{
+  "packageIdentity": {
+    "displayName": "Hagicode",
+    "publisherDisplayName": "newbe36524",
+    "publisher": "CN=8B6C8A94-AAE5-4C8B-9202-A29EA42B042F",
+    "identityName": "newbe36524.Hagicode"
+  }
+}
+```
+
+### 步驟 3：準備商店圖標資產
+
+微軟商店要的是一組固定尺寸的 PNG：`StoreLogo.png`、`Square44x44Logo.png`、`Square150x150Logo.png`、`Wide310x150Logo.png` 之類的。我們的 `prepare-msix.js` 腳本，在打包之前會先校驗這些資產是不是都齊了：
+
+```js
+// 校驗商店必需的圖標資產，缺一個都不行
+const requiredAssets = ['StoreLogo.png', 'Square44x44Logo.png', 'Square150x150Logo.png', 'Wide310x150Logo.png'];
+for (const assetName of requiredAssets) {
+  const assetPath = path.join(paths.generatedAssetsPath, assetName);
+  if (!fs.existsSync(assetPath)) {
+    throw new Error(`Missing required MSIX asset after preparation: ${assetPath}`);
+  }
+}
+```
+
+為什麼要這麼做呢？因為缺一個尺寸，MakeAppx 打包的時候並不會告訴你具體哪裡錯了，等到商店審核的時候才被打回來——這時候，你已經等了好幾天了。提前校驗，是一個非常有效的防禦。
+
+### 步驟 4：生成 AppxManifest.xml
+
+清單裡要塞進包身份、能力、可視資產、入口可執行檔。我們用一個覆蓋配置（`forge.store-config.json`）來驅動 `prepare-msix.js` 生成清單，確保身份和商店對得上。清單裡關鍵的那幾段，大概是這樣：
+
+```xml
+<!-- 包身份：必須和合作夥伴中心一致 -->
+<Identity Name="newbe36524.Hagicode"
+          Publisher="CN=8B6C8A94-AAE5-4C8B-9202-A29EA42B042F"
+          Version="1.2.3.0" />
+
+<Applications>
+  <Application Id="Hagicode" Executable="Hagicode.exe" EntryPoint="Windows.FullTrustApplication">
+    <uap:VisualElements ... />
+  </Application>
+</Applications>
+
+<!-- 能力聲明：runFullTrust 是桌面應用的關鍵 -->
+<Capabilities>
+  <rescap:Capability Name="runFullTrust" />
+  <Capability Name="internetClientServer" />
+</Capabilities>
+```
+
+注意那一行 `EntryPoint="Windows.FullTrustApplication"`，這可是桌面應用的關鍵標記，配合 `runFullTrust` 能力，才能以完整的權限跑起來。少了它，應用就只能乖乖待在沙箱裡，憋屈得很。
+
+### 步驟 5：用 maker-msix 打包
+
+構建命令寫在 `package.json` 裡：
+
+```json
+{
+  "scripts": {
+    "build:win:store": "npm run generate:store-bindings && node scripts/build-store-package.js"
+  }
+}
+```
+
+它最終調起 Electron Forge，把 `forge.store-config.json` 當作覆蓋配置帶進去，maker-msix 會去呼叫 Windows SDK 的 `MakeAppx`，吐出 `.msix` 檔案來。這裡頭有個硬約束：**打包必須在 Windows 上做**（或者帶 Windows SDK 的容器裡），畢竟它依賴 `MakeAppx`，這點沒法繞。
+
+### 步驟 6：簽名（商店提交時可以不簽）
+
+這一步，其實很容易被忽略——提交到商店的包，微軟會用它自己的證書重新簽一遍，所以「正式提交」之外的開發自測階段，是可以不簽名的。只是你要是想在本地裝上測試一下，那就得用受信任證書簽一下了，不然 Windows 是會拒絕安裝的。我們的 `resolveMsixSigningConfig` 在沒配簽名材料的時候，會返回一個空物件，讓流程接著往下走：
+
+```js
+// 沒配簽名材料就不簽，讓商店統一重簽
+function resolveMsixSigningConfig() {
+  if (!process.env.MSIX_CERT_FILE) return {};
+  return {
+    signMethod: 'signtool',
+    certFilePath: process.env.MSIX_CERT_FILE,
+    certPassword: process.env.MSIX_CERT_PASSWORD,
+  };
+}
+```
+
+把「自測簽名」和「提交空簽名」這兩條路徑分開，是一個非常關鍵的實踐。
+
+### 步驟 7：配置 Microsoft Store CLI 憑證
+
+到 Azure 門戶去建立一個 Azure AD 應用，給它授予存取 Partner Center 的權限，然後拿到下面這一組憑證：
+
+- `AZURE_AD_APPLICATION_CLIENT_ID`
+- `AZURE_AD_APPLICATION_SECRET`
+- `AZURE_AD_TENANT_ID`
+- `SELLER_ID`（合作夥伴中心的賣家 ID）
+- `MICROSOFT_STORE_PRODUCT_ID`（預留應用的產品 ID）
+
+這一步稍微有點繞，不過 Azure 門戶和 Partner Center 的文件裡都寫得很細，照著做就是了。
+
+### 步驟 8：提交到商店
+
+在 Windows 環境裡，用 Microsoft Store CLI 提交：
+
+```powershell
+# 配置憑證
+msstore reconfigure --tenantId $env:AZURE_AD_TENANT_ID `
+  --clientId $env:AZURE_AD_APPLICATION_CLIENT_ID `
+  --clientSecret $env:AZURE_AD_APPLICATION_SECRET `
+  --sellerId $env:SELLER_ID
+
+# 提交 MSIX 包到預留的產品
+msstore publish "$packagePath" -id $env:MICROSOFT_STORE_PRODUCT_ID
+```
+
+提交完之後，還要回到 Partner Center 把商店詳情（描述、截圖、定價、分級）填齊，最後點一下提交審核。審核一般要等 1–3 個工作日，第一次提審嘛，總會久一點。
+
+## 實踐：把配置和踩坑經驗沉澱下來
+
+走完一遍流程之後，下面這些實踐，能讓你少走一些彎路——畢竟彎路走多了，也就不覺得彎了，只是有些事能省則省。
+
+### 配置檔案要分開存
+
+把「通用構建配置」和「商店特定配置」分開存放，是關鍵。我們的做法是：`forge.config.js` 跑日常構建（NSIS、portable、macOS dmg），`forge.store-config.json` 只在商店構建的時候，透過 `extends` 繼承並覆蓋：
+
+```json
+{
+  "extends": "forge.config.js",
+  "buildVersion": "0.1.0.0",
+  "packageIdentity": { /* 商店預留身份 */ },
+  "msix": {
+    "minVersion": "10.0.17763.0",
+    "maxVersionTested": "10.0.19045.0",
+    "capabilities": ["runFullTrust", "internetClient", "internetClientServer", "privateNetworkClientsServer"]
+  }
+}
+```
+
+這樣一來，商店版和發行版，彼此都不會互相汙染。HagiCode Desktop 同時維護著三套發行渠道，配置分離，是我們能穩定迭代下去的前提。
+
+### 版本號必須是四段
+
+MSIX 的版本號必須是 `Major.Minor.Build.Revision` 四段（比如 `1.2.3.0`），可 Electron 的 `package.json` 通常只寫三段。那個 `buildVersion` 欄位，就是用來補最後一段的——商店提交的時候，版本號必須遞增，第四段非常方便，可以用來區分同一個語義版本下的多次提交。這一點，踩過的人都懂；沒踩過的，遲早也會踩。
+
+### 多語言聲明
+
+商店支援多語言的 listing，對應到清單裡，就是那一條條 `<Resource Language="..." />`。我們聲明了十種語言，商店會要求每種語言都填上一份描述（可以先用機器翻譯過審，再慢慢本地化）。`prepare-msix.js` 裡對應的渲染邏輯是這樣：
+
+```js
+// 把語言列表渲染成 MSIX 清單裡的 Resource 標籤
+function renderResourceTags(languages) {
+  return languages
+    .map((language) => `    <Resource Language="${escapeXml(language)}" />`)
+    .join('\n');
+}
+```
+
+### 常見坑（重點看）
+
+下面這些坑，HagiCode Desktop 幾乎每一個都踩過：
+
+1. **Publisher 不匹配**：從 Partner Center 複製 publisher 字串的時候，一不小心就丟了空格或者弄錯了大小寫，提交直接被拒。建議直接寫成配置檔案，別手敲。
+2. **缺少 `runFullTrust`**：應用啟動之後，沒法存取檔案系統，也拉不起子進程，表現成各種詭異的崩潰，排查起來，可費勁了。
+3. **圖標尺寸不全**：MakeAppx 不校驗，可商店審核會打回。`prepare-msix.js` 提前校驗，是個有效的防禦。
+4. **版本號不遞增**：商店拒絕接收相同或者更低的版本號，CI 流水線得保證每次構建都 bump。
+5. **在非 Windows 環境裡跑 maker-msix**：會找不到 `MakeAppx`，必須用 `windows-latest` runner。
+6. **簽名混亂**：自測用自簽證書，商店提交用空簽名讓微軟重簽，這兩條路徑要分開，別把自簽證書塞進提交包裡去。
+
+### 自動化建議
+
+第一次手動把全流程走完、每一步都摸清之後，強烈建議接上 GitHub Actions 做自動化。我們最後把版本解析、MSIX 構建、GitHub Release 發布、商店發布串成了一條流水線，每 4 小時檢查一次新版本。這部分細節，在我們另一篇文章《Windows 應用自動上架 Microsoft Store 的自動化實踐》裡有完整的拆解。
+
+如果你只是想先把應用掛上商店、商業化（訂閱 / 永久授權）之後再接，也可以看看我們《Electron 桌面應用如何接入 Microsoft Store 訂閱與永久許可證》那篇，那篇講的，是商店上架之後的商業化能力對接。
+
+## 參考資料
+
+- [Microsoft Store CLI 文件](https://github.com/microsoft/AppPublisher)
+- [electron-forge maker-msix](https://www.electronforge.io/config/makers/maker-msix)
+- [MSIX 文件](https://learn.microsoft.com/en-us/windows/msix/)
+- [HagiCode 官網](https://hagicode.com)
+- [HagiCode-org/site GitHub 仓库](https://github.com/HagiCode-org/site)
+
+## 總結
+
+圍繞「Electron 應用如何上架微軟商店：從 MSIX 打包到商店提交」，更穩妥的推進方式是先把關鍵配置、依賴邊界和落地路徑逐步跑通，再補齊優化細節。
+
+當目標、步驟和驗收點都明確之後，這類方案通常就能更順暢地進入實際交付。
