@@ -1,0 +1,294 @@
+---
+title: 對接 Reasonix 1.x 跑通 DeepSeek V4：ACP 模型選擇器接入實戰
+date: 2026-06-19
+tags: [Reasonix, DeepSeek, ACP, HagiCode, Agent Provider]
+---
+
+## 對接 Reasonix 1.x 跑通 DeepSeek V4：ACP 模型選擇器接入實戰
+
+> 本文聊聊在 HagiCode 裡怎麼把 Reasonix 1.x 這個本地 ACP CLI provider 切到 DeepSeek V4。重點其實也不在"接進來"，而是在 Reasonix 1.x 相比 0.x 那一刀的語義變化——啟動參數被砍到只剩一個 `-model`，憑證和策略全搬到 `reasonix.toml`，這中間踩的坑和驗證路徑，咱一點點說清楚。
+
+## 背景
+
+最近有人問了個挺具體的問題：在 HagiCode 裡怎麼對接 reasonix 1.x 版本來使用 deepseek v4。
+
+乍一看像個配置題，真翻代碼才發現，其實這是一道 CLI 語義遷移題。Reasonix 是 HagiCode 多 Agent Provider 體系裡的一個本地 ACP（Agent Communication Protocol）CLI。它在 HagiCode 的三層架構裡位置很清楚：
+
+- **HagiCode.Libs** —— `ReasonixProvider`、`ReasonixOptions`，封裝 `reasonix acp` 的進程啟動、ACP 握手、流式通知映射。
+- **hagicode-core** —— `ReasonixCliProvider` 薄適配器、`AIProviderType.ReasonixCli = 12`、`ReasonixGrain`、Hero 參數映射、健康監控。
+- **web** —— OpenAPI 類型、視覺映射、Hero 配置表單、多語言文案。
+
+整個接入鏈路在歸檔提案 `openspec/changes/archive/2026-06-06-integrate-reasonix-agent-provider` 裡已經全部落地了。所以問題就不再是"怎麼把 Reasonix 接進系統"，而是"接進來之後，怎麼把模型切到 DeepSeek V4"。
+
+關鍵的轉折點在於：Reasonix 1.x 和 0.x 的 ACP bootstrap 語義發生了一次根本變化。這個變化直接決定了你怎麼配 DeepSeek V4。畢竟語義這種東西，一旦變了，表面再像也是兩回事了。
+
+> 懸念先放這：為了把這套多 provider、多模型的複雜度理順，HagiCode 在 Reasonix 適配層做了一次"字段保留、語義遷移"的設計，稍後我會具體講為什麼這麼取捨。
+
+## 關於 HagiCode
+
+> 本文分享的方案來自我們在 [HagiCode](https://hagicode.com) 項目中的實踐經驗。
+>
+> HagiCode 是一個 AI 代碼助手項目，支持多種本地/遠程 Agent Provider。代碼開源在 [HagiCode-org/site](https://github.com/HagiCode-org/site)。
+
+## 分析
+
+### 1.x 把啟動參數砍到只剩一個
+
+直接看 `ReasonixProvider.BuildCommandArguments`：
+
+```csharp
+internal virtual IReadOnlyList<string> BuildCommandArguments(ReasonixOptions options)
+{
+    var arguments = new List<string> { "acp" };
+    // Reasonix 1.x reduced ACP bootstrap to a transport-scoped provider selector.
+    AppendOption(arguments, "-model", options.Model);
+    foreach (var argument in NormalizeExtraArguments(options.ExtraArguments))
+        arguments.Add(argument);
+    return arguments;
+}
+```
+
+那行註釋是題眼：1.x 把 ACP 啟動收斂成一個"transport-scoped 的 provider 選擇器"。翻譯成人話——啟動時唯一還有意義的 flag，就是 `-model` 了。
+
+而 0.x 時代那一票老 flag，被顯式過濾掉了：
+
+```csharp
+private static readonly HashSet<string> FilteredBootstrapFlags = new(StringComparer.OrdinalIgnoreCase)
+{
+    "-model", "-m", "--model",
+    "-dir", "--dir",
+    "-effort", "--effort",
+    "-budget", "--budget",
+    "-transcript", "--transcript",
+    "-mcp", "--mcp",
+    "-mcp-prefix", "--mcp-prefix",
+    "-yolo", "--yolo",
+    "--dangerously-skip-permissions",
+    "--no-proxy"
+};
+```
+
+單元測試也直接證明了這點。傳進去一堆 legacy flag，出來的命令行乾乾淨淨，也不報錯，只是默默丟掉：
+
+```csharp
+arguments.ShouldBe(
+[
+    "acp",
+    "-model", "deepseek-v4-flash"
+]);
+```
+
+### ReasonixOptions 字段還在，但語義變了
+
+這裡有個特別有意思的設計。`ReasonixOptions` 裡 `Effort`、`BudgetUsd`、`TranscriptPath`、`EnableYolo`、`McpServerSpecs`、`McpPrefix` 這些字段全都保留著，只是每個註釋都老老實實寫著"Reasonix 1.x ACP no longer accepts ... so this value is currently ignored"。
+
+這是典型的**字段保留、語義遷移**模式：調用方契約不破壞（0.x 代碼繼續能編譯、能傳值），可是運行時這些值會被靜悄悄丟棄。policy 類的東西（權限、MCP 插件、代理）被要求搬到 `reasonix.toml` 裡。
+
+打個比方，相當於你家原來的電燈開關還在牆上，可是裝修師傅把線路改了，現在開關變成了裝飾，真正的燈光控制搬到了智能家居面板上。開關看著沒變，按下去也不報錯，只是燈就是不亮了。
+
+所以接入 DeepSeek V4 的核心動作其實就一句話：**把模型 id 通過 `-model` selector 傳進去，把憑證/endpoint 配到 `reasonix.toml`**。
+
+### DeepSeek V4 怎麼進來
+
+在 HagiCode 的測試和 README 裡，DeepSeek 系列就是通過 `Model` 字段接入的標準用法：
+
+```csharp
+var reasonixOptions = new ReasonixOptions
+{
+    WorkingDirectory = "/path/to/repo",
+    Model = "deepseek-flash",
+    SessionId = "reasonix-session-123"
+};
+```
+
+測試裡反覆出現 `Model = "deepseek-v4-flash"`，對應生成的命令行就是 `reasonix acp -model deepseek-v4-flash`。具體模型 id（`deepseek-v4-flash`、`deepseek-flash` 等）要按你裝的 Reasonix 1.x 版本和 `reasonix.toml` 裡註冊的 provider 別名為準，畢竟別名的真假，Reasonix 自己心裡最清楚。
+
+### 工作目錄和會話恢復走 ACP，不走 CLI flag
+
+這是 1.x 的第二個語義變化，容易讓人懵。0.x 時代用 `--dir` 指定工作目錄，1.x 改成走 ACP 協議內的 `session/new` / `session/load`：
+
+```csharp
+var sessionHandle = await sessionClient.StartSessionAsync(
+    workingDirectory,
+    options.SessionId,
+    model: null,   // 模型選擇完全由啟動時的 -model 決定
+    startupCts.Token);
+```
+
+注意 `StartSessionAsync` 的 `model` 參數傳的是 `null`——模型選擇完全由啟動時的 `-model` 決定，session 級別不再覆蓋模型。`SessionId` 仍然是 provider-native 的連續性提示，用來 resume 會話而已。
+
+## 解決
+
+把上面的分析串成一條可執行路徑，分四步走吧。
+
+### 第一步：裝好 reasonix CLI
+
+Reasonix 是本地安裝、`IsPubliclyInstallable: false` 的 provider，不能用 npm 公開裝。先把 `reasonix` 可執行文件放到 PATH 裡。裝好之後用 HagiCode.Libs 自帶的 console 驗證一下：
+
+```bash
+# 跑 Ping 場景，執行 reasonix acp 握手並報告版本
+dotnet run --project src/HagiCode.Libs.Reasonix.Console -- --test-provider reasonix
+```
+
+握手失敗，多半是兩種情況：要么 PATH 沒找到 `reasonix`，要么 `reasonix.toml` 沒配。其實也沒別的理由了。
+
+### 第二步：在 reasonix.toml 裡配 DeepSeek V4 憑證
+
+1.x 不再接受 `--api-key`、`--base-url` 這類啟動 flag，模型提供商的 endpoint、密鑰、代理策略都要寫到 `reasonix.toml`。配置內容大致包括：
+
+- DeepSeek V4 的 API endpoint
+- DeepSeek 的 API key
+- 你想暴露給 `-model` selector 的別名（比如 `deepseek-v4-flash`）
+
+具體字段名以你裝的 Reasonix 版本文檔為準。HagiCode 這一側只負責把 `-model deepseek-v4-flash` 透傳過去，至於這個別名怎麼解析成真實模型，那就是 Reasonix 自己的事了——職責邊界劃得很清，誰也別越界。
+
+### 第三步：配置 HagiCode 的 ProviderConfiguration
+
+後端 `ReasonixCliProvider.ResolveModel` 的解析優先級是：request.Model 優先，否則走 `_config.Model`：
+
+```csharp
+private string? ResolveModel(AIRequest request)
+{
+    var model = string.IsNullOrWhiteSpace(request.Model)
+        ? _config.Model
+        : request.Model;
+    return string.IsNullOrWhiteSpace(model) ? null : model.Trim();
+}
+```
+
+所以在 `appsettings` 或運行時配置裡，把 provider 的 Model 設成 DeepSeek V4 的別名：
+
+```json
+{
+  "AIProvider": {
+    "Providers": {
+      "ReasonixCli": {
+        "Type": "ReasonixCli",
+        "Model": "deepseek-v4-flash",
+        "Settings": {}
+      }
+    }
+  }
+}
+```
+
+這裡有個特別容易踩的坑：`Settings` 裡只能放白名單內的 key：
+
+```csharp
+private static readonly IReadOnlyList<string> SupportedSettingKeys =
+[
+    "effort", "budgetUsd", "transcriptPath",
+    "enableYolo", "arguments", "startupTimeoutMs", "reasoning"
+];
+```
+
+`ValidateConfigurationOverrides` 會把白名單外的 key 直接拒絕。而且這些 key 在 1.x 裡大多被忽略（對應 `ReasonixOptions` 裡那些 ignored 字段），所以**千萬別把 DeepSeek 憑證塞進 Settings**，那不是它們該待的地方，憑證歸 `reasonix.toml`。
+
+### 第四步：用 console 做端到端驗證
+
+配置完直接用 Reasonix 專用 console 跑完整套件，把模型顯式指定成 DeepSeek V4：
+
+```bash
+# 默認套件：Ping / Simple Prompt / Complex Prompt / Session Resume 四個場景
+dotnet run --project src/HagiCode.Libs.Reasonix.Console -- \
+  --test-provider-full --model deepseek-v4-flash --repo .
+```
+
+四個場景全綠，說明模型選擇器、ACP 握手、流式通知、會話恢復全鏈路都通了。綠了，心裡也就踏實了。
+
+## 實踐
+
+### 前端 Hero 配置表單怎麼填
+
+如果你走的是 HagiCode 的 Hero 職業 UI 而不是直接改 appsettings，在 `HeroCliEquipmentForm` 裡選 Reasonix 後，表單字段是這些：
+
+- **binary**：默認 `reasonix`
+- **model**：填 `deepseek-v4-flash`（切到 DeepSeek V4 的關鍵字段）
+- **effort**：none / low / medium / high（1.x 忽略，但 UI 仍保留）
+- **budgetUsd**：數字（1.x 忽略）
+- **transcriptPath**：文本（1.x 忽略）
+- **enableYolo**：布爾（1.x 忽略，權限歸 toml）
+- **arguments**：透傳給 ACP 的額外參數
+- **startupTimeoutMs**：默認 15000
+
+真正影響 DeepSeek V4 行為的其實只有 `model` 一個字段，其餘在 1.x 下都是裝飾罷了。這也是 HagiCode 那個"字段保留、語義遷移"設計在 UI 上的體現——表單不破壞老用戶習慣，可是實際生效的字段收斂了。
+
+### 會話綁定與恢復
+
+`ReasonixCliProvider` 用 `ConcurrentDictionary<string, string>` 維護 session 綁定，binding key 由 cessionId、工作目錄、可執行路徑、模型一起算出來：
+
+```csharp
+var bindingKey = NormalizedAcpCliAdapter.BuildBindingKey(
+    effectiveRequest.CessionId,
+    options.WorkingDirectory,
+    options.ExecutablePath,
+    options.Model);
+```
+
+這意味著同一個會話如果中途切模型，binding key 會變，會被當成新會話。所以**接入 DeepSeek V4 後，整個會話生命週期內保持 model 別名穩定**，否則 resume 會斷。這點我實測踩過，血淚教訓，那滋味至今還記得。
+
+### 監控與降級
+
+Reasonix 在 `AgentCliMonitoringRegistry` 裡用 `Provider` 策略（不是 `Grain` 策略），畢竟它可能沒裝：
+
+```csharp
+new AgentCliMonitoringDescriptor
+{
+    CliId = "reasonix",
+    DisplayName = "Reasonix",
+    ProviderType = AIProviderType.ReasonixCli,
+    Strategy = Provider, // ping-based，走 PATH 發現
+    ExecutableCandidates = ["reasonix"]
+}
+```
+
+前端健康檢查會顯示 Reasonix 是否可用。如果 `reasonix` 不在 PATH，UI 要優雅降級成"不可用"——這套邏輯已經內置了，不用自己操心。
+
+### 幾個實戰注意點
+
+1. **模型別名的真實性**：`deepseek-v4-flash` 必須是 `reasonix.toml` 裡真實註冊的別名，否則 ACP 握手過了、發 prompt 還是會失敗。先用 console 驗證再上 Hero，別圖省事。
+2. **不要用 `arguments` 傳 legacy flag**：`NormalizeExtraArguments` 會把 `--effort`、`--budget` 這些過濾掉，傳了也白傳，徒勞而已。
+3. **憑證只在 toml**：API key、endpoint、代理、MCP 插件全部在 `reasonix.toml`，HagiCode 這一側的 Settings 白名單裡根本沒有這些字段。
+4. **startupTimeoutMs 可調**：DeepSeek V4 冷啟動如果慢，把 `startupTimeoutMs` 從默認 15000 調高，這個字段 1.x 是認的。
+5. **經濟系統歸到 claude 桶**：前端 `resolveEconomicSystemByExecutorType` 把 Reasonix 映射到 `'claude'` 桶，純展示用，不影響計費。
+
+### 一條最小驗證路徑
+
+如果只想最快確認 DeepSeek V4 能跑通，不碰 Hero UI：
+
+1. 裝 reasonix，配 `reasonix.toml`（DeepSeek endpoint + key + 別名）
+2. `appsettings` 裡 `ReasonixCli.Model = "deepseek-v4-flash"`
+3. 跑 `dotnet run --project src/HagiCode.Libs.Reasonix.Console -- --test-provider-full --model deepseek-v4-flash`
+4. 四個場景全綠，接入完成
+
+## 總結
+
+回到最初那個問題——"怎麼對接 reasonix 1.x 來用 deepseek v4"。
+
+答案其實也就一句：**把模型別名通過 `-model` selector 傳進去，把憑證和策略配到 `reasonix.toml`，別指望 CLI flag**。
+
+只是這一句背後，是 Reasonix 1.x 一次相當干脆的語義收斂：啟動參數砍到只剩 `-model`，工作目錄和會話恢復搬到 ACP 協議內，policy 全部下沉到 toml。HagiCode 這邊的適配層沒有硬剛這次變化，而是選了"字段保留、語義遷移"的溫和路線——老代碼繼續能編譯、能傳值，運行時靜默忽略，把生效的開關收斂到 `-model` 一個。
+
+這種取捨的好處是平滑遷移，代價是文檔得講清楚——這也是這篇文章存在的意義。你只要記住三件事：
+
+1. **模型走 `-model`**，DeepSeek V4 就是 `-model deepseek-v4-flash`
+2. **憑證走 toml**，別往 Settings 裡塞
+3. **會話內別切模型**，binding key 會變，resume 會斷
+
+HagiCode 選擇這麼設計 Reasonix 適配層，本質上是因為它要同時容納多個 provider、多個模型版本、多種部署形態。這種多語言、多平台的複雜度，正是我們在 HagiCode 裡反覆打磨 provider 適配策略的直接原因。
+
+## 參考資料
+
+- Reasonix Provider 實現：`repos/Hagicode.Libs/src/HagiCode.Libs.Providers/Reasonix/ReasonixProvider.cs`
+- Reasonix Options 字段語義：`repos/Hagicode.Libs/src/HagiCode.Libs.Providers/Reasonix/ReasonixOptions.cs`
+- 後端薄適配器：`repos/hagicode-core/src/PCode.ClaudeHelper/AI/Providers/ReasonixCliProvider.cs`
+- 接入提案歸檔：`openspec/changes/archive/2026-06-06-integrate-reasonix-agent-provider`
+- 後端 spec：`openspec/specs/reasonix-backend-integration/spec.md`
+- 單元測試（含 deepseek-v4-flash 用例）：`repos/Hagicode.Libs/tests/HagiCode.Libs.Providers.Tests/ReasonixProviderTests.cs`
+- HagiCode 官網：[hagicode.com](https://hagicode.com)
+
+## 總結
+
+圍繞"對接 Reasonix 1.x 跑通 DeepSeek V4：ACP 模型選擇器接入實戰"，更穩妥的推進方式是先把關鍵配置、依賴邊界和落地路徑逐步跑通，再補齊優化細節。
+
+當目標、步驟和驗收點都明確之後，這類方案通常就能更順暢地進入實際交付。

@@ -1,0 +1,294 @@
+---
+title: Reasonix 1.x와 DeepSeek V4 통합: ACP 모델 선택자 실전 가이드
+date: 2026-06-19
+tags: [Reasonix, DeepSeek, ACP, HagiCode, Agent Provider]
+---
+
+## Reasonix 1.x와 DeepSeek V4 통합: ACP 모델 선택자 실전 가이드
+
+> 이 글에서는 HagiCode에서 로컬 ACP CLI provider인 Reasonix 1.x를 DeepSeek V4로 전환하는 방법을 이야기합니다. 핵심은 "연결하는 것"이 아니라 Reasonix 1.x가 0.x와 비교해 가진 시맨틱 변화에 있습니다. 시작 파라미터가 `-model` 하나만 남게 되었고, 자격 증명과 정책은 전부 `reasonix.toml`로 이동했습니다. 이 과정에서 겪은 문제와 검증 경로를 차근차근 설명합니다.
+
+## 배경
+
+최근에 꽤 구체적인 질문을 받았습니다: HagiCode에서 reasonix 1.x 버전을 사용하여 deepseek v4를 연동하는 방법이 무엇인가요?
+
+처음에는 설정 문제처럼 보였지만, 코드를 살펴보니 실제로는 CLI 시맨틱 마이그레이션 문제였습니다. Reasonix는 HagiCode의 다중 Agent Provider 체계 내의 로컬 ACP (Agent Communication Protocol) CLI입니다. HagiCode의 3계층 아키텍처에서 위치가 명확합니다:
+
+- **HagiCode.Libs** —— `ReasonixProvider`、`ReasonixOptions`，`reasonix acp` 프로세스 시작、ACP 핸드셰이크、스트림 알림 매핑을 캡슐화합니다.
+- **hagicode-core** —— `ReasonixCliProvider` 얇은 어댑터、`AIProviderType.ReasonixCli = 12`、`ReasonixGrain`、Hero 파라미터 매핑、건강 모니터링.
+- **web** —— OpenAPI 유형、시각적 매핑、Hero 구성 양식、다국어 텍스트.
+
+전체 통합 체인은 아카이브된 제안 `openspec/changes/archive/2026-06-06-integrate-reasonix-agent-provider`에 이미 구현되어 있습니다. 따라서 문제는 "Reasonix를 시스템에 통합하는 방법"이 아니라 "통합한 후 모델을 DeepSeek V4로 전환하는 방법"이 되었습니다.
+
+핵심 전환점은 Reasonix 1.x와 0.x의 ACP bootstrap 시맨틱이 근본적으로 변했다는 점입니다. 이 변화가 DeepSeek V4를 구성하는 방법을 직접 결정합니다.毕竟 시맨틱이란 게 일단 바뀌면, 표면적으로 비슷해도 다른 일이 됩니다.
+
+> 의문은 여기에 남겨둡니다: 다중 provider、다중 모델의 복잡성을 정리하기 위해 HagiCode는 Reasonix 어댑터 레이어에서 "필드 보존, 시맨틱 마이그레이션" 설계를 했습니다. 나중에 왜 이렇게 선택했는지 구체적으로 설명하겠습니다.
+
+## HagiCode에 대하여
+
+> 이 글에서 공유하는 솔루션은 우리가 [HagiCode](https://hagicode.com) 프로젝트에서 얻은 실천 경험에서 왔습니다.
+>
+> HagiCode는 다양한 로컬/원격 Agent Provider를 지원하는 AI 코드 어시스턴트 프로젝트입니다. 코드는 [HagiCode-org/site](https://github.com/HagiCode-org/site)에 오픈 소스로 되어 있습니다.
+
+## 분석
+
+### 1.x가 시작 파라미터를 하나만 남게 줄였습니다
+
+직접 `ReasonixProvider.BuildCommandArguments`를 보세요:
+
+```csharp
+internal virtual IReadOnlyList<string> BuildCommandArguments(ReasonixOptions options)
+{
+    var arguments = new List<string> { "acp" };
+    // Reasonix 1.x reduced ACP bootstrap to a transport-scoped provider selector.
+    AppendOption(arguments, "-model", options.Model);
+    foreach (var argument in NormalizeExtraArguments(options.ExtraArguments))
+        arguments.Add(argument);
+    return arguments;
+}
+```
+
+그 주석이 핵심입니다: 1.x는 ACP 시작을 "transport-scoped provider 선택자" 하나로 수렴했습니다. 사람 말로 번역하면——시작 시 의미 있는 flag는 `-model` 하나뿐입니다.
+
+반면 0.x 시대의 그 옛날 flag들은 명시적으로 필터링되었습니다:
+
+```csharp
+private static readonly HashSet<string> FilteredBootstrapFlags = new(StringComparer.OrdinalIgnoreCase)
+{
+    "-model", "-m", "--model",
+    "-dir", "--dir",
+    "-effort", "--effort",
+    "-budget", "--budget",
+    "-transcript", "--transcript",
+    "-mcp", "--mcp",
+    "-mcp-prefix", "--mcp-prefix",
+    "-yolo", "--yolo",
+    "--dangerously-skip-permissions",
+    "--no-proxy"
+};
+```
+
+단위 테스트도 이 점을 직접 증명합니다. 레거시 flag를 한 무더기 넣어도 나오는 명령줄은 깨끗하고 에러도 없이 조용히 버려집니다:
+
+```csharp
+arguments.ShouldBe(
+[
+    "acp",
+    "-model", "deepseek-v4-flash"
+]);
+```
+
+### ReasonixOptions 필드는 여전히 있지만 시맨틱이 바뀌었습니다
+
+여기 아주 흥미로운 설계가 있습니다. `ReasonixOptions`에서 `Effort`、`BudgetUsd`、`TranscriptPath`、`EnableYolo`、`McpServerSpecs`、`McpPrefix` 같은 필드는 전부 보존되어 있지만, 각 주석에는 "Reasonix 1.x ACP no longer accepts ... so this value is currently ignored"라고 써 있습니다.
+
+이것은 전형적인 **필드 보존, 시맨틱 마이그레이션** 패턴입니다: 호출자 계약은 파괴되지 않습니다（0.x 코드는 계속 컴파일되고 값 전달 가능），그러나 런타임에 이 값들은 조용히 버려집니다. policy 클래스的东西（권한、MCP 플러그인、프록시）는 `reasonix.toml`로 이동해야 합니다.
+
+비유하자면, 당신 집의 원래 전등 스위치는 벽에 여전히 있지만, 인테리어 업체가 배선을 바꿔서 이제 스위치는 장식이 되고 진짜 조명 제어는 스마트 홈 패널로 이동했습니다. 스위치는 변하지 않았고 눌러도 에러가 없지만, 전등은 켜지지 않습니다.
+
+따라서 DeepSeek V4 통합의 핵심 동작은 사실 한 문장입니다: **모델 id를 `-model` selector를 통해 전달하고, 자격 증명/endpoint를 `reasonix.toml`에 구성합니다.**
+
+### DeepSeek V4가 어떻게 들어옵니까
+
+HagiCode의 테스트와 README에서 DeepSeek 시리즈는 `Model` 필드를 통해 통합하는 표준 사용법입니다:
+
+```csharp
+var reasonixOptions = new ReasonixOptions
+{
+    WorkingDirectory = "/path/to/repo",
+    Model = "deepseek-flash",
+    SessionId = "reasonix-session-123"
+};
+```
+
+테스트에서 `Model = "deepseek-v4-flash"`가 반복적으로 나타나고, 이에 해당해 생성된 명령줄은 `reasonix acp -model deepseek-v4-flash`입니다. 구체적인 모델 id（`deepseek-v4-flash`、`deepseek-flash` 등）는 당신이 설치한 Reasonix 1.x 버전과 `reasonix.toml`에 등록된 provider 별칭을 따라야 합니다.毕竟 별칭의 진위는 Reasonix가 가장 잘 알고 있습니다.
+
+### 작업 디렉터리와 세션 복구는 ACP를 따르고, CLI flag를 따르지 않습니다
+
+이것은 1.x의 두 번째 시맨틱 변화이고, 사람을 쉽게 혼란스럽게 만듭니다. 0.x 시대에는 `--dir`로 작업 디렉터리를 지정했고, 1.x는 ACP 프로토콜 내의 `session/new` / `session/load`를 따릅니다:
+
+```csharp
+var sessionHandle = await sessionClient.StartSessionAsync(
+    workingDirectory,
+    options.SessionId,
+    model: null,   // 모델 선택은 전적으로 시작 시의 -model에 의해 결정됩니다
+    startupCts.Token);
+```
+
+`StartSessionAsync`의 `model` 파라미터에 전달되는 것은 `null`입니다——모델 선택은 전적으로 시작 시의 `-model`에 의해 결정되고, 세션 레벨에서는 더 이상 모델을 덮어쓰지 않습니다. `SessionId`는 여전히 provider-native 연속성 힌트이고, 세션을 resume하는 데 사용됩니다.
+
+## 솔루션
+
+위의 분석을 실행 가능한 경로로 연결해서, 4단계로 나누어 진행합시다.
+
+### 첫 번째 단계: reasonix CLI 설치
+
+Reasonix는 로컬 설치、`IsPubliclyInstallable: false` provider이고 npm으로 공개 설치할 수 없습니다. 먼저 `reasonix` 실행 파일을 PATH에 넣으세요. 설치 후 HagiCode.Libs 자체 console로 검증하세요:
+
+```bash
+# Ping 시나리오 실행, reasonix acp 핸드셰이크를 수행하고 버전 보고
+dotnet run --project src/HagiCode.Libs.Reasonix.Console -- --test-provider reasonix
+```
+
+핸드셰이크 실패는 대부분 두 가지 상황입니다: PATH에서 `reasonix`를 찾지 못했거나 `reasonix.toml`을 구성하지 않았습니다. 사실 다른 이유는 없습니다.
+
+### 두 번째 단계: reasonix.toml에서 DeepSeek V4 자격 증명 구성
+
+1.x는 더 이상 `--api-key`、`--base-url` 같은 시작 flag를 받지 않습니다. 모델 공급자의 endpoint、키、프록시 정책은 전부 `reasonix.toml`에 써야 합니다. 구성 내용은 대략 다음을 포함합니다:
+
+- DeepSeek V4의 API endpoint
+- DeepSeek의 API key
+- `-model` selector에 노출하고 싶은 별칭（예: `deepseek-v4-flash`）
+
+구체적인 필드명은 당신이 설치한 Reasonix 버전 문서를 따르세요. HagiCode 측은 `-model deepseek-v4-flash`만 통과 전달하고, 이 별칭을 어떻게 실제 모델로 해석하는지는 Reasonix 자신의 일입니다——책임 경계가 매우 명확하고, 누구도 넘지 않습니다.
+
+### 세 번째 단계: HagiCode의 ProviderConfiguration 구성
+
+백엔드 `ReasonixCliProvider.ResolveModel`의 해석 우선순위는: request.Model 우선, 그렇지 않으면 `_config.Model`:
+
+```csharp
+private string? ResolveModel(AIRequest request)
+{
+    var model = string.IsNullOrWhiteSpace(request.Model)
+        ? _config.Model
+        : request.Model;
+    return string.IsNullOrWhiteSpace(model) ? null : model.Trim();
+}
+```
+
+따라서 `appsettings` 또는 런타임 구성에서 provider의 Model을 DeepSeek V4의 별칭으로 설정하세요:
+
+```json
+{
+  "AIProvider": {
+    "Providers": {
+      "ReasonixCli": {
+        "Type": "ReasonixCli",
+        "Model": "deepseek-v4-flash",
+        "Settings": {}
+      }
+    }
+  }
+}
+```
+
+여기에 아주 쉽게 빠지는 구멍이 있습니다: `Settings`에는 화이트리스트 내의 key만 넣을 수 있습니다:
+
+```csharp
+private static readonly IReadOnlyList<string> SupportedSettingKeys =
+[
+    "effort", "budgetUsd", "transcriptPath",
+    "enableYolo", "arguments", "startupTimeoutMs", "reasoning"
+];
+```
+
+`ValidateConfigurationOverrides`는 화이트리스트 외의 key를 직접 거부합니다. 그리고 이 key들은 대부분 1.x에서 무시됩니다（`ReasonixOptions`의 그 ignored 필드에 해당），따라서 **절대 DeepSeek 자격 증명을 Settings에 넣지 마세요**，그곳은 그들이 있어야 할 곳이 아닙니다. 자격 증명은 `reasonix.toml`에 속합니다.
+
+### 네 번째 단계: console로 엔드 투 엔드 검증
+
+구성 후 Reasonix 전용 console로 전체 스위트를 실행하고 모델을 명시적으로 DeepSeek V4로 지정하세요:
+
+```bash
+# 기본 스위트: Ping / Simple Prompt / Complex Prompt / Session Resume 4개 시나리오
+dotnet run --project src/HagiCode.Libs.Reasonix.Console -- \
+  --test-provider-full --model deepseek-v4-flash --repo .
+```
+
+네 개 시나리오가 전부 통과하면, 모델 선택자、ACP 핸드셰이크、스트림 알림、세션 복구 전체 체인이 연결된 것입니다. 통과하면 마음이 편안해집니다.
+
+## 실천
+
+### 프론트엔드 Hero 구성 양식 작성 방법
+
+만약 appsettings를 직접 수정하는 대신 HagiCode의 Hero 직업 UI를 사용한다면, `HeroCliEquipmentForm`에서 Reasonix를 선택한 후 양식 필드는 다음과 같습니다:
+
+- **binary**: 기본값 `reasonix`
+- **model**: `deepseek-v4-flash`를 입력（DeepSeek V4 전환의 핵심 필드）
+- **effort**: none / low / medium / high（1.x는 무시하지만 UI는 여전히 보존）
+- **budgetUsd**: 숫자（1.x는 무시）
+- **transcriptPath**: 텍스트（1.x는 무시）
+- **enableYolo**: 불리언（1.x는 무시, 권한은 toml에 속함）
+- **arguments**: ACP에 전달되는 추가 파라미터
+- **startupTimeoutMs**: 기본값 15000
+
+실제로 DeepSeek V4 동작에 영향을 미치는 필드는 사실 `model` 하나뿐이고, 나머지는 1.x에서는 장식일 뿐입니다. 이것도 HagiCode의 "필드 보존, 시맨틱 마이그레이션" 설계가 UI에서 구현된 것입니다——양식은 기존 사용자 습관을 파괴하지 않지만, 실제로 유효한 필드는 수렴되었습니다.
+
+### 세션 바인딩과 복구
+
+`ReasonixCliProvider`는 `ConcurrentDictionary<string, string>`으로 세션 바인딩을 유지하고, binding key는 cessionId、작업 디렉터리、실행 경로、모델에서 함께 계산됩니다:
+
+```csharp
+var bindingKey = NormalizedAcpCliAdapter.BuildBindingKey(
+    effectiveRequest.CessionId,
+    options.WorkingDirectory,
+    options.ExecutablePath,
+    options.Model);
+```
+
+이것은 동일한 세션이 중간에 모델을 전환하면 binding key가 변하고, 새 세션으로 간주된다는 것을 의미합니다. 따라서 **DeepSeek V4 통합 후 전체 세션 수명 주기 내에서 model 별칭을 안정적으로 유지하세요**，그렇지 않으면 resume이 끊깁니다. 이 점은 제가 실제로 겪었고, 피눈물의 교훈입니다.
+
+### 모니터링과 다운그레이드
+
+Reasonix는 `AgentCliMonitoringRegistry`에서 `Provider` 전략을 사용합니다（`Grain` 전략이 아닌），毕竟 설치되지 않을 수 있습니다:
+
+```csharp
+new AgentCliMonitoringDescriptor
+{
+    CliId = "reasonix",
+    DisplayName = "Reasonix",
+    ProviderType = AIProviderType.ReasonixCli,
+    Strategy = Provider, // ping-based，PATH 발견 따르기
+    ExecutableCandidates = ["reasonix"]
+}
+```
+
+프론트엔드 건강 검사는 Reasonix를 사용할 수 있는지 표시합니다. 만약 `reasonix`가 PATH에 없으면 UI는 우아하게 "사용할 수 없음"으로 다운그레이드됩니다——이 로직은 이미 내장되어 있고, 걱정할 필요가 없습니다.
+
+### 몇 가지 실전 주의점
+
+1. **모델 별칭의 진실성**: `deepseek-v4-flash`는 반드시 `reasonix.toml`에 실제 등록된 별칭이어야 합니다. 그렇지 않으면 ACP 핸드셰이크는 통과하지만 prompt 발송은 실패합니다. 먼저 console로 검증한 후 Hero에 진입하세요. 편한 길을 찾지 마세요.
+2. **`arguments`로 legacy flag를 전달하지 마세요**: `NormalizeExtraArguments`는 `--effort`、`--budget` 같은 것들을 필터링합니다. 전달해도 소용없고 헛수고일 뿐입니다.
+3. **자격 증명은 오직 toml에만 있습니다**: API key、endpoint、프록시、MCP 플러그인은 전부 `reasonix.toml`에 있고, HagiCode 측의 Settings 화이트리스트에는 이런 필드가 전혀 없습니다.
+4. **startupTimeoutMs는 조정 가능합니다**: DeepSeek V4 콜드 시작이 느리면 `startupTimeoutMs`를 기본값 15000에서 높이세요. 이 필드는 1.x가 인식합니다.
+5. **경제 시스템은 claude 버킷에 속합니다**: 프론트엔드 `resolveEconomicSystemByExecutorType`은 Reasonix를 `'claude'` 버킷에 매핑하고, 순수 전용 표시이고, 과금에 영향을 미치지 않습니다.
+
+### 최소 검증 경로 하나
+
+만약 DeepSeek V4가 실행될 수 있는지 가장 빨리 확인하고 싶고 Hero UI를 건드리지 않으려면:
+
+1. reasonix 설치、`reasonix.toml` 구성（DeepSeek endpoint + key + 별칭）
+2. `appsettings`에서 `ReasonixCli.Model = "deepseek-v4-flash"`
+3. `dotnet run --project src/HagiCode.Libs.Reasonix.Console -- --test-provider-full --model deepseek-v4-flash` 실행
+4. 네 개 시나리오 전부 통과, 통합 완료
+
+## 요약
+
+처음의 그 질문으로 돌아가서——"reasonix 1.x를 사용하여 deepseek v4를 연동하는 방법".
+
+답은 사실 한 문장입니다: **모델 별칭을 `-model` selector를 통해 전달하고, 자격 증명과 정책을 `reasonix.toml`에 구성하세요. CLI flag를 기대하지 마세요.**
+
+하지만 이 한 문장 뒤에는 Reasonix 1.x의 아주 단호한 시맨틱 수렴이 있습니다: 시작 파라미터가 `-model` 하나만 남게 줄어들고, 작업 디렉터리와 세션 복구는 ACP 프로토콜 내로 이동하고, policy는 전부 toml로 내려갑니다. HagiCode 측의 어댑터 레이어는 이 변화에 강경하지 않고 "필드 보존, 시맨틱 마이그레이션"의 온화한 경로를 선택했습니다——기존 코드는 계속 컴파일되고 값 전달 가능, 런타임에 조용히 무시하고, 유효한 스위치를 `-model` 하나로 수렴합니다.
+
+이런 선택의 장점은 매끄러운 마이그레이션이고, 대가는 문서를 명확하게 설명해야 한다는 것입니다——이것도 이 글이 존재하는 의미입니다. 당신은 세 가지만 기억하면 됩니다:
+
+1. **모델은 `-model` 따릅니다**，DeepSeek V4는 `-model deepseek-v4-flash`입니다
+2. **자격 증명은 toml 따릅니다**，Settings에 넣지 마세요
+3. **세션 내에서는 모델을 전환하지 마세요**，binding key가 변하고 resume이 끊깁니다
+
+HagiCode가 Reasonix 어댑터 레이어를 이렇게 설계한 것은 본질적으로 다중 provider、다중 모델 버전、다양한 배포 형태를 동시에 수용해야 하기 때문입니다. 이런 다국어、다중 플랫폼의 복잡성은 바로 우리가 HagiCode에서 반복적으로打磨하는 provider 어댑터 전략의 직접적인 원인입니다.
+
+## 참고자료
+
+- Reasonix Provider 구현: `repos/Hagicode.Libs/src/HagiCode.Libs.Providers/Reasonix/ReasonixProvider.cs`
+- Reasonix Options 필드 시맨틱: `repos/Hagicode.Libs/src/HagiCode.Libs.Providers/Reasonix/ReasonixOptions.cs`
+- 백엔드 얇은 어댑터: `repos/hagicode-core/src/PCode.ClaudeHelper/AI/Providers/ReasonixCliProvider.cs`
+- 통합 제안 아카이브: `openspec/changes/archive/2026-06-06-integrate-reasonix-agent-provider`
+- 백엔드 spec: `openspec/specs/reasonix-backend-integration/spec.md`
+- 단위 테스트（deepseek-v4-flash 사례 포함）: `repos/Hagicode.Libs/tests/HagiCode.Libs.Providers.Tests/ReasonixProviderTests.cs`
+- HagiCode 공식 사이트: [hagicode.com](https://hagicode.com)
+
+## 요약
+
+"Reasonix 1.x와 DeepSeek V4 통합: ACP 모델 선택자 실전 가이드"를 중심으로, 더 안정적인 추진 방식은 핵심 구성、의존 경계 및 랜딩 경로를 단계적으로 실행한 후, 최적화 세부사항을 보완하는 것입니다.
+
+목표、단계 및 검수점이 명확해지면, 이런 솔루션은 보통 더 원활하게 실제 납품에 들어갈 수 있습니다.
