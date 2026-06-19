@@ -1,0 +1,264 @@
+---
+title: Pi Agent Integration Implementation: Message Parsing, Retry, and Cancellation
+date: 2026-06-19
+tags: [hagicode, pi, cli, provider]
+---
+
+## Pi Agent Integration Implementation: Message Parsing, Retry, and Cancellation
+
+> Integrating a CLI-based AI agent inevitably involves three things: how to translate its private event stream into stable messages, who is responsible for retry after failure, and how to cleanly stop the process when the user clicks cancel. These three things, when you get down to it, are just about "clarifying responsibilities"—it's only when you actually do it that you realize how deep the water goes.
+
+## Background
+
+Recently I've been working on an AI code assistant project, and one of the agents I need to integrate is [pi](https://github.com/earendil-works/pi-coding-agent). It's a TUI/CLI coding agent that outputs JSON events line by line to stdout when running. Sounds simple—just start the process, read the output, and parse it—but when you actually get started, you'll find that "integrating an agent CLI" is completely different from "integrating a regular CLI."
+
+With a regular CLI, you read stdout, get an exit code, and that's it. But agent CLI has three particularly frustrating characteristics:
+
+First, its event stream is a **private protocol**. `turn_start`, `session`, `message_update`, `message_end`, `turn_end`, `agent_end`—these are defined by pi itself, not any industry standard. Every consumer layer that wants to use it has to handle them individually, effectively leaking pi's internal details everywhere. It's like looking at someone from a distance—you think you see them clearly, but you're only seeing the side they want to show you.
+
+Second, its failure semantics are **particularly ambiguous**. The agent might encounter network jitter, rate limiting, or process crashes while running. Should you retry? Where? Will retrying mess up already-half-written session state? These are architectural decisions, not something you can solve by quickly writing a `for` loop.
+
+Third, it's **long-running and interruptible**. A turn can run for tens of seconds or even minutes, with users wanting to cancel at any point. When canceled, the process shouldn't become an orphan, tool calls shouldn't be left half-finished, and already-emitted content can't be lost. The water here runs much deeper than you'd imagine.
+
+To address these pain points, we spent time rationalizing the integration path. I'll get into the specifics soon, but here's a spoiler: the real difficulty isn't "starting the process"—it's "clarifying responsibilities."
+
+## About HagiCode
+
+> The solution shared in this article comes from the [HagiCode](https://hagicode.com) project—an AI code assistant supporting multiple models and multiple agent CLI backends. GitHub repository: [HagiCode-org/site](https://github.com/HagiCode-org/site), feel free to give it a Star. All the code and pitfalls discussed below are actually running in this project. Writing this out is just leaving a memento for myself.
+
+## Overall Layering
+
+HagiCode splits AI capability integration into two layers:
+
+- The bottom layer is `Hagicode.Libs`, providing reusable provider primitives `ICliProvider<TOptions>`, specifically responsible for "starting a CLI agent and normalizing its output into a shared message stream."
+- The upper layer is `hagicode-core`, providing project-level thin adapters `IAIProvider`, responsible for "translating business requests into provider parameters, consuming shared message streams, and exposing unified streaming chunks externally."
+
+Pi's integration follows this path. The bottom layer `PiProvider` starts the pi process, reads the JSON event stream, and normalizes it into shared messages; the upper layer `PiCliProvider` translates `AIRequest` into `PiOptions`, consumes `CliMessage`, and emits `AIStreamingChunk` externally.
+
+These three things—message parsing, retry, cancellation—fall into three different places: `PiJsonEventMapper`, an oddly named archived proposal, and `CliProcessManager`. Let's go through them one by one.
+
+## Message Parsing: How Pi's Private Events Become Shared Messages
+
+pi outputs JSON events line by line under `--mode json --print`. This event set is private to pi and absolutely must not leak directly to the upper layer, otherwise every consumer would have to couple with pi's internal details, and the entire project would need to change whenever pi upgrades its event structure. This kind of leakage is just like writing your heart on your face—others find it exhausting to look at, and you're not necessarily comfortable either.
+
+We use `PiJsonEventMapper` to do a layer of translation, normalizing pi's events into shared `CliMessage`. `CliMessage` is defined in `HagiCode.Libs.Core/Transport/CliMessage.cs`, with a very simple structure—it's just a `(Type, Content)` record. The mapping relationship is roughly as follows:
+
+| pi Event | Shared Message | Purpose |
+|---|---|---|
+| `session` | `session.started` / `session.resumed` | Session lifecycle |
+| `message_update` (text type) | `assistant` | Streaming body increment |
+| `message_update` (thinking type) | `assistant.thought` | Thought chain |
+| `message_update` (tool type) | `tool.call` / `tool.update` | Tool call initiation |
+| `message_end` / `turn_end` (toolResult) | `tool.completed` / `tool.failed` | Tool results |
+| `turn_end` / `agent_end` | `terminal.completed` | End of current turn |
+| Non-zero exit / Parse failure | `terminal.failed` | Terminal failure |
+
+This table is just a quick reference. There are two key techniques inside that were only discovered after stumbling into pitfalls, worth expanding on.
+
+### Technique One: Converting Cumulative Snapshots to Deltas
+
+This is the easiest place to crash. pi's `message_update` event doesn't send increments, but rather **cumulative full text**—every time a token comes, it resends "the complete text up to now."
+
+If you directly forward received content to the frontend, users will see content repeatedly: the first line is "you", the second is "hello", the third is "hello,", the fourth is "hello, wor"... the frontend will think these are four independent outputs. Repetition, when you think about it, is fresh the first time, but becomes tedious after ten times.
+
+The solution is prefix comparison to calculate the true increment:
+
+```csharp
+// Key: pi sends cumulative snapshots, not increments
+// Use prefix comparison to extract the increment, otherwise the frontend will see repeated content
+if (text.StartsWith(_lastAssistantTextSnapshot, StringComparison.Ordinal))
+{
+    var delta = text[_lastAssistantTextSnapshot.Length..];
+    _lastAssistantTextSnapshot = text;
+    return delta.Length == 0 ? null : delta;
+}
+```
+
+There's also a hidden pitfall here: **cross-turn prefix replay**. When pi finishes a tool call and the assistant continues speaking, it will resend that previous text from the beginning again. If you only record one global snapshot, you'll treat the replayed content as an increment, causing a repetition after the tool call. `PiProviderTests` has a specific test case `ExecuteAsync_deduplicates_replayed_assistant_prefix_after_tool_turns` covering this scenario. In other words, snapshots before and after tool calls need to be aligned in processing, not each acting independently.
+
+### Technique Two: Buffering Thinking Until Turn End Before Sending
+
+Thought chains (thinking) cannot be emitted out upon receiving each token. pi will stuff a bunch of thought fragments in the middle of tool calls. If forwarded in real-time, the stream order becomes a mess—一会儿是 assistant 正文, 一会儿是思考碎片, 一会儿又是 tool.call. Does this make sense? Actually it doesn't, it just adds chaos.
+
+Our approach is: when receiving thinking events, first put them in `BufferThinkingSnapshot` for temporary storage, and only after `message_end` or `turn_end` and `stopReason != "toolUse"`, then uniformly `DrainBufferedThinkingMessages`. This way thought fragments in the middle of tool calls won't pollute the main stream, and the complete thought process is given all at once when the turn ends.
+
+### Fault Tolerance: Bad Lines Can't Crash the Stream
+
+Agent CLI is not the ideal system from textbooks—it occasionally spits out a non-JSON line, or a JSON without a `type` field. If you throw an exception here, the entire stream dies and the user sees nothing. After all, the real world has some imperfections—who can guarantee every line is well-behaved?
+
+Our strategy is: any line that fails parsing doesn't interrupt the stream, but is collected into `_invalidOutputLines`. After the process ends, in `Complete()`, these "bad lines" are spliced into the diagnostic text of `terminal.failed`. This way when users see an error, they can directly see what garbage pi actually spit out, not a dry "parse error".
+
+## Retry: If Provider Layer Doesn't Do It, Who Does?
+
+This is the easiest pitfall in the entire integration. Intuitively "integrating a CLI should come with retry", yet HagiCode in an archived proposal **actively removed** all automatic retry from the provider layer. The proposal is called `remove-provider-auto-retry-support`.
+
+### Why No Automatic Retry
+
+The proposal background is written very straightforwardly. Retry logic was originally scattered in two places: one copy in `Hagicode.Libs` (OpenCode-style fresh-runtime replay), another copy in `hagicode-core` (`ProviderErrorAutoRetryCoordinator`). Both sides did their own thing, causing "whether to retry or not" to become a hidden implicit behavior inside the provider, silently changing failure timing, session continuation methods, and chat state flow.
+
+Think about it and your head hurts: a user sends a message, the provider internally retries three times by itself, the first two fail and the third succeeds. The upper layer has no idea what happened in the middle, and session state, token counting, and UI progress all don't match. This kind of implicit behavior, how should I put it, is just chronic poison in the architecture.
+
+So the boundary was converged into one sentence:
+
+> Provider converges back to single-attempt semantics, caller needs to treat no-retry state as normal single-execution result.
+
+### What Does This Look Like for PiProvider
+
+In code, it's three things:
+
+- `PiOptions` has **no retry-related fields at all**—no `maxAttempts`, no `retryDelay`, no `retryClassifier`.
+- `ExecuteAsync` ends after running one pi process, failure directly gives `terminal.failed`.
+- Those classifiers previously serving automatic retry (like `ClaudeCodeRetryableTerminalFailureClassifier`, `CodexRetryableTerminalFailureClassifier`, etc.) as long as they purely served automatic retry, were all removed from the active path.
+
+But please note, **retry capability hasn't disappeared, just moved up**. The proposal explicitly writes "leaving a stable boundary for subsequent unified takeover of retry by higher layers". The configuration `providerErrorAutoRetry` DTO, normalization, serialization, and frontend settings page round-trip are all retained, just that it no longer drives provider execution. After all, some things aren't really unwanted, just kept in a different way.
+
+### What If You Need to Retry
+
+If you want to add retry on top of pi, the correct approach is to do it at the caller of `PiCliProvider`—for example, your session orchestration layer (in HagiCode it's Orleans's `SessionGrain`, on the frontend it might be the chat orchestration layer). After getting `terminal.failed`, judge for yourself whether it's retryable, decide delay and count yourself, then send `ExecuteAsync` again.
+
+A minimum viable pattern looks like this:
+
+```csharp
+// Put retry logic at the caller, don't stuff it back into PiProvider
+// Otherwise it will destroy the "single attempt" boundary just established by provider
+async Task<AIResponse> ExecuteWithRetryAsync(AIRequest req, int maxAttempts, CancellationToken ct)
+{
+    for (var attempt = 1; ; attempt++)
+    {
+        var response = await provider.ExecuteAsync(req, ct);
+
+        // Return on success or reaching limit
+        if (response.FinishReason != FinishReason.Unknown || attempt >= maxAttempts)
+            return response;
+
+        // Only retry retryable terminal failures (network, 5xx, process crash)
+        // model rejected, auth failure, these retries are meaningless too, don't retry
+        await Task.Delay(TimeSpan.FromSeconds(Math.Pow(2, attempt)), ct);
+    }
+}
+```
+
+The classification logic for "retryable" is no longer in the provider, the caller defines it themselves. `providerErrorAutoRetry` configuration (maxAttempts, retryDelay, enabled) can still be read from the frontend settings page, but what actually drives retry is your orchestration layer, not `PiProvider`. Please recite this three times.
+
+## Cancellation: Token Passthrough + Three-Stage Shutdown
+
+For cancellation, PiProvider itself implements almost nothing, fully delegating to `CliProcessManager`. PiProvider only handles two things: passing down the `CancellationToken`, and doing cleanup when exceptions occur.
+
+### Full-Chain Passthrough
+
+The chain looks like this, passed all the way to the bottom:
+
+```
+Caller CancellationToken
+  → PiCliProvider.StreamCoreAsync(cancellationToken)
+  → PiProvider.ExecuteProcessAsync([EnumeratorCancellation] cancellationToken)
+  → ReadLineAsync(cancellationToken) / WaitForExitAsync(cancellationToken)
+  → On exception _processManager.StopAsync(handle, CancellationToken.None)
+```
+
+Note the last line: when cleaning up, `CancellationToken.None` is used, not the token passed in by the user. This is a detail, but extremely important.
+
+The reason is: the user's token **has already been cancelled**. If you use this already-cancelled token to do cleanup, the cleanup task will be immediately cancelled, and the process becomes an orphan—pi is still running in the background, no one collects it, CPU and memory are wasted. So cleanup must use `CancellationToken.None`, ensuring cleanup actions can definitely complete. It's just like with people, some things need to be properly wrapped up only after they completely stop, otherwise it's just leaving a mess.
+
+### Three-Stage Progressive Shutdown
+
+`CliProcessManager.StopProcessAsync` is a three-stage progressive shutdown process, with time constants defined at the top of the file:
+
+```csharp
+// Patience for graceful stop: first give the process time to wrap up itself
+private static readonly TimeSpan GracefulStopTimeout = TimeSpan.FromSeconds(2);
+// Patience to wait for process to truly exit after force kill
+private static readonly TimeSpan StopWaitTimeout = TimeSpan.FromSeconds(5);
+```
+
+The three stages progress like this:
+
+1. **Interrupt signal**. `TryInterruptAsync` first writes a `\u0003` to stdin (that's the Ctrl+C character), and under Unix additionally `kill -INT <pid>`. This step is to let pi gracefully wrap up itself—it can sense the interruption and finish what it's writing.
+2. **Graceful wait**. Wait at most 2 seconds to see if the process exits by itself.
+3. **Force kill**. If it hasn't exited, directly `Process.Kill(entireProcessTree: true)`, killing the entire process tree together, then wait at most 5 seconds to confirm it's truly dead.
+
+Why `entireProcessTree: true`? Because when pi runs tools it spawns child processes—for example, local model processes routed by the provider, bash subprocesses running. Killing only the parent process leaves child processes as orphans continuing to run. Killing the whole tree together is clean.
+
+Under Windows there's no SIGINT, can only rely on the Ctrl+C character, so cross-platform behavior will differ, keep this in mind.
+
+### PiProvider's Exception Cleanup
+
+PiProvider's `ExecuteProcessAsync` when `ReadLineAsync` throws an exception, uses `ExceptionDispatchInfo.Capture` to temporarily store the exception, jumps out of the loop to call `StopAsync` to clean up the process, then `pendingException.Throw()` re-throws the original exception to the upper layer.
+
+Why store and then throw? Because if thrown directly, the process hasn't had time to be collected and becomes an orphan; if thrown before `StopAsync`, the cleanup logic can't run at all. Store it temporarily, first ensure the process is definitely collected, then preserve the original `OperationCanceledException` semantics completely for the caller—the caller getting this exception can judge "oh, user actively cancelled", not "an error occurred".
+
+## Unified Contract for Startup Failures
+
+There's another detail worth mentioning separately. Process startup failure—for example, pi executable doesn't exist, permissions are wrong—PiProvider **doesn't throw an exception**, but synthesizes a `terminal.failed` message, then `yield break`.
+
+Why do this? Because if throwing an exception, upper-layer consumers have to handle two completely different semantics: one is "normal message during streaming consumption", the other is "exception thrown before streaming even starts". This makes the consumer's `await foreach` particularly hard to write.
+
+After unifying into "always give you a message first, then end the stream", the consumer's logic becomes consistent: getting `terminal.failed` counts as failure, getting `terminal.completed` counts as success, no need for try/catch branching. This is a small but important design decision that stabilizes the contract.
+
+## Practice: Correct Way to Consume Streams
+
+Referencing HagiCode's `PiScenarioMessageReader` (libs console test scenario) and `PiCliProvider.StreamCoreAsync` (core thin adapter), the consumer roughly looks like this:
+
+```csharp
+await foreach (var message in provider.ExecuteAsync(options, prompt, cancellationToken))
+{
+    // 1. Failure needs to short-circuit first, don't process subsequent messages
+    if (NormalizedAcpCliAdapter.TryGetFailureMessage(message.Content, out var failure))
+    {
+        yield return new AIStreamingChunk { Type = StreamingChunkType.Error, ErrorMessage = failure };
+        yield break;   // Stream ends after terminal.failed
+    }
+
+    // 2. Assistant text is cumulative snapshot, do increment calculation yourself again
+    if (message.Type == "assistant" && TryGetText(message.Content, out var text))
+    {
+        var delta = ReconcileSnapshot(text);  // Prefix comparison
+        if (!string.IsNullOrEmpty(delta)) yield return Chunk(delta);
+    }
+
+    // 3. terminal.completed is the only reliable "end" signal
+    if (message.Type == "terminal.completed") break;
+}
+```
+
+### Common Pitfalls Quick Reference
+
+Putting the pitfalls encountered along the way into a table for future reference:
+
+| Phenomenon | Cause | Handling |
+|---|---|---|
+| Frontend sees repeated assistant text | Didn't convert cumulative to delta | Use `ReconcileAssistantTextSnapshot` for prefix comparison |
+| Process still running after cancellation | Used already-cancelled token for cleanup | Change to `CancellationToken.None` for cleanup |
+| Retry not working | Put retry in PiProvider, but provider has single-attempt semantics | Move up to caller orchestration layer |
+| pi error messages lost | Didn't read diagnostic fields of `terminal.failed` | Fully pass through `text` / `invalid_output_lines` / `stderr` |
+| Receive thought fragments during tool calls | Directly forwarded thinking events | Buffer until turn end then `DrainBufferedThinkingMessages` |
+
+### How to Verify
+
+The libs layer uses `StubCliProcessManager` to mock processes, with unit tests covering pure logic like parameter construction, event normalization, increment deduplication, and failure passthrough. The real CLI path uses `HAGICODE_REAL_CLI_TESTS` environment variable to opt-in, running trip scenarios with real models. The core layer's `PiCliProviderTests` verifies the thin adapter's `AIStreamingChunk` projection and session binding.
+
+```bash
+# Run Pi-related unit tests in Hagicode.Libs repository
+dotnet test --filter "FullyQualifiedName~PiProviderTests"
+
+# Run real CLI integration tests (need pi installed locally)
+HAGICODE_REAL_CLI_TESTS=1 dotnet test --filter "FullyQualifiedName~PiProviderTests.RealCli"
+```
+
+## Summary
+
+Putting these three things together, the mental model for integrating pi actually comes down to one sentence: **let each layer only do its own thing**.
+
+- Message parsing is handed to `PiJsonEventMapper`: private events are normalized into shared `CliMessage`, cumulative snapshots converted to deltas, thinking buffered until turn end.
+- Retry is handed to the caller: provider single attempt, whoever wants to retry does it themselves at the upper layer, configuration retained but no longer driving provider.
+- Cancellation is handed to `CliProcessManager`: `CancellationToken` passed through the full chain, cleanup uses `CancellationToken.None`, three-stage progressive shutdown (interrupt signal → graceful wait → force kill entire process tree).
+
+After these boundaries are clearly drawn, integrating a new agent CLI almost becomes assembly-line work—you only need to write a new `XxxProvider` and `XxxJsonEventMapper`, and cross-cutting logic like retry, cancellation, message contracts, and error handling are all reused. This is also the fundamental reason why HagiCode can simultaneously support multiple agent CLI backends (claude code, codex, pi, gemini cli, etc.) without becoming a mess.
+
+Let me say that most important boundary one more time: **don't add retry at the provider layer**. Once you understand this point, integrating agent CLI is more than halfway done...
+
+## Summary
+
+Returning to the theme "Pi Agent Integration Implementation: Message Parsing, Retry, and Cancellation", what's really worth repeatedly confirming isn't scattered techniques, but whether constraint conditions, implementation boundaries, and engineering trade-offs have been clearly seen.
+
+As long as the judgment bases in the article are solidified into stable checklist items, you can make reliable decisions faster when facing similar problems in the future.

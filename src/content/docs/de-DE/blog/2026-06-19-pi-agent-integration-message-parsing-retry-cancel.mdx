@@ -1,0 +1,264 @@
+---
+title: Pi Agent Integration: Nachrichtensanalyse, Wiederholung und Abbruch
+date: 2026-06-19
+tags: [hagicode, pi, cli, provider]
+---
+
+## Pi Agent Integration: Nachrichtensanalyse, Wiederholung und Abbruch
+
+> Bei der Integration eines AI-Agenten in CLI-Form kommen Sie an drei Dingen nicht vorbei: wie man seinen privaten Ereignisstrom in stabile Nachrichten übersetzt, wer nach einem Fehlschlag für die Wiederholung verantwortlich ist und wie der Prozess sauber gestoppt wird, wenn der Benutzer auf Abbrechen klickt. Eigentlich sind diese drei Dinge nur eine Frage der "Klärung von Zuständigkeiten", aber wenn Sie es tatsächlich tun, werden Sie feststellen, wie tief das Wasser ist.
+
+## Hintergrund
+
+Kürzlich arbeite ich an einem AI-Coding-Assistent-Projekt, und einer der Agenten, die integriert werden müssen, ist [pi](https://github.com/earendil-works/pi-coding-agent). Es ist ein TUI/CLI-Coding-Agent, der bei der Ausführung JSON-Ereignisse zeilenweise auf stdout ausgibt. Klingt einfach – einfach den Prozess starten, die Ausgabe lesen und parsen – aber wenn Sie wirklich loslegen, werden Sie feststellen, dass "die Integration eines Agenten-CLI" und "die Integration eines normalen CLI" zwei völlig unterschiedliche Dinge sind.
+
+Bei einem normalen CLI lesen Sie stdout, erhalten einen Exit-Code, und das war's. Aber ein Agenten-CLI hat drei kopfschmerzverursachende Eigenschaften:
+
+Erstens ist sein Ereignisstrom ein **privates Protokoll**. `turn_start`, `session`, `message_update`, `message_end`, `turn_end`, `agent_end` – diese sind von pi selbst definiert, nicht irgendein Industriestandard. Jede obere Ebene, die es konsumieren möchte, muss es einzeln behandeln, was im Wesentlichen pi's interne Details überall durchsickern lässt. Es ist wie jemand aus der Ferne zu betrachten; Sie denken, Sie sehen ihn klar, aber Sie sehen nur die Seite, die er Ihnen zeigen möchte.
+
+Zweitens sind seine Fehlersemantiken **besonders mehrdeutig**. Der Agent könnte während der Ausführung auf Netzwerkjitter, Modell-Ratenbegrenzung oder Prozessabsturz stoßen. Soll an dieser Stelle wiederholt werden? Wo wiederholen? Wird eine Wiederholung den bereits halb geschriebenen Sitzungsstatus durcheinander bringen? Dies ist eine architektonische Entscheidung, nicht etwas, das Sie durch lockeres Schreiben einer `for`-Schleife lösen können.
+
+Drittens ist es **langläufig und unterbrechbar**. Ein einziger Turn kann zehn Sekunden oder sogar Minuten laufen, und Benutzer könnten jederzeit abbrechen wollen. Beim Abbruch darf der Prozess nicht zum Waisen werden, Tool-Aufrufe dürfen keinen halbfertigen Zustand hinterlassen, und bereits ausgegebene Inhalte dürfen nicht verloren gehen. Das Wasser hier ist viel tiefer als imagined.
+
+Um diese Schmerzpunkte zu lösen, haben wir einige Zeit damit verbracht, den Integrationsweg zu sortieren. Ich werde später ins Detail gehen, aber hier ist ein Spoiler: Die eigentliche Schwierigkeit liegt nicht im "Starten des Prozesses", sondern im "Klären von Zuständigkeiten".
+
+## Über HagiCode
+
+> Die in diesem Artikel geteilte Lösung stammt aus dem [HagiCode](https://hagicode.com) Projekt – einem AI-Coding-Assistenten, der mehrere Modelle und mehrere Agenten-CLI-Backends unterstützt. GitHub-Repository: [HagiCode-org/site](https://github.com/HagiCode-org/site), fühlen Sie sich frei, ihm einen Stern zu geben. Der gesamte unten erwähnte Code und alle erwähnten Fallstricke laufen tatsächlich in diesem Projekt. Eigentlich schreibe ich das nur, um mir eine Erinnerung zu hinterlassen.
+
+## Gesamtschichtung
+
+HagiCode unterteilt die Integration von AI-Fähigkeiten in zwei Ebenen:
+
+- Die untere Ebene ist `Hagicode.Libs`, die ein wiederverwendbares Provider-Primitiv `ICliProvider<TOptions>` bereitstellt, das speziell dafür verantwortlich ist, "einen CLI-Agenten zu starten und seine Ausgabe in einen gemeinsamen Nachrichtenstrom zu normalisieren."
+- Die obere Ebene ist `hagicode-core`, die einen projektspezifischen Thin-Adapter `IAIProvider` bereitstellt, der dafür verantwortlich ist, "Geschäftsanfragen in Provider-Parameter zu übersetzen, den gemeinsamen Nachrichtenstrom zu konsumieren und einheitliche Streaming-Chunks nach außen zu exponieren."
+
+Die Integration von pi folgt diesem Weg. Die untere Ebene `PiProvider` startet den pi-Prozess, liest den JSON-Ereignisstrom und normalisiert ihn in gemeinsame Nachrichten; die obere Ebene `PiCliProvider` übersetzt `AIRequest` in `PiOptions`, konsumiert `CliMessage` und gibt `AIStreamingChunk` nach außen aus.
+
+Diese drei Dinge – Nachrichtensanalyse, Wiederholung, Abbruch – befinden sich jeweils an drei verschiedenen Orten: `PiJsonEventMapper`, ein scheinbar seltsames Archivierungs-Proposal und `CliProcessManager`. Lassen Sie uns sie einzeln durchgehen.
+
+## Nachrichtensanalyse: Wie pi's private Ereignisse zu gemeinsamen Nachrichten werden
+
+pi gibt JSON-Ereignisse zeilenweise unter `--mode json --print` aus. Dieser Ereignissatz ist pi privat und darf nicht direkt an die obere Ebene durchsickern, sonst müsste jeder Konsument sich mit pi's internen Details koppeln, und sobald pi die Ereignisstruktur aktualisiert, müsste Ihr gesamtes Projekt geändert werden. Eigentlich ist diese Art von Leck nicht anders als das Schreiben von Gedanken auf Ihr Gesicht – andere finden es anstrengend anzusehen, und Sie sind selbst nicht unbedingt bequem damit.
+
+Wir haben `PiJsonEventMapper` verwendet, um eine Übersetzungsebene zu schaffen, die pi's Ereignisse in gemeinsame `CliMessage` normalisiert. `CliMessage` ist in `HagiCode.Libs.Core/Transport/CliMessage.cs` definiert, mit einer sehr einfachen Struktur, nur ein `(Type, Content)`-Record. Die Zuordnungsbeziehung ist ungefähr wie folgt:
+
+| pi-Ereignis | gemeinsame Nachricht | Zweck |
+|---|---|---|
+| `session` | `session.started` / `session.resumed` | Sitzungslebenszyklus |
+| `message_update` (Text-Typ) | `assistant` | Streaming-Body-Inkrement |
+| `message_update` (Thinking-Typ) | `assistant.thought` | Denkkette |
+| `message_update` (Tool-Typ) | `tool.call` / `tool.update` | Tool-Aufruf-Initiierung |
+| `message_end` / `turn_end` (toolResult) | `tool.completed` / `tool.failed` | Tool-Ergebnis |
+| `turn_end` / `agent_end` | `terminal.completed` | diese Runde endet |
+| Nicht-Null-Exit / Parse-Fehler | `terminal.failed` | Terminal-Fehler |
+
+Diese Tabelle ist nur eine schnelle Referenz, aber es gibt zwei wichtige Techniken, die nach dem Treten in Fallstricke herausgefunden wurden und es wert sind, erweitert zu werden.
+
+### Technik Eins: Umwandlung von kumulativer Momentaufnahme in Delta
+
+Dies ist der einfachste Punkt zum Abstürzen. pi's `message_update`-Ereignis sendet keine Inkremente, sondern **kumulativen Volltext** – jedes Mal, wenn ein Token kommt, sendet es den "bislang vollständigen Text" erneut.
+
+Wenn Sie den empfangenen Inhalt direkt an das Frontend weiterleiten, werden Benutzer sehen, dass sich der Inhalt wiederholt dupliziert: der erste ist "du", der zweite ist "hal", der dritte ist "hall,", der vierte ist "hall, wo"... Das Frontend wird denken, dies sind vier unabhängige Ausgaben. Eigentlich ist Duplikation einmal interessant, zehnmal langweilig.
+
+Die Lösung ist Präfixvergleich, um das echte Inkrement zu berechnen:
+
+```csharp
+// Schlüssel: pi sendet kumulative Momentaufnahmen, keine Inkremente
+// Verwenden Sie Präfixvergleich, um das Inkrement zu extrahieren, sonst sieht das Frontend doppelten Inhalt
+if (text.StartsWith(_lastAssistantTextSnapshot, StringComparison.Ordinal))
+{
+    var delta = text[_lastAssistantTextSnapshot.Length..];
+    _lastAssistantTextSnapshot = text;
+    return delta.Length == 0 ? null : delta;
+}
+```
+
+Es gibt auch einen versteckten Fallstrick hier: **Cross-Turn-Präfix-Wiedergabe**. pi wird den vorherigen Text erneut vom Anfang wiedergeben, wenn der Assistant nach einem Tool-Aufruf weiter spricht. Wenn Sie nur eine globale Momentaufnahme behalten, werden Sie den wiedergegebenen Inhalt als Inkrement behandeln, was zu einem weiteren Segment der Duplizierung nach dem Tool-Aufruf führt. `PiProviderTests` hat einen spezifischen Testfall `ExecuteAsync_deduplicates_replayed_assistant_prefix_after_tool_turns`, der dieses Szenario abdeckt. Mit anderen Worten, Momentaufnahmen vor und nach Tool-Aufrufen müssen ausgerichtet und verarbeitet werden, nicht unabhängig voneinander operieren.
+
+### Technik Zwei: Puffern von Thinking bis zum Turn-Ende vor dem Senden
+
+Die Denkkette (thinking) kann nicht sofort beim Empfang jedes Tokens ausgegeben werden. pi wird eine Reihe von Denkmitten in der Mitte von Tool-Aufrufen einfügen. Wenn in Echtzeit weitergeleitet, wird die Stream-Reihenfolge zu einem Chaos – manchmal Assistant-Body, manchmal Denkmitten, manchmal tool.call. Ist das sinnvoll? Eigentlich ist es nicht sinnvoll, nur Verwirrung zu addieren.
+
+Unser Ansatz ist: beim Empfang von Thinking-Ereignissen werden sie zuerst in `BufferThinkingSnapshot` vorübergehend gespeichert, und erst wenn `message_end` oder `turn_end` und `stopReason != "toolUse"` erreicht sind, werden sie einheitlich `DrainBufferedThinkingMessages`. Auf diese Weise verschmutzen Denkmitten in der Mitte von Tool-Aufrufen nicht den Hauptstrom, und der vollständige Denkprozess wird am Ende des Turns auf einmal gegeben.
+
+### Fehlertoleranz: Schlechte Zeilen dürfen den Stream nicht zum Absturz bringen
+
+Ein Agenten-CLI ist nicht das ideale System aus Lehrbüchern; es gibt gelegentlich eine Zeile von Nicht-JSON aus, oder ein JSON ohne `type`-Feld. Wenn Sie hier eine Ausnahme werfen, stirbt der gesamte Stream, und Benutzer sehen nichts. Schließlich ist die reale Welt immer etwas unvollkommen; wer kann garantieren, dass jede Zeile gutartig ist?
+
+Unsere Strategie ist: jede Zeile, die nicht geparst werden kann, unterbricht nicht den Stream, sondern wird in `_invalidOutputLines` gesammelt. Nach dem Prozessende werden diese "schlechten Zeilen" in den Diagnosetext von `terminal.failed` in `Complete()` verkettet. Auf diese Weise sehen Benutzer, wenn sie einen Fehler sehen, direkt, was pi tatsächlich an Unsinn ausgegeben hat, statt ein trockenes "parse error".
+
+## Wiederholung: Wenn die Provider-Ebene es nicht tut, wer dann?
+
+Dies ist der einfachste Fallstrick in der gesamten Integration. Intuitiv "sollte die Integration eines CLI mit Wiederholung kommen", aber HagiCode hat in einem archivierten Proposal **aktiv alle automatische Wiederholung aus der Provider-Ebene entfernt**. Das Proposal heißt `remove-provider-auto-retry-support`.
+
+### Warum nicht automatisch wiederholen
+
+Der Proposal-Hintergrund ist sehr direkt geschrieben. Die Wiederholungslogik war ursprünglich an zwei Orten verstreut: eine in `Hagicode.Libs` (OpenCode-Stil fresh-runtime replay), und eine weitere in `hagicode-core` (`ProviderErrorAutoRetryCoordinator`). Beide Seiten machten ihr eigenes Ding, was dazu führte, dass "ob wiederholt wird oder nicht" zu einem impliziten Verhalten wurde, das im Provider versteckt war, das heimlich den Fehlerzeitpunkt, die Sitzungsfortsetzungsmethode und den Chat-Statusfluss ändern würde.
+
+Denken Sie darüber nach und Sie bekommen Kopfschmerzen: Benutzer senden eine Nachricht, Provider wiederholt intern dreimal von selbst, die ersten beiden scheitern, der dritte succeed. Die obere Ebene hat keine Ahnung, was in der Mitte passiert ist, Sitzungsstatus, Token-Zählung, UI-Fortschritt passen alle nicht. Diese Art von implizitem Verhalten, wie soll ich es ausdrücken, ist ein chronisches Gift in der Architektur.
+
+Also wurde die Grenze zu einem Satz konvergiert:
+
+> Provider konvergiert zurück zu Einzelversuchssemantik; Aufrufer muss den Nicht-Wiederholungsstatus als normales Einzelversuchsergebnis behandeln.
+
+### Was bedeutet das für PiProvider
+
+Im Code bedeutet das drei Dinge:
+
+- `PiOptions` hat **keine wiederholungsbezogenen Felder** – kein `maxAttempts`, kein `retryDelay`, kein `retryClassifier`.
+- `ExecuteAsync` endet nach einmaligem Ausführen des pi-Prozesses, Fehler geben direkt `terminal.failed`.
+- Die Klassifizierer, die früher der automatischen Wiederholung dienten (`ClaudeCodeRetryableTerminalFailureClassifier`, `CodexRetryableTerminalFailureClassifier` usw.), solange sie rein der automatischen Wiederholung dienten, wurden alle aus dem aktiven Pfad entfernt.
+
+Aber beachten Sie, **die Wiederholungsfähigkeit ist nicht verschwunden, nur nach oben verschoben**. Das Proposal schreibt explizit "einen stabilen Rand für die anschließende einheitliche Übernahme durch höhere Ebenen zu lassen". Das DTO, die Normalisierung, die Serialisierung und der Roundtrip der Frontend-Einstellungsseite des Konfigurationselements `providerErrorAutoRetry` sind alle beibehalten, nur dass es nicht mehr die Provider-Ausführung steuert. Schließlich sind einige Dinge nicht wirklich unerwünscht, nur auf eine andere Weise bewahrt.
+
+### Was tun, wenn Sie wiederholen müssen
+
+Wenn Sie eine Wiederholung über pi hinzufügen möchten, ist der richtige Ansatz, dies beim Aufrufer von `PiCliProvider` zu tun – zum Beispiel Ihre Sitzungsorchestrierungsebene (HagiCode verwendet Orleans's `SessionGrain`, das Frontend könnte die Chat-Orchestrierungsebene sein). Nach dem Erhalten von `terminal.failed` bestimmen Sie selbst, ob es wiederholbar ist, entscheiden Sie selbst über Verzögerung und Anzahl, und senden `ExecuteAsync` erneut.
+
+Ein minimal lebensfähiges Muster sieht so aus:
+
+```csharp
+// Wiederholungslogik wird beim Aufrufer platziert, nicht zurück in PiProvider gesteckt
+// Andernfalls wird das gerade vom Provider etablierte "Einzelversuchs"-Rand zerstört
+async Task<AIResponse> ExecuteWithRetryAsync(AIRequest req, int maxAttempts, CancellationToken ct)
+{
+    for (var attempt = 1; ; attempt++)
+    {
+        var response = await provider.ExecuteAsync(req, ct);
+
+        // Bei Erfolg oder Erreichen der Grenze zurückkehren
+        if (response.FinishReason != FinishReason.Unknown || attempt >= maxAttempts)
+            return response;
+
+        // Nur bei wiederholbaren Endfehlern wiederholen (Netzwerk, 5xx, Prozessabsturz)
+        // Model rejected, auth failure – Wiederholung dieser ist sinnlos, nicht wiederholen
+        await Task.Delay(TimeSpan.FromSeconds(Math.Pow(2, attempt)), ct);
+    }
+}
+```
+
+Die Klassifizierungslogik zur Bestimmung von "wiederholbar" ist jetzt nicht im Provider, vom Aufrufer selbst definiert. Die `providerErrorAutoRetry`-Konfiguration (maxAttempts, retryDelay, enabled) kann weiterhin von der Frontend-Einstellungsseite gelesen werden, aber was tatsächlich die Wiederholung steuert, ist Ihre Orchestrierungsebene, nicht `PiProvider`. Bitte wiederholen Sie dies dreimal.
+
+## Abbruch: Token-Durchleitung + Drei-Stufen-Abschaltung
+
+Für den Abbruch implementiert PiProvider fast nichts selbst, delegiert vollständig an `CliProcessManager`, PiProvider ist nur für zwei Dinge verantwortlich: das `CancellationToken` weiterzugeben und bei Ausnahmen aufzuräumen.
+
+### Vollständige Kettendurchleitung
+
+Die Kette ist so, durchgereicht bis zum Ende:
+
+```
+Aufrufer CancellationToken
+  → PiCliProvider.StreamCoreAsync(cancellationToken)
+  → PiProvider.ExecuteProcessAsync([EnumeratorCancellation] cancellationToken)
+  → ReadLineAsync(cancellationToken) / WaitForExitAsync(cancellationToken)
+  → Bei Ausnahme _processManager.StopAsync(handle, CancellationToken.None)
+```
+
+Beachten Sie die letzte Zeile: beim Aufräumen wird `CancellationToken.None` verwendet, nicht das vom Benutzer übergebene Token. Dies ist ein Detail, aber extrem wichtig.
+
+Der Grund ist: das Token des Benutzers **ist bereits abgebrochen**. Wenn Sie dieses bereits abgebrochene Token zum Aufräumen verwenden, wird die Aufräumaufgabe sofort abgebrochen, und der Prozess wird zum Waisen – pi läuft noch im Hintergrund, niemand sammelt ihn, CPU und Speicher werden verschwendet. Daher muss das Aufräumen `CancellationToken.None` verwenden, um sicherzustellen, dass die Aufräumaktion definitiv abgeschlossen werden kann. Eigentlich ist es wie bei Menschen: einige Dinge müssen ordnungsgemäß beendet werden, nachdem sie vollständig gestoppt haben, sonst bleibt es ein Durcheinander.
+
+### Drei-Stufen-Progressiv-Abschaltung
+
+`CliProcessManager.StopProcessAsync` ist ein Drei-Stufen-Progressiv-Abschaltungsprozess, mit Zeitkonstanten am Anfang der Datei definiert:
+
+```csharp
+// Geduld für sanften Stopp: zuerst dem Prozess Zeit geben, sich selbst aufzuräumen
+private static readonly TimeSpan GracefulStopTimeout = TimeSpan.FromSeconds(2);
+// Geduld für das Warten auf den tatsächlichen Prozessausgang nach erzwungenem Kill
+private static readonly TimeSpan StopWaitTimeout = TimeSpan.FromSeconds(5);
+```
+
+Die drei Stufen verlaufen wie folgt:
+
+1. **Unterbrechungssignal**. `TryInterruptAsync` schreibt zuerst ein `\u0003` (das ist das Ctrl+C-Zeichen) in stdin, und führt unter Unix zusätzlich `kill -INT <pid>` aus. Dieser Schritt ist dazu, dass pi sich selbst ordnungsgemäß aufräumen kann – es kann die Unterbrechung wahrnehmen und das, was es schreibt, beenden.
+2. **Sanftes Warten**. Höchstens 2 Sekunden warten, um zu sehen, ob der Prozess von selbst beendet wird.
+3. **Erzwungenes Kill**. Wenn es noch nicht beendet wurde, direkt `Process.Kill(entireProcessTree: true)`, den gesamten Prozessbaum gemeinsam töten, dann höchstens 5 Sekunden warten, um zu bestätigen, dass er wirklich tot ist.
+
+Warum `entireProcessTree: true`? Weil pi beim Ausführen von Tools Kindprozesse spawned – wie den lokalen Modellprozess, an den der Provider weiterleitet, den bash-Unterprozess, den er ausführt. Nur den Elternprozess zu töten, lassen Kindprozesse als Waisen weiterlaufen. Den ganzen Baum gemeinsam zu töten ist sauber.
+
+Unter Windows gibt es kein SIGINT-Ding, kann nur auf das Ctrl+C-Zeichen vertrauen, daher wird sich das plattformübergreifende Verhalten unterscheiden, behalten Sie das im Hinterkopf.
+
+### PiProvider's Ausnahme-Aufräumung
+
+PiProvider's `ExecuteProcessAsync` verwendet, wenn `ReadLineAsync` eine Ausnahme wirft, `ExceptionDispatchInfo.Capture`, um die Ausnahme vorübergehend zu speichern, bricht aus der Schleife aus und ruft `StopAsync` auf, um den Prozess aufzuräumen, dann `pendingException.Throw()`, um die ursprüngliche Ausnahme erneut an die obere Ebene zu werfen.
+
+Warum vorübergehend speichern und dann werfen? Weil Sie, wenn Sie direkt werfen, der Prozess keine Zeit hatte, recycled zu werden, und zum Waisen wird; wenn Sie vor `StopAsync` werfen, läuft die Aufräumlogik gar nicht. Vorübergehend speichern, zuerst sicherstellen, dass der Prozess definitiv recycled wird, dann die ursprüngliche `OperationCanceledException`-Semantik vollständig für den Aufrufer bewahren – wenn der Aufrufer diese Ausnahme erhält, kann er urteilen "oh, es ist der Benutzer, der aktiv abbricht", nicht "ein Fehler ist aufgetreten."
+
+## Einheitlicher Vertrag für Startfehler
+
+Es gibt ein weiteres Detail, das separat erwähnenswert ist. Prozessstartfehler – zum Beispiel pi-Executable existiert nicht, falsche Berechtigungen – PiProvider **wirft keine Ausnahme**, sondern synthetisiert eine `terminal.failed`-Nachricht, dann `yield break`.
+
+Warum so? Weil Sie, wenn Sie eine Ausnahme werfen, obere Ebenen-Konsumenten zwei völlig unterschiedliche Semantiken behandeln müssen: eine ist "normale Nachricht während des Streaming-Konsums", die andere ist "Ausnahme, bevor Streaming beginnt". Dies würde das `await foreach` des Konsumenten besonders schwer zu schreiben machen.
+
+Nach der Vereinheitlichung zu "immer zuerst eine Nachricht geben, dann den Stream beenden", wird die Logik des Konsumenten konsistent: `terminal.failed` erhalten gilt als Fehler, `terminal.completed` erhalten gilt als Erfolg, keine try/catch-Verzweigungsverarbeitung erforderlich. Dies ist eine kleine aber wichtige Entwurfsentscheidung, die den Vertrag stabilisiert.
+
+## Praxis: Richtige Art, den Stream zu konsumieren
+
+Verweisend auf `PiScenarioMessageReader` in HagiCode (libs Konsolen-Testszenario) und `PiCliProvider.StreamCoreAsync` (core Thin-Adapter), sieht der Konsument ungefähr so aus:
+
+```csharp
+await foreach (var message in provider.ExecuteAsync(options, prompt, cancellationToken))
+{
+    // 1. Fehler sollte zuerst kurzschließen, keine nachfolgenden Nachrichten mehr verarbeiten
+    if (NormalizedAcpCliAdapter.TryGetFailureMessage(message.Content, out var failure))
+    {
+        yield return new AIStreamingChunk { Type = StreamingChunkType.Error, ErrorMessage = failure };
+        yield break;   // Stream endet nach terminal.failed
+    }
+
+    // 2. Assistant-Text ist kumulative Momentaufnahme, Inkrementberechnung selbst durchführen
+    if (message.Type == "assistant" && TryGetText(message.Content, out var text))
+    {
+        var delta = ReconcileSnapshot(text);  // Präfixvergleich
+        if (!string.IsNullOrEmpty(delta)) yield return Chunk(delta);
+    }
+
+    // 3. terminal.completed ist das einzige zuverlässige "Ende"-Signal
+    if (message.Type == "terminal.completed") break;
+}
+```
+
+### Häufige Fallstricke-Schnellreferenz
+
+Organisieren der auf dem Weg encountered Fallstricke in eine Tabelle, praktisch für spätere Personen:
+
+| Phänomen | Ursache | Behandlung |
+|---|---|---|
+| Frontend sieht Assistant-Text-Duplizierung | Keine kumulative zu Delta-Umwandlung durchgeführt | Verwenden Sie `ReconcileAssistantTextSnapshot` für Präfixvergleich |
+| Prozess läuft noch nach Abbruch | Verwendetes bereits abgebrochenes Token für Aufräumung | Ändern Sie die Verwendung von `CancellationToken.None` für Aufräumung |
+| Wiederholung funktioniert nicht | Wiederholung in PiProvider gesteckt, aber Provider ist Einzelversuchssemantik | Nach oben zur Aufrufer-Orchestrierungsebene verschieben |
+| pi-Fehlermeldungen verloren | Diagnosefeld von `terminal.failed` nicht gelesen | Vollständig durchleiten von `text` / `invalid_output_lines` / `stderr` |
+| Denkmitten in der Mitte von Tool-Aufrufen empfangen | Direkt weitergeleitete Thinking-Ereignisse | Puffern bis zum Turn-Ende dann `DrainBufferedThinkingMessages` |
+
+### Wie zu verifizieren
+
+Die libs-Ebene verwendet `StubCliProcessManager` zum Mocken von Prozessen, Unit-Tests decken reine Logik wie Parameterkonstruktion, Ereignisnormalisierung, Inkrement-Deduplizierung, Fehlerdurchleitung ab. Der echte CLI-Pfad verwendet die Umgebungsvariable `HAGICODE_REAL_CLI_TESTS` zum Opt-in, führt Trip-Szenarien mit echten Modellen aus. Die core-Ebene's `PiCliProviderTests` verifiziert die `AIStreamingChunk`-Projektion des Thin-Adapters und die Session-Bindung.
+
+```bash
+# Führen Sie pi-bezogene Unit-Tests im Hagicode.Libs-Repository aus
+dotnet test --filter "FullyQualifiedName~PiProviderTests"
+
+# Führen Sie echte CLI-Integrationstests aus (benötigen pi lokal installiert)
+HAGICODE_REAL_CLI_TESTS=1 dotnet test --filter "FullyQualifiedName~PiProviderTests.RealCli"
+```
+
+## Zusammenfassung
+
+Diese drei Dinge zusammenzureihen, das mentale Modell für die Integration von pi ist eigentlich nur ein Satz: **lassen Sie jede Ebene nur ihre eigene Sache tun**.
+
+- Nachrichtensanalyse wird an `PiJsonEventMapper` delegiert: private Ereignisse werden in gemeinsame `CliMessage` normalisiert, kumulative Momentaufnahme wird in Delta umgewandelt, Thinking wird bis zum Turn-Ende gepuffert.
+- Wiederholung wird an den Aufrufer delegiert: Provider macht Einzelversuche, wer wiederholen möchte, tut es selbst auf der oberen Ebene, Konfiguration ist beibehalten, steuert aber nicht mehr den Provider.
+- Abbruch wird an `CliProcessManager` delegiert: `CancellationToken` wird durch die volle Kette durchgereicht, Aufräumung verwendet `CancellationToken.None`, Drei-Stufen-Progressiv-Abschaltung (Unterbrechungssignal → sanftes Warten → erzwungenes Kill des gesamten Prozessbaums).
+
+Nachdem diese Ränder klar gezogen sind, wird die Integration eines neuen Agenten-CLI fast zu einer Pipeline-Arbeit – Sie müssen nur einen neuen `XxxProvider` und `XxxJsonEventMapper` schreiben, und querschnittende Logik wie Wiederholung, Abbruch, Nachrichtenvertrag, Fehlerbehandlung werden alle wiederverwendet. Dies ist auch der grundlegende Grund, warum HagiCode gleichzeitig mehrere Agenten-CLI-Backends (claude code, codex, pi, gemini cli usw.) unterstützen kann, ohne chaotisch zu werden.
+
+Lassen Sie mich diesen wichtigsten Rand noch einmal sagen: **fügen Sie keine Wiederholung auf der Provider-Ebene hinzu**. Sobald Sie diesen Punkt verstehen, ist die Integration von Agenten-CLI mehr als zur Hälfte erledigt...
+
+## Zusammenfassung
+
+Zurück zum Thema "Pi Agent Integration: Nachrichtensanalyse, Wiederholung und Abbruch", was es wirklich wert ist, wiederholt zu bestätigen, sind nicht verstreute Techniken, sondern ob Randbedingungen, Implementierungsgrenzen und technische Abwägungen klar gesehen wurden.
+
+Solange die im Artikel genannten Urteilsgrundlagen in stabile Prüfpunkte sedimentiert werden, können bei ähnlichen Problemen in der Zukunft zuverlässigere Entscheidungen schneller getroffen werden.

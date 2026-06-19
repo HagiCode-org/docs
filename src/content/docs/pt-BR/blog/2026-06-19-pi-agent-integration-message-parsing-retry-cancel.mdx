@@ -1,0 +1,264 @@
+---
+title: Implementação de Integração com Pi Agent: Análise de Mensagens, Retentativa e Cancelamento
+date: 2026-06-19
+tags: [hagicode, pi, cli, provider]
+---
+
+## Implementação de Integração com Pi Agent: Análise de Mensagens, Retentativa e Cancelamento
+
+> Ao integrar um AI agent na forma de CLI, não dá para evitar três coisas: como traduzir seu fluxo de eventos privados em mensagens estáveis, quem é responsável pela retentativa após falha, e como o processo encerra limpo quando o usuário clica em cancelar. Na verdade, quando você analisa essas três coisas, é apenas "separar responsabilidades", mas só ao colocá-las em prática você percebe o quão profundo é o rio.
+
+## Contexto
+
+Recentemente estou trabalhando em um projeto de assistente de código AI, e um dos agents com os quais preciso integrar é o [pi](https://github.com/earendil-works/pi-coding-agent). Ele próprio é um coding agent TUI/CLI que, quando executado, emite eventos JSON linha por linha no stdout. Parece simples—iniciar o processo, ler a saída, analisar—mas quando você realmente começa, percebe que "integrar um agent CLI" e "integrar um CLI comum" são coisas completamente diferentes.
+
+Com um CLI comum, você lê stdout, pega o código de saída, e pronto. Mas agent CLI tem três características que causam dor de cabeça:
+
+Primeiro, seu fluxo de eventos é um **protocolo privado**. `turn_start`, `session`, `message_update`, `message_end`, `turn_end`, `agent_end`—esses são definidos pelo próprio pi, não são padrões da indústria. Cada camada superior que queira consumi-lo precisa processar separadamente, equivalente a vazar os detalhes internos do pi para todos os lados. É como observar alguém à distância, você acha que entendeu, mas na verdade só viu o lado que ela queria mostrar.
+
+Segundo, sua semântica de falha é **particularmente ambígua**. Enquanto o agent roda, pode haver oscilação de rede, limitação de modelo, travamento de processo—neste momento, deve-se retentar? Onde retentar? A retentativa vai bagunçar o estado da sessão que já foi parcialmente escrito? Isso é uma decisão de arquitetura, não algo que se resolve simplesmente escrevendo um loop `for`.
+
+Terceiro, ele é **longo e interrompível**. Um turn pode rodar por dezenas de segundos ou até minutos, e no meio o usuário pode querer cancelar a qualquer momento. Ao cancelar, o processo não pode virar órfão, chamadas de ferramenta não podem ficar pela metade, e o conteúdo já emitido não pode ser perdido. O rio aqui é muito mais profundo do que se imagina.
+
+Para resolver essas dores, gastamos um tempo para organizar o caminho de integração. Vou detalhar mais à frente, mas aqui vai um spoiler: a dificuldade real não está em "iniciar o processo", mas em "separar responsabilidades".
+
+## Sobre o HagiCode
+
+> A solução compartilhada neste artigo vem do projeto [HagiCode](https://hagicode.com)—um assistente de código AI que suporta múltiplos modelos e backends de agent CLI. Repositório GitHub: [HagiCode-org/site](https://github.com/HagiCode-org/site), bem-vindo para dar uma Star. Todo o código abaixo e todos os problemas enfrentados estão rodando de verdade neste projeto. Na verdade, escrever isso é apenas para deixar um registro para mim mesmo.
+
+## Camadas Gerais
+
+O HagiCode divide a integração de capacidades AI em duas camadas:
+
+- A camada inferior é `HagiCode.Libs`, fornecendo primitivos de provider reutilizáveis `ICliProvider<TOptions>`, especializado em "iniciar um CLI agent e normalizar sua saída em um fluxo de mensagens compartilhado".
+- A camada superior é `hagicode-core`, fornecendo um thin adapter `IAIProvider` em nível de projeto, responsável por "traduzir requisições de negócio em parâmetros do provider, consumir o fluxo de mensagens compartilhado, expor externamente chunks de streaming unificados".
+
+A integração do Pi segue este caminho. A camada inferior `PiProvider` inicia o processo pi, lê o fluxo de eventos JSON, normaliza em mensagens compartilhadas; a camada superior `PiCliProvider` traduz `AIRequest` em `PiOptions`, consome `CliMessage`, expõe `AIStreamingChunk`.
+
+Estas três coisas—análise de mensagens, retentativa, cancelamento—caem respectivamente em três lugares diferentes: `PiJsonEventMapper`, uma proposta de arquivamento aparentemente estranha, e `CliProcessManager`. Vou falar de cada um.
+
+## Análise de Mensagens: Como Eventos Privados do Pi Viram Mensagens Compartilhadas
+
+Em `--mode json --print`, o pi emite eventos JSON linha por linha. Este conjunto de eventos é privado do pi e não pode vazar diretamente para a camada superior, caso contrário cada consumidor precisaria acoplar aos detalhes internos do pi, e se o pi atualizar a estrutura de eventos, todo o projeto precisará ser alterado. Na verdade, esse vazamento é como escrever sentimentos no rosto—as outras pessoas ficam cansadas de ver, e você próprio também não se sente necessariamente confortável.
+
+Nós usamos `PiJsonEventMapper` para fazer uma camada de tradução, normalizando os eventos do pi em `CliMessage` compartilhado. `CliMessage` é definido em `HagiCode.Libs.Core/Transport/CliMessage.cs`, a estrutura é muito simples, apenas um record `(Type, Content)`. O mapeamento é aproximadamente assim:
+
+| Evento pi | Mensagem Compartilhada | Uso |
+|---|---|---|
+| `session` | `session.started` / `session.resumed` | Ciclo de vida da sessão |
+| `message_update` (tipo text) | `assistant` | Incremento de texto streaming |
+| `message_update` (tipo thinking) | `assistant.thought` | Cadeia de raciocínio |
+| `message_update` (tipo tool) | `tool.call` / `tool.update` | Início de chamada de ferramenta |
+| `message_end` / `turn_end` (toolResult) | `tool.completed` / `tool.failed` | Resultado da ferramenta |
+| `turn_end` / `agent_end` | `terminal.completed` | Fim deste turno |
+| Saída não-zero / Falha de análise | `terminal.failed` | Falha terminal |
+
+Esta tabela é apenas uma referência rápida, há duas técnicas-chave aqui, que foram descobertas depois de cair em armadilhas, vale a pena detalhar.
+
+### Técnica 1: cumulative snapshot para delta
+
+Este é o ponto mais propenso a erros. O evento `message_update` do pi não envia incrementos, mas **texto completo cumulativo**—cada token que chega, ele envia novamente o "texto completo até agora".
+
+Se você encaminhar diretamente o conteúdo recebido para o frontend, o usuário verá o conteúdo repetido várias vezes: o primeiro é "你", o segundo é "你好", o terceiro é "你好，", o quarto é "你好，世"... O frontend pensará que são quatro saídas independentes. Na verdade, repetição dessas coisas, ver uma vez é novidade, ver dez vezes é cansaço.
+
+A solução é comparação de prefixo, calculando o verdadeiro incremento:
+
+```csharp
+// Chave: o pi envia snapshot cumulativo, não incrementos
+// Use comparação de prefixo para extrair o incremento, caso contrário o frontend verá conteúdo repetido
+if (text.StartsWith(_lastAssistantTextSnapshot, StringComparison.Ordinal))
+{
+    var delta = text[_lastAssistantTextSnapshot.Length..];
+    _lastAssistantTextSnapshot = text;
+    return delta.Length == 0 ? null : delta;
+}
+```
+
+Aqui tem uma armadilha escondida: **replay de prefixo entre turns**. Quando o pi termina a chamada de ferramenta e o assistant continua falando, ele enviará novamente aquele texto anterior desde o início. Se você só gravar um snapshot global, tratará o conteúdo de replay como incremento, causando repetição após a chamada de ferramenta. `PiProviderTests` tem um caso de teste específico `ExecuteAsync_deduplicates_replayed_assistant_prefix_after_tool_turns` cobrindo este cenário. Em outras palavras, os snapshots antes e depois da chamada de ferramenta devem ser alinhados no processamento, não podem agir por conta própria.
+
+### Técnica 2: thinking deve ser buffered até o fim do turn
+
+A cadeia de raciocínio (thinking) não pode ser emitida a cada token recebido. Durante a chamada de ferramenta, o pi insere muitos fragmentos de pensamento, se encaminhar em tempo real, a ordem do fluxo ficará uma bagunça—um momento é texto do assistant, outro momento é fragmento de pensamento, outro ainda é tool.call. Isso faz sentido? Na verdade não tem muito sentido, apenas aumenta a confusão.
+
+Nossa abordagem é: quando receber evento thinking, primeiro colocar em `BufferThinkingSnapshot` para armazenamento temporário, esperar `message_end` ou `turn_end` e `stopReason != "toolUse"`, depois unificar `DrainBufferedThinkingMessages`. Assim, fragmentos de pensamento durante a chamada de ferramenta não poluirão o fluxo principal, e no fim do turn forneceremos todo o processo de raciocínio de uma vez.
+
+### Tolerância a Falhas: Linhas Ruins Não Podem Derrubar o Fluxo
+
+Agent CLI não é um sistema ideal de livro didático, ocasionalmente pode emitir uma linha que não é JSON, ou um JSON sem campo `type`. Se você lançar exceção aqui, todo o fluxo morre, e o usuário não vê nada. Afinal, o mundo real sempre tem imperfeições, quem pode garantir que cada linha estará em conformidade?
+
+Nossa estratégia é: qualquer linha que falhe na análise não interrompe o fluxo, mas é coletada em `_invalidOutputLines`. Após o processo terminar, em `Complete()`, juntamos essas "linhas ruins" no texto de diagnóstico de `terminal.failed`. Assim, quando o usuário vê o erro, pode ver diretamente o que o pi emitiu de confuso, em vez de um "parse error" seco.
+
+## Retentativa: Camada Provider Não Faz, Quem Faz?
+
+Esta é a armadilha mais fácil de cair em toda a integração. Intuitivamente "integrar um CLI deve incluir retentativa", mas o HagiCode em uma proposta de arquivamento **removeu ativamente** toda retentativa automática da camada provider. A proposta se chama `remove-provider-auto-retry-support`.
+
+### Por Que Não Retentar Automaticamente
+
+O contexto da proposta é escrito de forma muito direta. A lógica de retentativa originalmente estava espalhada em dois lugares: uma cópia em `Hagicode.Libs` (fresh replay estilo OpenCode), outra em `hagicode-core` (`ProviderErrorAutoRetryCoordinator`). Ambos faziam各自的 por conta própria, resultando em "se deve ou não retentar" tornando-se um comportamento implícito escondido dentro do provider, que悄悄 alterava o momento de falha, o modo de continuação de sessão e o fluxo de estado do chat.
+
+Pense nisso e dá dor de cabeça: usuário envia uma mensagem, o provider internamente retenta três vezes, as duas primeiras falharam, a terceira teve sucesso. A camada superior não tem ideia do que aconteceu no meio, estado da sessão, contagem de tokens, progresso da UI, tudo não corresponde. Esse comportamento implícito, como dizer, é o veneno crônico da arquitetura.
+
+Então o limite foi reduzido a uma frase:
+
+> Provider converge para semântica de tentativa única, o chamador deve tratar estado sem retentativa como resultado de execução única normal.
+
+### Como Fica no PiProvider
+
+Em código, são três coisas:
+
+- Em `PiOptions` **não há nenhum campo relacionado a retry**—sem `maxAttempts`, sem `retryDelay`, sem `retryClassifier`.
+- `ExecuteAsync` roda um processo pi até o fim e termina, falha dá diretamente `terminal.failed`.
+- Classificadores antes servindo para retentativa automática (`ClaudeCodeRetryableTerminalFailureClassifier`, `CodexRetryableTerminalFailureClassifier`, etc.) desde que puramente servindo a retentativa automática, todos removidos do caminho ativo.
+
+Mas note, **capacidade de retentativa não desapareceu, apenas subiu**. A proposta escreve claramente "deixar limite estável para camada superior unificar controle de retentativa posteriormente". DTO de configuração `providerErrorAutoRetry`, normalização, serialização, round-trip da página de configurações frontend, tudo preservado, apenas não mais direciona execução do provider. Afinal, algumas coisas não são realmente indesejadas, apenas mantidas de outra forma.
+
+### E Se Precisar Retentar
+
+Se você precisa adicionar retentativa acima do pi, a maneira correta é fazer no chamador de `PiCliProvider`—por exemplo, sua camada de orquestração de sessão (no HagiCode é o `SessionGrain` do Orleans, no frontend pode ser camada de orquestração chat). Após receber `terminal.failed`, você mesmo julga se é retentável, decide o atraso e o número de vezes, envia `ExecuteAsync` novamente.
+
+Um mínimo padrão funcional fica assim:
+
+```csharp
+// Lógica de retentativa colocada no chamador, não enfiar de volta no PiProvider
+// Caso contrário quebrará o limite de "tentativa única" que o provider acabou de estabelecer
+async Task<AIResponse> ExecuteWithRetryAsync(AIRequest req, int maxAttempts, CancellationToken ct)
+{
+    for (var attempt = 1; ; attempt++)
+    {
+        var response = await provider.ExecuteAsync(req, ct);
+
+        // Sucesso ou atingiu limite então retorna
+        if (response.FinishReason != FinishReason.Unknown || attempt >= maxAttempts)
+            return response;
+
+        // Só retenta falhas terminais retentáveis (rede, 5xx, travamento de processo)
+        // model rejected, auth failure retentar também não faz sentido, não retente
+        await Task.Delay(TimeSpan.FromSeconds(Math.Pow(2, attempt)), ct);
+    }
+}
+```
+
+A lógica de classificação "retentável" agora não está no provider, o chamador define por conta própria. Configuração `providerErrorAutoRetry` (maxAttempts, retryDelay, enabled) ainda pode ser lida da página de configurações frontend, mas o que realmente dirige retentativa é sua camada de orquestração, não o `PiProvider`. Repita isso três vezes.
+
+## Cancelamento: Passagem de Token + Parada em Três Estágios
+
+Sobre cancelamento, o `PiProvider` quase não implementa, tudo delegado para `CliProcessManager`, o `PiProvider` só é responsável por duas coisas: passar `CancellationToken` para baixo, fazer limpeza quando houver exceção.
+
+### Passagem em Toda a Cadeia
+
+A cadeia é assim, passando até o fim:
+
+```
+Chamador CancellationToken
+  → PiCliProvider.StreamCoreAsync(cancellationToken)
+  → PiProvider.ExecuteProcessAsync([EnumeratorCancellation] cancellationToken)
+  → ReadLineAsync(cancellationToken) / WaitForExitAsync(cancellationToken)
+  → Quando há exceção _processManager.StopAsync(handle, CancellationToken.None)
+```
+
+Note a última linha: na limpeza usa `CancellationToken.None`, não o token que o usuário passou. Este é um detalhe, mas extremamente importante.
+
+A razão é: o token do usuário **já foi cancelado**. Se você usar esse token já cancelado para fazer limpeza, a tarefa de limpeza será imediatamente cancelada, o processo vira órfão—o pi ainda está rodando no background, ninguém recolhe, CPU e memória ocupadas à toa. Então limpeza deve usar `CancellationToken.None`, garantindo que a ação de limpeza definitivamente será executada até o fim. Na verdade é como com pessoas, algumas coisas só podem ser bem finalizadas após parar completamente, caso contrário deixa uma bagunça.
+
+### Parada Progressiva em Três Estágios
+
+`CliProcessManager.StopProcessAsync` é um processo de parada progressiva em três estágios, constantes de tempo definidas no topo do arquivo:
+
+```csharp
+// Paciência para parada elegante: primeiro dar tempo para o processo concluir por si
+private static readonly TimeSpan GracefulStopTimeout = TimeSpan.FromSeconds(2);
+// Paciência para aguardar processo realmente sair após kill forçado
+private static readonly TimeSpan StopWaitTimeout = TimeSpan.FromSeconds(5);
+```
+
+Os três estágios progridem assim:
+
+1. **Sinal de interrupção**. `TryInterruptAsync` primeiro escreve um `\u0003` em stdin (caractere Ctrl+C), no Unix adicionalmente `kill -INT <pid>`. Este passo é para deixar o pi concluir elegantemente por si—ele pode perceber a interrupção, finalizar o que está escrevendo.
+2. **Espera elegante**. Espera no máximo 2 segundos, ver se o processo saiu por si.
+3. **Kill forçado**. Ainda não saiu então diretamente `Process.Kill(entireProcessTree: true)`, matando toda a árvore de processos junto, depois espera no máximo 5 segundos para confirmar que realmente morreu.
+
+Por que `entireProcessTree: true`? Porque quando o pi roda ferramentas, ele spawnará subprocessos—por exemplo, processo de modelo local para o qual o provider roteia, subprocesso bash rodando. Matando só o processo pai, subprocesso vira órfão e continua rodando. Matando a árvore inteira junto fica limpo.
+
+Em Windows não existe SIGINT, só depende do caractere Ctrl+C, então comportamento cross-platform terá diferenças, isso precisa estar em mente.
+
+### Limpeza de Exceção do PiProvider
+
+`ExecuteProcessAsync` do `PiProvider` quando `ReadLineAsync` lança exceção, usará `ExceptionDispatchInfo.Capture` para armazenar temporariamente a exceção, após sair do loop chama `StopAsync` para limpar processo, depois `pendingException.Throw()` para relançar a exceção original para camada superior.
+
+Por que armazenar temporariamente e depois lançar? Porque se lançar diretamente, o processo ainda não teve tempo de ser recolhido, vira órfão; se lançar antes de `StopAsync`, a lógica de limpeza nem é executada. Armazenar temporariamente, primeiro garantir que o processo seja definitivamente recolhido, depois preservar completamente a semântica original de `OperationCanceledException` para o chamador—o chamador ao receber esta exceção, pode julgar "ah, foi cancelamento ativo do usuário", não "houve erro".
+
+## Contrato Unificado de Falha de Inicialização
+
+Ainda há um detalhe que vale a pena mencionar separadamente. Falha ao iniciar processo—por exemplo, executável do pi não existe, permissão errada—o `PiProvider` **não lança exceção**, mas sintetiza uma mensagem `terminal.failed`, depois `yield break`.
+
+Por que assim? Porque se lançar exceção, o consumidor da camada superior precisará tratar duas semânticas completamente diferentes: uma é "mensagem normal durante consumo streaming", outra é "exceção lançada antes de começar streaming". Isso tornará o `await foreach` do consumidor especialmente difícil de escrever.
+
+Após unificar para "primeiro sempre te dar mensagem, depois terminar fluxo", a lógica do consumidor fica consistente: receber `terminal.failed` é falha, receber `terminal.completed` é sucesso, não precisa try/catch para tratamento ramificado. Esta é uma decisão de design pequena mas importante, deixando o contrato estável.
+
+## Prática: Maneira Correta de Consumir Fluxo
+
+Referenciando `PiScenarioMessageReader` do HagiCode (cenário de teste console do libs) e `PiCliProvider.StreamCoreAsync` (thin adapter do core), o consumidor fica aproximadamente assim:
+
+```csharp
+await foreach (var message in provider.ExecuteAsync(options, prompt, cancellationToken))
+{
+    // 1. Falha precisa curto-circuito prioritariamente, não processar mensagens subsequentes
+    if (NormalizedAcpCliAdapter.TryGetFailureMessage(message.Content, out var failure))
+    {
+        yield return new AIStreamingChunk { Type = StreamingChunkType.Error, ErrorMessage = failure };
+        yield break;   // após terminal.failed o fluxo termina
+    }
+
+    // 2. texto assistant é cumulative snapshot, fazer cálculo de incremento novamente
+    if (message.Type == "assistant" && TryGetText(message.Content, out var text))
+    {
+        var delta = ReconcileSnapshot(text);  // comparação de prefixo
+        if (!string.IsNullOrEmpty(delta)) yield return Chunk(delta);
+    }
+
+    // 3. terminal.completed é o único sinal confiável de "fim"
+    if (message.Type == "terminal.completed") break;
+}
+```
+
+### Referência Rápida de Armadilhas Comuns
+
+Organizei as armadilhas encontradas neste caminho em uma tabela, para facilitar para quem vier depois:
+
+| Fenômeno | Causa | Tratamento |
+|---|---|---|
+| Frontend vê texto assistant repetido | Não fez cumulative para delta | Usar `ReconcileAssistantTextSnapshot` para comparação de prefixo |
+| Processo ainda rodando após cancelamento | Limpeza usou token já cancelado | Mudar para usar `CancellationToken.None` para limpeza |
+| Retentativa não funciona | Escreveu retentativa no PiProvider, mas provider é semântica de tentativa única | Subir para camada de orquestração do chamador |
+| Mensagem de erro do pi perdida | Não leu campo de diagnóstico de `terminal.failed` | Encaminhar completamente `text` / `invalid_output_lines` / `stderr` |
+| Receber fragmento de pensamento durante chamada de ferramenta | Encaminhou diretamente evento thinking | Buffer até fim do turn depois `DrainBufferedThinkingMessages` |
+
+### Como Verificar
+
+Camada libs usa `StubCliProcessManager` para mockar processo, testes unitários cobrem construção de parâmetros, normalização de eventos, deduplicação de incremento, passagem de falha, etc. Caminho de CLI real usa variável de ambiente `HAGICODE_REAL_CLI_TESTS` para opt-in, roda cenário trip com modelo real. Camada core `PiCliProviderTests` verifica projeção de `AIStreamingChunk` e session binding do thin adapter.
+
+```bash
+# Rodar testes unitários relacionados ao Pi no repositório Hagicode.Libs
+dotnet test --filter "FullyQualifiedName~PiProviderTests"
+
+# Rodar teste de integração CLI real (precisa ter pi instalado localmente)
+HAGICODE_REAL_CLI_TESTS=1 dotnet test --filter "FullyQualifiedName~PiProviderTests.RealCli"
+```
+
+## Conclusão
+
+Juntando essas três coisas, o modelo mental para integrar pi é na verdade uma frase: **deixar cada camada fazer apenas seu trabalho**.
+
+- Análise de mensagens delegada para `PiJsonEventMapper`: eventos privados normalizados em `CliMessage` compartilhado, cumulative snapshot convertido em delta, thinking bufferizado até fim do turn.
+- Retentativa delegada para chamador: provider tentativa única, quem quiser retentar faz na camada superior, configuração preservada mas não mais direciona provider.
+- Cancelamento delegado para `CliProcessManager`: `CancellationToken` passagem em toda cadeia, limpeza usa `CancellationToken.None`, parada progressiva em três estágios (sinal de interrupção → espera elegante → kill forçado da árvore inteira de processos).
+
+Após definir claramente esses limites, integrar um novo agent CLI quase se torna tarefa de linha de montagem—você só precisa escrever um novo `XxxProvider` e `XxxJsonEventMapper`, toda lógica transversal de retentativa, cancelamento, contrato de mensagens, tratamento de erro é reutilizada. Esta também é a razão fundamental pela qual o HagiCode pode suportar múltiplos backends de agent CLI (claude code, codex, pi, gemini cli, etc.) sem se bagunçar.
+
+Finalmente repito aquele limite mais importante: **não adicione retentativa na camada provider**. Entender isso, integrar agent CLI já passou mais da metade...
+
+## Resumo
+
+Voltando ao tema "Implementação de Integração com Pi Agent: Análise de Mensagens, Retentativa e Cancelamento", o que realmente vale a pena confirmar repetidamente não são técnicas dispersas, mas se as condições de restrição, limites de implementação e escolhas de engenharia já foram compreendidas.
+
+Enquanto solidificar os critérios de julgamento do artigo em itens de verificação estáveis, ao enfrentar problemas similares posteriormente, poderá tomar decisões confiáveis mais rapidamente.

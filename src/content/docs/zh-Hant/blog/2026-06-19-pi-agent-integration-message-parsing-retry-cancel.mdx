@@ -1,0 +1,264 @@
+---
+title: Pi Agent 對接實現：訊息解析、重試與取消
+date: 2026-06-19
+tags: [hagicode, pi, cli, provider]
+---
+
+## Pi Agent 對接實現：訊息解析、重試與取消
+
+> 接一個 CLI 形態的 AI agent，繞不開三件事：怎麼把它私有的事件流翻譯成穩定訊息、失敗之後到底誰負責重試、用戶點取消時進程怎麼乾淨地停。其實這三件事說穿了，不過是"分清職責"罷了，只是真做起來，才知道水有多深。
+
+## 背景
+
+最近我在做一個 AI 代碼助手項目，要對接的 agent 之一是 [pi](https://github.com/earendil-works/pi-coding-agent)。它本身是一個 TUI/CLI 的 coding agent，跑起來會在 stdout 按行吐 JSON 事件。聽起來也簡單——拉起進程、讀輸出、解析就好——可真上手了你會發現，"對接一個 agent CLI"跟"對接一個普通 CLI"完全是兩碼事。
+
+普通 CLI 你讀完 stdout 拿個退出碼，事情也就過去了。可 agent CLI 偏偏有三個讓人頭疼的特點：
+
+第一，它的事件流是**私有協議**。`turn_start`、`session`、`message_update`、`message_end`、`turn_end`、`agent_end`——這些是 pi 自家定義的，不是什麼行業標準。每個想消費它的上層都得各自處理一遍，等於把 pi 的內部細節泄漏得到處都是。就像隔著距離看一個人，你以為看清了，其實只是看到了她想給你看的那一面罷了。
+
+第二，它的失敗語義**特別曖昧**。agent 跑著跑著可能網絡抖了一下、模型限流了、進程崩了，這時候到底要不要重試？在哪兒重試？重試會不會把已經半截寫出去的會話狀態搞亂？這是架構決策，不是隨手寫個 `for` 循環就能解決的。
+
+第三，它**長且可中斷**。一個 turn 可能跑幾十秒甚至幾分鐘，中間用戶隨時可能想取消。取消的時候進程不能變孤兒，工具調用不能留半成品，已經吐出的內容又不能丟。這裡的水，比想象中深多了。
+
+為了解決這些痛點，我們花了點時間把對接路徑理順了。後面會具體說，這裡先劇透一句：真正的難點不在"拉起進程"，而在"分清職責"。
+
+## 關於 HagiCode
+
+> 本文分享的方案來自 [HagiCode](https://hagicode.com) 項目——一個 AI 代碼助手，支持多模型、多 agent CLI 後端。GitHub 倉庫：[HagiCode-org/site](https://github.com/HagiCode-org/site)，歡迎來點個 Star。下面講的所有代碼、所有踩過的坑，都是這個項目裡真實跑著的。其實寫出來也不過是給自己留個念想而已。
+
+## 整體分層
+
+HagiCode 把 AI 能力對接拆成兩層：
+
+- 底層是 `Hagicode.Libs`，提供可復用的 provider 原語 `ICliProvider<TOptions>`，專門負責"拉起一個 CLI agent、把它的輸出歸一化成共享訊息流"。
+- 上層是 `hagicode-core`，提供項目級的 thin adapter `IAIProvider`，負責"把業務請求翻譯成 provider 的參數、消費共享訊息流、對外暴露統一的流式 chunk"。
+
+Pi 的接入就走這條路。底層 `PiProvider` 拉 pi 進程、讀 JSON 事件流、歸一化成共享訊息；上層 `PiCliProvider` 把 `AIRequest` 翻成 `PiOptions`、消費 `CliMessage`、對外吐 `AIStreamingChunk`。
+
+這三件事——訊息解析、重試、取消——分別落在三個不同的地方：`PiJsonEventMapper`、一個看似奇怪的歸檔提案、還有 `CliProcessManager`。下面一個個說。
+
+## 訊息解析：Pi 私有事件怎麼變成共享訊息
+
+pi 在 `--mode json --print` 下按行輸出 JSON 事件。這套事件是 pi 私有的，絕不能直接漏給上層，否則每個消費方都要耦合 pi 的內部細節，pi 一升級事件結構你全項目跟著改。其實這種泄漏，跟把心事寫在臉上沒什麼兩樣——別人看著累，自己也不見得舒服。
+
+我們用 `PiJsonEventMapper` 做了一層翻譯，把 pi 的事件歸一化成共享的 `CliMessage`。`CliMessage` 定義在 `HagiCode.Libs.Core/Transport/CliMessage.cs`，結構非常簡單，就是一個 `(Type, Content)` 的 record。映射關係大致如下：
+
+| pi 事件 | 共享訊息 | 用途 |
+|---|---|---|
+| `session` | `session.started` / `session.resumed` | 會話生命週期 |
+| `message_update`（text 類） | `assistant` | 流式正文增量 |
+| `message_update`（thinking 類） | `assistant.thought` | 思考鏈 |
+| `message_update`（tool 類） | `tool.call` / `tool.update` | 工具調用發起 |
+| `message_end` / `turn_end`（toolResult） | `tool.completed` / `tool.failed` | 工具結果 |
+| `turn_end` / `agent_end` | `terminal.completed` | 本輪結束 |
+| 非零退出 / 解析失敗 | `terminal.failed` | 終態失敗 |
+
+這張表只是個速查，裡面有兩個關鍵技巧，是踩坑之後才摸索出來的，值得展開講。
+
+### 技巧一：cumulative snapshot 轉 delta
+
+這是最容易翻車的點。pi 的 `message_update` 事件發的不是增量，而是**累積全文**——每來一個 token，它把"到目前為止的完整文本"重新發一遍。
+
+如果你直接把收到內容轉發給前端，用戶會看到內容反復重復：第一條是"你"，第二條是"你好"，第三條是"你好，"，第四條是"你好，世"……前端會以為這是四次獨立的輸出。其實重復這種東西，看一次是新鮮，看十次就是厭倦罷了。
+
+解決辦法是前綴比對，算出真正的增量：
+
+```csharp
+// 關鍵：pi 發的是累積快照，不是增量
+// 用前綴比對把增量摳出來，否則前端會看到重復內容
+if (text.StartsWith(_lastAssistantTextSnapshot, StringComparison.Ordinal))
+{
+    var delta = text[_lastAssistantTextSnapshot.Length..];
+    _lastAssistantTextSnapshot = text;
+    return delta.Length == 0 ? null : delta;
+}
+```
+
+這裡還有個隱藏的坑：**跨 turn 的前綴重放**。pi 在工具調用結束、assistant 重新接著說的時候，會再次把之前那段文本從頭發一遍。如果你只記一個全局快照，就會把重放的內容當成增量，導致工具調用後又出現一段重復。`PiProviderTests` 裡專門有個用例 `ExecuteAsync_deduplicates_replayed_assistant_prefix_after_tool_turns` 覆蓋這個場景。換句話說，工具調用前後的快照要對齊處理，不能各自為政。
+
+### 技巧二：thinking 要緩衝到 turn 結束再發
+
+思考鏈（thinking）不能每收到一個 token 就往外吐。pi 在工具調用中途會塞進來一堆思考碎片，如果實時轉發，流的順序會亂成一鍋粥——一會兒是 assistant 正文，一會兒是思考碎片，一會兒又是 tool.call。這有意義嗎？其實也沒什麼意義，只是徒增混亂而已。
+
+我們的做法是：收到 thinking 事件時先放進 `BufferThinkingSnapshot` 暫存，等 `message_end` 或 `turn_end` 且 `stopReason != "toolUse"` 時，再統一 `DrainBufferedThinkingMessages`。這樣工具調用中途的思考碎片就不會污染主流，turn 結束時一次性給出完整的思考過程。
+
+### 容錯：壞的行不能讓流崩掉
+
+agent CLI 不是教科書裡的理想系統，它偶爾會吐出一行非 JSON，或者一個 JSON 沒有 `type` 字段。如果你在這裡拋異常，整個流就死了，用戶什麼也看不到。畢竟現實世界總有些不完美，誰能保證每行都規規矩矩呢？
+
+我們的策略是：任何一行解析失敗，都不中斷流，而是收集到 `_invalidOutputLines`。等進程結束後，在 `Complete()` 裡把這些"壞行"拼進 `terminal.failed` 的診斷文本。這樣用戶看到錯誤時，能直接看到 pi 到底吐了什麼亂七八糟的東西，而不是一個乾巴巴的"parse error"。
+
+## 重試：provider 層不做，誰做？
+
+這是整個對接裡最容易踩的坑。直覺上"對接一個 CLI 應該帶重試"，可 HagiCode 在一個歸檔提案裡**主動移除了** provider 層的全部自動重試。提案叫 `remove-provider-auto-retry-support`。
+
+### 為什麼不自動重試
+
+提案背景寫得非常直白。重試邏輯原本散落在兩個地方：`Hagicode.Libs` 裡有一份（OpenCode 風格的 fresh-runtime replay），`hagicode-core` 裡又有一份（`ProviderErrorAutoRetryCoordinator`）。兩邊都各搞各的，導致"到底重不重試"成了一個隱藏在 provider 內部的隱式行為，會偷偷改變失敗時機、會話續跑方式和聊天狀態流。
+
+你想想就頭大：用戶發一條訊息，provider 內部自己重試了三次，前兩次都失敗、第三次成功了。上層完全不知道中間發生了什麼，會話狀態、token 計數、UI 進度全部對不上。這種隱式行為，怎麼說呢，是架構裡的慢性毒藥罷了。
+
+於是邊界被收斂成一句話：
+
+> provider 收斂回單次嘗試語義，調用方需將無重試狀態視為正常單次執行結果。
+
+### 落到 PiProvider 上是什麼樣
+
+落到代碼上，就是三件事：
+
+- `PiOptions` 裡**沒有任何 retry 相關字段**——沒有 `maxAttempts`、沒有 `retryDelay`、沒有 `retryClassifier`。
+- `ExecuteAsync` 一次 pi 進程跑完就結束，失敗直接給 `terminal.failed`。
+- 之前為自動重試服務的那些分類器（`ClaudeCodeRetryableTerminalFailureClassifier`、`CodexRetryableTerminalFailureClassifier` 之類）只要純粹服務於自動重試的，全部從活躍路徑移除。
+
+但請注意，**重試能力並沒有消失，只是上移了**。提案明確寫著"為後續由更高層統一接管重試留出穩定邊界"。配置項 `providerErrorAutoRetry` 的 DTO、歸一化、序列化、前端設置頁 round-trip 全部保留，只是它不再驅動 provider 執行。畢竟有些東西不是真的不要了，只是換了種方式留著而已。
+
+### 那要重試怎麼辦
+
+如果你要在 pi 之上加重試，正確做法是在 `PiCliProvider` 的調用方做——比如你的會話編排層（HagiCode 裡是 Orleans 的 `SessionGrain`，前端可能是 chat 編排層）。拿到 `terminal.failed` 後，自己判斷是否可重試，自己決定延遲和次數，再發一次 `ExecuteAsync`。
+
+一個最小可用模式長這樣：
+
+```csharp
+// 重試邏輯放在調用方，不要塞回 PiProvider
+// 否則會破壞 provider 剛建立起來的"單次嘗試"邊界
+async Task<AIResponse> ExecuteWithRetryAsync(AIRequest req, int maxAttempts, CancellationToken ct)
+{
+    for (var attempt = 1; ; attempt++)
+    {
+        var response = await provider.ExecuteAsync(req, ct);
+
+        // 成功或達到上限就返回
+        if (response.FinishReason != FinishReason.Unknown || attempt >= maxAttempts)
+            return response;
+
+        // 只對可重試的終態失敗重試（網絡、5xx、進程崩潰）
+        // model rejected、auth failure 這類重試也無意義，別重試
+        await Task.Delay(TimeSpan.FromSeconds(Math.Pow(2, attempt)), ct);
+    }
+}
+```
+
+判斷"可重試"的分類邏輯現在不在 provider 裡，調用方自己定義。`providerErrorAutoRetry` 配置（maxAttempts、retryDelay、enabled）仍可從前端設置頁讀到，但真正驅動重試的是你的編排層，不是 `PiProvider`。這一點請反覆念三遍。
+
+## 取消：token 透傳 + 三段式停機
+
+取消這事，PiProvider 自己幾乎不實現，全委託給 `CliProcessManager`，PiProvider 只負責兩件事：把 `CancellationToken` 傳下去，異常時做善後。
+
+### 全鏈路透傳
+
+鏈路是這樣的，一路傳到底：
+
+```
+調用方 CancellationToken
+  → PiCliProvider.StreamCoreAsync(cancellationToken)
+  → PiProvider.ExecuteProcessAsync([EnumeratorCancellation] cancellationToken)
+  → ReadLineAsync(cancellationToken) / WaitForExitAsync(cancellationToken)
+  → 異常時 _processManager.StopAsync(handle, CancellationToken.None)
+```
+
+注意最後一行：清理的時候用的是 `CancellationToken.None`，不是用戶傳進來的那個 token。這是個細節，但極其重要。
+
+原因是：用戶的 token **已經取消**了。如果你拿這個已經取消的 token 去做清理，清理任務會立刻被取消掉，進程就變孤兒了——pi 還在後台跑，沒人收，CPU 和內存白白占著。所以清理必須用 `CancellationToken.None`，確保清理動作一定能執行完。其實跟人一樣，有些事得在它徹底停下來之後，再好好收尾，否則就是留一地雞毛罷了。
+
+### 三段式遞進停機
+
+`CliProcessManager.StopProcessAsync` 是個三段式遞進的停機流程，時間常量定義在文件頂部：
+
+```csharp
+// 優雅停止的耐心：先給進程自己收尾的時間
+private static readonly TimeSpan GracefulStopTimeout = TimeSpan.FromSeconds(2);
+// 強制 kill 後等待進程真正退出的耐心
+private static readonly TimeSpan StopWaitTimeout = TimeSpan.FromSeconds(5);
+```
+
+三段是這樣遞進的：
+
+1. **中斷信號**。`TryInterruptAsync` 先往 stdin 寫一個 `\u0003`（就是 Ctrl+C 字符），Unix 下再額外 `kill -INT <pid>`。這一步是為了讓 pi 自己優雅收尾——它能感知到中斷，把正在寫的東西收個尾。
+2. **優雅等待**。最多等 2 秒，看進程是不是自己退了。
+3. **強制 kill**。還沒退就直接 `Process.Kill(entireProcessTree: true)`，把整棵進程樹一起殺，再最多等 5 秒確認它真死了。
+
+為什麼要 `entireProcessTree: true`？因為 pi 跑工具的時候會派生子進程——比如 provider 路由到的本地模型進程、跑的 bash 子進程。只殺父進程，子進程會變孤兒繼續跑。整棵樹一起殺才乾淨。
+
+Windows 下沒有 SIGINT 這回事，只能靠 Ctrl+C 字符，所以跨平台行為會有差異，這個心裡要有數。
+
+### PiProvider 的異常善後
+
+PiProvider 的 `ExecuteProcessAsync` 在 `ReadLineAsync` 拋異常時，會用 `ExceptionDispatchInfo.Capture` 把異常暫存，跳出循環後調 `StopAsync` 清理進程，再 `pendingException.Throw()` 把原始異常重新拋給上層。
+
+為什麼要暫存再拋？因為如果直接拋，進程還來不及回收，就成了孤兒；如果在 `StopAsync` 之前拋，清理邏輯根本走不到。暫存一下，先保證進程一定被回收，再把原始的 `OperationCanceledException` 語義完整保留給調用方——調用方拿到這個異常，就能判斷"哦，是用戶主動取消"，而不是"出錯了"。
+
+## 啟動失敗的統一契約
+
+還有個細節值得單獨提一下。進程啟動失敗——比如 pi 可執行文件不存在、權限不對——PiProvider **不拋異常**，而是合成一條 `terminal.failed` 訊息，然後 `yield break`。
+
+為什麼要這樣？因為如果拋異常，上層消費方就得處理兩種完全不同的語義：一種是"流式消費過程中正常的訊息"，一種是"還沒開始流就拋的異常"。這會讓消費方的 `await foreach` 變得特別難寫。
+
+統一成"永遠先給你訊息、再結束流"之後，消費方的邏輯就一致了：拿到 `terminal.failed` 就算失敗，拿到 `terminal.completed` 就算成功，不需要 try/catch 分叉處理。這是個小但重要的設計決策，讓契約穩定下來。
+
+## 實踐：消費流的正確姿勢
+
+參考 HagiCode 裡 `PiScenarioMessageReader`（libs 的 console 測試場景）和 `PiCliProvider.StreamCoreAsync`（core 的 thin adapter），消費方大概長這樣：
+
+```csharp
+await foreach (var message in provider.ExecuteAsync(options, prompt, cancellationToken))
+{
+    // 1. 失敗要優先短路，別再處理後續訊息
+    if (NormalizedAcpCliAdapter.TryGetFailureMessage(message.Content, out var failure))
+    {
+        yield return new AIStreamingChunk { Type = StreamingChunkType.Error, ErrorMessage = failure };
+        yield break;   // terminal.failed 之後流就結束了
+    }
+
+    // 2. assistant 文本是 cumulative snapshot，自己做一次增量計算
+    if (message.Type == "assistant" && TryGetText(message.Content, out var text))
+    {
+        var delta = ReconcileSnapshot(text);  // 前綴比對
+        if (!string.IsNullOrEmpty(delta)) yield return Chunk(delta);
+    }
+
+    // 3. terminal.completed 是唯一可靠的"結束"信號
+    if (message.Type == "terminal.completed") break;
+}
+```
+
+### 常見坑速查
+
+把這一路踩過的坑整理成一張表，方便後來人：
+
+| 現象 | 原因 | 處理 |
+|---|---|---|
+| 前端看到 assistant 文本重復 | 沒做 cumulative 轉 delta | 用 `ReconcileAssistantTextSnapshot` 做前綴比對 |
+| 取消後進程還在跑 | 清理用了已經取消的 token | 改用 `CancellationToken.None` 做清理 |
+| 重試不生效 | 把重試寫進了 PiProvider，但 provider 是單次嘗試語義 | 上移到調用方編排層 |
+| pi 報錯訊息丟失 | 沒讀 `terminal.failed` 的診斷字段 | 完整透傳 `text` / `invalid_output_lines` / `stderr` |
+| 工具調用中途收到思考碎片 | 直接轉發了 thinking 事件 | 緩衝到 turn 結束再 `DrainBufferedThinkingMessages` |
+
+### 怎麼驗證
+
+libs 層用 `StubCliProcessManager` mock 進程，單測覆蓋參數構建、事件歸一化、增量去重、失敗透傳這些純邏輯。真實 CLI 路徑用 `HAGICODE_REAL_CLI_TESTS` 環境變量 opt-in，用真實模型跑 trip 場景。core 層的 `PiCliProviderTests` 驗證 thin adapter 的 `AIStreamingChunk` 投影和 session binding。
+
+```bash
+# 在 Hagicode.Libs 倉庫跑 Pi 相關單測
+dotnet test --filter "FullyQualifiedName~PiProviderTests"
+
+# 跑真實 CLI 集成測試（需要本地裝好 pi）
+HAGICODE_REAL_CLI_TESTS=1 dotnet test --filter "FullyQualifiedName~PiProviderTests.RealCli"
+```
+
+## 總結
+
+把這三件事串起來，對接 pi 的心智模型其實就一句話：**讓每一層只做自己的事**。
+
+- 訊息解析交給 `PiJsonEventMapper`：私有事件歸一化成共享 `CliMessage`，cumulative snapshot 轉成 delta，thinking 緩衝到 turn 結束。
+- 重試交給調用方：provider 單次嘗試，誰想重試誰自己在上層做，配置保留但不再驅動 provider。
+- 取消交給 `CliProcessManager`：`CancellationToken` 全鏈路透傳，清理用 `CancellationToken.None`，三段式遞進停機（中斷信號 → 優雅等待 → 強制 kill 整棵進程樹）。
+
+這套邊界劃清楚之後，對接一個新的 agent CLI 幾乎成了流水線活——你只需要寫一個新的 `XxxProvider` 和 `XxxJsonEventMapper`，重試、取消、訊息契約、錯誤處理這些橫切邏輯全部復用。這也是 HagiCode 能同時支持多個 agent CLI 後端（claude code、codex、pi、gemini cli 等等）而不至於亂套的根本原因。
+
+最後再說一遍那個最重要的邊界：**不要在 provider 層加重試**。把這一點想通，對接 agent CLI 這件事，也就過去大半了……
+
+## 總結
+
+回到"Pi Agent 對接實現：訊息解析、重試與取消"這個主題，真正值得反覆確認的不是零散技巧，而是約束條件、實現邊界和工程取捨是否已經看清。
+
+只要把文中的判斷依據沉澱成穩定的檢查項，後續面對類似問題時就能更快做出可靠決策。

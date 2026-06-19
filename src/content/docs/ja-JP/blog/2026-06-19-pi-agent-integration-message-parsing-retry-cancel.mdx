@@ -1,0 +1,264 @@
+---
+title: Pi Agent統合：メッセージ解析、再試行、キャンセル
+date: 2026-06-19
+tags: [hagicode, pi, cli, provider]
+---
+
+## Pi Agent統合：メッセージ解析、再試行、キャンセル
+
+> CLI形式のAI agentを統合するには、3つのことを避けて通れません：そのプライベートイベントストリームを安定したメッセージに翻訳する方法、失敗後の再試行責任、ユーザーがキャンセルをクリックした際にプロセスをきれいに停止させる方法。実はこの3つは突き詰めれば「役割分担」に過ぎませんが、実際にやってみて初めてその深さが分かります。
+
+## 背景
+
+最近、私はAIコードアシスタントプロジェクトに取り組んでおり、統合対象となるagentの一つが[pi](https://github.com/earendil-works/pi-coding-agent)です。それ自体はTUI/CLI形式のcoding agentで、実行中にstdoutから行ごとにJSONイベントを出力します。単純そうに聞こえます——プロセスを起動して、出力を読み取って、解析すればよいだけ——でも実際に手を動かしてみると、agent CLIの統合は普通のCLIの統合とはまったく別物だと気づきます。
+
+普通のCLIはstdoutを読み終えて終了コードを取得すれば、それで終わりです。でもagent CLIには3つの厄介な特徴があります：
+
+第一に、そのイベントストリームは**プライベートプロトコル**です。`turn_start`、`session`、`message_update`、`message_end`、`turn_end`、`agent_end`——これらはpi独自に定義されたもので、業界標準ではありません。それを消費したいすべての上位レイヤーがそれぞれ処理する必要があり、piの内部詳細があちこちに漏れ出すことになります。遠くから人を見ているようなもので、見えたつもりでも、実は見せたい一面しか見ていないに過ぎません。
+
+第二に、その失敗セマンティクスは**特にあいまい**です。agentが実行中にネットワークが少し振れたり、モデルがレート制限されたり、プロセスがクラッシュしたりしたとき、再試行すべきか？どこで再試行する？再試行すると、すでに半分書き出されたセッション状態が乱れる可能性がある？これはアーキテクチャ上の決定事項で、単に`for`ループを書けば解決できるものではありません。
+
+第三に、**長く中断可能**です。1つのturnが数十秒、あるいは数分かかることもあり、その途中でユーザーがいつでもキャンセルしたくなる可能性があります。キャンセル時にプロセスを孤児にできず、ツール呼び出しを半端なまま残せず、すでに出力されたコンテンツも失えません。ここには想像以上に深みがあります。
+
+これらの痛点を解決するために、統合パスを整理する時間を費やしました。後で詳しく説明しますが、ここだけ先に言うと、本当の難しさは「プロセスを起動する」ことではなく、「役割分担を明確にする」ことです。
+
+## HagiCodeについて
+
+> この記事で共有するソリューションは[HagiCode](https://hagicode.com)プロジェクトから来ています——AIコードアシスタントで、複数のモデルと複数のagent CLIバックエンドをサポートしています。GitHubリポジトリ：[HagiCode-org/site](https://github.com/HagiCode-org/site)、ぜひStarをつけてください。以下で説明するすべてのコード、すべてのトラブルは、実際にこのプロジェクトで動いているものです。実は、これを書き出したのは自分への記念に過ぎません。
+
+## 全体レイヤー
+
+HagiCodeはAI能力の統合を2つのレイヤーに分割します：
+
+- 下層は`Hagicode.Libs`で、再利用可能なproviderプリミティブ`ICliProvider<TOptions>`を提供し、「CLI agentを起動して、その出力を共有メッセージストリームに正規化する」ことを専門とします。
+- 上層は`hagicode-core`で、プロジェクトレベルのthin adapter `IAIProvider`を提供し、「ビジネスリクエストをproviderのパラメータに翻訳し、共有メッセージストリームを消費し、統一されたストリーミングchunkを外部に公開する」ことを担当します。
+
+Piの統合はこのパスに従います。下層の`PiProvider`はpiプロセスを起動し、JSONイベントストリームを読み取り、共有メッセージに正規化します。上層の`PiCliProvider`は`AIRequest`を`PiOptions`に翻訳し、`CliMessage`を消費し、外部に`AIStreamingChunk`を出力します。
+
+この3つ——メッセージ解析、再試行、キャンセル——はそれぞれ3つの異なる場所に属します：`PiJsonEventMapper`、一見奇妙に見えるアーカイブ提案、そして`CliProcessManager`。以下で一つずつ説明します。
+
+## メッセージ解析：Piプライベートイベントを共有メッセージに変換
+
+piは`--mode json --print`モードで行ごとにJSONイベントを出力します。この一連のイベントはpiプライベートのもので、絶対にそのまま上層に漏らしてはいけません。さもないと、各消費側がpiの内部詳細に結合することになり、piがイベント構造をアップグレードするとプロジェクト全体が追随する必要があります。実際、この漏洩は心を顔に書くようなもので、他人が見るのも疲れるし、自分も必ずしも快適とは限りません。
+
+私たちは`PiJsonEventMapper`を使って翻訳レイヤーを作成し、piのイベントを共有の`CliMessage`に正規化しました。`CliMessage`は`HagiCode.Libs.Core/Transport/CliMessage.cs`で定義されており、構造は非常にシンプルで、`(Type, Content)`のrecordです。マッピング関係は概ね以下の通りです：
+
+| piイベント | 共有メッセージ | 用途 |
+|---|---|---|
+| `session` | `session.started` / `session.resumed` | セッションライフサイクル |
+| `message_update`（text型） | `assistant` | ストリーミング本文増分 |
+| `message_update`（thinking型） | `assistant.thought` | 思考チェーン |
+| `message_update`（tool型） | `tool.call` / `tool.update` | ツール呼び出し開始 |
+| `message_end` / `turn_end`（toolResult） | `tool.completed` / `tool.failed` | ツール結果 |
+| `turn_end` / `agent_end` | `terminal.completed` | 今回のターン終了 |
+| 非ゼロ終了 / 解析失敗 | `terminal.failed` | 最終状態の失敗 |
+
+この表はクイックリファレンスに過ぎませんが、ここには2つの重要なテクニックがあり、トラブルを経験した後にようやく見つけ出したもので、詳しく説明する価値があります。
+
+### テクニック1：cumulative snapshotからdeltaへの変換
+
+これは最も失敗しやすいポイントです。piの`message_update`イベントは増分ではなく、**累積全文**を送信します——トークンが来るたびに、「これまでの完全なテキスト」を再送します。
+
+受信した内容をそのままフロントエンドに転送すると、ユーザーはコンテンツが繰り返し表示されるのを見ることになります：1つ目は「你」、2つ目は「你好」、3つ目は「你好，」、4つ目は「你好，世」……フロントエンドはこれを4つの独立した出力だと見なします。実は繰り返しというもの、1回見るのは新鮮ですが、10回見ればうんざりするだけです。
+
+解決策はプレフィックス比較で真の増分を計算することです：
+
+```csharp
+// 重要：piは累積スナップショットを送るので、増分ではない
+// プレフィックス比較で増分を抽出し、さもないとフロントエンドは重複コンテンツを見る
+if (text.StartsWith(_lastAssistantTextSnapshot, StringComparison.Ordinal))
+{
+    var delta = text[_lastAssistantTextSnapshot.Length..];
+    _lastAssistantTextSnapshot = text;
+    return delta.Length == 0 ? null : delta;
+}
+```
+
+ここにも隠れた落とし穴があります：**ターン間のプレフィックスリプレイ**です。piはツール呼び出しが終了してassistantが再び続きを言うとき、以前のテキストを最初から再度送信します。グローバルスナップショットだけを記録していると、リプレイされたコンテンツを増分として扱い、ツール呼び出し後に再度重複が発生することになります。`PiProviderTests`には`ExecuteAsync_deduplicates_replayed_assistant_prefix_after_tool_turns`というテストケースがあり、このシナリオをカバーしています。つまり、ツール呼び出し前後のスナップショットをアライメントして処理し、それぞれ勝手にやってはいけません。
+
+### テクニック2：thinkingはターン終了までバッファリングしてから送信
+
+思考チェーン（thinking）はトークンを受け取るたびに出力してはいけません。piはツール呼び出しの途中に思考の断片を詰め込んでくることがあり、リアルタイムで転送するとストリームの順序が混乱します——ある時はassistant本文、ある時は思考の断片、ある時はtool.call。これに意味がありますか？実はあまり意味もなく、ただ混乱を増やすだけです。
+
+私たちのアプローチは：thinkingイベントを受け取ったらまず`BufferThinkingSnapshot`に一時保存し、`message_end`または`turn_end`で`stopReason != "toolUse"`の場合にのみ、統一して`DrainBufferedThinkingMessages`を実行します。こうすることで、ツール呼び出し途中の思考断片がメインストリームを汚染せず、ターン終了時に完全な思考プロセスを一度に提供できます。
+
+### 耐障害性：悪い行がストリームをクラッシュさせてはいけない
+
+agent CLIは教科書通りの理想的なシステムではなく、時折非JSONの行や、`type`フィールドのないJSONを出力することがあります。ここで例外を投げると、ストリーム全体が死に、ユーザーは何も見られなくなります。結局のところ、現実世界には不完全さがあり、各行が規則正しいことを誰も保証できません。
+
+私たちの戦略は：どの行の解析に失敗しても、ストリームを中断せず、`_invalidOutputLines`に収集することです。プロセス終了後、`Complete()`でこれらの「悪い行」を`terminal.failed`の診断テキストに結合します。こうすることで、ユーザーがエラーを見たとき、piが実際にどのような乱雑なものを出力したかを直接確認でき、単なる「parse error」という乾燥したメッセージではありません。
+
+## 再試行：providerレイヤーではしない、誰がする？
+
+これは統合全体で最も失敗しやすいポイントです。直感では「CLIを統合するなら再試行を含めるべき」と思われますが、HagiCodeはアーカイブ提案でproviderレイヤーのすべての自動再試行を**能動的に削除しました**。提案名は`remove-provider-auto-retry-support`です。
+
+### なぜ自動再試行しないのか
+
+提案の背景は非常に直截に書かれています。再試行ロジックはもともと2つの箇所に分散していました：`Hagicode.Libs`に1つ（OpenCodeスタイルのfresh-runtime replay）、`hagicode-core`にまた1つ（`ProviderErrorAutoRetryCoordinator`）。両方がそれぞれ勝手にやっていたため、「再試行するかどうか」がprovider内部に隠された暗黙の振る舞いになり、失敗タイミング、セッション継続方法、チャット状態ストリームをこっそり変更していました。
+
+考えてみるだけで頭が痛くなります：ユーザーがメッセージを送信し、provider内部で自分で3回再試行し、最初の2回は失敗、3回目が成功しました。上層は途中で何が起こったかまったく知らず、セッション状態、トークンカウント、UI進捗がすべて合いません。このような暗黙の振る舞いは、アーキテクチャにおける慢性毒のようなものです。
+
+そこで境界は一文に収束されました：
+
+> providerは単一試行セマンティクスに収束し、呼び出し側は再試行なし状態を正常な単一実行結果として扱う必要がある。
+
+### PiProviderではどうなるか
+
+コードに落とすと、3つのことになります：
+
+- `PiOptions`には**再試行関連フィールドがまったくない**——`maxAttempts`、`retryDelay`、`retryClassifier`がありません。
+- `ExecuteAsync`は1回のpiプロセス実行で終了し、失敗すると直接`terminal.failed`を返します。
+- 以前、自動再試行に奉仕していた分類器（`ClaudeCodeRetryableTerminalFailureClassifier`、`CodexRetryableTerminalFailureClassifier`など）は、純粋に自動再試行に奉仕している限り、すべてアクティブパスから削除されました。
+
+ただし、**再試行能力は消えたわけではなく、単に上に移動した**ことに注意してください。提案には「将来、より上層で再試行を統一的に管理できるように安定した境界を確保する」と明記されています。設定項目`providerErrorAutoRetry`のDTO、正規化、シリアル化、フロントエンド設定ページのround-tripはすべて保持されていますが、provider実行を駆動しなくなっただけです。結局のところ、本当に要らなくなったわけではなく、ただ別の方法で保持しているだけです。
+
+### 再試行したい場合はどうするか
+
+piの上に再試行を追加したい場合、正しい方法は`PiCliProvider`の呼び出し側で行うことです——例えば、セッションオーケストレーションレイヤー（HagiCodeではOrleansの`SessionGrain`、フロントエンドではchatオーケストレーションレイヤーかもしれません）。`terminal.failed`を受け取った後、自分で再試行可能かを判断し、自分で遅延と回数を決めて、再度`ExecuteAsync`を送信します。
+
+最小限の実行可能なパターンは以下の通りです：
+
+```csharp
+// 再試行ロジックは呼び出し側に置き、PiProviderに戻さない
+// さもないと、providerが確立した「単一試行」境界を破壊する
+async Task<AIResponse> ExecuteWithRetryAsync(AIRequest req, int maxAttempts, CancellationToken ct)
+{
+    for (var attempt = 1; ; attempt++)
+    {
+        var response = await provider.ExecuteAsync(req, ct);
+
+        // 成功または上限に達したら返す
+        if (response.FinishReason != FinishReason.Unknown || attempt >= maxAttempts)
+            return response;
+
+        // 再試行可能な最終状態失敗のみ再試行（ネットワーク、5xx、プロセスクラッシュ）
+        // model rejected、auth failureなどは再試行しても意味がないので、再試行しない
+        await Task.Delay(TimeSpan.FromSeconds(Math.Pow(2, attempt)), ct);
+    }
+}
+```
+
+「再試行可能」を判断する分類ロジックは現在providerにではなく、呼び出し側が自分で定義します。`providerErrorAutoRetry`設定（maxAttempts、retryDelay、enabled）はフロントエンド設定ページから読み取れますが、実際に再試行を駆動するのはオーケストレーションレイヤーで、`PiProvider`ではありません。この点は3回繰り返して言ってください。
+
+## キャンセル：token透伝 + 3段階停止
+
+キャンセルに関して、PiProvider自身はほとんど実装せず、すべて`CliProcessManager`に委譲し、PiProviderは2つのことだけを担当します：`CancellationToken`を渡すこと、例外発生時に事後処理をすることです。
+
+### 全链路透伝
+
+チェーンは以下の通りで、最後まで伝わります：
+
+```
+呼び出し側 CancellationToken
+  → PiCliProvider.StreamCoreAsync(cancellationToken)
+  → PiProvider.ExecuteProcessAsync([EnumeratorCancellation] cancellationToken)
+  → ReadLineAsync(cancellationToken) / WaitForExitAsync(cancellationToken)
+  → 例外時 _processManager.StopAsync(handle, CancellationToken.None)
+```
+
+最後の行に注意：クリーンアップ時には`CancellationToken.None`を使用し、ユーザーが渡したtokenではありません。これは詳細ですが、極めて重要です。
+
+理由は：ユーザーのtokenは**すでにキャンセルされています**。すでにキャンセルされたtokenでクリーンアップを行うと、クリーンアップタスクがすぐにキャンセルされ、プロセスが孤児になります——piがまだバックグラウンドで動き続け、誰も回収せず、CPUとメモリを無駄に占領します。したがって、クリーンアップには必ず`CancellationToken.None`を使用し、クリーンアップアクションが確実に完了するようにする必要があります。人間と同じで、完全に停止してからきちんと事後処理をする必要があり、さもないと散らかり放題になります。
+
+### 3段階漸進停止
+
+`CliProcessManager.StopProcessAsync`は3段階の漸進停止プロセスで、時間定数はファイル先頭で定義されています：
+
+```csharp
+// エレガント停止の忍耐：まずプロセス自身が終了する時間を与える
+private static readonly TimeSpan GracefulStopTimeout = TimeSpan.FromSeconds(2);
+// 強制kill後、プロセスが本当に終了するまでの忍耐
+private static readonly TimeSpan StopWaitTimeout = TimeSpan.FromSeconds(5);
+```
+
+3段階は以下のように漸進します：
+
+1. **割り込み信号**。`TryInterruptAsync`がまずstdinに`\u0003`（つまりCtrl+C文字）を書き込み、Unixでは追加で`kill -INT <pid>`を実行します。このステップはpi自身がエレガントに終了できるようにするため——割り込みを感知し、書き込んでいるものを終了させます。
+2. **エレガント待機**。最大2秒待機し、プロセスが自分で終了したかを確認します。
+3. **強制kill**。まだ終了しない場合は直接`Process.Kill(entireProcessTree: true)`を実行し、プロセスツリー全体を一緒にkillし、最大5秒待機して本当に死んだかを確認します。
+
+なぜ`entireProcessTree: true`なのか？piがツールを実行するときに子プロセスを派生させるためです——例えば、providerがルーティングしたローカルモデルプロセス、実行中のbash子プロセス。親プロセスだけをkillすると、子プロセスが孤児になり続けて動きます。ツリー全体を一緒にkillして初めてきれいになります。
+
+WindowsにはSIGINTというものがなく、Ctrl+C文字しか頼れないため、クロスプラットフォームの振る舞いに違いがあり、この点は心に留めておく必要があります。
+
+### PiProviderの例外事後処理
+
+PiProviderの`ExecuteProcessAsync`は`ReadLineAsync`が例外を投げたとき、`ExceptionDispatchInfo.Capture`で例外を一時保存し、ループを抜けた後に`StopAsync`を呼び出してプロセスをクリーンアップし、`pendingException.Throw()`で元の例外を上層に再スローします。
+
+なぜ一時保存してからスローするのか？直接スローすると、プロセスが回収される時間がなく孤児になるからです。`StopAsync`の前にスローすると、クリーンアップロジックがまったく実行されません。一時保存して、まずプロセスが確実に回収されることを保証し、元の`OperationCanceledException`セマンティクスを完全に呼び出し側に残します——呼び出し側がこの例外を受け取ると、「ああ、ユーザーが能動的にキャンセルした」と判断でき、「エラーが発生した」ではありません。
+
+## 起動失敗の統一契約
+
+詳細として別途言及する価値があります。プロセス起動失敗——例えばpi実行ファイルが存在しない、権限が正しくない——PiProviderは**例外を投げず**、代わりに`terminal.failed`メッセージを合成し、`yield break`します。
+
+なぜこうするのか？例外を投げると、上層の消費側が2つの完全に異なるセマンティクスを処理する必要があるからです：1つは「ストリーミング消費プロセス中の通常のメッセージ」、もう1つは「まだストリーミングを開始していないのに投げられた例外」です。これにより、消費側の`await foreach`が特に書きにくくなります。
+
+「常にメッセージを先に提供し、その後ストリームを終了する」に統一した後、消費側のロジックは一貫します：`terminal.failed`を受け取ると失敗、`terminal.completed`を受け取ると成功、try/catch分岐処理は不要です。これは小さくても重要な設計決定であり、契約を安定させます。
+
+## 実践：ストリーム消費の正しい姿
+
+HagiCodeの`PiScenarioMessageReader`（libsのコンソールテストシナリオ）と`PiCliProvider.StreamCoreAsync`（coreのthin adapter）を参考に、消費側は概ね以下のようになります：
+
+```csharp
+await foreach (var message in provider.ExecuteAsync(options, prompt, cancellationToken))
+{
+    // 1. 失敗は優先的にショートカットし、後続メッセージを処理しない
+    if (NormalizedAcpCliAdapter.TryGetFailureMessage(message.Content, out var failure))
+    {
+        yield return new AIStreamingChunk { Type = StreamingChunkType.Error, ErrorMessage = failure };
+        yield break;   // terminal.failedの後ストリームは終了
+    }
+
+    // 2. assistantテキストはcumulative snapshotなので、自分でもう一度増分計算を行う
+    if (message.Type == "assistant" && TryGetText(message.Content, out var text))
+    {
+        var delta = ReconcileSnapshot(text);  // プレフィックス比較
+        if (!string.IsNullOrEmpty(delta)) yield return Chunk(delta);
+    }
+
+    // 3. terminal.completedは唯一の信頼できる「終了」シグナル
+    if (message.Type == "terminal.completed") break;
+}
+```
+
+### 一般的な落とし穴クイックリファレンス
+
+道中で踏んだ落とし穴を表に整理して、後続の人の参考にしました：
+
+| 現象 | 原因 | 処理 |
+|---|---|---|
+| フロントエンドがassistantテキストの重複を見る | cumulativeからdeltaへの変換をしていない | `ReconcileAssistantTextSnapshot`でプレフィックス比較を行う |
+| キャンセル後もプロセスが動いている | キャンセル済みtokenをクリーンアップに使用した | クリーンアップに`CancellationToken.None`を使用する |
+| 再試行が有効でない | 再試行をPiProviderに書いたが、providerは単一試行セマンティクス | 呼び出し側オーケストレーションレイヤーに上へ移動する |
+| piエラー情報が失われる | `terminal.failed`の診断フィールドを読んでいない | `text` / `invalid_output_lines` / `stderr`を完全に透伝する |
+| ツール呼び出し中に思考断片を受信 | thinkingイベントを直接転送した | ターン終了までバッファリングしてから`DrainBufferedThinkingMessages` |
+
+### 検証方法
+
+libsレイヤーは`StubCliProcessManager`でプロセスをモックし、単体テストでパラメータ構築、イベント正規化、増分重複排除、失敗透伝などの純粋なロジックをカバーします。実際のCLIパスは`HAGICODE_REAL_CLI_TESTS`環境変数でopt-inし、実際のモデルでtripシナリオを実行します。coreレイヤーの`PiCliProviderTests`はthin adapterの`AIStreamingChunk`投影とsession bindingを検証します。
+
+```bash
+# Hagicode.LibsリポジトリでPi関連単体テストを実行
+dotnet test --filter "FullyQualifiedName~PiProviderTests"
+
+# 実際のCLI統合テストを実行（ローカルにpiをインストールする必要がある）
+HAGICODE_REAL_CLI_TESTS=1 dotnet test --filter "FullyQualifiedName~PiProviderTests.RealCli"
+```
+
+## まとめ
+
+この3つを結びつけると、pi統合のメンタルモデルは実は一言：**各レイヤーが自分のことだけをする**。
+
+- メッセージ解析は`PiJsonEventMapper`に委ねる：プライベートイベントを共有`CliMessage`に正規化し、cumulative snapshotをdeltaに変換し、thinkingをターン終了までバッファリングする。
+- 再試行は呼び出し側に委ねる：providerは単一試行、誰が再試行したいかが自分で上層で行い、設定は保持するがproviderを駆動しない。
+- キャンセルは`CliProcessManager`に委ねる：`CancellationToken`を全链路透伝し、クリーンアップには`CancellationToken.None`を使用し、3段階漸進停止（割り込み信号 → エレガント待機 → プロセスツリー全体を強制kill）を行う。
+
+この境界を明確にした後、新しいagent CLIを統合することはほぼ流れ作業になります——新しい`XxxProvider`と`XxxJsonEventMapper`を書くだけで、再試行、キャンセル、メッセージ契約、エラー処理などの横断ロジックはすべて再利用されます。これがHagiCodeが複数のagent CLIバックエンド（claude code、codex、pi、gemini cliなど）を同時にサポートでき、乱れることのない根本的な理由です。
+
+最後にもう一度、最も重要な境界を言います：**providerレイヤーで再試行を追加しないでください**。この点を理解すれば、agent CLI統合も半分以上終わります……
+
+## まとめ
+
+「Pi Agent統合：メッセージ解析、再試行、キャンセル」というテーマに戻ると、繰り返し確認する価値があるのは零細なテクニックではなく、制約条件、実装境界、工学的なトレードオフがすでに明確になっているかどうかです。
+
+記事中の判断根拠を安定したチェック項目として蓄積すれば、今後同様の問題に直面したとき、より迅速に信頼できる決定を下すことができます。
