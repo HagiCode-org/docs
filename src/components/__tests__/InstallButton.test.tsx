@@ -11,6 +11,7 @@ import * as versionManager from '@shared/version-manager';
 import InstallButton, { filterSupportedPlatformGroups } from '../InstallButton';
 
 const fallbackUrl = 'https://index.hagicode.com/desktop/history/';
+const windowsStoreUrl = 'https://apps.microsoft.com/detail/9N3PM0N3SVDW';
 const fallbackSteamUrl = 'https://store.steampowered.com/app/4625540/Hagicode/';
 vi.mock('@shared/version-manager', async () => {
   const actual = await vi.importActual<typeof import('@shared/version-manager')>('@shared/version-manager');
@@ -134,6 +135,81 @@ describe('InstallButton runtime states', () => {
       'href',
       expect.stringContaining('Hagicode.Desktop.Setup.1.2.3.exe'),
     );
+  });
+
+  it('promotes Microsoft Store as the primary Windows CTA and hides duplicate shortcuts', async () => {
+    window.history.replaceState({}, '', '/?os=windows');
+    vi.mocked(versionManager.getDesktopVersionData).mockResolvedValue(
+      createVersionData({
+        latest: {
+          version: 'v1.2.4',
+          assets: [
+            {
+              name: 'Hagicode.Desktop.Setup.1.2.4.exe',
+              path: 'v1.2.4/Hagicode.Desktop.Setup.1.2.4.exe',
+              size: 1048576,
+              lastModified: null,
+              torrentUrl: 'v1.2.4/Hagicode.Desktop.Setup.1.2.4.exe.torrent',
+              downloadSources: [
+                {
+                  kind: 'official',
+                  label: 'Official Download',
+                  url: 'https://desktop.dl.hagicode.com/v1.2.4/Hagicode.Desktop.Setup.1.2.4.exe',
+                  primary: true,
+                },
+                {
+                  kind: 'github-release',
+                  label: 'GitHub Release',
+                  url: 'https://github.com/HagiCode-org/releases/download/v1.2.4/Hagicode.Desktop.Setup.1.2.4.exe',
+                },
+              ],
+            },
+          ],
+        },
+        channels: {
+          stable: {
+            latest: {
+              version: 'v1.2.4',
+              assets: [
+                {
+                  name: 'Hagicode.Desktop.Setup.1.2.4.exe',
+                  path: 'v1.2.4/Hagicode.Desktop.Setup.1.2.4.exe',
+                  size: 1048576,
+                  lastModified: null,
+                  torrentUrl: 'v1.2.4/Hagicode.Desktop.Setup.1.2.4.exe.torrent',
+                  downloadSources: [
+                    {
+                      kind: 'official',
+                      label: 'Official Download',
+                      url: 'https://desktop.dl.hagicode.com/v1.2.4/Hagicode.Desktop.Setup.1.2.4.exe',
+                      primary: true,
+                    },
+                    {
+                      kind: 'github-release',
+                      label: 'GitHub Release',
+                      url: 'https://github.com/HagiCode-org/releases/download/v1.2.4/Hagicode.Desktop.Setup.1.2.4.exe',
+                    },
+                  ],
+                },
+              ],
+            },
+            all: [],
+          },
+          beta: { latest: null, all: [] },
+        },
+      }),
+    );
+
+    const { container } = render(<InstallButton variant="compact" locale="en" />);
+
+    expect(
+      await screen.findByRole('link', { name: 'Install Hagicode Desktop from Microsoft Store' }),
+    ).toHaveAttribute('href', windowsStoreUrl);
+    expect(screen.queryByRole('link', { name: /China/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /GitHub/i })).not.toBeInTheDocument();
+    expect(
+      container.querySelector('ms-store-badge[data-windows-store-entry="docs-header-install"]'),
+    ).toBeNull();
   });
 
   it('filters historical deb downloads out of precomputed platform groups', () => {
@@ -568,7 +644,7 @@ describe('InstallButton runtime states', () => {
 
     const { container } = render(<InstallButton variant="full" locale="en" />);
 
-    await screen.findByRole('link', { name: /China/i });
+    await screen.findByRole('link', { name: 'Install Hagicode Desktop from Microsoft Store' });
     fireEvent.click(screen.getByRole('button', { name: 'Select Other Version' }));
 
     const groupLabels = Array.from(container.querySelectorAll('.dropdown-group-label'));

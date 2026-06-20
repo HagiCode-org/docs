@@ -310,6 +310,8 @@ export default function InstallButton({
           unavailable: 'Unavailable',
           retry: 'Retry',
           openVersionHistory: 'Open version history',
+          windowsStoreInstall: 'Install from Microsoft Store',
+          windowsStoreAriaLabel: 'Install Hagicode Desktop from Microsoft Store',
           desktopPackages: 'Desktop packages',
           choosePackage: 'Choose the package for your device',
           packageHint: 'Your current platform is listed first, and the default source is clearly tagged.',
@@ -331,6 +333,8 @@ export default function InstallButton({
           unavailable: '暂不可用',
           retry: '重试',
           openVersionHistory: '打开版本历史页',
+          windowsStoreInstall: 'Microsoft Store 安装',
+          windowsStoreAriaLabel: '通过 Microsoft Store 安装 Hagicode Desktop',
           desktopPackages: 'Desktop 安装包',
           choosePackage: '选择适合当前设备的安装包',
           packageHint: '当前设备对应的平台会优先展示，默认下载源会被明确标记。',
@@ -348,7 +352,6 @@ export default function InstallButton({
     locale === 'en' ? 'Open Hagicode on Steam' : '打开 Hagicode Steam 商店页';
   const windowsStoreShortcutAriaLabel =
     locale === 'en' ? 'Open Hagicode on Microsoft Store' : '打开 Hagicode Microsoft Store 页面';
-  const showWindowsStoreShortcut = variant === 'compact';
 
   const loadRuntimeVersionData = useCallback(() => {
     let mounted = true;
@@ -578,6 +581,8 @@ export default function InstallButton({
       label: getPrimaryDownloadSourceLabel(source, locale),
     }))
     .filter((entry) => Boolean(entry.action));
+  const preferWindowsStorePrimary = canDownload && currentOS === 'windows';
+  const showWindowsStoreShortcut = variant === 'compact' && !preferWindowsStorePrimary;
   const showDisabledPrimaryButtons = primarySourceButtons.length === 0;
   const primaryButtonsDisabled = isLoading || !canDownload || (!FEATURE_MAC_DOWNLOAD_ENABLED && currentOS === 'macos');
   const showDropdownToggle = canDownload && platformData.length > 0;
@@ -640,34 +645,73 @@ export default function InstallButton({
         className={`split-button-container ${variant === 'compact' ? 'split-button-container--segmented' : ''}`}
         data-action-group={variant === 'compact' ? 'segmented' : 'default'}
       >
-        <div
-          className={`install-button-primary-actions ${variant === 'compact' ? 'install-button-primary-actions--grouped' : ''}`}
-          data-segment-role="primary-actions"
-        >
-          {(showDisabledPrimaryButtons
-            ? primarySourceOrder
-            : primarySourceButtons.map((entry) => entry.source)).map((source) => {
-            const configuredEntry = primarySourceButtons.find((entry) => entry.source === source);
-            const label = configuredEntry?.label ?? getPrimaryDownloadSourceLabel(source, locale);
-            const action = configuredEntry?.action ?? null;
-            const buttonClassName = [
-              'btn-download-source',
-              `btn-download-source--${source}`,
-              primaryButtonsDisabled || !action ? 'btn-download-source-disabled' : '',
-              isLoading ? 'btn-download-source-loading' : '',
-            ]
-              .filter(Boolean)
-              .join(' ');
+        {preferWindowsStorePrimary ? (
+          <a
+            href={WINDOWS_STORE_URL}
+            className="btn-download-main"
+            aria-label={t.windowsStoreAriaLabel}
+          >
+            <svg className="download-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path
+                d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+            <span className="btn-text">{t.windowsStoreInstall}</span>
+          </a>
+        ) : (
+          <div
+            className={`install-button-primary-actions ${variant === 'compact' ? 'install-button-primary-actions--grouped' : ''}`}
+            data-segment-role="primary-actions"
+          >
+            {(showDisabledPrimaryButtons
+              ? primarySourceOrder
+              : primarySourceButtons.map((entry) => entry.source)).map((source) => {
+              const configuredEntry = primarySourceButtons.find((entry) => entry.source === source);
+              const label = configuredEntry?.label ?? getPrimaryDownloadSourceLabel(source, locale);
+              const action = configuredEntry?.action ?? null;
+              const buttonClassName = [
+                'btn-download-source',
+                `btn-download-source--${source}`,
+                primaryButtonsDisabled || !action ? 'btn-download-source-disabled' : '',
+                isLoading ? 'btn-download-source-loading' : '',
+              ]
+                .filter(Boolean)
+                .join(' ');
 
-            if (primaryButtonsDisabled || !action) {
+              if (primaryButtonsDisabled || !action) {
+                return (
+                  <button
+                    key={source}
+                    type="button"
+                    className={buttonClassName}
+                    disabled
+                    aria-disabled="true"
+                    aria-label={label}
+                  >
+                    <svg className="download-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                      <path
+                        d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                    </svg>
+                    <span className="btn-text">{label}</span>
+                  </button>
+                );
+              }
+
               return (
-                <button
+                <a
                   key={source}
-                  type="button"
+                  href={action.url}
                   className={buttonClassName}
-                  disabled
-                  aria-disabled="true"
-                  aria-label={label}
+                  aria-label={`${t.installHagicodeDesktop} (${label})`}
                 >
                   <svg className="download-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
                     <path
@@ -679,31 +723,11 @@ export default function InstallButton({
                     />
                   </svg>
                   <span className="btn-text">{label}</span>
-                </button>
+                </a>
               );
-            }
-
-            return (
-              <a
-                key={source}
-                href={action.url}
-                className={buttonClassName}
-                aria-label={`${t.installHagicodeDesktop} (${label})`}
-              >
-                <svg className="download-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                  <path
-                    d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                </svg>
-                <span className="btn-text">{label}</span>
-              </a>
-            );
-          })}
-        </div>
+            })}
+          </div>
+        )}
 
         {showWindowsStoreShortcut && (
           <MicrosoftStoreBadge
