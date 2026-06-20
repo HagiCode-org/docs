@@ -1,0 +1,246 @@
+---
+title: O Prompt de Commit de IA no HagiCode: Concepção e Implementação
+date: 2026-06-20
+tags: [handlebars, hagicode]
+---
+
+## O Prompt de Commit de IA no HagiCode: Concepção e Implementação
+
+> Quando você joga um monte de alterações confusas para a IA pedir ajuda no commit, que tipo de prompt é enviado para o modelo nos bastidores? Por que o prompt precisa ser escrito daquela maneira? Este artigo desmonta o prompt que realmente impulsiona o "commit de IA" no HagiCode.
+
+## Contexto
+
+Usar IA para auxiliar no desenvolvimento é algo que muitos desenvolvedores já experimentaram. Acumulando um monte de alterações não commitadas, arquivos de configuração, documentação, lógica de negócio, casos de teste todos misturados - deixa qualquer um de cabeça doendo. Agrupar manualmente, escrever manualmente mensagens de commit que seguem as convenções, então mudar de branch e fazer push - só esses "trabalhos finais" podem consumir meia hora.
+
+Na verdade, isso naturalmente cria uma demanda - **conseguir jogar todas as alterações não commitadas para a IA de uma vez, deixá-la analisar, agrupar, escrever mensagens, e até mesmo fazer commit + push diretamente?**
+
+A ideia é boa, mas na prática há muitos desafios. A IA facilmente pode alterar apenas `--author` sem mudar o Committer, deixando o autor correto mas o committer errado no histórico de commits - uma desconexão visual. Ela pode escrever mensagens extravagantes completamente desalinhadas com o estilo do seu repositório. Pode mudar arbitrariamente para o branch principal e causar problemas. Pode omitir `Co-Authored-By` ou adicionar erradamente `Signed-off-by` acionando problemas de conformidade.
+
+Cada um desses desafios é uma lição aprendida. Para preencher essas lacunas, transformamos o "commit de IA" em um contrato de tarefa de Agent parametrizado. Este artigo quer esclarecer como esse contrato se parece e por que foi projetado dessa forma.
+
+## Sobre o HagiCode
+
+A solução compartilhada neste artigo vem da nossa prática no projeto [HagiCode](https://hagicode.com). O HagiCode é um assistente de código de IA focado no fluxo de trabalho dos desenvolvedores, transformando tarefas diárias como commit de Git, revisão de código, build e publicação em tarefas que a IA pode participar. O sistema de prompts desmontado abaixo é exatamente o que está rodando no backend do HagiCode. No fundo, é apenas tentar delegar esses trabalhos triviais de "finalização" para a IA.
+
+## A Forma Real do Prompt: Template mais Metadados, não Uma String Fixa
+
+Muitas pessoas pensam que "prompt" é apenas um texto fixo em linguagem natural, jogado para o modelo e pronto. A abordagem do HagiCode é completamente diferente.
+
+O prompt que realmente impulsiona o "commit de IA" é chamado `auto-compose-commit`, correspondendo a `PromptScenario.AutoComposeCommit` no código. Ele está localizado em `repos/hagicode-core/src/PCode.Web/Resources/Prompts/` com a seguinte estrutura:
+
+```
+Resources/Prompts/
+├── auto-compose-commit.en-US.hbs     # Template Handlebars em inglês
+├── auto-compose-commit.en-US.json    # Metadados em inglês (schema de parâmetros, versão, tags)
+├── auto-compose-commit.zh-CN.hbs     # Template em chinês
+└── auto-compose-commit.zh-CN.json    # Metadados em chinês
+```
+
+Ou seja, um prompt é uma combinação de **um template Handlebars + um JSON de metadados**, organizado em vários conjuntos por locale.
+
+Por que essa separação? Na verdade, há várias considerações.
+
+Primeiro, **desacoplamento de metadados e conteúdo do prompt**. O JSON descreve o schema de parâmetros - nome do parâmetro, tipo, se é obrigatório, valor padrão; o `.hbs` apenas cuida de "como dizer isso". Assim, o frontend pode renderizar automaticamente o formulário de entrada correto com base no JSON sem precisar saber o conteúdo do template: seletor de identidade Git, modo Co-Authored-By, estratégia de branch de destino, se deve fazer push... esses controles são todos gerados pelo JSON.
+
+Segundo, **organização plana por idioma, em vez de usar chaves i18n para tradução**. Cada locale tem um conjunto completo de `.hbs` + `.json`, evitando "deriva de chaves de tradução". Diferentes idiomas não apenas substituem palavras, mas exemplos de agrupamento, exemplos de comandos também podem ser localizados. Hábitos de commit em repositórios chinês e inglês são naturalmente diferentes, forçar um único template e traduzir é apenas estranho.
+
+Terceiro, **migrar de Scriban para Handlebars foi para performance**. `HandlebarsTemplateRenderer` escolheu `Handlebars.Net` porque pode "compilar templates diretamente para bytecode IL", muito mais rápido que interpretação. Durante a migração também foi feita uma compatibilidade interessante: substituir `True/False` por `true/false` nos resultados renderizados, compatibilizando com o hábito de saída booleana do Scriban antigo - sem atenção a esse detalhe, testes antigos falhariam todos.
+
+## O Prompt Tem essa Forma, Cinco Decisões-Chave por Trás
+
+Abrindo `auto-compose-commit.zh-CN.hbs`, o esqueleto é aproximadamente:
+
+```
+Instruções de modo não-interativo
+├── <task>            Definição da tarefa: analisar alterações, agrupar inteligentemente, múltiplos commits
+├── <context>         Contexto: projectPath + controle de push + controle de branch de destino
+├── <working_directory>
+├── <git_profile>     Identidade: Author e Committer dupla escrita
+├── <tools>           Lista branca de ferramentas
+├── <requirements>    Requisitos rígidos (branch, agrupamento, Co-Authored-By, Signed-off-by, Conventional Commits)
+├── <historical_format_analysis>  Consistência histórica
+├── <constraints>     Restrições (proibir reset, ignorar .gitignore)
+├── <workflow>        Fluxo de execução passo a passo
+├── <output_format>   Saída estritamente separada por `---`
+└── <final_instruction>
+```
+
+Abaixo, vamos expandir cinco pontos que melhor refletem as intenções de design.
+
+### Decisão Um: Execução Direta, Não Apenas Geração de Plano
+
+O prompt enfatiza repetidamente uma frase: **Use comandos Git diretamente para executar cada commit, não retorne planos, opere diretamente.**
+
+Esta é a diferença fundamental entre "Auto Compose Commit" e a solução anterior. A solução anterior `ai-git-commit-message-generator` (correspondendo à especificação `ai-commit-message-generation` no OpenSpec) fazia apenas uma coisa: chamar `POST /api/git/generate-commit-message`, retornar uma string de commit message, deixando o usuário fazer o commit manualmente.
+
+Mas `auto-compose-commit` é diferente, é uma **tarefa automatizada de Agent**. O modelo deve chamar a ferramenta `Bash(git:*)` por conta própria, completando toda a cadeia add → commit → push. Esta diferença determina o tom de todo o prompt - não pode apenas descrever "que tipo de mensagem escrever", mas também deve especificar "que fluxo seguir, que ferramentas usar, o que fazer em caso de erro".
+
+### Decisão Dois: Por Que a Identidade Git é Tão Verborrágica
+
+Há uma grande seção sobre Author e Committer em `<git_profile>` e `<requirements>`, parece redundante à primeira vista:
+
+```
+- `--author="Name <email>"` apenas modifica Author
+- `git -c user.name="Name" -c user.email="email" commit ...` apenas modifica Committer para este comando
+- Para cada commit gerado, você deve definir Author e Committer simultaneamente para a identidade selecionada
+- Forma de comando preferida:
+  git -c user.name="..." -c user.email="..." commit --author="... <...>" ...
+```
+
+Isso vem de aprendizados de experiência. O commit Git tem dois campos de identidade, o modelo facilmente altera apenas `--author`, deixando o Committer como a identidade da configuração global. No histórico de commits, "autor está certo, committer está errado", parece desconectado. Por isso o prompt coloca diretamente o template de comando preferencial e exige que o modelo use `git log --format=fuller -1` para autoverificação.
+
+Analogicamente, é como enviar uma encomenda, "remetente" e "responsável real" são dois formulários diferentes. Você escreve o nome em apenas um formulário, o outro ainda imprime o nome da empresa - a encomenda é enviada, mas os registros não correspondem, é desconfortável no fim.
+
+### Decisão Três: Árvore de Decisão de Agrupamento Mais Consistência Histórica
+
+O que o modelo mais faz é "improvisar livremente", mas improvisação no agrupamento de commits é frequentemente um desastre. Então o prompt fornece uma árvore de decisão clara: arquivos de configuração em um grupo separado, documentação em outro grupo, alterações de código do mesmo módulo combinadas, alterações entre módulos avaliam caso a caso. Também fornece exemplos positivos, como `src/auth/login.ts` junto com `auth.service.ts` devem entrar no mesmo commit.
+
+Mais crítico é a seção `<historical_format_analysis>`. Ela exige que o modelo:
+
+> 1. Use `git log -n 15 --pretty=format:"%H|%s|%b%n---%n"` para obter o histórico de commits recente
+> 2. Analise padrões de estrutura, padrões de idioma, tipos comuns, formatos especiais
+> 3. Gere mensagens de commit seguindo os padrões detectados
+
+Ou seja, o modelo não pode escrever como quiser, deve primeiro alinhar com o estilo já existente do repositório alvo. O repositório principal HagiCode Mono usa inglês + Conventional Commits, certos sub-repositórios usam estilo de parágrafo chinês, a IA deve se adaptar. Essa capacidade corresponde à proposta arquivada `2026-02-23-auto-commit-compose-history-consistency-optimization`, uma otimização adicionada depois. Afinal, ninguém quer que o histórico de commits de seu próprio repositório pareça uma sopa de letras.
+
+### Decisão Quatro: Renderização Condicional de Co-Authored-By e Signed-off-by
+
+Há muitos `{{#if}}` aninhados no prompt, decidindo se adicionar trailer com base nos parâmetros de execução:
+
+- Quando `coAuthoredByIsNone`, não adicione `Co-Authored-By` completamente
+- Quando `coAuthoredByIsCustom`, use o trailer personalizado fornecido pelo usuário
+- Quando `signedOffByEnabled` mais `gitProfileName`, adicione `Signed-off-by`, quando a identidade está faltando deve reportar erro em vez de inventar uma
+
+A parte de trailer envolve atribuição de autoria e conformidade (sign-off DCO), deve ser controlada explicitamente pelo usuário, nunca permitindo que o modelo tome decisões por conta própria. HagiCode implementou uma série de propostas como `git-commit-coauthor-standardization`, `ai-commit-consent-management` nesta área, finalmente definindo limites claros. Este tipo de coisa, é melhor ser estrito, não ambíguo.
+
+### Decisão Cinco: Contrato de Saída Separado por `---`
+
+`<output_format>` exige que cada retorno deve separar múltiplos blocos de commit com `---`, formato fixo:
+
+```
+---
+Commit 1: {hash}
+{message}
+---
+Commit 2: {hash}
+{message}
+---
+```
+
+Isso não é apenas para estética. O modelo pode produzir N commits em uma única tarefa, o backend depende desse separador para extrair hash e message de cada commit, retornando ao frontend para exibir. Uma vez que o protocolo de saída fique solto, a análise do backend falha diretamente. Por isso a regra `---` é enfatizada duas vezes em `<output_format>` e `<final_instruction>` - coisas importantes devem ser ditas três vezes.
+
+## Como o Prompt é Montado e Entregue
+
+Ver apenas o template não é suficiente, precisa saber como ele é executado.
+
+### Carregamento e Renderização
+
+O backend registra dois singletons em `PCodeClaudeHelperModule`:
+
+```csharp
+// Registrar carregador de prompts: encontrar .json e .hbs correspondentes por scenario + locale
+context.Services.AddSingleton<IPromptLoader, FilePromptLoaderV2>();
+// Registrar renderizador Handlebars: compilar templates para IL e cachear
+context.Services.AddSingleton<HandlebarsTemplateRenderer>(...);
+```
+
+`FilePromptLoaderV2` obtém o conteúdo do template e entrega para `HandlebarsTemplateRenderer.Render(template, parameters)` renderizar. A lógica central do renderizador é aproximadamente:
+
+```csharp
+public string Render(string template, IDictionary<string, object> parameters)
+{
+    // Cache por SHA256 do conteúdo do template, evitar recompilar a cada commit
+    var compiledTemplate = GetOrCompileTemplate(template);
+    var rendered = compiledTemplate(parameters ?? new Dictionary<string, object>());
+    // Compatibilizar com hábito de saída booleana do Scriban antigo
+    rendered = rendered.Replace("True", "true").Replace("False", "false");
+    return rendered;
+}
+```
+
+O resultado da compilação é cacheado por hash de conteúdo, isso é chave para performance. Operações como commit podem ser acionadas com alta frequência, recompilar IL toda vez seria insuportável.
+
+### De Onde Vêm os Parâmetros
+
+O JSON de metadados declara cerca de dez parâmetros: `projectPath`, `needPush`, `targetBranchMode`, `gitProfileName`, `gitProfileEmail`, `signedOffByEnabled`, `coAuthoredBy*` etc. Esses parâmetros são coletados pelo "drawer de commit de IA" no frontend, injetados no backend através do canal AutoTask, então roteados pelo `FilePromptProvider` para este template de acordo com `PromptScenario.AutoComposeCommit`.
+
+### Tratamento de Três Estados da Estratégia de Branch
+
+`targetBranchMode` decide se o modelo deve mexer no branch antes do commit, é um tri-state:
+
+| Modo | Comportamento |
+|------|---------------|
+| `current` | Commit no local, não mexe no branch |
+| `new-custom` | Criar novo branch do branch atual usando `targetBranchName` fornecido pelo usuário |
+| `ai-generated-new` | O modelo gera nome de branch kebab-case baseado nas alterações, se houver conflito adiciona sufixo estável |
+
+O prompt diz claramente "não mude para qualquer outro branch existente", prevenindo que o modelo mude arbitrariamente para o branch principal para fazer commit. Esta capacidade corresponde à proposta `auto-branch-switch-on-commit`. Afinal, uma vez que o branch principal é bagunçado, o rollback também é uma bagunça.
+
+## Exemplo Completo de Renderização
+
+Suponha que o usuário selecionou no frontend: ficar no branch atual, precisa fazer push, habilitar Signed-off-by, desabilitar Co-Authored-By, identidade Git é `newbe <newbe@newbe.pro>`.
+
+Então a seção `<git_profile>` será renderizada como:
+
+```
+<git_profile>
+Use a seguinte identidade Git em todos os commits gerados:
+- Nome selecionado: newbe
+- Email selecionado: newbe@newbe.pro
+...
+- Esta execução também exige sign-off Git padrão, então prefira usar `git ... commit --author=... --signoff ...`
+</git_profile>
+```
+
+Em `<requirements>` mantém apenas o branch `Co-Authored-By disabled for this run`, o comando dado por `<workflow>` se torna:
+
+```bash
+# Note que -c define Committer simultaneamente, --author define Author, --signoff adiciona trailer DCO
+git -c user.name="newbe" -c user.email="newbe@newbe.pro" commit \
+    --author="newbe <newbe@newbe.pro>" --signoff -m "type(scope): subject"
+```
+
+## Práticas de Engenharia na Manutenção de Templates
+
+HagiCode equipa esses templates `.hbs` com um conjunto completo de garantias de engenharia, não apenas escrever e terminar.
+
+Primeiro, **testes de snapshot**. No diretório de testes há snapshots verificados como `BuildMessage_enUS.verified.txt`, `BuildMessage_zhCN.verified.txt`, qualquer diferença de renderização do template é capturada pelos testes. Mudar uma palavra requer atualizar o snapshot, prevenindo deriva silenciosa do prompt.
+
+Segundo, **script de formatação**. `cleanup-prompts.py --fix` limpa trailing whitespace, dobra linhas vazias extras, CI bloqueia PRs diretamente se a verificação falhar.
+
+Terceiro, **validação de parâmetros**. Parâmetros obrigatórios, valores padrão, tipos de cada scenario têm cobertura de testes dedicada, se o template usa `{{newParam}}` mas o JSON não declara, o teste falha.
+
+Quarto, **camadas de snapshot**: `Snapshots/Rendered/` guarda resultados renderizados, `Snapshots/Scenarios/` guarda metadados de cenário, garantindo consistência entre template, metadados e produto renderizado.
+
+Aqui há um aviso prático de aprendizados. Se você quiser adicionar novos parâmetros ou novos ramos a este prompt, quatro coisas devem ser feitas simultaneamente:
+
+1. Usar `{{newParam}}` no template (`.hbs`)
+2. Declarar schema no array `parameters` dos metadados (`.json`)
+3. Atualizar testes de snapshot correspondentes `.verified.txt`
+4. Formulário frontend gera controles de entrada com base em novos parâmetros JSON, e passa através da API
+
+Se perder qualquer passo, o parâmetro fica vazio durante renderização, ou o teste de snapshot falha, ou o frontend não pode configurar. Essa restrição de "sincronização em quatro lugares" parece chata, mas para garantir manutenibilidade, só pode ser assim.
+
+## Por Que o Prompt é Tão "Verborrágico"
+
+Olhando para trás este prompt, percebe-se que é excepcionalmente longo, identidade, trailer, formato de saída são repetidamente enfatizados. Isso é intencional.
+
+O modelo em modo Agent facilmente "toma decisões por conta própria", deve dispersar restrições rígidas em múltiplos lugares como `<requirements>`, `<workflow>`, `<final_instruction>` repetidamente, para reduzir a probabilidade de execução omitida. É o mesmo princípio que orientar novatos - dizer coisas importantes três vezes não é porque a pessoa é burra, é porque há muitas distrações.
+
+Em modo não-interativo (CI/CD, automação), o modelo não pode perguntar ao usuário, então o início do prompt declara claramente "proibir usar AskUserQuestion, usar valores padrão para informações faltantes e registrar hipóteses", garantindo que funcione sem supervisão.
+
+Uma vez que o contrato de saída fique solto, a análise do backend falha, então a regra de separação `---` é enfatizada duas vezes. Coisas importantes realmente devem ser ditas três vezes.
+
+## Referências
+
+- [Site oficial do HagiCode](https://hagicode.com)
+- [Repositório GitHub do HagiCode](https://github.com/HagiCode-org/site)
+- Especificação Conventional Commits: [conventionalcommits.org](https://www.conventionalcommits.org/)
+- Handlebars.Net: [github.com/Handlebars-Net/Handlebars.Net](https://github.com/Handlebars-Net/Handlebars.Net)
+- Git DCO (Developer Certificate of Origin): [developercertificate.org](https://developercertificate.org/)
+
+## Conclusão
+
+Voltando ao tema "O Prompt de Commit de IA no HagiCode: Concepção e Implementação", o que realmente vale confirmar repetidamente não são técnicas dispersas, mas se as restrições, limites de implementação e escolhas de engenharia foram compreendidos.
+
+Desde que as bases de julgamento no artigo sejam consolidadas em itens de verificação estáveis, ao enfrentar problemas similares você poderá tomar decisões confiáveis mais rapidamente.

@@ -1,0 +1,246 @@
+---
+title: HagiCode 中 AI 提交使用的提示詞：設計思路與實現拆解
+date: 2026-06-20
+tags: [handlebars, hagicode]
+---
+
+## HagiCode 中 AI 提交使用的提示詞：設計思路與實現拆解
+
+> 當你把一堆亂七八糟的改動丟給 AI 讓它幫你提交時，背後到底發了一段什麼樣的提示詞給模型？為什麼提示詞要寫成那個樣子？這篇文章把 HagiCode 裡真正驅動"AI 提交"的提示詞拆給你看。
+
+## 背景
+
+用 AI 輔助開發這事，其實也算是經歷了一整天敲代碼的疲憊了吧。攢了一堆沒提交的改動，配置文件、文檔、業務邏輯、測試用例全混在一起，看著就讓人頭疼。手動分組、手寫符合規範的 commit message、再切分支 push 一遍——光是這些"收尾活"，半小時就這麼沒了。
+
+其實這事兒自然就有了訴求——**能不能一次性把未提交的改動丟給 AI，讓它自己分析、分組、寫 message、甚至直接 commit + push？**
+
+想法是好的，真做起來坑可不少。AI 很容易只改 `--author` 不改 Committer，提交歷史裡作者對了、提交者錯了，看著就撕裂；它可能自由發揮寫一堆花裡胡哨的 message，完全不對齊你倉庫的風格；它可能擅自切到主幹分支把事情搞砸；它可能漏掉 `Co-Authored-By`，或者亂加 `Signed-off-by` 觸發合規問題。
+
+這一個個坑，踩下來也都是教訓罷了。為了填平這些痛點，我們把"AI 提交"做成了一個參數化的 Agent 任務契約。這份契約長什麼樣、為什麼這麼設計，就是這篇文章想聊清楚的事。
+
+## 關於 HagiCode
+
+本文分享的方案來自我們在 [HagiCode](https://hagicode.com) 項目裡的實踐。HagiCode 是一個面向開發者工作流的 AI 代碼助手，把 Git 提交、代碼審查、構建發布這些日常環節都做成了 AI 可參與的任務。下文拆解的提示詞系統，正是 HagiCode 後端裡真實在跑的那一套。說到底，也只是想把那點瑣碎的"收尾活"交給 AI 罷了。
+
+## 提示詞的真實形態：模板加元數據，而不是一段寫死的字符串
+
+很多人以為"提示詞"就是一段寫死的自然語言，丟給模型就完事了。其實 HagiCode 的做法完全不是這樣。
+
+真正驅動"AI 提交"的提示詞叫 `auto-compose-commit`，對應代碼裡的 `PromptScenario.AutoComposeCommit`。它位於 `repos/hagicode-core/src/PCode.Web/Resources/Prompts/` 下，結構是這樣的：
+
+```
+Resources/Prompts/
+├── auto-compose-commit.en-US.hbs     # 英文 Handlebars 模板
+├── auto-compose-commit.en-US.json    # 英文元數據（參數 schema、版本、標籤）
+├── auto-compose-commit.zh-CN.hbs     # 中文模板
+└── auto-compose-commit.zh-CN.json    # 中文元數據
+```
+
+也就是說，一個提示詞是 **一份 Handlebars 模板 + 一份 JSON 元數據** 的組合，按 locale 平鋪成多套。
+
+為什麼要這麼拆呢？其實背後有幾個考量。
+
+第一，**元數據和提示詞正文解耦**。JSON 描述參數 schema——參數叫什麼、什麼類型、是否必填、默認值是什麼；`.hbs` 只管"這段話怎麼說"。這樣一來，前端可以在完全不知道模板正文的前提下，依據 JSON 自動渲染出正確的輸入表單：Git 身份選擇器、Co-Authored-By 模式、目標分支策略、要不要 push……這些控件都是 JSON 驅動出來的。
+
+第二，**多語言平鋪，而不是用 i18n key 做翻譯**。每個 locale 一整套完整的 `.hbs` + `.json`，避免了"翻譯 key 漂移"。不同語言不只是把詞替換掉，連分組示例、命令示例都可以本地化。中英文倉庫的提交習慣本就不同，硬塞進一套模板再翻譯，反而別扭罷了。
+
+第三，**從 Scriban 遷到 Handlebars，是為了性能**。`HandlebarsTemplateRenderer` 選用了 `Handlebars.Net`，因為它能"compile templates directly to IL bytecode"，比解釋執行快得多。遷移過程中還做了個有意思的兼容處理：把渲染結果裡的 `True/False` 替換成 `true/false`，兼容舊 Scriban 的布爾輸出習慣——這種細節不留意，舊測試會全紅。
+
+## 提示詞長成這樣，背後有五個關鍵決策
+
+把 `auto-compose-commit.zh-CN.hbs` 拆開看，骨架大致是：
+
+```
+非交互模式說明
+├── <task>            任務定義：分析變更、智能分組、多提交
+├── <context>         上下文：projectPath + push 控制 + 目標分支控制
+├── <working_directory>
+├── <git_profile>     身份：Author 加 Committer 雙寫
+├── <tools>           工具白名單
+├── <requirements>    硬性要求（分支、分組、Co-Authored-By、Signed-off-by、Conventional Commits）
+├── <historical_format_analysis>  歷史一致性
+├── <constraints>     約束（禁止 reset、忽略 .gitignore）
+├── <workflow>        分步執行流程
+├── <output_format>   嚴格的 `---` 分隔輸出
+└── <final_instruction>
+```
+
+下面挑五個最能體現設計意圖的點展開聊聊。
+
+### 決策一：直接執行，而不是只生成計劃
+
+提示詞裡反覆強調一句話：**直接使用 Git 命令執行每個提交，不返回計劃，直接操作。**
+
+這是"Auto Compose Commit"區別於早期方案的根本不同。早期的 `ai-git-commit-message-generator`（對應 OpenSpec 裡的 `ai-commit-message-generation` 規範）只做一件事：調一個 `POST /api/git/generate-commit-message`，返回一段 commit message 字符串，剩下的用戶自己手動去提交。
+
+可是 `auto-compose-commit` 不一樣，它是一個 **Agent 自動任務**。模型必須自己調用 `Bash(git:*)` 工具，把 add → commit → push 的全鏈路跑完。這一區別，就決定了整段提示詞的基調——它不能只描述"要寫什麼樣的 message"，還得規定"按什麼流程操作、用什麼工具、出錯怎麼辦"。
+
+### 決策二：為什麼 Git 身份要寫得這麼嘮叨
+
+`<git_profile>` 和 `<requirements>` 裡有一大段關於 Author 與 Committer 的說明，乍看挺冗餘：
+
+```
+- `--author="Name <email>"` 只會修改 Author
+- `git -c user.name="Name" -c user.email="email" commit ...` 只會修改這一次命令的 Committer
+- 對於每一個生成的提交，你必須同時把 Author 和 Committer 設置為選定身份
+- 首選命令形式：
+  git -c user.name="..." -c user.email="..." commit --author="... <...>" ...
+```
+
+這其實是真實踩坑換來的。Git 提交裡有兩個身份字段，模型很容易只改 `--author`，結果 Committer 還是全局配置的那個身份。提交歷史裡"作者是對的、提交者是錯的"，看著就撕裂。所以提示詞直接把首選命令模板貼出來，還要求模型用 `git log --format=fuller -1` 做自檢。
+
+類比一下，這就像你寄快遞，"寄件人"和"實際經手人"是兩張不同的單子。你只在張單子上寫了名字，另一張還印著公司的名字——快遞是寄出去了，可記錄對不上，終歸是別扭罷了。
+
+### 決策三：分組決策樹加歷史一致性
+
+模型最擅長的就是"自由發揮"，可自由發揮在提交分組這事上，往往是災難。所以提示詞給了一棵明確的決策樹：配置文件單獨一組、文檔單獨一組、同模塊的代碼改動合並、跨模塊的改動看情況。還配了正例，比如 `src/auth/login.ts` 加上 `auth.service.ts` 應該進同一個提交。
+
+更關鍵的是 `<historical_format_analysis>` 這一段。它要求模型：
+
+> 1. 使用 `git log -n 15 --pretty=format:"%H|%s|%b%n---%n"` 獲取最近的提交歷史
+> 2. 分析結構模式、語言模式、常用類型、特殊格式
+> 3. 生成遵循檢測到的模式的提交信息
+
+也就是說，模型不能想怎麼寫就怎麼寫，得先去對齊目標倉庫已有的風格。HagiCode Mono 主倉用英文 + Conventional Commits，某些子倉庫用中文段落式，AI 必須入鄉隨俗。這個能力對應歸檔提案 `2026-02-23-auto-commit-compose-history-consistency-optimization`，是後來補上的優化。畢竟，誰也不希望自家提交歷史像一鍋亂燉罷了。
+
+### 決策四：Co-Authored-By 和 Signed-off-by 的條件渲染
+
+提示詞裡有大量嵌套的 `{{#if}}`，根據運行參數決定要不要加 trailer：
+
+- `coAuthoredByIsNone` 時，完全不加 `Co-Authored-By`
+- `coAuthoredByIsCustom` 時，用用戶給的自定義 trailer
+- `signedOffByEnabled` 加上 `gitProfileName` 時，加 `Signed-off-by`，缺失身份時必須報錯而不是臆造一個
+
+trailer 這塊涉及署名歸屬和合規（DCO sign-off），必須由用戶顯式控制，絕不能讓模型自作主張。HagiCode 在這塊陸續落地了 `git-commit-coauthor-standardization`、`ai-commit-consent-management` 等一系列提案，才把邊界劃清楚。這種事，寧可嚴一點，也不能含糊。
+
+### 決策五：`---` 分隔的輸出契約
+
+`<output_format>` 規定每次返回必須用 `---` 分隔多個 commit 塊，格式寫死：
+
+```
+---
+Commit 1: {hash}
+{message}
+---
+Commit 2: {hash}
+{message}
+---
+```
+
+這可不是為了好看。模型一次任務可能產出 N 個提交，後端要靠這個分隔符把每條提交的 hash 和 message 解析出來，回傳給前端展示。一旦輸出協議鬆動，後端解析直接崩。所以 `---` 這條規則在 `<output_format>` 和 `<final_instruction>` 裡被強調了兩次——重要的事，本就該說三遍罷了。
+
+## 提示詞是怎麼被組裝和投遞的
+
+光看模板還不夠，得知道它怎麼跑起來。
+
+### 加載與渲染
+
+後端在 `PCodeClaudeHelperModule` 裡註冊了兩個單例：
+
+```csharp
+// 註冊提示詞加載器：按 scenario + locale 找到對應的 .json 和 .hbs
+context.Services.AddSingleton<IPromptLoader, FilePromptLoaderV2>();
+// 註冊 Handlebars 渲染器：把模板編譯成 IL 並緩存
+context.Services.AddSingleton<HandlebarsTemplateRenderer>(...);
+```
+
+`FilePromptLoaderV2` 拿到模板正文後，交給 `HandlebarsTemplateRenderer.Render(template, parameters)` 渲染。渲染器的核心邏輯大致是這樣：
+
+```csharp
+public string Render(string template, IDictionary<string, object> parameters)
+{
+    // 按模板內容的 SHA256 做緩存，避免每次提交都重新編譯
+    var compiledTemplate = GetOrCompileTemplate(template);
+    var rendered = compiledTemplate(parameters ?? new Dictionary<string, object>());
+    // 兼容舊 Scriban 的布爾輸出習慣
+    rendered = rendered.Replace("True", "true").Replace("False", "false");
+    return rendered;
+}
+```
+
+編譯結果按內容哈希緩存，這是性能關鍵。提交這種操作可能高頻觸發，每次都重新編譯 IL，誰也受不了。
+
+### 參數從哪來
+
+JSON 元數據裡聲明了十來個參數：`projectPath`、`needPush`、`targetBranchMode`、`gitProfileName`、`gitProfileEmail`、`signedOffByEnabled`、`coAuthoredBy*` 等等。這些參數由前端"AI 提交抽屜"收集，經 AutoTask 通道注入後端，再由 `FilePromptProvider` 按 `PromptScenario.AutoComposeCommit` 路由到這套模板。
+
+### 分支策略的三態處理
+
+`targetBranchMode` 決定了模型在 commit 前要不要動分支，是個三態：
+
+| 模式 | 行為 |
+|------|------|
+| `current` | 原地提交，不動分支 |
+| `new-custom` | 用用戶給的 `targetBranchName` 從當前分支切新分支 |
+| `ai-generated-new` | 模型自己根據變更生成 kebab-case 分支名，衝突就加穩定後綴 |
+
+提示詞裡明確寫了"不要切換到任何已存在的其他分支"，防止模型自作主張切到主幹上提交。這個能力對應 `auto-branch-switch-on-commit` 提案。畢竟主幹一旦被亂搞，回滾起來也是一地雞毛罷了。
+
+## 一次完整的渲染示例
+
+假設用戶在前端選了：留在當前分支、需要 push、開啟 Signed-off-by、關閉 Co-Authored-By、Git 身份是 `newbe <newbe@newbe.pro>`。
+
+那麼 `<git_profile>` 段會被渲染成：
+
+```
+<git_profile>
+在所有生成的提交中使用以下 Git 身份：
+- 選定名稱：newbe
+- 選定郵箱：newbe@newbe.pro
+...
+- 本次運行還要求 Git 標準 sign-off 尾注，因此優先使用 `git ... commit --author=... --signoff ...`
+</git_profile>
+```
+
+`<requirements>` 裡只保留 `Co-Authored-By disabled for this run` 那個分支，`<workflow>` 給出的命令就變成：
+
+```bash
+# 注意 -c 同時設置 Committer，--author 設置 Author，--signoff 加 DCO trailer
+git -c user.name="newbe" -c user.email="newbe@newbe.pro" commit \
+    --author="newbe <newbe@newbe.pro>" --signoff -m "type(scope): subject"
+```
+
+## 模板維護的工程實踐
+
+HagiCode 給這套 `.hbs` 模板配了一整套工程化保障，不是寫完就完事的。
+
+第一，**快照測試**。測試目錄下有 `BuildMessage_enUS.verified.txt`、`BuildMessage_zhCN.verified.txt` 這種已驗證快照，模板任何渲染差異都會被測試捕獲。改一個字都得更新快照，防止提示詞悄悄漂移。
+
+第二，**格式化腳本**。`cleanup-prompts.py --fix` 會清理 trailing whitespace、折疊多餘空行，CI 檢查不通過直接攔 PR。
+
+第三，**參數校驗**。每個 scenario 的必填參數、默認值、類型都有專門測試覆蓋，模板裡用了 `{{newParam}}` 但 JSON 沒聲明，測試就紅。
+
+第四，**快照分層**：`Snapshots/Rendered/` 存渲染結果，`Snapshots/Scenarios/` 存場景元數據，保證模板、元數據、渲染產物三者一致。
+
+這裡有個挺實用的踩坑提醒。如果你要給這套提示詞加新參數或者新分支，有四件事必須同步做：
+
+1. 模板（`.hbs`）裡用上 `{{newParam}}`
+2. 元數據（`.json`）的 `parameters` 數組裡聲明 schema
+3. 快照測試更新對應的 `.verified.txt`
+4. 前端表單依據新 JSON 參數生成輸入控件，並通過 API 透傳
+
+漏掉任何一環，要麼渲染時參數為空，要麼快照測試紅，要麼前端沒法配置。這種"四處同步"的約束看著煩，可是為了保證可維護性，也只能如此罷了。
+
+## 為什麼提示詞這麼"嘮叨"
+
+回頭看這段提示詞，會發現它異常冗長，身份、trailer、輸出格式被反覆強調。這其實是刻意的。
+
+模型在 Agent 模式下特別容易"自作主張"，必須把硬約束分散到 `<requirements>`、`<workflow>`、`<final_instruction>` 多處反覆申明，才能降低漏執行的概率。這跟帶新人是一個道理——重要的事說三遍，不是因為對方笨，是因為分散注意力的事情太多了。
+
+非交互模式下（CI/CD、自動化），模型沒法向用戶提問，所以提示詞開頭就明確"禁止用 AskUserQuestion，缺失信息用默認值並記錄假設"，保證無人值守也能跑通。
+
+輸出契約一旦鬆動，後端解析就崩，所以 `---` 分隔規則被強調了兩次。重要的事，確實得說三遍罷了。
+
+## 參考資料
+
+- [HagiCode 官網](https://hagicode.com)
+- [HagiCode GitHub 倉庫](https://github.com/HagiCode-org/site)
+- Conventional Commits 規範：[conventionalcommits.org](https://www.conventionalcommits.org/)
+- Handlebars.Net：[github.com/Handlebars-Net/Handlebars.Net](https://github.com/Handlebars-Net/Handlebars.Net)
+- Git DCO (Developer Certificate of Origin)：[developercertificate.org](https://developercertificate.org/)
+
+## 總結
+
+回到「HagiCode 中 AI 提交使用的提示詞：設計思路與實現拆解」這個主題，真正值得反覆確認的不是零散技巧，而是約束條件、實現邊界和工程取捨是否已經看清。
+
+只要把文中的判斷依據沉澱成穩定的檢查項，後續面對類似問題時就能更快做出可靠決策。

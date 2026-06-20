@@ -1,0 +1,246 @@
+---
+title: Les prompts utilisés pour les commits IA dans HagiCode : réflexion de conception et décomposition de l'implémentation
+date: 2026-06-20
+tags: [handlebars, hagicode]
+---
+
+## Les prompts utilisés pour les commits IA dans HagiCode : réflexion de conception et décomposition de l'implémentation
+
+> Lorsque vous jetez un tas de modifications chaotiques à l'IA pour qu'elle vous aide à les committer, quel genre de prompt est réellement envoyé au modèle en arrière-plan ? Pourquoi le prompt est-il écrit de cette manière ? Cet article décompose pour vous le prompt qui pilote réellement le "commit IA" dans HagiCode.
+
+## Contexte
+
+L'assistance au développement par l'IA, c'est aussi l'expérience de la fatigue après une journée complète de codage. Vous accumulez un tas de modifications non commitées : fichiers de configuration, documentation, logique métier, cas de test, tous mélangés ensemble – rien qu'à voir ça, ça donne mal à la tête. Regrouper manuellement, écrire manuellement un message de commit conforme aux normes, puis changer de branche et faire un push – ces "tâches de finalisation" prennent une demi-heure comme ça.
+
+Naturellement, un besoin émerge – **pourrait-on jeter toutes les modifications non commitées à l'IA en une seule fois, et lui laisser analyser, regrouper, écrire les messages, voire même faire directement commit + push ?**
+
+L'idée est bonne, mais la mise en pratique regorge de pièges. L'IA peut facilement ne modifier que `--author` sans modifier le Committer, résultant en un historique de commits où l'auteur est correct mais le committer est erroné – ce qui crée une dissonance visuelle. Elle peut rédiger des messages élaborés et fantaisistes, totalement désalignés avec le style de votre dépôt. Elle peut basculer autonomement vers la branche principale et tout gâcher. Elle peut oublier `Co-Authored-By`, ou ajouter arbitrairement `Signed-off-by` déclenchant des problèmes de conformité.
+
+Chacun de ces pièges est une leçon apprise. Pour combler ces points de douleur, nous avons transformé le "commit IA" en un contrat de tâche Agent paramétré. À quoi ressemble ce contrat, pourquoi est-il conçu ainsi – c'est ce que cet article cherche à clarifier.
+
+## À propos de HagiCode
+
+La solution partagée dans cet article provient de notre pratique dans le projet [HagiCode](https://hagicode.com). HagiCode est un assistant de code IA orienté vers les flux de travail des développeurs, transformant les étapes quotidiennes comme les commits Git, la revue de code, le build et la publication en tâches où l'IA peut participer. Le système de prompts décomposé ci-dessous est précisément celui qui tourne réellement dans le backend de HagiCode. En fin de compte, il s'agit simplement de confier ces tâches de "finalisation" triviales à l'IA.
+
+## La forme réelle des prompts : templates plus métadonnées, pas une chaîne codée en dur
+
+Beaucoup pensent qu'un "prompt" est juste une chaîne de langage naturel codée en dur, jetée au modèle et c'est terminé. En réalité, l'approche de HagiCode est complètement différente.
+
+Le prompt qui pilote réellement le "commit IA" s'appelle `auto-compose-commit`, correspondant à `PromptScenario.AutoComposeCommit` dans le code. Il se trouve sous `repos/hagicode-core/src/PCode.Web/Resources/Prompts/` avec la structure suivante :
+
+```
+Resources/Prompts/
+├── auto-compose-commit.en-US.hbs     # Template Handlebars anglais
+├── auto-compose-commit.en-US.json    # Métadonnées anglaises (schéma de paramètres, version, tags)
+├── auto-compose-commit.zh-CN.hbs     # Template chinois
+└── auto-compose-commit.zh-CN.json    # Métadonnées chinoises
+```
+
+Autrement dit, un prompt est une combinaison de **un template Handlebars + un JSON de métadonnées**, déployé en plusieurs ensembles selon la locale.
+
+Pourquoi cette séparation ? Il y a en réalité plusieurs considérations.
+
+Premièrement, **découplage des métadonnées et du corps du prompt**. Le JSON décrit le schéma de paramètres – nom des paramètres, type, requis ou non, valeur par défaut ; le `.hbs` gère uniquement "comment formuler ce passage". Ainsi, le frontend peut automatiquement générer le bon formulaire de saisie sans connaître le contenu du template : sélecteur d'identité Git, mode Co-Authored-By, stratégie de branche cible,要不要 push…… ces contrôles sont tous générés par le JSON.
+
+Deuxièmement, **déploiement multilingue aplati, pas traduction par clés i18n**. Chaque locale a un ensemble complet `.hbs` + `.json`, évitant la "dérive des clés de traduction". Les différentes langues ne substituent pas seulement les mots, les exemples de regroupement, les exemples de commandes peuvent aussi être localisés. Les habitudes de commit des dépôts chinois et anglais sont fondamentalement différentes, forcer le même template puis traduire serait plutôt maladroit.
+
+Troisièmement, **migration de Scriban vers Handlebars pour la performance**. `HandlebarsTemplateRenderer` a choisi `Handlebars.Net` parce qu'il peut "compiler les templates directement en bytecode IL", beaucoup plus rapide que l'exécution interprétée. Durant la migration, une gestion de compatibilité intéressante a été faite : remplacer `True/False` par `true/false` dans le résultat rendu, pour compatibiliser avec les habitudes de sortie booléenne de l'ancien Scriban – sans attention à ce détail, les anciens tests seraient tous rouges.
+
+## Cinq décisions clés derrière la forme du prompt
+
+En décomposant `auto-compose-commit.zh-CN.hbs`, le squelette est approximativement :
+
+```
+Explication du mode non-interactif
+├── <task>            Définition de tâche : analyser les changements, regroupement intelligent, commits multiples
+├── <context>         Contexte : projectPath + contrôle push + contrôle branche cible
+├── <working_directory>
+├── <git_profile>     Identité : double écriture Author + Committer
+├── <tools>           Liste blanche d'outils
+├── <requirements>    Exigences strictes (branche, regroupement, Co-Authored-By, Signed-off-by, Conventional Commits)
+├── <historical_format_analysis>  Cohérence historique
+├── <constraints>     Contraintes (interdire reset, ignorer .gitignore)
+├── <workflow>        Flux d'exécution étape par étape
+├── <output_format>   Sortie strictement séparée par `---`
+└── <final_instruction>
+```
+
+Voici cinq points qui reflètent le mieux les intentions de conception.
+
+### Décision un : exécution directe, pas génération de plan uniquement
+
+Le prompt répète une phrase : **Utilisez directement les commandes Git pour exécuter chaque commit, ne retournez pas de plan, opérez directement.**
+
+C'est la différence fondamentale entre "Auto Compose Commit" et les solutions précédentes. Le premier `ai-git-commit-message-generator` (correspondant à la spécification `ai-commit-message-generation` dans OpenSpec) ne faisait qu'une chose : appeler `POST /api/git/generate-commit-message`, retourner une chaîne de message de commit, le reste étant laissé à l'utilisateur pour committer manuellement.
+
+Mais `auto-compose-commit` est différent, c'est une **tâche automatique Agent**. Le modèle doit lui-même appeler l'outil `Bash(git:*)`, et exécuter la chaîne complète add → commit → push. Cette distinction détermine le ton de l'ensemble du prompt – il ne peut pas seulement décrire "quel genre de message écrire", il doit aussi spécifier "quel flux suivre, quels outils utiliser, que faire en cas d'erreur".
+
+### Décision deux : pourquoi l'identité Git est-elle si verbeuse
+
+`<git_profile>` et `<requirements>` contiennent une longue explication sur Author et Committer, qui semble redondante au premier abord :
+
+```
+- `--author="Name <email>"` ne modifie que Author
+- `git -c user.name="Name" -c user.email="email" commit ...` ne modifie que le Committer de cette commande
+- Pour chaque commit généré, vous devez définir à la fois Author et Committer sur l'identité sélectionnée
+- Forme de commande préférée :
+  git -c user.name="..." -c user.email="..." commit --author="... <...>" ...
+```
+
+C'est en réalité le résultat d'erreurs réelles. Les commits Git ont deux champs d'identité, et le modèle peut facilement ne modifier que `--author`, résultant en un Committer qui reste l'identité de configuration globale. Dans l'historique des commits "l'auteur est correct, le committer est erroné" – visuellement discordant. Donc le prompt affiche directement le template de commande préféré, et exige que le modèle fasse une auto-vérification avec `git log --format=fuller -1`.
+
+Par analogie, c'est comme envoyer un colis – "expéditeur" et "manipulateur effectif" sont deux formulaires différents. Vous n'avez écrit votre nom que sur un formulaire, l'autre porte encore le nom de l'entreprise – le colis est bien parti, mais l'enregistrement ne correspond pas, c'est gênant.
+
+### Décision trois : arbre de décision de regroupement plus cohérence historique
+
+Ce que le modèle fait le mieux, c'est "improviser librement", mais cette liberté dans le regroupement de commits est souvent catastrophique. Donc le prompt fournit un arbre de décision explicite : fichiers de configuration dans un groupe séparé, documentation dans un groupe séparé, modifications de code du même module fusionnées, modifications跨 modules au cas par cas. Il y a aussi des exemples positifs, comme `src/auth/login.ts` plus `auth.service.ts` devraient aller dans le même commit.
+
+Plus critique est la section `<historical_format_analysis>`. Elle exige du modèle :
+
+> 1. Utiliser `git log -n 15 --pretty=format:"%H|%s|%b%n---%n"` pour obtenir l'historique des commits récents
+> 2. Analyser les patterns de structure, patterns de langage, types courants, formats spéciaux
+> 3. Générer des messages de commit suivant les patterns détectés
+
+Autrement dit, le modèle ne peut pas écrire comme il veut, il doit d'abord s'aligner sur le style existant du dépôt cible. Le dépôt principal HagiCode Mono utilise anglais + Conventional Commits, certains sous-dépôts utilisent des paragraphes chinois, l'IA doit s'adapter aux coutumes locales. Cette capacité correspond à la proposition archivée `2026-02-23-auto-commit-compose-history-consistency-optimization`, une optimisation ajoutée plus tard. Après tout, personne ne veut voir son historique de commits ressembler à un pot-pourri.
+
+### Décision quatre : rendu conditionnel de Co-Authored-By et Signed-off-by
+
+Le prompt contient de nombreux `{{#if}}` imbriqués, déterminant selon les paramètres d'exécution s'il faut ajouter des trailers :
+
+- Quand `coAuthoredByIsNone`, ne pas ajouter du tout `Co-Authored-By`
+- Quand `coAuthoredByIsCustom`, utiliser le trailer personnalisé fourni par l'utilisateur
+- Quand `signedOffByEnabled` plus `gitProfileName`, ajouter `Signed-off-by`, en cas d'identité manquante doit signaler une erreur au lieu d'en inventer une
+
+La partie des trailers concerne l'attribution d'auteur et la conformité (sign-off DCO), doit être contrôlée explicitement par l'utilisateur, l'IA ne doit en aucun cas décider autonomement. HagiCode a successivement implémenté `git-commit-coauthor-standardization`, `ai-commit-consent-management` et une série d'autres propositions pour clarifier les frontières. Ce genre de chose, mieux vaut être un peu trop strict que flou.
+
+### Décision cinq : contrat de sortie séparé par `---`
+
+`<output_format>` stipule que chaque retour doit utiliser `---` pour séparer plusieurs blocs de commit, format codé en dur :
+
+```
+---
+Commit 1: {hash}
+{message}
+---
+Commit 2: {hash}
+{message}
+---
+```
+
+Ce n'est pas pour l'esthétique. Une tâche du modèle peut produire N commits, le backend doit utiliser ce séparateur pour parser le hash et le message de chaque commit, et les renvoyer au frontend pour affichage. Une fois le protocole de sortie assoupli, le parsing backend s'effondre directement. Donc la règle `---` est soulignée deux fois dans `<output_format>` et `<final_instruction>` – les choses importantes, il faut les dire trois fois.
+
+## Comment le prompt est assemblé et livré
+
+Voir seulement le template ne suffit pas, il faut savoir comment il tourne.
+
+### Chargement et rendu
+
+Le backend enregistre deux singletons dans `PCodeClaudeHelperModule` :
+
+```csharp
+// Enregistrer le chargeur de prompts : trouver le .json et .hbs correspondant par scenario + locale
+context.Services.AddSingleton<IPromptLoader, FilePromptLoaderV2>();
+// Enregistrer le moteur de rendu Handlebars : compiler les templates en IL et mettre en cache
+context.Services.AddSingleton<HandlebarsTemplateRenderer>(...);
+```
+
+Après que `FilePromptLoaderV2` a obtenu le contenu du template, il le passe à `HandlebarsTemplateRenderer.Render(template, parameters)` pour le rendu. La logique cœur du moteur est approximativement :
+
+```csharp
+public string Render(string template, IDictionary<string, object> parameters)
+{
+    // Mettre en cache par SHA256 du contenu du template, éviter de recompiler à chaque commit
+    var compiledTemplate = GetOrCompileTemplate(template);
+    var rendered = compiledTemplate(parameters ?? new Dictionary<string, object>());
+    // Compatibiliser avec les habitudes de sortie booléenne de l'ancien Scriban
+    rendered = rendered.Replace("True", "true").Replace("False", "false");
+    return rendered;
+}
+```
+
+Le résultat de la compilation est mis en cache par hash de contenu, c'est la clé de performance. L'opération de commit peut être déclenchée à haute fréquence, recompiler l'IL à chaque fois, personne ne peut supporter.
+
+### D'où viennent les paramètres
+
+Le JSON de métadonnées déclare une dizaine de paramètres : `projectPath`, `needPush`, `targetBranchMode`, `gitProfileName`, `gitProfileEmail`, `signedOffByEnabled`, `coAuthoredBy*` etc. Ces paramètres sont collectés par le "tiroir de commit IA" du frontend, injectés dans le backend via le canal AutoTask, puis routés par `FilePromptProvider` vers ce template selon `PromptScenario.AutoComposeCommit`.
+
+### Traitement tri-état de la stratégie de branche
+
+`targetBranchMode` détermine si le modèle doit toucher aux branches avant commit, c'est un tri-état :
+
+| Mode | Comportement |
+|------|--------------|
+| `current` | Commit sur place, ne pas toucher aux branches |
+| `new-custom` | Utiliser `targetBranchName` fourni par l'utilisateur pour créer une nouvelle branche depuis la branche actuelle |
+| `ai-generated-new` | Le modèle génère lui-même un nom de branche kebab-case selon les modifications, en cas de conflit ajouter un suffixe stable |
+
+Le prompt précise explicitement "ne pas basculer vers aucune autre branche existante", pour éviter que le modèle ne bascule autonomement vers la branche principale pour committer. Cette capacité correspond à la proposition `auto-branch-switch-on-commit`. Après tout, une fois la branche principale mise en désordre, le rollback est un vrai cauchemar.
+
+### Un exemple complet de rendu
+
+Supposons que l'utilisateur sélectionne dans le frontend : rester sur la branche actuelle, besoin de push, Signed-off-by activé, Co-Authored-By désactivé, identité Git `newbe <newbe@newbe.pro>`.
+
+Alors la section `<git_profile>` sera rendue comme :
+
+```
+<git_profile>
+Utiliser l'identité Git suivante dans tous les commits générés :
+- Nom sélectionné : newbe
+- Email sélectionné : newbe@newbe.pro
+...
+- Cette exécution exige aussi le sign-off standard Git, donc privilégier `git ... commit --author=... --signoff ...`
+</git_profile>
+```
+
+Dans `<requirements>` seule la branche "Co-Authored-By disabled for this run" est conservée, les commandes données dans `<workflow>` deviennent :
+
+```bash
+# Notez que -c définit simultanément le Committer, --author définit Author, --signoff ajoute le trailer DCO
+git -c user.name="newbe" -c user.email="newbe@newbe.pro" commit \
+    --author="newbe <newbe@newbe.pro>" --signoff -m "type(scope): subject"
+```
+
+## Pratiques d'ingénierie pour la maintenance des templates
+
+HagiCode équipe ce système de templates `.hbs` d'un ensemble complet de garanties d'ingénierie, ce n'est pas terminé une fois écrit.
+
+Premièrement, **tests de snapshot**. Dans le répertoire de tests il y a `BuildMessage_enUS.verified.txt`, `BuildMessage_zhCN.verified.txt` etc., des snapshots vérifiés, toute différence de rendu du template sera capturée par les tests. Changer un caractère nécessite de mettre à jour le snapshot, empêchant la dérive silencieuse des prompts.
+
+Deuxièmement, **scripts de formatage**. `cleanup-prompts.py --fix` nettoie les trailing whitespace, replie les lignes vides excessives, si le contrôle CI échoue le PR est bloqué directement.
+
+Troisièmement, **validation des paramètres**. Les paramètres requis, valeurs par défaut, types de chaque scenario ont une couverture de tests dédiée, si le template utilise `{{newParam}}` mais que le JSON ne le déclare pas, le test est rouge.
+
+Quatrièmement, **stratification des snapshots** : `Snapshots/Rendered/` stocke les résultats de rendu, `Snapshots/Scenarios/` stocke les métadonnées de scénarios, garantissant la cohérence entre template, métadonnées et produit de rendu.
+
+Voici un rappel pratique d'erreur. Si vous voulez ajouter un nouveau paramètre ou une nouvelle branche à ce prompt, quatre choses doivent être faites synchroniquement :
+
+1. Utiliser `{{newParam}}` dans le template (`.hbs`)
+2. Déclarer le schéma dans le tableau `parameters` des métadonnées (`.json`)
+3. Mettre à jour le `.verified.txt` correspondant dans les tests de snapshot
+4. Le formulaire du frontend génère les contrôles de saisie selon les nouveaux paramètres JSON, et les transmet via l'API
+
+Omettre n'importe quel maillon, soit le paramètre est vide au rendu, soit le test de snapshot est rouge, soit le frontend ne peut pas configurer. Cette contrainte de "synchronisation à quatre endroits" semble ennuyeuse, mais pour garantir la maintenabilité, on n'a pas le choix.
+
+### Pourquoi le prompt est si "verbeux"
+
+En regardant ce prompt, on remarque qu'il est anormalement long, l'identité, les trailers, le format de sortie sont répétés maintes fois. C'est en fait délibéré.
+
+Le modèle en mode Agent a tendance à "agir autonomement", il faut disperser les contraintes strictes dans `<requirements>`, `<workflow>`, `<final_instruction>` et les répéter à plusieurs endroits pour réduire la probabilité d'exécution manquée. C'est comme former un nouveau – dire les choses importantes trois fois, pas parce que l'autre est stupide, mais parce qu'il y a trop de distractions.
+
+En mode non-interactif (CI/CD, automatisation), le modèle ne peut pas poser de questions à l'utilisateur, donc le prompt précise au début "interdire AskUserQuestion, utiliser des valeurs par défaut pour les informations manquantes et enregistrer les hypothèses", garantissant que ça peut tourner sans surveillance.
+
+Une fois le contrat de sortie assoupli, le parsing backend s'effondre, donc la règle de séparation `---` est soulignée deux fois. Les choses importantes, il faut effectivement les dire trois fois.
+
+## Références
+
+- [Site officiel de HagiCode](https://hagicode.com)
+- [Dépôt GitHub HagiCode](https://github.com/HagiCode-org/site)
+- Spécification Conventional Commits : [conventionalcommits.org](https://www.conventionalcommits.org/)
+- Handlebars.Net : [github.com/Handlebars-Net/Handlebars.Net](https://github.com/Handlebars-Net/Handlebars.Net)
+- Git DCO (Developer Certificate of Origin) : [developercertificate.org](https://developercertificate.org/)
+
+## Conclusion
+
+Revenant au thème "Les prompts utilisés pour les commits IA dans HagiCode : réflexion de conception et décomposition de l'implémentation", ce qui vaut vraiment la peine d'être vérifié maintes fois ne sont pas les techniques dispersées, mais si les contraintes, les frontières d'implémentation et les compromis d'ingénierie ont été clairement compris.
+
+Tant que vous cristallisez les bases de jugement de cet article en points de contrôle stables, vous pourrez prendre des décisions fiables plus rapidement face à des problèmes similaires.

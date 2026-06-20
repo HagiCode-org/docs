@@ -1,0 +1,246 @@
+---
+title: HagiCodeにおけるAIコミットで使用されるプロンプト：設計思想と実装の分解
+date: 2026-06-20
+tags: [handlebars, hagicode]
+---
+
+## HagiCodeにおけるAIコミットで使用されるプロンプト：設計思想と実装の分解
+
+> バラバラな変更をAIに投げてコミットしてもらう時、裏では一体どんなプロンプトがモデルに送られているのか？なぜプロンプトはそのように書かれているのか？この記事では、HagiCodeで実際に「AIコミット」を駆動しているプロンプトを分解して紹介します。
+
+## 背景
+
+AIで開発をサポートするというのは、コードを一日中書いて疲れ果てた後の話でもあります。コミットしていない変更が溜まっていて、設定ファイル、ドキュメント、業務ロジック、テストケースがすべて混ざっていて、見るだけで頭が痛くなります。手動でグループ分け、規約に沿ったコミットメッセージを手書き、ブランチを切り替えてpushする——こうした「仕上げ作業」だけで30分が消えていくのです。
+
+当然、こうしたニーズが生まれます——**未コミットの変更をまとめてAIに投げて、自動的に分析、グループ分け、メッセージ作成、さらに直接commit + pushまでできないか？**
+
+アイデアは良いですが、実装すると落とし穴がたくさんあります。AIは`--author`だけを変更してCommitterを変更し忘れることがあり、コミット履歴では作成者は正しいのにコミットした人は間違っているという、見るに忍びない状態になります。花を添えたようなメッセージを自由に書いてしまい、リポジトリのスタイルと全く合わないかもしれません。勝手にメインブランチに切り替えて問題を起こすかもしれません。`Co-Authored-By`を忘れたり、`Signed-off-by`を適当に追加してコンプライアンス問題を引き起こすかもしれません。
+
+こうした落とし穴の一つ一つが教訓となります。これらの問題点を解消するため、「AIコミット」をパラメータ化されたエージェントタスク契約にしました。この契約がどのようなものか、なぜそのように設計されたのか、それがこの記事で明らかにしたいことです。
+
+## HagiCodeについて
+
+この記事で共有するソリューションは、[HagiCode](https://hagicode.com)プロジェクトでの実践から来ています。HagiCodeは開発者のワークフロー向けのAIコードアシスタントで、Gitコミット、コードレビュー、ビルド・リリースといった日常的なタスクをAIが参加できるタスクにしています。以下で分解するプロンプトシステムは、HagiCodeのバックエンドで実際に動いているものです。結局のところ、あの些細な「仕上げ作業」をAIに任せたいだけなのです。
+
+## プロンプトの真の姿：テンプレートとメタデータの組み合わせ、ハードコードされた文字列ではない
+
+多くの人は「プロンプト」＝ハードコードされた自然言語の文字列であり、モデルに投げれば終わりだと思っています。しかし、HagiCodeのアプローチはこれとは全く異なります。
+
+実際に「AIコミット」を駆動するプロンプトは`auto-compose-commit`と呼ばれ、コード内では`PromptScenario.AutoComposeCommit`に対応します。これは`repos/hagicode-core/src/PCode.Web/Resources/Prompts/`にあり、構造は以下のようになっています：
+
+```
+Resources/Prompts/
+├── auto-compose-commit.en-US.hbs     # 英語Handlebarsテンプレート
+├── auto-compose-commit.en-US.json    # 英語メタデータ（パラメータスキーマ、バージョン、タグ）
+├── auto-compose-commit.zh-CN.hbs     # 中国語テンプレート
+└── auto-compose-commit.zh-CN.json    # 中国語メタデータ
+```
+
+つまり、一つのプロンプトは**Handlebarsテンプレート1つとJSONメタデータ1つ**の組み合わせであり、localeごとに複数セットに平らに配置されています。
+
+なぜこのように分割したのでしょうか？ 背後にはいくつかの考慮があります。
+
+第一に、**メタデータとプロンプト本文の分離**です。JSONはパラメータスキーマを記述します——パラメータ名、型、必須かどうか、デフォルト値は何か。`.hbs`は「この話をどう言うか」だけを担当します。これにより、フロントエンドはテンプレートの本文を知らなくても、JSONに基づいて正しい入力フォームを自動レンダリングできます：Git IDセレクタ、Co-Authored-Byモード、ターゲットブランチ戦略、pushするかどうか……これらのコントロールはすべてJSON駆動で生成されます。
+
+第二に、**多言語を平らに配置し、i18nキーで翻訳しないこと**です。各localeに完全な`.hbs` + `.json`のセットがあり、「翻訳キーのドリフト」を回避しています。異なる言語は単語を置換するだけでなく、グループ分けの例、コマンドの例さえもローカライズできます。中英文のリポジトリではコミットの習慣がそもそも異なるため、一つのテンプレートに押し込んで翻訳するのは不自然です。
+
+第三に、**ScribanからHandlebarsに移行したのはパフォーマンスのため**です。`HandlebarsTemplateRenderer`は`Handlebars.Net`を採用しました。なぜなら、「テンプレートを直接ILバイトコードにコンパイル」でき、解釈実行よりもはるかに高速だからです。移行過程で興味深い互換性処理も行いました：レンダリング結果の`True/False`を`true/false`に置換し、古いScribanのブール出力習慣と互換性を保ちます——こうした詳細を気にしないと、古いテストが全部赤くなります。
+
+## プロンプトがこの形である理由：5つの重要な意思決定
+
+`auto-compose-commit.zh-CN.hbs`を分解して見ると、骨格は大まかにこうなっています：
+
+```
+非インタラクティブモードの説明
+├── <task>            タスク定義：変更分析、スマートグループ化、複数コミット
+├── <context>         コンテキスト：projectPath + push制御 + ターゲットブランチ制御
+├── <working_directory>
+├── <git_profile>     ID：Author + Committerの二重記述
+├── <tools>           ツールホワイトリスト
+├── <requirements>    硬要件（ブランチ、グループ化、Co-Authored-By、Signed-off-by、Conventional Commits）
+├── <historical_format_analysis>  履歴の一貫性
+├── <constraints>     制約（reset禁止、.gitignore無視）
+├── <workflow>        段階的実行フロー
+├── <output_format>   厳格な`---`区切りの出力
+└── <final_instruction>
+```
+
+以下で、設計意図を最もよく表す5つのポイントを取り上げて詳しく説明します。
+
+### 決定一：直接実行し、計画を生成しない
+
+プロンプトでは一つの文章が繰り返し強調されています：**Gitコマンドを直接使用して各コミットを実行し、計画を返さず、直接操作してください。**
+
+これは「Auto Compose Commit」が初期のソリューションと根本的に異なる点です。初期の`ai-git-commit-message-generator`（OpenSpecの`ai-commit-message-generation`仕様に対応）は一つのことしかしません：`POST /api/git/generate-commit-message`を呼び出し、コミットメッセージ文字列を返し、残りはユーザーが手動でコミットします。
+
+しかし`auto-compose-commit`は異なります。これは**エージェント自動タスク**です。モデルは自分で`Bash(git:*)`ツールを呼び出し、add → commit → pushの全チェーンを実行しなければなりません。この違いが、プロンプト全体のトーンを決定します——「どのようなメッセージを書くか」を記述するだけでなく、「どのようなプロセスで操作するか、どのツールを使うか、エラー時にどうするか」を規定する必要があります。
+
+### 決定二：なぜGit IDをこれほど冗長に書くのか
+
+`<git_profile>`と`<requirements>`には、AuthorとCommitterに関する長い説明があり、一見冗長に見えます：
+
+```
+- `--author="Name <email>"`はAuthorのみを変更します
+- `git -c user.name="Name" -c user.email="email" commit ...`は今回のコマンドのCommitterのみを変更します
+- 生成された各コミットに対して、AuthorとCommitterの両方を選択されたIDに設定しなければなりません
+- 推奨コマンド形式：
+  git -c user.name="..." -c user.email="..." commit --author="... <...>" ...
+```
+
+これは実際に踏んだ穴から来ています。Gitコミットには2つのIDフィールドがあり、モデルは`--author`だけを変更しがちで、結果としてCommitterは依然としてグローバル設定のIDのままになります。コミット履歴で「作成者は正しいが、コミットした人は間違っている」というのは見るに耐えません。そのため、プロンプトは推奨コマンドテンプレートを直接貼り付け、モデルに`git log --format=fuller -1`で自己検査を要求しています。
+
+例えると、これは荷物を送る時の「差出人」と「実際の担当者」が異なる伝票に書かれているようなものです。一枚の伝票に名前を書いても、もう一枚には会社の名前が印刷されたまま——荷物は送られますが、記録が合わず、結局不自然です。
+
+### 決定三：グループ分けの決定木と履歴の一貫性
+
+モデルが最も得意なのは「自由奔放に振る舞うこと」ですが、コミットのグループ分けで自由奔潮であることは、往々にして災難です。そのため、プロンプトには明確な決定木が用意されています：設定ファイルは単独グループ、ドキュメントは単独グループ、同一モジュールのコード変更はマージ、クロスモジュールの変更は状況次第。正例も付いています。例えば`src/auth/login.ts`と`auth.service.ts`は同じコミットに入るべきです。
+
+さらに重要なのは`<historical_format_analysis>`のセクションです。これはモデルに以下を要求します：
+
+> 1. `git log -n 15 --pretty=format:"%H|%s|%b%n---%n"`を使用して最近のコミット履歴を取得する
+> 2. 構造パターン、言語パターン、一般的なタイプ、特殊フォーマットを分析する
+> 3. 検出されたパターンに従うコミットメッセージを生成する
+
+つまり、モデルは自由に書いてはいけず、ターゲットリポジトリの既存のスタイルに合わせる必要があります。HagiCode Monoメインリポジトリは英語 + Conventional Commitsですが、一部のサブリポジトリは中国語の段落式を使用しており、AIは郷に入っては郷に従えなければなりません。この能力はアーカイブ提案`2026-02-23-auto-commit-compose-history-consistency-optimization`に対応し、後で追加された最適化です。結局のところ、自分のコミット履歴が雑多な鍋のように見えるのは誰も望まないでしょう。
+
+### 決定四：Co-Authored-ByとSigned-off-byの条件付きレンダリング
+
+プロンプトには大量のネストされた`{{#if}}`があり、実行パラメータに基づいてtrailerを追加するかどうかを決定します：
+
+- `coAuthoredByIsNone`の場合、`Co-Authored-By`を完全に追加しない
+- `coAuthoredByIsCustom`の場合、ユーザーが提供したカスタムtrailerを使用する
+- `signedOffByEnabled`と`gitProfileName`がある場合、`Signed-off-by`を追加し、IDが欠けている場合はエラーを報告し、勝手に作成しない
+
+trailerは署名の帰属とコンプライアンス（DCO sign-off）に関わるため、ユーザーが明示的に制御する必要があり、モデルが勝手に決めてはいけません。HagiCodeはこの領域で`git-commit-coauthor-standardization`、`ai-commit-consent-management`などの一連の提案を順次実装し、境界を明確にしました。こうしたことは、多少厳しくてもあいまいにしてはいけません。
+
+### 決定五：`---`区切りの出力契約
+
+`<output_format>`は、各回の返信が`---`で複数のコミットブロックを区切ることを規定し、フォーマットは固定されています：
+
+```
+---
+Commit 1: {hash}
+{message}
+---
+Commit 2: {hash}
+{message}
+---
+```
+
+これは見栄えのためではありません。モデルが一度のタスクでN個のコミットを生成する可能性があり、バックエンドはこの区切り文字に依存して各コミットのハッシュとメッセージを解析し、フロントエンドに返して表示します。出力プロトコルが緩むと、バックエンドの解析が直接崩壊します。そのため、`---`というルールは`<output_format>`と`<final_instruction>`で2回強調されています——重要なことは、本来3回言うべきものです。
+
+## プロンプトはどのように組み立てられて投げられるのか
+
+テンプレートを見るだけでは不十分で、どのように動作するかを知る必要があります。
+
+### ロードとレンダリング
+
+バックエンドは`PCodeClaudeHelperModule`で2つのシングルトンを登録しています：
+
+```csharp
+// プロンプトローダーを登録：scenario + localeで対応する.jsonと.hbsを見つける
+context.Services.AddSingleton<IPromptLoader, FilePromptLoaderV2>();
+// Handlebarsレンダラーを登録：テンプレートをILにコンパイルしてキャッシュ
+context.Services.AddSingleton<HandlebarsTemplateRenderer>(...);
+```
+
+`FilePromptLoaderV2`がテンプレート本文を取得した後、`HandlebarsTemplateRenderer.Render(template, parameters)`に渡してレンダリングします。レンダラーのコアロジックは大まかに以下のようになっています：
+
+```csharp
+public string Render(string template, IDictionary<string, object> parameters)
+{
+    // テンプレート内容のSHA256でキャッシュし、毎回のコミットで再コンパイルを避ける
+    var compiledTemplate = GetOrCompileTemplate(template);
+    var rendered = compiledTemplate(parameters ?? new Dictionary<string, object>());
+    // 古いScribanのブール出力習慣と互換性を保つ
+    rendered = rendered.Replace("True", "true").Replace("False", "false");
+    return rendered;
+}
+```
+
+コンパイル結果をコンテンツハッシュでキャッシュするのが、パフォーマンスの鍵です。コミットのような操作は高頻度でトリガーされる可能性があり、毎回ILを再コンパイルするのは誰も耐えられません。
+
+### パラメータはどこから来るのか
+
+JSONメタデータには10個以上のパラメータが宣言されています：`projectPath`、`needPush`、`targetBranchMode`、`gitProfileName`、`gitProfileEmail`、`signedOffByEnabled`、`coAuthoredBy*`など。これらのパラメータはフロントエンドの「AIコミットドロワー」で収集され、AutoTaskチャネル経由でバックエンドに注入され、`FilePromptProvider`が`PromptScenario.AutoComposeCommit`に従ってこのテンプレートセットにルーティングされます。
+
+### ブランチ戦略の三態処理
+
+`targetBranchMode`は、モデルがコミット前にブランチを操作するかどうかを決定し、三つの状態があります：
+
+| モード | 挙動 |
+|------|------|
+| `current` | その場でコミットし、ブランチを操作しない |
+| `new-custom` | ユーザーが提供した`targetBranchName`で現在のブランチから新しいブランチを切る |
+| `ai-generated-new` | モデルが変更に基づいてkebab-caseのブランチ名を生成し、競合したら安定した接尾辞を追加する |
+
+プロンプトには「既存の他のブランチには切り替えないでください」と明記され、モデルが勝手にメインブランチに切り替えてコミットするのを防ぎます。この能力は`auto-branch-switch-on-commit`提案に対応します。メインブランチが乱されると、ロールバックするのも一苦労です。
+
+## 完全なレンダリング例
+
+ユーザーがフロントエンドで以下を選択したと仮定します：現在のブランチに留まる、push必要、Signed-off-by有効、Co-Authored-By無効、Git IDは`newbe <newbe@newbe.pro>`。
+
+すると`<git_profile>`セクションは以下のようにレンダリングされます：
+
+```
+<git_profile>
+生成されたすべてのコミットで以下のGit IDを使用してください：
+- 選択された名前：newbe
+- 選択されたメール：newbe@newbe.pro
+...
+- 今回の実行ではGit標準のsign-off注記も要求されるため、優先的に`git ... commit --author=... --signoff ...`を使用してください
+</git_profile>
+```
+
+`<requirements>`には「Co-Authored-By disabled for this run」というブランチのみが残り、`<workflow>`で提供されるコマンドは以下のようになります：
+
+```bash
+# 注意：-cはCommitterを同時に設定し、--authorはAuthorを設定し、--signoffはDCO trailerを追加
+git -c user.name="newbe" -c user.email="newbe@newbe.pro" commit \
+    --author="newbe <newbe@newbe.pro>" --signoff -m "type(scope): subject"
+```
+
+## テンプレートメンテナンスのエンジニアリング実践
+
+HagiCodeはこの`.hbs`テンプレートセットに一連のエンジニアリング保障を用意しており、書き終わるだけでは終わりません。
+
+第一に、**スナップショットテスト**です。テストディレクトリには`BuildMessage_enUS.verified.txt`、`BuildMessage_zhCN.verified.txt`のような検証済みスナップショットがあり、テンプレートのレンダリング差異はすべてテストで捕捉されます。一文字でも変更するとスナップショットを更新する必要があり、プロンプトがこっそりドリフトするのを防ぎます。
+
+第二に、**フォーマットスクリプト**です。`cleanup-prompts.py --fix`は末尾の空白をクリーンアップし、余分な空行を畳み込み、CIチェックに不合格だとPRをブロックします。
+
+第三に、**パラメータ検証**です。各scenarioの必須パラメータ、デフォルト値、型には専用のテストがカバーされ、テンプレートで`{{newParam}}`を使用したがJSONで宣言していない場合、テストは赤くなります。
+
+第四に、**スナップショットの階層化**：`Snapshots/Rendered/`はレンダリング結果を格納し、`Snapshots/Scenarios/`はシナリオメタデータを格納し、テンプレート、メタデータ、レンダリング産物の三者が一貫していることを保証します。
+
+ここで実用的な落とし穴の警告があります。このプロンプトセットに新しいパラメータや新しいブランチを追加する場合、4つのことを同期して行う必要があります：
+
+1. テンプレート（`.hbs`）で`{{newParam}}`を使用する
+2. メタデータ（`.json`）の`parameters`配列でschemaを宣言する
+3. スナップショットテストで対応する`.verified.txt`を更新する
+4. フロントエンドフォームが新しいJSONパラメータに基づいて入力コントロールを生成し、APIを通じて透過する
+
+いずれかを漏らすと、レンダリング時にパラメータが空になるか、スナップショットテストが赤くなるか、フロントエンドで設定できなくなります。こうした「四处同期」の制約は面倒に見えますが、保守性を保証するためには仕方ありません。
+
+## なぜプロンプトはこれほど「冗長」なのか
+
+このプロンプトを振り返ると、異常に長く、ID、trailer、出力フォーマットが繰り返し強調されていることがわかります。これは意図的なものです。
+
+モデルはエージェントモードで特に「勝手な判断」をしやすく、硬い制約を`<requirements>`、`<workflow>`、`<final_instruction>`の複数箇所に分散して繰り返し宣言することで、実行漏れの確率を下げる必要があります。これは新人を指導するのと同じ理屈です——重要なことを3回言うのは、相手が愚かだからではなく、注意が散漫になることが多すぎるからです。
+
+非インタラクティブモード（CI/CD、自動化）では、モデルはユーザーに質問できないため、プロンプトの冒頭で「AskUserQuestionを禁止し、情報が欠けている場合はデフォルト値を使用して仮定を記録してください」と明記し、無人でも動作するように保証しています。
+
+出力契約が緩むと、バックエンド解析が崩壊するため、`---`区切りルールが2回強調されています。重要なことは、実際に3回言うべきものです。
+
+## 参考文献
+
+- [HagiCode公式サイト](https://hagicode.com)
+- [HagiCode GitHubリポジトリ](https://github.com/HagiCode-org/site)
+- Conventional Commits仕様：[conventionalcommits.org](https://www.conventionalcommits.org/)
+- Handlebars.Net：[github.com/Handlebars-Net/Handlebars.Net](https://github.com/Handlebars-Net/Handlebars.Net)
+- Git DCO (Developer Certificate of Origin)：[developercertificate.org](https://developercertificate.org/)
+
+## まとめ
+
+「HagiCodeにおけるAIコミットで使用されるプロンプト：設計思想と実装の分解」というテーマに戻ると、本当に繰り返し確認すべきなのはバラバラなテクニックではなく、制約条件、実装境界、エンジニアリングのトレードオフがすでに見えているかどうかです。
+
+記事中の判断根拠を安定したチェック項目として蓄積できれば、同様の問題に直面した際、より迅速に信頼できる決定を下せるようになります。
