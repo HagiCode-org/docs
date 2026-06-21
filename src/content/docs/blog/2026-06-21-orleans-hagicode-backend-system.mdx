@@ -1,0 +1,328 @@
+---
+title: 用 Orleans 搞定 AI 编程工作台的后台分布式难题
+date: 2026-06-21
+tags: [orleans, hagicode, dotnet, distributed-systems, actor-model]
+---
+
+## 用 Orleans 搞定 AI 编程工作台的后台分布式难题
+
+> 在一个进程里管十几种 AI CLI 工具、同时拖着几十个会话的实时流——听起来像在做梦？其实我们也觉得挺离谱的。但 Orleans 的 Virtual Actor 模型，还真就把这份复杂度收得服服帖帖。怎么说呢，有些工具生来就是解决某种问题的，只是你遇到那个问题之前，不会懂它有多合适罢了。
+
+## 背景
+
+做 AI 编程工作台这种产品，后台架构有个很特别是地方：每个用户会话，说到底，就是一个活着的、有状态的、能跟你耗上一两个小时的"生命体"。用户丢一句话进来，系统得挑一个合适的 AI Provider——Claude Code、Codex、Gemini、Kimi、CodeBuddy 等等，光数名字就得掰半天手指头——然后拉起子进程，通过流式通道实时把执行结果推回去，还得在 SignalR 上同步各种状态变更。
+
+这事要搁传统无状态 HTTP + Redis 方案身上，头疼的问题就来了：
+
+1. **多 Provider 管理碎了一地**。每种 AI CLI 工具有自己的进程模型、自己的流式输出格式、自己的超时脾气，十几套逻辑揉在一起，代码很快就变成了——你懂的——意大利面条。也不是说不能吃，只是吃得胃疼。
+2. **超时不可控，全看命**。一个 AI 操作可能跑三分钟完事，也可能跟你耗上两个小时。用全局统一超时配置？那短操作被无故掐断的场景，啧，想想都替用户委屈。反过来，长操作把线程池吃光，也不是什么美好的画面。
+3. **并发要精打细算，毕竟 GPU 不是大风刮来的**。同时跑太多 AI 操作，机器资源直接拉满；但太保守也不行，花钱买的算力白白晾着，这跟把空调开到 16 度然后盖棉被有什么区别。得按全局许可，精确控住活跃会话数。
+4. **状态管理复杂到怀疑人生**。每个会话有自己的消息队列、阶段状态、绑定的执行器——这些是有状态的数据，硬往无状态 HTTP 模型里塞，就只能拿 Redis 当万能胶水粘。粘是粘上了，然后你就会发现自己写了一座山的序列化/反序列化和分布式锁逻辑。写完之后对着屏幕发呆：我到底在解决业务问题，还是在跟基础设施搏斗？
+
+这几个问题凑在一起，与其说是技术挑战，不如说是架构选型的灵魂拷问。
+
+## 关于 HagiCode
+
+这些东西不是凭空想出来的。本文分享的方案来自我们在 [HagiCode](https://hagicode.com) 项目里的真刀真枪踩坑经验。HagiCode 是个面向 AI 协作编程的桌面工作台，它的后台要在单进程里协调十几种 AI CLI 工具，还得给前端提供低延迟的实时响应——说白了，就是又要马儿跑，又要马儿不吃草，还要马儿边跑边唱歌。
+
+下面要讲的 Orleans 架构，正是我们在开发 HagiCode 过程中实打实踩坑、实打实优化出来的东西。如果你觉得这套方案有点意思，那说明我们的工程底子还不赖——那么 HagiCode 本身，或许也值得你多看两眼。
+
+## 选型：为什么是 Orleans
+
+面对前面的灵魂拷问，我们认认真真看了三条路：
+
+**方案 A：无状态 API + Redis 状态管理。** 逻辑倒也简单——每个请求从 Redis 掏会话状态、执行操作、再写回去。水平扩展确实舒服，但 Redis 状态结构会跟着业务一起膨胀，膨胀到你不知道自己到底在维护一个缓存还是在维护一个隐式的数据库。状态一致性得靠锁，流式通信得额外搭 WebSocket/SSE 路由层。说白了，Redis 在这里就是个共享大字典，真正需要的有状态抽象，它给不了。
+
+**方案 B：Actor 模型框架（Dapr / Akka.NET）。** Dapr 的 Actor 能力本身够用，但它要求部署 Sidecar——对本地桌面端产品来说，杀鸡用牛刀都算抬举了，简直是开坦克去买菜。Akka.NET 的 Actor 模型更偏向低延迟短任务，动辄一两小时的长生命周期工作流，你得自己操心持久化和恢复，框架不给兜底。
+
+**方案 C：Microsoft Orleans。** 看到 Orleans 的 Virtual Actor 模型的时候，怎么说呢，那种感觉就像——找了半天钥匙，结果发现就在自己口袋里。有几个特性简直是为我们这种场景量身缝制的：
+
+- **Activation/Deactivation 自动管理**：你不用操心 grain 什么时候生、什么时候死，运行时帮你全包了。一个会话对应一个 grain，会话在 grain 就在，会话结束 grain 自动回收。这种"不用管"的感觉，经历过手动生命周期管理的人才会懂。
+- **`IAsyncEnumerable<T>` 原生流式支持**：从 CLI 进程输出到前端展示，全程异步流式，不需要中间缓冲队列。就这一个特性，帮我们省掉了至少上千行手写胶水代码。
+- **`[AlwaysInterleave]` 和 `[ResponseTimeout]`**：细粒度的并发和超时控制，按接口级配，不是全局一刀切。终于不用在"要么全短、要么全长"之间做痛苦的选择了。
+- **内置持久化状态（`IPersistentState<T>`）**：状态自动持久化，不需要再额外搭分布式缓存。省心，真的省心。
+
+评估下来，Orleans 对 HagiCode 后台的核心需求几乎是对号入座：
+
+| 能力 | Orleans 对应方案 |
+| --- | --- |
+| 有状态会话 | `IPersistentState<T>` + SQLite Shard 持久化 |
+| 流式输出 | `IAsyncEnumerable<T>` 原生支持，自动穿透到 SignalR |
+| 长超时控制 | `[ResponseTimeout("02:00:00")]` 按接口粒度配置 |
+| Provider 多态路由 | `ExecutorGrainFactory` 根据 `AIProviderType` 分发 |
+| 并发控制 | `SessionConcurrencyManager` 配合 grain 单线程调度 |
+
+## 五个核心设计决策
+
+选好了工具只是第一步。怎么落地，才是真正见功夫的地方。以下是我们踩过坑、爬起来、拍拍土之后沉淀下来的五个关键设计。有的是经验，有的是教训，有的......算了，反正都写出来你自己看。
+
+### 1. Facade Grain 模式
+
+整个系统的核心调度 grain 是 `SessionGrain`。但它不直接处理所有逻辑——真要那么干，它会变成一个上万行的上帝类。上帝类这种东西，写的时候觉得自己无所不能，改的时候觉得自己一无是处。
+
+我们把特定领域逻辑委托给两个运行时组件：`ChatSessionGrain` 处理聊天模式，`ProposalSessionGrain` 处理提案模式。
+
+```csharp
+internal partial class SessionGrain(
+    ILogger<SessionGrain> logger,
+    IServiceProvider serviceProvider,
+    IExecutorGrainFactory executorGrainFactory,
+    IMessageService messageService,
+    [PersistentState("session")] IPersistentState<SessionState> state)
+    : Grain, ISessionGrain
+{
+    internal ChatSessionGrain ChatSessionComponent =>
+        _chatSessionComponent ??= new ChatSessionGrain(RuntimeContext);
+
+    internal ProposalSessionGrain ProposalSessionComponent =>
+        _proposalSessionComponent ??= new ProposalSessionGrain(RuntimeContext);
+
+    internal ISessionRuntimeComponent GetRuntimeComponent(SessionType sessionType) =>
+        sessionType switch
+        {
+            SessionType.Chat => ChatSessionComponent,
+            SessionType.Proposal => ProposalSessionComponent,
+            _ => throw new ArgumentOutOfRangeException(nameof(sessionType))
+        };
+}
+```
+
+这个模式的设计的干净利落：grain 身份稳定，不随 session 类型变来变去；外部调用者只管和 `ISessionGrain` 打交道，里面怎么分活它不操心；组件本身无状态，随时可以按需重建；两者共享同一份 `SessionState` 持久化状态，数据一致性天然搞定。谁说架构设计不能优雅来着？
+
+### 2. 多态执行器工厂
+
+HagiCode 支持十几种 AI CLI 工具，每种都要独立的进程管理和流式输出。我们为每种工具实现了一个专用 grain——`ClaudeCodeGrain`、`CodexGrain`、`GeminiGrain` 等等，名儿列出来跟点名似的。然后靠工厂统一路由：
+
+```csharp
+internal sealed class ExecutorGrainFactory : IExecutorGrainFactory
+{
+    public IExecutorStreamGrain GetExecutorGrain(
+        AIProviderType executorType, CessionId cessionId)
+    {
+        return executorType switch
+        {
+            AIProviderType.ClaudeCodeCli => ExecutorStreamGrainAdapter.From(
+                _grainFactory.GetGrain<IClaudeCodeGrain>(cessionId.Value)),
+            AIProviderType.CodexCli => ExecutorStreamGrainAdapter.From(
+                _grainFactory.GetGrain<ICodexGrain>(cessionId.Value)),
+            AIProviderType.GeminiCli => ExecutorStreamGrainAdapter.From(
+                _grainFactory.GetGrain<IGeminiGrain>(cessionId.Value)),
+            // ... 10+ providers
+            _ => throw new NotSupportedException(
+                $"Unsupported executor type: {executorType}")
+        };
+    }
+}
+```
+
+所有执行器 grain 实现同一个 `IExecutorStreamGrain` 接口，通过 `ExecutorStreamGrainAdapter` 做统一适配。上层代码完全不感知底下用的是哪个 Provider——加一个新工具？新增一个 grain 类，在工厂的 switch 里加一行，完事。这种扩展点，怎么说呢，像是给未来的自己留了一扇门，门后面也不用什么复杂的迷宫，径直走进去就好。
+
+### 3. 流式通信管道
+
+Orleans 对 `IAsyncEnumerable<T>` 的原生支持，让流式输出变得特别自然。以 `ClaudeCodeGrain` 为例：
+
+```csharp
+public async IAsyncEnumerable<ClaudeCodeResponse> ExecuteCommandStreamAsync(
+    string command,
+    string? heroId,
+    [EnumeratorCancellation] CancellationToken token = default)
+{
+    var (provider, configuration) = await CreateProviderAsync(heroId, token);
+
+    await foreach (var response in SendAsync(command, provider, context, token))
+    {
+        yield return response;
+    }
+}
+```
+
+整个管道是这样的：CLI 进程 stdout → grain 流式 yield → `ExecutorGrainFactory` 包装为 `SessionMessage` → `SessionGrain` 通过 SignalR 推到前端。每一步都是异步流式的，没有中间缓冲，没有同步阻塞。这也是 Orleans 相比传统方案最爽的一点——你不需要在 grain 内部维护一个 `ConcurrentQueue` 然后手动推，`yield return` 四个字搞定一切。这种流畅感，用过了就回不去了。
+
+### 4. 分层超时策略
+
+AI 操作的时间方差极大——一个简单的语法纠错可能 3 秒完事，一个复杂重构能跑上两个小时。超时策略一刀切？切下去痛的可不是刀。
+
+我们分层配置：Silo 级别默认 30 秒超时，个别接口通过 `[ResponseTimeout]` 覆盖：
+
+```csharp
+public static class GrainTimeouts
+{
+    public const string LongRunningResponseTimeout = "02:00:00";
+    public const string HealthCheckResponseTimeout = "00:01:00";
+}
+
+[Alias("HagiCode.Orleans.IAIGrain")]
+public interface IAIGrain : IGrainWithStringKey
+{
+    [ResponseTimeout(GrainTimeouts.LongRunningResponseTimeout)]
+    Task<ProposalOptimizationBundleResultDto> OptimizeProposalBundleAsync(...);
+
+    [ResponseTimeout(GrainTimeouts.HealthCheckResponseTimeout)]
+    Task<HealthCheckResult> PingAsync(HealthCheckRequest? request = null);
+}
+```
+
+原则很简单：默认保守，按需放宽。这其实不是什么高深理论，就是把最小权限原则用在超时配置上。AI 操作给够两小时，健康检查只给一分钟，各过各的日子，谁也别耽误谁。
+
+### 5. 批量 Grain Collection 配置
+
+Orleans 默认会在 grain 空闲一阵子后自动回收（Deactivation）。这本身是好事，但频繁激活/回收就跟反复开关冰箱门一样，徒增开销。我们对核心 grain 类型统一配了较长的回收时间：
+
+```csharp
+internal static void ConfigureGrainCollectionOptions(
+    GrainCollectionOptions options,
+    OrleansTimeoutPolicy? timeoutPolicy = null)
+{
+    var coreGrainTypes = new[]
+    {
+        typeof(SessionGrain).FullName,
+        typeof(ClaudeCodeGrain).FullName,
+        typeof(CodexGrain).FullName,
+        typeof(GameDriverGrain).FullName,
+        // ... 十余种核心 grain
+    };
+
+    var collectionAge = timeoutPolicy?.GrainCollectionAge
+        ?? TimeSpan.FromHours(24);
+
+    foreach (var name in coreGrainTypes)
+    {
+        options.ClassSpecificCollectionAge[name!] = collectionAge;
+    }
+
+    // MessageBucket 例外：10 分钟快速回收
+    options.ClassSpecificCollectionAge[typeof(MessageBucketGrain).FullName!] =
+        TimeSpan.FromMinutes(10);
+}
+```
+
+核心思路就是差异化：高频短期 grain 快速回收释放内存，核心业务 grain 保持热缓存少折腾。这个调优看着简单，在不设的话默认回收策略会对吞吐有可见影响——折腾过的人都知道我在说什么。
+
+## 落地实践
+
+### 本地开发与持久化
+
+HagiCode 本地开发用 Development Clustering，持久化走 SQLite Shard，已经以经在多个 contributor 的环境里验证过了：
+
+```csharp
+context.Services.AddOrleans(siloBuilder =>
+{
+    siloBuilder.UseDevelopmentClustering(options =>
+    {
+        options.PrimarySiloEndpoint = new IPEndPoint(
+            IPAddress.Loopback, siloPort);
+    });
+
+    siloBuilder
+        .Configure<ClusterOptions>(options =>
+        {
+            options.ClusterId = "hagicode-cluster";
+            options.ServiceId = "hagicode-service";
+        })
+        .AddActivityPropagation();
+
+    siloBuilder.ConfigureServices(services =>
+    {
+        services.AddSqliteGrainStorage(
+            ProviderConstants.DEFAULT_STORAGE_PROVIDER_NAME,
+            options =>
+            {
+                options.ShardRootPath = storageOptions.ShardRootPath;
+                options.ShardCount = storageOptions.ShardCount;
+                options.UseWalMode = storageOptions.UseWalMode;
+            });
+    });
+});
+```
+
+自定义的 `SqliteGrainStorage` 按 Shard 分片创建多个数据库文件，路径类似 `data/orleans/grains/shard_00.db`。生产环境能换成 Azure Table Storage 或 SQL Server，代码不用改一行——这就是 Orleans 存储提供者抽象的好处。怎么说呢，好的抽象让你换后端跟换衣服一样简单，坏的抽象让你换后端跟换皮一样痛苦。
+
+### 并发会话控制
+
+`SessionConcurrencyManager` 用进程内锁 + 全局计数器管活跃会话数上限：
+
+```csharp
+internal static class SessionConcurrencyManager
+{
+    private static readonly HashSet<SessionId> GlobalActiveSessions = [];
+    private static readonly Lock Lock = new();
+
+    internal static ConcurrencyCheckResult TryActivateSession(SessionId sessionId)
+    {
+        lock (Lock)
+        {
+            if (GlobalActiveSessions.Contains(sessionId))
+                return new ConcurrencyCheckResult { Allowed = true };
+
+            if (GlobalActiveSessions.Count >= _cachedMaxConcurrentSessions)
+                return new ConcurrencyCheckResult { Allowed = false };
+
+            GlobalActiveSessions.Add(sessionId);
+            return new ConcurrencyCheckResult { Allowed = true };
+        }
+    }
+}
+```
+
+这个管理器通过 Stack Trace + Caller 验证，限制只能从 `SessionGrain` 内部调用，防止外部代码绕过并发检查。不过说实话，这里用 `internal static` 其实破坏了 Actor 隔离原则——毕竟并发控制确实是个全局需求，权衡之后我们接受了这个设计折中。完美是完美的敌人，这句话在架构设计上同样成立。
+
+### 健康检查集成
+
+`AIGrain.PingAsync()` 有两种模式：轻量连接性探测和显式 Ping-Pong 校验。后者用于初始化向导里验证 Provider 是不是真的能用：
+
+```csharp
+public async Task<HealthCheckResult> PingAsync(
+    HealthCheckRequest? request = null)
+{
+    if (!isModelAware)
+    {
+        // 轻量级 CLI 就绪探测
+        var provider = await aiProviderFactory.GetProviderAsync(
+            AIProviderType.ClaudeCodeCli);
+        var result = await provider.PingAsync(timeoutCts.Token);
+        return new HealthCheckResult { IsHealthy = result.Success };
+    }
+
+    // 显式 Ping-Pong 验证
+    var response = await aiService.ExecuteAsync(new AIRequest
+    {
+        Prompt = HealthCheckPingPongProbe.Prompt,
+        SystemMessage = HealthCheckPingPongProbe.SystemMessage,
+        Temperature = 0,
+        MaxTokens = 32
+    }, timeoutCts.Token);
+
+    var passed = HealthCheckPingPongProbe.IsExpectedResponse(
+        normalizedResponse);
+    return new HealthCheckResult { IsHealthy = passed };
+}
+```
+
+温度设为 0，MaxTokens 限制到 32——既保证响应确定性，也控住了成本。毕竟健康检查不是让你跑 benchmark，够用就好。做人也是一样，知道什么时候该收手，比知道什么时候该出手更难得。
+
+## 总结
+
+回头看看 HagiCode 用 Orleans 构建后台系统这条路，五个核心设计决策值得记住：
+
+1. **超时要按接口粒度配**，别用全局统一超时——AI 操作 2h、健康检查 1min、默认 30s，各管各的，井水不犯河水。
+2. **Grain Collection 年龄要差异化**——高频短期 grain 快速回收，核心业务 grain 保持热缓存，该快的快，该稳的稳。
+3. **流式管道要全程异步**——从 CLI stdout 到 SignalR 推送，不引入任何一个同步阻塞中间件，像水流一样自然往下走。
+4. **Facade Grain 拆分复杂度**——组件无状态但共享持久化状态，比上帝类好维护得多。分而治之，老祖宗的智慧放在代码里一样好使。
+5. **Grain 接口用 `[Alias]` 标记稳定名**——序列化兼容性的最后一道防线。这条线守住了，半夜被报警叫醒的概率就小得多。
+
+Orleans 的 Virtual Actor 模型，为有状态、长生命周期的会话系统提供了一套完整到让人感动的运行时抽象。如果你也在做类似的 AI 工作台或实时协作系统，这套方案值得一试——不是因为它完美，而是因为它在合适的场景里，刚刚好。
+
+此情可待成追忆，只是当时已惘然......扯远了。反正代码跑起来了，文章也写完了。就这样吧。
+
+## 参考资料
+
+- [Microsoft Orleans 官方文档](https://learn.microsoft.com/en-us/dotnet/orleans/)
+- [Orleans Streaming 指南](https://learn.microsoft.com/en-us/dotnet/orleans/streaming/)
+- [Orleans Grain Persistence](https://learn.microsoft.com/en-us/dotnet/orleans/grains/grain-persistence/)
+- [HagiCode GitHub](https://github.com/HagiCode-org/site)
+
+## 总结
+
+围绕“用 Orleans 搞定 AI 编程工作台的后台分布式难题”，更稳妥的推进方式是先把关键配置、依赖边界和落地路径逐步跑通，再补齐优化细节。
+
+当目标、步骤和验收点都明确之后，这类方案通常就能更顺畅地进入实际交付。

@@ -1,0 +1,328 @@
+---
+title: Usando Orleans para Resolver Desafios Distribuídos do Backend de Ambientes de Programação AI
+date: 2026-06-21
+tags: [orleans, hagicode, dotnet, distributed-systems, actor-model]
+---
+
+## Usando Orleans para Resolver Desafios Distribuídos do Backend de Ambientes de Programação AI
+
+> Gerenciar dezenas de ferramentas CLI de AI em um único processo e, ao mesmo tempo, lidar com dezenas de sessões de streaming em tempo real—parece sonhador? Na verdade, achamos também meio absurdo. Mas o modelo Virtual Actor do Orleans realmente trouxe essa complexidade sob controle. Digamos assim: algumas ferramentas nascem para resolver certos problemas, só que você não entende o quanto são adequadas até encontrar esse problema.
+
+## Contexto
+
+Ao desenvolver produtos como ambientes de programação AI, a arquitetura de backend tem um aspecto muito particular: cada sessão de usuário, no fundo, é um "organismo vivo", com estado, que pode te consumir por uma ou duas horas. O usuário envia uma mensagem, o sistema precisa escolher um AI Provider adequado—Claude Code, Codex, Gemini, Kimi, CodeBuddy, etc., só para contar os nomes já precisa de todos os dedos—então inicia subprocessos, empurra os resultados de execução em tempo real através de canais de streaming, e ainda sincroniza várias mudanças de estado no SignalR.
+
+Se tentássemos fazer isso com a abordagem tradicional de HTTP sem estado + Redis, surgiriam problemas de dor de cabeça:
+
+1. **Gestão de múltiplos Providers fragmentada**. Cada ferramenta CLI de AI tem seu próprio modelo de processo, seu próprio formato de saída streaming, seu próprio temperamento de timeout—mais de uma dúzia de lógicas misturadas, e o código rapidamente se transforma—como você sabe—em espaguete. Não que não dê pra comer, só que dá dor de estômago.
+2. **Timeout incontrolável, tudo na sorte**. Uma operação AI pode terminar em três minutos ou te consumir por duas horas. Usar uma configuração global de timeout unificado? A cena de operações curtas sendo cortadas arbitrariamente, puxa, até dói pelos usuários só de pensar. Por outro lado, operações longas consumindo o pool de threads também não é um quadro bonito.
+3. **Concorrência precisa ser meticulosamente calculada, já que GPU não cai do céu**. Rodar muitas operações AI ao mesmo tempo enche os recursos da máquina; mas ser muito conservador também não funciona, poder computacional pago ficando ocioso, isso é igual a ligar o ar em 16 graus e dormir com cobertor. Precisa controlar o número de sessões ativas com precisão, baseado em licenças globais.
+4. **Gerenciamento de estado complexo ao ponto de questionar a existência**. Cada sessão tem sua própria fila de mensagens, estado de fase, executor vinculado—estes são dados com estado, forçá-los em modelo HTTP sem estado só dá pra usar Redis como cola universal. Colou, então você se descobre escrevendo uma montanha de lógica de serialização/deserialização e bloqueios distribuídos. Depois fica olhando para a tela: eu estou resolvendo problemas de negócio ou lutando com infraestrutura?
+
+Estes problemas juntos, mais do que desafios técnicos, são questionamentos existenciais sobre escolhas de arquitetura.
+
+## Sobre HagiCode
+
+Estas coisas não vieram do nada. A solução compartilhada aqui vem da nossa experiência real de pisar em buracos no projeto [HagiCode](https://hagicode.com). HagiCode é um ambiente de desktop para programação colaborativa com AI, seu backend precisa coordenar dezenas de ferramentas CLI de AI em um único processo, e ainda fornecer respostas em tempo real com baixa latência para o frontend—falando claro, quer que o cavalo corra, não coma, e ainda cante enquanto corre.
+
+A arquitetura Orleans a seguir é exatamente o que desenvolvemos e otimizamos no processo de desenvolvimento do HagiCode. Se você acha que esta solução é interessante, isso mostra que nossa base de engenharia não é ruim—então talvez HagiCode em si valha uma olhada mais atenta.
+
+## Escolha: Por que Orleans
+
+Diante dos questionamentos anteriores, examinamos seriamente três caminhos:
+
+**Opção A: API sem estado + gerenciamento de estado Redis.** A lógica é simples—cada requisição pega estado de sessão do Redis, executa operação, escreve de volta. Escalabilidade horizontal é confortável, mas a estrutura de estado do Redis infla junto com o negócio, infla até você não saber se está mantendo um cache ou um banco de dados implícito. Consistência de estado depende de locks, comunicação streaming precisa de camada extra de WebSocket/SSE. Falando claro, Redis aqui é só um dicionário compartilhado gigante, não consegue fornecer a abstração com estado de verdade.
+
+**Opção B: Frameworks de modelo Actor (Dapr / Akka.NET).** A capacidade Actor do Dapr é suficiente, mas exige deploy de Sidecar—para produtos desktop locais, matar frango com faca de açougueiro é até elogio, é como ir comprar verdura com tanque de guerra. O modelo Actor do Akka.NET é mais voltado para tarefas curtas de baixa latência, workflows de ciclo de vida longo de uma ou duas horas, você precisa se preocupar com persistência e recuperação, o framework não oferece garantia.
+
+**Opção C: Microsoft Orleans.** Quando vimos o modelo Virtual Actor do Orleans, digamos assim, a sensação foi como—procurando chaves o dia todo, descobrindo que estavam no bolso o tempo todo. Algumas características parecem costuradas sob medida para nosso cenário:
+
+- **Gerenciamento automático de Activation/Deactivation**: você não se preocupa quando grain nasce ou morre, o runtime cuida de tudo. Uma sessão corresponde a um grain, sessão existe grain existe, sessão termina grain é recolhido automaticamente. Essa sensação de "não precisa se preocupar", só quem fez gerenciamento manual de ciclo de vida entende.
+- **Suporte nativo streaming `IAsyncEnumerable<T>`**: da saída do processo CLI até exibição no frontend, tudo assíncrono streaming, sem fila de buffer intermediária. Só essa característica nos economizou pelo menos mil linhas de código cola manual.
+- **`[AlwaysInterleave]` e `[ResponseTimeout]`**: controle fino de concorrência e timeout, configurado por nível de interface, não corta tudo globalmente. Finalmente não precisa mais fazer escolhas dolorosas entre "ou tudo curto ou tudo longo".
+- **Estado persistente embutido (`IPersistentState<T>`)**: estado persistido automaticamente, sem precisar montar cache distribuído extra. Economiza trabalho, economiza mesmo.
+
+Na avaliação, Orleans atende quase perfeitamente os requisitos centrais do backend HagiCode:
+
+| Capacidade | Solução Orleans correspondente |
+| --- | --- |
+| Sessão com estado | `IPersistentState<T>` + persistência SQLite Shard |
+| Saída streaming | `IAsyncEnumerable<T>` suporte nativo, penetra automaticamente até SignalR |
+| Controle de timeout longo | `[ResponseTimeout("02:00:00")]` configurado por granularidade de interface |
+| Roteamento polimórfico Provider | `ExecutorGrainFactory` despacha baseado em `AIProviderType` |
+| Controle de concorrência | `SessionConcurrencyManager` combinado com agendamento single-thread do grain |
+
+## Cinco Decisões de Design Centrais
+
+Escolher a ferramenta é só o primeiro passo. Como implementar, isso é onde mostra o trabalho real. Abaixo estão cinco designs-chave que acumulamos depois de pisar em buracos, levantar, bater a poeira. Alguns são experiência, alguns são lições, outros... esquece, tudo está escrito pra você ver.
+
+### 1. Padrão Facade Grain
+
+O grain de agendamento central do sistema é `SessionGrain`. Mas ele não processa toda a lógica diretamente—se fizesse isso, se tornaria uma classe Deus com mais de dez mil linhas. Classes desse tipo, quando você escreve se acha capaz de tudo, quando modifica se acha inútil.
+
+Delegamos lógica de domínio específico para dois componentes de runtime: `ChatSessionGrain` processa modo chat, `ProposalSessionGrain` processa modo proposta.
+
+```csharp
+internal partial class SessionGrain(
+    ILogger<SessionGrain> logger,
+    IServiceProvider serviceProvider,
+    IExecutorGrainFactory executorGrainFactory,
+    IMessageService messageService,
+    [PersistentState("session")] IPersistentState<SessionState> state)
+    : Grain, ISessionGrain
+{
+    internal ChatSessionGrain ChatSessionComponent =>
+        _chatSessionComponent ??= new ChatSessionGrain(RuntimeContext);
+
+    internal ProposalSessionGrain ProposalSessionComponent =>
+        _proposalSessionComponent ??= new ProposalSessionGrain(RuntimeContext);
+
+    internal ISessionRuntimeComponent GetRuntimeComponent(SessionType sessionType) =>
+        sessionType switch
+        {
+            SessionType.Chat => ChatSessionComponent,
+            SessionType.Proposal => ProposalSessionComponent,
+            _ => throw new ArgumentOutOfRangeException(nameof(sessionType))
+        };
+}
+```
+
+Este padrão é limpo e arrumado: identidade do grain estável, não varia com tipo de sessão; chamadores externos só lidam com `ISessionGrain`, não se preocupam como dividir trabalho internamente; componentes em si sem estado, podem ser reconstruídos sob demanda; ambos compartilham mesmo estado persistente `SessionState`, consistência de dados resolvida naturalmente. Quem disse que design de arquitetura não pode ser elegante?
+
+### 2. Fábrica de Executor Polimórfico
+
+HagiCode suporta dezenas de ferramentas CLI de AI, cada uma precisa gerenciamento de processo independente e saída streaming. Implementamos um grain dedicado para cada ferramenta—`ClaudeCodeGrain`, `CodexGrain`, `GeminiGrain`, etc., a lista parece chamada. Depois roteamento unificado através de fábrica:
+
+```csharp
+internal sealed class ExecutorGrainFactory : IExecutorGrainFactory
+{
+    public IExecutorStreamGrain GetExecutorGrain(
+        AIProviderType executorType, CessionId cessionId)
+    {
+        return executorType switch
+        {
+            AIProviderType.ClaudeCodeCli => ExecutorStreamGrainAdapter.From(
+                _grainFactory.GetGrain<IClaudeCodeGrain>(cessionId.Value)),
+            AIProviderType.CodexCli => ExecutorStreamGrainAdapter.From(
+                _grainFactory.GetGrain<ICodexGrain>(cessionId.Value)),
+            AIProviderType.GeminiCli => ExecutorStreamGrainAdapter.From(
+                _grainFactory.GetGrain<IGeminiGrain>(cessionId.Value)),
+            // ... 10+ providers
+            _ => throw new NotSupportedException(
+                $"Unsupported executor type: {executorType}")
+        };
+    }
+}
+```
+
+Todos os grains executor implementam mesma interface `IExecutorStreamGrain`, através de `ExecutorStreamGrainAdapter` faz adaptação unificada. Código de camada superior não percebe qual Provider está sendo usado—adicionar nova ferramenta? Adicionar classe grain nova, adicionar linha no switch da fábrica, pronto. Esse ponto de extensão, digamos assim, é como deixar uma porta para você mesmo no futuro, atrás da porta não precisa labirinto complexo, só entrar direto.
+
+### 3. Pipeline de Comunicação Streaming
+
+O suporte nativo de Orleans para `IAsyncEnumerable<T>` torna saída streaming especialmente natural. Tomando `ClaudeCodeGrain` como exemplo:
+
+```csharp
+public async IAsyncEnumerable<ClaudeCodeResponse> ExecuteCommandStreamAsync(
+    string command,
+    string? heroId,
+    [EnumeratorCancellation] CancellationToken token = default)
+{
+    var (provider, configuration) = await CreateProviderAsync(heroId, token);
+
+    await foreach (var response in SendAsync(command, provider, context, token))
+    {
+        yield return response;
+    }
+}
+```
+
+O pipeline inteiro é assim: CLI processo stdout → grain yield streaming → `ExecutorGrainFactory` empacota como `SessionMessage` → `SessionGrain` empurra via SignalR para frontend. Cada passo é assíncrono streaming, sem buffer intermediário, sem bloqueio síncrono. Esse é também o ponto mais agradável de Orleans comparado com abordagem tradicional—você não precisa manter `ConcurrentQueue` dentro do grain e empurrar manualmente, `yield return` quatro palavras resolvem tudo. Essa fluidez, depois de usar, não tem volta.
+
+### 4. Estratégia de Timeout em Camadas
+
+A variância temporal de operações AI é extremamente grande—uma correção gramatical simples pode terminar em 3 segundos, uma refatoração complexa pode rodar por duas horas. Timeout unilateral? O que dói não é o corte.
+
+Configuramos em camadas: nível Silo padrão 30 segundos timeout, interfaces individuais sobrescrevem através de `[ResponseTimeout]`:
+
+```csharp
+public static class GrainTimeouts
+{
+    public const string LongRunningResponseTimeout = "02:00:00";
+    public const string HealthCheckResponseTimeout = "00:01:00";
+}
+
+[Alias("HagiCode.Orleans.IAIGrain")]
+public interface IAIGrain : IGrainWithStringKey
+{
+    [ResponseTimeout(GrainTimeouts.LongRunningResponseTimeout)]
+    Task<ProposalOptimizationBundleResultDto> OptimizeProposalBundleAsync(...);
+
+    [ResponseTimeout(GrainTimeouts.HealthCheckResponseTimeout)]
+    Task<HealthCheckResult> PingAsync(HealthCheckRequest? request = null);
+}
+```
+
+Princípio simples: padrão conservador, relaxar sob demanda. Na verdade não é teoria profunda, é aplicar princípio de menor privilégio em configuração de timeout. Operação AI tem duas horas, health check só um minuto, cada um vive sua vida, ninguém atrapalha ninguém.
+
+### 5. Configuração em Lote de Grain Collection
+
+Orleans por padrão recolhe automaticamente grain após ficar ocioso por um tempo (Deactivation). Isso é bom, mas ativação/recoletação frequente é como abrir e fechar porta da geladeira repetidamente, aumenta despesa desnecessariamente. Configuramos tempo de recoletação mais longo uniformemente para tipos de grain centrais:
+
+```csharp
+internal static void ConfigureGrainCollectionOptions(
+    GrainCollectionOptions options,
+    OrleansTimeoutPolicy? timeoutPolicy = null)
+{
+    var coreGrainTypes = new[]
+    {
+        typeof(SessionGrain).FullName,
+        typeof(ClaudeCodeGrain).FullName,
+        typeof(CodexGrain).FullName,
+        typeof(GameDriverGrain).FullName,
+        // ... mais de dez tipos de grain centrais
+    };
+
+    var collectionAge = timeoutPolicy?.GrainCollectionAge
+        ?? TimeSpan.FromHours(24);
+
+    foreach (var name in coreGrainTypes)
+    {
+        options.ClassSpecificCollectionAge[name!] = collectionAge;
+    }
+
+    // Exceção MessageBucket: recoletação rápida em 10 minutos
+    options.ClassSpecificCollectionAge[typeof(MessageBucketGrain).FullName!] =
+        TimeSpan.FromMinutes(10);
+}
+```
+
+A ideia central é diferenciação: grain de alta frequência curta recoleta rápido liberando memória, grain de negócio central mantém cache quente mexendo pouco. Essa otimização parece simples, se não configurada, estratégia de recoletação padrão terá impacto visível em throughput—quem mexeu com isso sabe do que estou falando.
+
+## Implementação Prática
+
+### Desenvolvimento Local e Persistência
+
+HagiCode usa Development Clustering para desenvolvimento local, persistência via SQLite Shard, já foi validado em ambientes de múltiplos contributors:
+
+```csharp
+context.Services.AddOrleans(siloBuilder =>
+{
+    siloBuilder.UseDevelopmentClustering(options =>
+    {
+        options.PrimarySiloEndpoint = new IPEndPoint(
+            IPAddress.Loopback, siloPort);
+    });
+
+    siloBuilder
+        .Configure<ClusterOptions>(options =>
+        {
+            options.ClusterId = "hagicode-cluster";
+            options.ServiceId = "hagicode-service";
+        })
+        .AddActivityPropagation();
+
+    siloBuilder.ConfigureServices(services =>
+    {
+        services.AddSqliteGrainStorage(
+            ProviderConstants.DEFAULT_STORAGE_PROVIDER_NAME,
+            options =>
+            {
+                options.ShardRootPath = storageOptions.ShardRootPath;
+                options.ShardCount = storageOptions.ShardCount;
+                options.UseWalMode = storageOptions.UseWalMode;
+            });
+    });
+});
+```
+
+`SqliteGrainStorage` personalizado cria múltiplos arquivos de banco de dados divididos por Shard, caminho semelhante a `data/orleans/grains/shard_00.db`. Em produção pode trocar para Azure Table Storage ou SQL Server, sem alterar uma linha de código—esse é o benefício da abstração de provedor de armazenamento do Orleans. Digamos assim, boa abstração faz trocar backend ser como trocar roupa, má abstração faz trocar backend ser como trocar pele.
+
+### Controle de Concorrência de Sessões
+
+`SessionConcurrencyManager` usa bloqueio intra-processo + contador global para gerenciar limite de sessões ativas:
+
+```csharp
+internal static class SessionConcurrencyManager
+{
+    private static readonly HashSet<SessionId> GlobalActiveSessions = [];
+    private static readonly Lock Lock = new();
+
+    internal static ConcurrencyCheckResult TryActivateSession(SessionId sessionId)
+    {
+        lock (Lock)
+        {
+            if (GlobalActiveSessions.Contains(sessionId))
+                return new ConcurrencyCheckResult { Allowed = true };
+
+            if (GlobalActiveSessions.Count >= _cachedMaxConcurrentSessions)
+                return new ConcurrencyCheckResult { Allowed = false };
+
+            GlobalActiveSessions.Add(sessionId);
+            return new ConcurrencyCheckResult { Allowed = true };
+        }
+    }
+}
+```
+
+Este gerenciador através de Stack Trace + Caller verificação, limita só pode ser chamado de dentro de `SessionGrain`, previne código externo burlar verificação de concorrência. Mas honestamente, usar `internal static` aqui realmente quebra princípio de isolamento Actor—afinal controle de concorrência é realmente necessidade global, após considerar tradeoffs aceitamos essa compensação de design. Perfeição é inimiga de perfeição, essa frase também se aplica a design de arquitetura.
+
+### Integração de Health Check
+
+`AIGrain.PingAsync()` tem dois modos: detecção leve de conectividade e verificação explícita Ping-Pong. Este último é usado no guia de inicialização para verificar se Provider realmente funciona:
+
+```csharp
+public async Task<HealthCheckResult> PingAsync(
+    HealthCheckRequest? request = null)
+{
+    if (!isModelAware)
+    {
+        // Detecção leve de prontidão CLI
+        var provider = await aiProviderFactory.GetProviderAsync(
+            AIProviderType.ClaudeCodeCli);
+        var result = await provider.PingAsync(timeoutCts.Token);
+        return new HealthCheckResult { IsHealthy = result.Success };
+    }
+
+    // Verificação explícita Ping-Pong
+    var response = await aiService.ExecuteAsync(new AIRequest
+    {
+        Prompt = HealthCheckPingPongProbe.Prompt,
+        SystemMessage = HealthCheckPingPongProbe.SystemMessage,
+        Temperature = 0,
+        MaxTokens = 32
+    }, timeoutCts.Token);
+
+    var passed = HealthCheckPingPongProbe.IsExpectedResponse(
+        normalizedResponse);
+    return new HealthCheckResult { IsHealthy = passed };
+}
+```
+
+Temperatura definida para 0, MaxTokens limitado a 32—garante determinismo de resposta, controla custo também. Afinal health check não é pra rodar benchmark, suficiente é bom. Com pessoas é igual, saber quando parar é mais raro que saber quando agir.
+
+## Conclusão
+
+Olhando para trás no caminho de HagiCode usando Orleans para construir sistema backend, cinco decisões de design centrais valem lembrar:
+
+1. **Timeout deve ser configurado por granularidade de interface**, não usar timeout unificado global—operação AI 2h, health check 1min, padrão 30s, cada um cuida do seu, águas não se misturam.
+2. **Idade de Grain Collection deve ser diferenciada**—grain de alta frequência curta recoleta rápido, grain de negócio central mantém cache quente, rápido onde precisa, estável onde precisa.
+3. **Pipeline streaming deve ser totalmente assíncrono**—de CLI stdout até push SignalR, não introduzir nenhum middleware de bloqueio síncrono, flui naturalmente como água.
+4. **Facade Grain divide complexidade**—componentes sem estado mas compartilham estado persistente, muito mais fácil manter que classe Deus. Dividir e conquistar, sabedoria ancestral funciona igual em código.
+5. **Interface Grain marca nome estável com `[Alias]`**—última linha de defesa de compatibilidade de serialização. Se defender essa linha, probabilidade de ser acordado por alarme de madrugada diminui muito.
+
+O modelo Virtual Actor do Orleans fornece abstração de runtime completa até emocionante para sistemas de sessão com estado e ciclo de vida longo. Se você também está fazendo ambiente AI similar ou sistema de colaboração em tempo real, esta solução vale tentar—não porque é perfeita, mas porque no cenário adequado, é exatamente certo.
+
+Esses sentimentos podem ser memórias, mas na época parecia tudo sem sentido... divaguei. Enfim código rodou, artigo terminou. É isso.
+
+## Referências
+
+- [Documentação oficial Microsoft Orleans](https://learn.microsoft.com/en-us/dotnet/orleans/)
+- [Guia Orleans Streaming](https://learn.microsoft.com/en-us/dotnet/orleans/streaming/)
+- [Orleans Grain Persistence](https://learn.microsoft.com/en-us/dotnet/orleans/grains/grain-persistence/)
+- [HagiCode GitHub](https://github.com/HagiCode-org/site)
+
+## Resumo
+
+Ao redor de "Usando Orleans para Resolver Desafios Distribuídos do Backend de Ambientes de Programação AI", forma mais segura de avançar é primeiro rodar configurações-chave, limites de dependência e caminho de implementação passo a passo, depois completar detalhes de otimização.
+
+Quando objetivo, passos e pontos de aceitação estão claros, esse tipo de solução geralmente pode entrar em entrega real mais suavemente.
