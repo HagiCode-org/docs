@@ -57,6 +57,8 @@ export const collections = {
         blogSchema(context).extend({
           /** 隐藏博客文章中的广告区域 */
           hideAd: z.boolean().optional(),
+          /** 隐藏博客文章末尾固定的转化回收 CTA（Microsoft Store + 定价页） */
+          hideCta: z.boolean().optional(),
           /** Optional explicit RSS language. Missing blog posts derive language from their locale path. */
           language: z.enum(BLOG_LANGUAGE_INPUTS).optional(),
         }),
