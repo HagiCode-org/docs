@@ -1,0 +1,144 @@
+---
+title: HagiCode 是怎么把 13 个 Agent CLI 接到一套系统里的
+date: 2026-06-22
+tags: [HagiCode, Agent CLI, 架构设计, AI]
+---
+
+## HagiCode 是怎么把 13 个 Agent CLI 接到一套系统里的
+
+> 其实这事儿吧，说难也不难，说简单呢，又不简单。聊聊我们怎么用一套分层架构，把 Claude Code、Codex、Copilot、Gemini 这些风格各异的 Agent CLI 统一管起来，还能随时插一个新的进来。
+
+## 背景
+
+故事开始得突然，源于一个挺让人头疼的问题。
+
+Agent CLI 这两年像竹笋一样冒头——Claude Code、OpenAI Codex、GitHub Copilot、Gemini CLI、Kimi、Qoder、Kiro…… 每隔几个月就钻出一个新的。作为一个想让用户"装一个 HagiCode、用全套 Agent"的项目，我们不可能只押宝某一个 CLI，可是又不可能为每个 CLI 写一套从安装、健康检查到调度的完整逻辑——那样代码会膨胀得没法维护，像乱成一团的毛线，谁都不敢碰。
+
+更麻烦的是，这些 CLI 的脾气差得远：有的走 stdio、有的走 gRPC、有的只给你一个 shell 入口、流式输出格式还各说各话。要是直接在业务代码里写 `if (provider == ClaudeCode)` 这种判断，没过半年就会变成一坨谁都不敢动的"祖传代码"。毕竟，谁愿意去动一块看着就摇摇欲坠的砖呢？
+
+为了把这些痛处都收住，我们做了个决定：**在业务层和具体 CLI 之间，加一套薄薄的抽象层和共享运行时**。这事儿看着简单，可它直接决定了 HagiCode 能不能快速接入新 CLI。稍后我会具体说怎么做。
+
+## 关于 HagiCode
+
+本文分享的方案，来自我们在 HagiCode 项目里摸爬滚打的实践。HagiCode 是一个 AI 代码助手整合平台，目标很纯粹——用一套安装、一套配置，把主流 Agent CLI 全都接进来给用户用。
+
+## "13 个"这个数字是怎么来的
+
+先说一个被反复问到的数字——为什么是 13 个 Agent CLI。
+
+其实答案就藏在 `AIProviderType` 这个枚举里，像藏在窗外的竹影里，只要你肯看，就能看见。原始定义长这样：
+
+```csharp
+public enum AIProviderType
+{
+    ClaudeCodeCli = 0,
+    CodexCli = 1,
+    GitHubCopilot = 2,
+    CodebuddyCli = 3,
+    OpenCodeCli = 4,
+    IFlowCli = 5,        // 已废弃
+    HermesCli = 6,
+    QoderCli = 7,
+    KiroCli = 8,
+    KimiCli = 9,
+    GeminiCli = 10,
+    DeepAgentsCli = 11,
+    ReasonixCli = 12,
+    PiCli = 13,
+}
+```
+
+枚举一共 14 个值，可是 `IFlowCli=5` 这条路已经走不通了。在 `AIProviderFactory` 里，它被显式挡在了门外：
+
+```csharp
+if (providerType == AIProviderType.IFlowCli)
+{
+    throw new NotSupportedException("IFlowCli is no longer supported");
+}
+```
+
+再配合 `IsActivelySupportedProviderType()` 做一次过滤，真正在系统里"活着"的，就是 **13 个**：Claude Code、Codex、GitHub Copilot、CodeBuddy、OpenCode、Hermes、Qoder、Kiro、Kimi、Gemini、DeepAgents、Reasonix、Pi。
+
+这就是"13"的由来。不是个营销数字，是代码里真真切切数出来的。毕竟数字是不会骗人的，骗人的只是我们自己罢了。
+
+## 分层架构：把变化关在笼子里
+
+接 13 个 CLI 的核心思路，其实就一句话：**让业务代码不关心它调的到底是哪一个**。
+
+我们把它拆成了六层，从上往下看：
+
+### 1. 身份层 —— `AIProviderType`
+
+枚举就是每个 CLI 的"身份证号"。任何地方提到一个 CLI，都用这个枚举值标识，字符串和枚举之间用 `ToStringValue()` / `ToAIProviderType()` 互转。简单，却不可或缺。
+
+### 2. 业务契约层 —— `IAIProvider` / `IAIProviderFactory`
+
+业务侧只认 `IAIProvider` 这个接口，里面定义的是"发一个 prompt、拿到流式回复"这种通用动作。至于底下是 Claude 还是 Codex，业务不关心——就像你写信，只管把信交出去，至于邮差姓什么，谁在乎呢？
+
+### 3. 适配器层 —— `*CliProvider`
+
+每个 CLI 对应一个薄适配器，比如 `PiCliProvider`、`ReasonixCliProvider`、`ClaudeCodeCliProvider`。这些适配器要做的事情很少：把通用的业务请求翻译成具体 CLI 能懂的参数，再把具体 CLI 的输出翻译回来。它们故意写得很薄，新加一个 CLI，基本就是抄一个现成的，改改而已。
+
+### 4. 共享运行时层 —— `ICliProvider<TOptions>`
+
+这一层在 `HagiCode.Libs` 里，是真正干脏活累活的地方：跨平台拉起进程、处理 stdio 传输、解析流式输出、处理超时和重试。所有适配器都复用同一套运行时，所以对接一个新 CLI 时，进程管理这块基本不用重写。
+
+打个比方，适配器层是"翻译官"，共享运行时层是"快递公司"。翻译官只管把话说清楚；包裹怎么送、路上堵不堵车，那是快递公司的事。各司其职，世界就清净了。
+
+### 5. 工厂路由层 —— `AIProviderFactory`
+
+`CreateProvider` 里一个 `switch`，按 `AIProviderType` 实例化对应适配器，顺带校验 `IsConfigured`。这是唯一一处"知道具体类型"的地方，被严格隔离在工厂里。变化只允许在一个角落里发生，其余地方都干干净净。
+
+### 6. 目录 / UI 投影层 —— `main-professions.yaml`
+
+这一层有意思，它不是代码，是数据。
+
+主职业清单（"我是个前端"、"我是个后端"、"我是个全栈"这种角色画像）由 `main-professions.yaml` 这个预设文件驱动，通过 `HeroPrimaryProfessionPresetProvider` 读出来，再投影到前端 UI。新增一个主职业，不需要改一行代码，改 YAML 就行。数据代替代码，省心。
+
+> 顺便说一句，这块是 HagiCode 重构最大的地方。早期版本里有个叫 `AgentCliInstallRegistry` 的代码内注册表，后来发现维护成本太高——代码写多了，人也就累了——整套被推倒，换成了数据驱动 + 健康监测的方案。这也是为什么 HagiCode 现在能快速扩展职业类型的原因。
+
+## 安装这事儿怎么解决
+
+13 个 CLI 都要装，每个官方安装方式还不一样，这就是另一座山了。
+
+我们的做法是 **Docker Compose 预装 + 外部管理兜底**。镜像里把主流 CLI（Claude Code、Codex、Copilot、CodeBuddy、OpenCode、Qoder、Kiro、Kimi、Gemini、Pi）都预装好，用户拉镜像就能用，不用自己一条条敲命令。装好了，心情自然也好。
+
+对于需要在本地环境单独装的，安装命令矩阵大概是这样（已核对官方文档）：
+
+| CLI | 官方安装方式 |
+| --- | --- |
+| Claude Code | `npm install -g @anthropic-ai/claude-code` |
+| Codex | `npm install -g @openai/codex` |
+| GitHub Copilot | `npm install -g @github/copilot` |
+| CodeBuddy | `npm install -g @tencent-ai/codebuddy-code` |
+| OpenCode | `npm i -g opencode-ai@latest` |
+| Qoder | `npm install -g @qoder-ai/qodercli` |
+| Kiro | `curl -fsSL https://cli.kiro.dev/install \| bash` |
+| Kimi | `curl -LsSf https://code.kimi.com/install.sh \| bash` |
+| Gemini | npm |
+| Hermes | 官方脚本，保留 docs-only 兜底 |
+| DeepAgents / Reasonix | 见各自官方文档 |
+
+前端 `PrimaryProfessionCard.tsx` 这块也跟着变了——它现在**没有"安装 CLI"按钮**，而是展示 CLI 可用性、版本探测结果，以及"这个 CLI 由外部管理"的兜底提示。也就是说，装不装得起来由系统层负责，UI 只负责如实反馈状态。状态和逻辑各写一遍，迟早会对不上，那又何必呢？
+
+## 加一个新 CLI 要做啥
+
+落到实操，在 HagiCode 里加一个新 CLI，大概也就这么几步：
+
+1. 在 `AIProviderType` 里加一个枚举值
+2. 抄一个现成的 `*CliProvider`，改成新 CLI 的参数和输出解析
+3. 在 `AIProviderFactory` 的 `switch` 里加一行路由
+4. 如果要进主职业目录，在 `main-professions.yaml` 里配一下
+5. 镜像里加一条安装命令（或者走外部管理兜底）
+
+整套流程下来，核心改动不超过两百行代码——这便是这套抽象真正的价值。每多接一个 CLI，边际成本都很低，业务代码一行都不用改。条条大路通罗马，只是我们这条路，稍微好走一点罢了。
+
+## 总结
+
+回头看，"接 13 个 CLI"听着吓人，可拆开看，其实也就两层功夫：
+
+一层是**把变化隔离**——通过 `AIProviderType` 枚举 + `IAIProvider` 契约 + 薄适配器 + 共享运行时，让业务代码和具体 CLI 解耦；另一层是**把配置数据化**——用 `main-professions.yaml` 这种 YAML 预设驱动目录和 UI，避免每加一个东西都要动代码。
+
+这套方案，是我们在 HagiCode 实际开发里踩过坑、迭代过几轮才稳定下来的。如果你正在做类似的"多 Provider 整合"系统，希望这个分层思路能给你一点参考。毕竟，Agent CLI 这两年还会继续冒出来，一个能快速接入新 CLI 的架构，比"现在支持了几个"重要得多......
+
+<!-- HAGICLAW_PROGRAMMATIC_ENDING -->
