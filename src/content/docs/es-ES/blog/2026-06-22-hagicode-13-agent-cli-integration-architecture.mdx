@@ -1,0 +1,142 @@
+---
+title: Cómo HagiCode conectó 13 Agent CLI a un solo sistema
+date: 2026-06-22
+tags: [HagiCode, Agent CLI, Diseño de Arquitectura, IA]
+---
+
+## Cómo HagiCode conectó 13 Agent CLI a un solo sistema
+
+> En realidad, este asunto, si lo decimos difícil no es tan difícil, y si lo decimos simple, tampoco es tan simple. Hablemos de cómo utilizamos una arquitectura en capas para gestionar de manera unificada Agent CLI con estilos tan diversos como Claude Code, Codex, Copilot y Gemini, y cómo podemos insertar uno nuevo en cualquier momento.
+
+## Antecedentes
+
+La historia comenzó repentinamente, derivada de un problema bastante doloroso.
+
+Los Agent CLI han surgido como brotes de bambú en los últimos dos años: Claude Code, OpenAI Codex, GitHub Copilot, Gemini CLI, Kimi, Qoder, Kiro... cada pocos meses aparece uno nuevo. Como un proyecto que quiere que los usuarios "instalen un HagiCode y usen todo el conjunto de Agent", no podemos apostar solo por un CLI, pero tampoco podemos escribir un conjunto completo de lógica desde instalación, verificación de salud hasta programación para cada CLI; el código se hincharía hasta volverse inmantenible, como ovillos de lana desordenados que nadie se atreve a tocar.
+
+Aún más problemático es que los caracteres de estos CLI difieren mucho: algunos usan stdio, otros usan gRPC, algunos solo te dan una entrada shell, y los formatos de salida en streaming dicen cada uno lo suyo. Si escribes juicios como `if (provider == ClaudeCode)` directamente en el código de negocio, en menos de seis meses se convertirá en un bloque de "código heredado" que nadie se atreve a tocar. Después de todo, ¿quién querría tocar un ladrillo que se ve a punto de caer?
+
+Para contener todos estos dolores, tomamos una decisión: **agregar una capa de abstracción delgada y un runtime compartido entre la capa de negocio y el CLI específico**. Esto parece simple, pero determina directamente si HagiCode puede conectarse rápidamente a nuevos CLI. Más adelante explicaré específicamente cómo hacerlo.
+
+## Sobre HagiCode
+
+El enfoque compartido en este artículo proviene de nuestra práctica en el proyecto HagiCode. HagiCode es una plataforma de integración de asistentes de código IA, con un objetivo muy puro: usar una instalación, una configuración, para conectar todos los Agent CLI principales para que los usuarios los usen.
+
+## De dónde viene el número "13"
+
+Hablemos primero de un número que se pregunta repetidamente: ¿por qué 13 Agent CLI.
+
+En realidad, la respuesta está escondida en la enumeración `AIProviderType`, como sombras de bambú afuera de la ventana; siempre que estés dispuesto a mirar, puedes verla. La definición original se ve así:
+
+```csharp
+public enum AIProviderType
+{
+    ClaudeCodeCli = 0,
+    CodexCli = 1,
+    GitHubCopilot = 2,
+    CodebuddyCli = 3,
+    OpenCodeCli = 4,
+    IFlowCli = 5,        // Descontinuado
+    HermesCli = 6,
+    QoderCli = 7,
+    KiroCli = 8,
+    KimiCli = 9,
+    GeminiCli = 10,
+    DeepAgentsCli = 11,
+    ReasonixCli = 12,
+    PiCli = 13,
+}
+```
+
+La enumeración tiene 14 valores en total, pero el camino `IFlowCli=5` ya no funciona. En `AIProviderFactory`, está explícitamente bloqueado:
+
+```csharp
+if (providerType == AIProviderType.IFlowCli)
+{
+    throw new NotSupportedException("IFlowCli is no longer supported");
+}
+```
+
+Combinado con el filtrado usando `IsActivelySupportedProviderType()`, los que realmente están "vivos" en el sistema son **13**: Claude Code, Codex, GitHub Copilot, CodeBuddy, OpenCode, Hermes, Qoder, Kiro, Kimi, Gemini, DeepAgents, Reasonix, Pi.
+
+Así es como surge el "13". No es un número de marketing, es algo contado con certeza en el código. Después de todo, los números no mienten, lo que miente es solo nosotros mismos.
+
+## Arquitectura en capas: encerrar el cambio en una jaula
+
+La idea central de conectar 13 CLI se resume en una frase: **hacer que el código de negocio no le importe cuál está llamando**.
+
+Lo dividimos en seis capas, mirando de arriba hacia abajo:
+
+### 1. Capa de identidad —— `AIProviderType`
+
+La enumeración es el "número de documento de identidad" de cada CLI. En cualquier lugar donde se mencione un CLI, se identifica con este valor de enumeración, con conversión mutua entre cadenas y enumeración usando `ToStringValue()` / `ToAIProviderType()`. Simple, pero indispensable.
+
+### 2. Capa de contrato de negocio —— `IAIProvider` / `IAIProviderFactory`
+
+El lado de negocio solo reconoce la interfaz `IAIProvider`, que define acciones generales como "enviar un prompt, obtener respuesta en streaming". En cuanto a si abajo es Claude o Codex, el negocio no le importa—como cuando escribes una carta, solo te preocupas de entregarla, ¿a quién le importa el apellido del cartero?
+
+### 3. Capa de adaptador —— `*CliProvider`
+
+Cada CLI corresponde a un adaptador delgado, como `PiCliProvider`, `ReasonixCliProvider`, `ClaudeCodeCliProvider`. Lo que estos adaptadores tienen que hacer es muy poco: traducir solicitudes de negocio generales a parámetros que el CLI específico pueda entender, y traducir de vuelta la salida del CLI específico. Están escritos intencionalmente muy delgados; agregar un nuevo CLI es básicamente copiar uno existente y modificar un poco.
+
+### 4. Capa de runtime compartido —— `ICliProvider<TOptions>`
+
+Esta capa está en `HagiCode.Libs` y es donde realmente se hace el trabajo sucio: iniciar procesos multiplataforma, manejar transporte stdio, analizar salida en streaming, manejar tiempos de espera y reintentos. Todos los adaptadores reutilizan el mismo conjunto de runtime, por lo que al conectar un nuevo CLI, la gestión de procesos básicamente no necesita reescribirse.
+
+Para usar una metáfora, la capa de adaptador es el "traductor", la capa de runtime compartido es la "empresa de mensajería". El traductor solo se preocupa de decir las cosas con claridad; cómo se entrega el paquete, si hay tráfico en el camino, eso es asunto de la empresa de mensajería. Cada uno hace su trabajo, el mundo queda tranquilo.
+
+### 5. Capa de enrutamiento de fábrica —— `AIProviderFactory`
+
+En `CreateProvider` hay un `switch` que instancia el adaptador correspondiente según `AIProviderType`, y por paso verifica `IsConfigured`. Este es el único lugar que "sabe el tipo específico", aislado estrictamente en la fábrica. El cambio solo se permite que ocurra en una esquina, el resto de lugares están completamente limpios.
+
+### 6. Capa de proyección de directorio / UI —— `main-professions.yaml`
+
+Esta capa es interesante, no es código, es datos.
+
+La lista de profesiones principales (perfiles de rol como "soy un frontend", "soy un backend", "soy un full-stack") está impulsada por el archivo predefinido `main-professions.yaml`, leído por `HeroPrimaryProfessionPresetProvider`, y luego proyectado a la UI frontend. Agregar una profesión principal no requiere cambiar una sola línea de código, basta con modificar el YAML. Los datos reemplazan al código, menos preocupaciones.
+
+> Por cierto, esta es la parte donde HagiCode se refactorizó más. En las primeras versiones había un registro de código llamado `AgentCliInstallRegistry`, pero luego descubrimos que el costo de mantenimiento era demasiado alto—cuando escribes mucho código, la gente también se cansa—todo el conjunto fue derribado y reemplazado por un enfoque impulsado por datos + monitoreo de salud. Esta es también la razón por la que HagiCode ahora puede expandir rápidamente los tipos de profesiones.
+
+## Cómo se resuelve la instalación
+
+13 CLI para instalar, y cada uno tiene un método de instalación oficial diferente, esa es otra montaña.
+
+Nuestro enfoque es **preinstalación con Docker Compose + respaldo de gestión externa**. La imagen tiene preinstalados los CLI principales (Claude Code, Codex, Copilot, CodeBuddy, OpenCode, Qoder, Kiro, Kimi, Gemini, Pi), el usuario tira la imagen y la puede usar, sin necesidad de escribir comandos uno por uno. Cuando está instalado, el estado de ánimo naturalmente también mejora.
+
+Para aquellos que necesitan instalarse por separado en el entorno local, la matriz de comandos de instalación es aproximadamente así (verificada con documentación oficial):
+
+| CLI | Método de instalación oficial |
+| --- | --- |
+| Claude Code | `npm install -g @anthropic-ai/claude-code` |
+| Codex | `npm install -g @openai/codex` |
+| GitHub Copilot | `npm install -g @github/copilot` |
+| CodeBuddy | `npm install -g @tencent-ai/codebuddy-code` |
+| OpenCode | `npm i -g opencode-ai@latest` |
+| Qoder | `npm install -g @qoder-ai/qodercli` |
+| Kiro | `curl -fsSL https://cli.kiro.dev/install \| bash` |
+| Kimi | `curl -LsSf https://code.kimi.com/install.sh \| bash` |
+| Gemini | npm |
+| Hermes | Script oficial, respaldo docs-only |
+| DeepAgents / Reasonix | Ver documentación oficial de cada uno |
+
+El frontend `PrimaryProfessionCard.tsx` también cambió en consecuencia: ahora **no tiene "botón de instalar CLI"**, sino que muestra disponibilidad del CLI, resultados de detección de versión, y un mensaje de respaldo de "este CLI es gestionado externamente". Es decir, si se puede instalar o no es responsabilidad de la capa del sistema, la UI solo se encarga de reflejar el estado con precisión. Estado y lógica escritos cada uno por separado, tarde o temprano no coincidirán, entonces ¿para qué molestarse?
+
+## Qué hay que hacer para agregar un nuevo CLI
+
+Llegando a la práctica, en HagiCode agregar un nuevo CLI implica aproximadamente estos pasos:
+
+1. Agregar un valor de enumeración en `AIProviderType`
+2. Copiar un `*CliProvider` existente, modificarlo para los parámetros y análisis de salida del nuevo CLI
+3. Agregar una línea de enrutamiento en el `switch` de `AIProviderFactory`
+4. Si quieres entrar en el directorio de profesiones principales, configurarlo en `main-professions.yaml`
+5. Agregar un comando de instalación en la imagen (o ir por respaldo de gestión externa)
+
+Todo el proceso, los cambios centrales no superan las doscientas líneas de código: este es el verdadero valor de esta abstracción. Por cada CLI adicional conectado, el costo marginal es muy bajo, y el código de negocio no necesita cambiar ni una línea. Todos los caminos conducen a Roma, solo que nuestro camino, es un poco más fácil de transitar.
+
+## Conclusión
+
+Mirando hacia atrás, "conectar 13 CLI" suena intimidante, pero al desglosarlo, en realidad son solo dos niveles de trabajo:
+
+Un nivel es **aislar el cambio**—a través de la enumeración `AIProviderType` + contrato `IAIProvider` + adaptadores delgados + runtime compartido, permitiendo que el código de negocio y el CLI específico se desacoplen; otro nivel es **convertir la configuración en datos**—usar predefinidos YAML como `main-professions.yaml` para impulsar el directorio y la UI, evitando tener que tocar código cada vez que agregas algo.
+
+Este enfoque es algo que estabilizamos después de iterar varias veces y caer en pozos durante el desarrollo real de HagiCode. Si estás haciendo un sistema similar de "integración de múltiples Providers", espero que esta idea de capas pueda darte algo de referencia. Después de todo, los Agent CLI seguirán surgiendo en los próximos dos años, una arquitectura que pueda conectarse rápidamente a nuevos CLI es mucho más importante que "cuántos soporta ahora"...

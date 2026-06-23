@@ -1,0 +1,142 @@
+---
+title: HagiCode가 13개의 Agent CLI를 하나의 시스템에 통합하는 방법
+date: 2026-06-22
+tags: [HagiCode, Agent CLI, 아키텍처 설계, AI]
+---
+
+## HagiCode가 13개의 Agent CLI를 하나의 시스템에 통합하는 방법
+
+> 사실 이 일은 어렵지 않지만, 간단하지도 않습니다. 어떻게 우리가 계층형 아키텍처를 사용해서 Claude Code, Codex, Copilot, Gemini 같은 다양한 스타일의 Agent CLI를 통합 관리하고, 언제든 새로운 것을 끼워 넣을 수 있는지 이야기해 보겠습니다.
+
+## 배경
+
+이 이야기는 갑작스럽게 시작되었습니다. 꽤 골치 아픈 문제에서 비롯되었거든요.
+
+최근 2년 동안 Agent CLI가 죽순처럼 솟아나고 있습니다—Claude Code, OpenAI Codex, GitHub Copilot, Gemini CLI, Kimi, Qoder, Kiro…… 몇 달마다 새로운 것이 나옵니다. "HagiCode 하나만 설치하면 모든 Agent를 쓸 수 있다"는 목표를 가진 프로젝트로서 우리는 어떤 하나의 CLI에만 의존할 수 없지만, 각 CLI에 대해 설치부터 헬스 체크, 스케줄링까지 완전한 로직을 작성할 수도 없습니다—그렇게 하면 코드가 유지 관리하기 힘들게 불어나고, 엉킨 양털처럼 아무도 건드리고 싶지 않게 됩니다.
+
+더 문제는 이 CLI들의 성격이 천차만별이라는 것입니다. 어떤 것은 stdio를 사용하고, 어떤 것은 gRPC를 사용하며, 어떤 것은 shell 진입점만 제공하고, 스트리밍 출력 형식도 각자 다릅니다. 비즈니스 코드에 `if (provider == ClaudeCode)` 같은 판단을 직접 쓰면, 반 년이 지나기 전에 아무도 건드리지 못하는 "유산 코드"가 됩니다. 결국, 누가 위태로워 보이는 벽돌을 움직이고 싶겠어요?
+
+이런 고통을 수습하기 위해 우리는 결정을 내렸습니다: **비즈니스 계층과 구체적인 CLI 사이에 얇은 추상화 계층과 공유 런타임을 추가하자**. 이것은 간단해 보이지만, HagiCode가 새로운 CLI를 빠르게 통합할 수 있는지를 직접 결정합니다. 나중에 구체적으로 어떻게 하는지 말씀드리겠습니다.
+
+## HagiCode에 대하여
+
+이 글에서 공유하는 솔루션은 HagiCode 프로젝트에서 우리가 실제로 시행착오를 겪으며 얻은 경험에서 왔습니다. HagiCode는 AI 코드 어시스턴트 통합 플랫폼으로, 목표는 순수합니다—하나의 설치, 하나의 설정으로 주류 Agent CLI를 모두 통합해서 사용자에게 제공하는 것입니다.
+
+## "13개"라는 숫자는 어디서 왔는가
+
+먼저 반복적으로 질문받는 숫자에 대해 말씀드리겠습니다—왜 13개의 Agent CLI인가요.
+
+사실 답은 `AIProviderType` 열거형에 숨겨져 있습니다. 창밖의 대나무 그림자처럼, 당신이 보기만 한다면 볼 수 있습니다. 원래 정의는 다음과 같습니다:
+
+```csharp
+public enum AIProviderType
+{
+    ClaudeCodeCli = 0,
+    CodexCli = 1,
+    GitHubCopilot = 2,
+    CodebuddyCli = 3,
+    OpenCodeCli = 4,
+    IFlowCli = 5,        // 폐기됨
+    HermesCli = 6,
+    QoderCli = 7,
+    KiroCli = 8,
+    KimiCli = 9,
+    GeminiCli = 10,
+    DeepAgentsCli = 11,
+    ReasonixCli = 12,
+    PiCli = 13,
+}
+```
+
+열거형에는 총 14개의 값이 있지만, `IFlowCli=5` 이 경로는 더 이상 통하지 않습니다. `AIProviderFactory`에서 명시적으로 차단되었습니다:
+
+```csharp
+if (providerType == AIProviderType.IFlowCli)
+{
+    throw new NotSupportedException("IFlowCli is no longer supported");
+}
+```
+
+그리고 `IsActivelySupportedProviderType()`로 한 번 더 필터링하면, 시스템에서 실제로 "살아있는" 것은 **13개**입니다: Claude Code, Codex, GitHub Copilot, CodeBuddy, OpenCode, Hermes, Qoder, Kiro, Kimi, Gemini, DeepAgents, Reasonix, Pi.
+
+이것이 "13"의 유래입니다. 마케팅 숫자가 아니라, 코드에서 실제로 세어 나온 것입니다. 결국 숫자는 속이지 않고, 속이는 것은 우리 자신일 뿐입니다.
+
+## 계층형 아키텍처: 변화를 우리 안에 가두기
+
+13개의 CLI를 통합하는 핵심 아이디어는 사실 한 문장입니다: **비즈니스 코드가 호출하는 것이 구체적으로 어느 것인지 신경 쓰지 않게 하자**.
+
+우리는 이것을 여섯 계층으로 나눴습니다. 위에서 아래로 보겠습니다:
+
+### 1. 식별 계층 —— `AIProviderType`
+
+열거형은 각 CLI의 "주민등록번호"입니다. 어느 곳에서든 CLI를 언급할 때 이 열거형 값으로 식별하고, 문자열과 열거형 사이는 `ToStringValue()` / `ToAIProviderType()`으로 상호 변환합니다. 간단하지만 필수적입니다.
+
+### 2. 비즈니스 계약 계층 —— `IAIProvider` / `IAIProviderFactory`
+
+비즈니스 측은 `IAIProvider` 인터페이스만 인식합니다. 이 인터페이스에는 "프롬프트를 보내고 스트리밍 응답을 받기" 같은 일반적인 동작이 정의되어 있습니다. 그 아래가 Claude인지 Codex인지는 비즈니스가 신경 쓰지 않습니다—편지를 쓸 때처럼, 편지만 보내면 되고 우편배달부의 성이 무엇인지 누가 신경 쓰겠어요?
+
+### 3. 어댑터 계층 —— `*CliProvider`
+
+각 CLI는 얇은 어댑터에 해당합니다. 예를 들어 `PiCliProvider`, `ReasonixCliProvider`, `ClaudeCodeCliProvider`가 있습니다. 이 어댑터들이 해야 할 일은 거의 없습니다: 일반적인 비즈니스 요청을 구체적인 CLI가 이해할 수 있는 매개변수로 번역하고, 구체적인 CLI의 출력을 다시 번역해서 돌려줍니다. 의도적으로 아주 얇게 작성했기 때문에 새 CLI를 추가할 때 기본적으로 기존 것을 복사하고 약간 수정만 하면 됩니다.
+
+### 4. 공유 런타임 계층 —— `ICliProvider<TOptions>`
+
+이 계층은 `HagiCode.Libs`에 있고, 실제로 더러운 일을 하는 곳입니다: 크로스 플랫폼으로 프로세스를 시작하고, stdio 전송을 처리하고, 스트리밍 출력을 파싱하고, 타임아웃과 재시도를 처리합니다. 모든 어댑터가 동일한 런타임을 재사용하기 때문에 새 CLI를 통합할 때 프로세스 관리 부분은 기본적으로 다시 작성할 필요가 없습니다.
+
+비유하자면, 어댑터 계층은 "통역사", 공유 런타임 계층은 "택배 회사"입니다. 통역사는 말만 명확하게 하면 되고, 패키지가 어떻게 배달되고 길이 막히는지는 택배 회사의 일입니다. 각자 맡은 바를 하면 세상이 깨끗해집니다.
+
+### 5. 팩토리 라우팅 계층 —— `AIProviderFactory`
+
+`CreateProvider` 안에 하나의 `switch`가 있고, `AIProviderType`에 따라 해당 어댑터를 인스턴스화하고 `IsConfigured`도 검증합니다. 이것은 "구체적인 타입을 아는" 유일한 곳이고, 팩토리에 엄격하게 격리되어 있습니다. 변화는 한 구석에서만 허용되고, 나머지 곳은 깨끗합니다.
+
+### 6. 카탈로그 / UI 프로젝션 계층 —— `main-professions.yaml`
+
+이 계층은 재미있습니다. 코드가 아니라 데이터입니다.
+
+주 직업 목록("나는 프론트엔드다", "나는 백엔드다", "나는 풀스택이다" 같은 역할 프로필)은 `main-professions.yaml`이라는 프리셋 파일로 구동되고, `HeroPrimaryProfessionPresetProvider`를 통해 읽혀서 프론트엔드 UI에 프로젝션됩니다. 새로운 주 직업을 추가하려면 코드 한 줄을 수정할 필요가 없고, YAML만 수정하면 됩니다. 데이터가 코드를 대신해서 마음 편합니다.
+
+> 덧붙여 말하면, 이 부분은 HagiCode 리팩토링에서 가장 큰 부분입니다. 초기 버전에는 `AgentCliInstallRegistry`라는 코드 내 레지스트리가 있었지만, 나중에 유지 관리 비용이 너무 높다는 것을 알게 되었습니다—코드가 많아지면 사람도 피곤해집니다—전체를 뒤집어 데이터 구동 + 건강 모니터링 솔루션으로 바꿨습니다. 이것이 HagiCode가 지금 직업 유형을 빠르게 확장할 수 있는 이유이기도 합니다.
+
+## 설치 문제는 어떻게 해결하는가
+
+13개의 CLI를 모두 설치해야 하고 각각의 공식 설치 방법도 다르다는 것이 또 다른 산입니다.
+
+우리의 접근 방식은 **Docker Compose 사전 설치 + 외부 관리 백업**입니다. 이미지에 주류 CLI(Claude Code, Codex, Copilot, CodeBuddy, OpenCode, Qoder, Kiro, Kimi, Gemini, Pi)를 모두 사전 설치해 두어서, 사용자가 이미지를 당겨오면 바로 사용할 수 있고 명령을 일일이 입력할 필요가 없습니다. 설치가 끝나면 기분도 자연스럽게 좋아집니다.
+
+로컬 환경에서 별도로 설치해야 하는 경우, 설치 명령 행렬은 대략 다음과 같습니다(공식 문서와 확인 완료):
+
+| CLI | 공식 설치 방법 |
+| --- | --- |
+| Claude Code | `npm install -g @anthropic-ai/claude-code` |
+| Codex | `npm install -g @openai/codex` |
+| GitHub Copilot | `npm install -g @github/copilot` |
+| CodeBuddy | `npm install -g @tencent-ai/codebuddy-code` |
+| OpenCode | `npm i -g opencode-ai@latest` |
+| Qoder | `npm install -g @qoder-ai/qodercli` |
+| Kiro | `curl -fsSL https://cli.kiro.dev/install \| bash` |
+| Kimi | `curl -LsSf https://code.kimi.com/install.sh \| bash` |
+| Gemini | npm |
+| Hermes | 공식 스크립트, docs-only 백업 보존 |
+| DeepAgents / Reasonix | 각각의 공식 문서 참조 |
+
+프론트엔드 `PrimaryProfessionCard.tsx` 부분도 따라서 바뀌었습니다—지금은 **"CLI 설치" 버튼이 없고**, CLI 가용성, 버전 감지 결과, 그리고 "이 CLI는 외부에서 관리됩니다"라는 백업 프롬프트를 표시합니다. 즉, 설치 여부는 시스템 계층이 담당하고, UI는 상태만 성실히 피드백합니다. 상태와 로직을 각자 한 번씩 작성하면迟早不 일치하게 됩니다. 그렇다면 왜 그렇게 해야 합니까?
+
+## 새 CLI를 추가하려면 무엇을 해야 하는가
+
+실제로 HagiCode에 새 CLI를 추가하려면 대략 다음 몇 단계만 필요합니다:
+
+1. `AIProviderType`에 열거형 값 추가
+2. 기존 `*CliProvider`를 복사해서 새 CLI의 매개변수와 출력 파싱으로 수정
+3. `AIProviderFactory`의 `switch`에 라우팅 한 줄 추가
+4. 주 직업 카탈로그에 들어가려면 `main-professions.yaml`에 설정
+5. 이미지에 설치 명령 한 줄 추가(또는 외부 관리 백업)
+
+전체 프로세스를 거쳐도 핵심 수정은 200줄의 코드를 넘지 않습니다—이것이 이 추상화의 진정한 가치입니다. CLI를 하나 더 통합할 때마다 한계 비용이 매우 낮고, 비즈니스 코드는 한 줄도 수정할 필요가 없습니다. 모든 길이 로마로 통하지만, 우리 길은 그나마 조금 더 걷기 쉽습니다.
+
+## 요약
+
+돌아보면, "13개의 CLI 통합"은 무섭게 들리지만, 쪼개서 보면 사실 두 가지 작업입니다:
+
+하나는 **변화를 격리하는 것**—`AIProviderType` 열거형 + `IAIProvider` 계약 + 얇은 어댑터 + 공유 런타임을 통해 비즈니스 코드와 구체적인 CLI를 분리; 다른 하나는 **구성을 데이터화하는 것**—`main-professions.yaml` 같은 YAML 프리셋으로 카탈로그와 UI를 구동해서, 무언가를 추가할 때마다 코드를 수정하는 것을 피합니다.
+
+이 솔루션은 우리가 HagiCode 실제 개발에서 구멍을 파고 몇 번 반복해서 안정화한 것입니다. 만약 당신도 비슷한 "다중 Provider 통합" 시스템을 만들고 있다면, 이 계층형 아이디어가 참고가 되기를 바랍니다. 결국 Agent CLI는 최근 2년 동안 계속해서 나올 것이고, 새 CLI를 빠르게 통합할 수 있는 아키텍처가 "지금 몇 개를 지원하는가"보다 훨씬 더 중요합니다......

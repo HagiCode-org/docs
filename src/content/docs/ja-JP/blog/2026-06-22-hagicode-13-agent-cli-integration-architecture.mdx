@@ -1,0 +1,142 @@
+---
+title: HagiCode が 13 の Agent CLI を 1 つのシステムに統合する方法
+date: 2026-06-22
+tags: [HagiCode, Agent CLI, アーキテクチャ設計, AI]
+---
+
+## HagiCode が 13 の Agent CLI を 1 つのシステムに統合する方法
+
+> 実はこの件、難しくもなく、簡単でもありません。Claude Code、Codex、Copilot、Gemini といったスタイルの異なる Agent CLI をどのように 1 つの階層化アーキテクチャで統一管理し、いつでも新しいものを追加できるかについてお話しします。
+
+## 背景
+
+物語は突然始まりました。ある頭の痛い問題からです。
+
+この 2 年間、Agent CLI は竹の子のように登場してきました——Claude Code、OpenAI Codex、GitHub Copilot、Gemini CLI、Kimi、Qoder、Kiro……。数ヶ月ごとに新しいものが現れます。「HagiCode を 1 つインストールして、全種類の Agent を使えるようにしたい」というプロジェクトとして、ある CLI に賭けることはできません。しかし、各 CLI のためにインストール、ヘルスチェックからスケジューリングまでの完全なロジックを書くことも不可能です——そうするとコードはメンテナンス不可能なほど膨れ上がり、絡み合った毛糸の塊のようになり、誰も触りたがらなくなります。
+
+さらに面倒なのは、これらの CLI の気質が全く違うことです——stdio を使うもの、gRPC を使うもの、シェルエントリしか与えないもの、ストリーム出力のフォーマットもそれぞれです。業務コードで直接 `if (provider == ClaudeCode)` のような判断を書くと、半年も経たずに誰も触りたくない「伝統的なコード」の塊になります。結局、誰が崩れそうなレンガを動かしたがるでしょうか？
+
+これらの痛みを収めるため、私たちは決断しました：**業務レイヤーと具体的な CLI の間に、薄い抽象化レイヤーと共有ランタイムを追加する**。これは簡単に見えますが、HagiCode が新しい CLI を迅速に接続できるかどうかを直接決定します。具体的なやり方は後ほど詳しく説明します。
+
+## HagiCode について
+
+この記事で共有するソリューションは、HagiCode プロジェクトでの実践から来ています。HagiCode は AI コードアシスタント統合プラットフォームで、目標はシンプルです——1 つのインストール、1 つの設定で、主流の Agent CLI をすべてユーザーに提供することです。
+
+## 「13 個」という数字の由来
+
+繰り返し聞かれる数字について先にお話しします——なぜ 13 個の Agent CLI なのか。
+
+実は答えは `AIProviderType` という列挙型に隠れています。窓の外の竹の影のように、見ようと思えば見えるものです。元の定義はこうです：
+
+```csharp
+public enum AIProviderType
+{
+    ClaudeCodeCli = 0,
+    CodexCli = 1,
+    GitHubCopilot = 2,
+    CodebuddyCli = 3,
+    OpenCodeCli = 4,
+    IFlowCli = 5,        // 非推奨
+    HermesCli = 6,
+    QoderCli = 7,
+    KiroCli = 8,
+    KimiCli = 9,
+    GeminiCli = 10,
+    DeepAgentsCli = 11,
+    ReasonixCli = 12,
+    PiCli = 13,
+}
+```
+
+列挙型は合計 14 個の値ですが、`IFlowCli=5` の道はもう通れません。`AIProviderFactory` では、明示的にブロックされています：
+
+```csharp
+if (providerType == AIProviderType.IFlowCli)
+{
+    throw new NotSupportedException("IFlowCli is no longer supported");
+}
+```
+
+さらに `IsActivelySupportedProviderType()` でフィルタリングすると、システムで「生きている」のは **13 個** です：Claude Code、Codex、GitHub Copilot、CodeBuddy、OpenCode、Hermes、Qoder、Kiro、Kimi、Gemini、DeepAgents、Reasonix、Pi。
+
+これが「13」の由来です。マーケティング用の数字ではなく、コードで実際に数えられたものです。結局、数字は嘘をつきません。嘘をつくのは私たち自身です。
+
+## 階層化アーキテクチャ：変化を籠の中に閉じ込める
+
+13 個の CLI を接続する核心的なアイデアは、実は 1 つの文です：**業務コードに、どの CLI を呼んでいるかを意識させない**。
+
+これを 6 つのレイヤーに分け、上から見ていきます：
+
+### 1. ID レイヤー —— `AIProviderType`
+
+列挙型は各 CLI の「ID番号」です。ある CLI に言及する場所では、この列挙値で識別し、文字列と列挙型の間は `ToStringValue()` / `ToAIProviderType()` で相互変換します。シンプルですが、不可欠です。
+
+### 2. 業務契約レイヤー —— `IAIProvider` / `IAIProviderFactory`
+
+業務側は `IAIProvider` というインターフェースしか認識せず、そこで定義されているのは「prompt を送って、ストリーム応答を受け取る」といった一般的な操作です。下が Claude か Codex か、業務側は気にしません——手紙を書くとき、手紙を渡すだけなら、郵便配達員の姓が何か、誰が気にするでしょうか？
+
+### 3. アダプターレイヤー —— `*CliProvider`
+
+各 CLI は薄いアダプターに対応します。例えば `PiCliProvider`、`ReasonixCliProvider`、`ClaudeCodeCliProvider` です。これらのアダプターがやることは少ないです：一般的な業務リクエストを具体的な CLI が理解できるパラメータに翻訳し、具体的な CLI の出力を翻訳して戻します。意図的に薄く書いてあり、新しい CLI を追加するときは、基本的に既存のものをコピーして、少し修正するだけです。
+
+### 4. 共有ランタイムレイヤー —— `ICliProvider<TOptions>`
+
+このレイヤーは `HagiCode.Libs` にあり、本当に汚い仕事をする場所です：クロスプラットフォームでプロセスを起動し、stdio 伝送を処理し、ストリーム出力を解析し、タイムアウトと再試行を処理します。すべてのアダプターは同じランタイムセットを再利用するため、新しい CLI を接続するとき、プロセス管理部分は基本的に書き直す必要がありません。
+
+例えると、アダプターレイヤーは「通訳官」、共有ランタイムレイヤーは「配送会社」です。通訳官は言葉を伝えることだけを担当し、荷物の配送方法や渋滞は配送会社の仕事です。各々が職責を果たせば、世界は平和です。
+
+### 5. ファクトリルーティングレイヤー —— `AIProviderFactory`
+
+`CreateProvider` の `switch` で、`AIProviderType` に従って対応するアダプターをインスタンス化し、合わせて `IsConfigured` を検証します。これは「具体的な型を知っている」唯一の場所であり、工場内で厳密に隔離されています。変化は 1 つの隅でのみ発生し、他の場所はきれいです。
+
+### 6. カタログ / UI 投影レイヤー —— `main-professions.yaml`
+
+このレイヤーは面白いです。コードではなく、データです。
+
+メイン職業リスト（「私はフロントエンドです」「私はバックエンドです」「私はフルスタックです」のような役割プロフィール）は `main-professions.yaml` というプリセットファイルで駆動され、`HeroPrimaryProfessionPresetProvider` を通じて読み取られ、フロントエンド UI に投影されます。新しいメイン職業を追加するには、コードを 1 行も変更する必要はなく、YAML を変更するだけです。データがコードの代わりになり、楽です。
+
+> ちなみに、ここは HagiCode の最大のリファクタリング箇所です。初期バージョンには `AgentCliInstallRegistry` というコード内レジストリがありましたが、メンテナンスコストが高すぎると気づきました——コードが増えれば、人も疲れます——全体が推倒され、データ駆動 + ヘルスモニタリングのソリューションに置き換えられました。これが、HagiCode が今、職業タイプを迅速に拡張できる理由です。
+
+## インストール問題の解決
+
+13 個の CLI をインストールする必要があり、各公式インストール方法も異なります。これが別の山です。
+
+私たちのやり方は **Docker Compose プリインストール + 外部管理のバックアップ** です。イメージに主流の CLI（Claude Code、Codex、Copilot、CodeBuddy、OpenCode、Qoder、Kiro、Kimi、Gemini、Pi）をプリインストールし、ユーザーはイメージをプルするだけで使用でき、コマンドを 1 つずつ入力する必要がありません。インストールが完了すれば、気分も自然と良くなります。
+
+ローカル環境で個別にインストールする必要があるものについては、インストールコマンドマトリクスはこうなります（公式ドキュメントで確認済み）：
+
+| CLI | 公式インストール方法 |
+| --- | --- |
+| Claude Code | `npm install -g @anthropic-ai/claude-code` |
+| Codex | `npm install -g @openai/codex` |
+| GitHub Copilot | `npm install -g @github/copilot` |
+| CodeBuddy | `npm install -g @tencent-ai/codebuddy-code` |
+| OpenCode | `npm i -g opencode-ai@latest` |
+| Qoder | `npm install -g @qoder-ai/qodercli` |
+| Kiro | `curl -fsSL https://cli.kiro.dev/install \| bash` |
+| Kimi | `curl -LsSf https://code.kimi.com/install.sh \| bash` |
+| Gemini | npm |
+| Hermes | 公式スクリプト、docs-only バックアップを維持 |
+| DeepAgents / Reasonix | 各自の公式ドキュメントを参照 |
+
+フロントエンドの `PrimaryProfessionCard.tsx` も変わりました——今は**「CLI をインストール」ボタンがなく**、CLI の可用性、バージョン検出結果、および「この CLI は外部管理です」というバックアップ提示を表示します。つまり、インストールできるかどうかはシステムレイヤーが担当し、UI は状態をフィードバックするだけです。状態とロジックを別々に書くと、遅かれ早かれ一致しなくなります。それなら、なぜそうするのでしょうか？
+
+## 新しい CLI を追加するには
+
+実践的に、HagiCode に新しい CLI を追加するには、だいたい以下の手順です：
+
+1. `AIProviderType` に列挙値を追加
+2. 既存の `*CliProvider` をコピーし、新しい CLI のパラメータと出力解析に変更
+3. `AIProviderFactory` の `switch` にルーティング行を追加
+4. メイン職業カタログに含める場合、`main-professions.yaml` で設定
+5. イメージにインストールコマンドを追加（または外部管理のバックアップを使用）
+
+全プロセスで、核心的な変更は 200 行のコードを超えません——これがこの抽象化の真の価値です。CLI を追加するたびに、限界コストは低く、業務コードは 1 行も変更する必要がありません。「すべての道はローマに通じる」と言いますが、私たちの道は少し歩きやすいかもしれません。
+
+## まとめ
+
+振り返ってみると、「13 個の CLI を接続する」は怖いように聞こえますが、分解すると、実は 2 つのレベルの作業です：
+
+1 つは**変化を隔離する**——`AIProviderType` 列挙型 + `IAIProvider` 契約 + 薄いアダプター + 共有ランタイムを通じて、業務コードと具体的な CLI を切り離す。もう 1 つは**設定をデータ化する**——`main-professions.yaml` のような YAML プリセットでカタログと UI を駆動し、新しいものを追加するたびにコードを変更する必要がないようにする。
+
+このソリューションは、HagiCode の実際の開発で穴を掘り、数回のイテレーションを経て安定したものです。同様の「複数 Provider 統合」システムを作っているなら、この階層化アイデアが少し参考になることを願っています。結局、Agent CLI はこの 2 年間も出てき続け、新しい CLI を迅速に接続できるアーキテクチャは、「現在いくつサポートしているか」よりもはるかに重要です……
