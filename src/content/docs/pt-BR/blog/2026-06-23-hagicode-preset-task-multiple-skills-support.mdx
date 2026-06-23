@@ -1,0 +1,185 @@
+---
+title: Roteamento preciso de cada comando: Suporte a múltiplas habilidades no HagiCode Preset Task na prática
+date: 2026-06-23
+tags: [hagicode, preset-task, skill, design de arquitetura, assistente de código AI]
+---
+
+## Roteamento preciso de cada comando: Suporte a múltiplas habilidades no HagiCode Preset Task na prática
+
+> Vários comandos em um preset, mas só podem compartilhar um conjunto de requisitos de habilidades? Esta alteração permite que cada comando declare independentemente a skill de que depende, e exibe essa vinculação no painel visual — badge, resumo, instalação com um clique, tudo em sequência.
+
+## Background
+
+Primeiro, um pouco de contexto.
+
+O preset task do HagiCode é um sistema de ferramentas pequenas e plugáveis. Os usuários não precisam digitar comandos manualmente, basta preencher alguns campos no painel visual e clicar para criar uma sessão de tarefa automática. Cada preset é essencialmente um diretório, que geralmente tem esta estrutura:
+
+- `manifest.json`: informações de identidade do preset
+- `panel.json`: definição do formulário do painel visual
+- `commands.json`: lista de comandos a serem executados
+- `task-preset.json` ou `prompts.json`: parâmetros da tarefa e requisitos de habilidades
+
+Este sistema é realmente conveniente de usar, mas logo encontramos um ponto desconfortável.
+
+Nas versões iniciais, as skills só podiam ser declaradas no array `requirements` no nível do preset. O que isso significa? Todos os comandos dentro do mesmo preset compartilhavam o mesmo conjunto de requisitos de habilidades. Parece que não é um grande problema, mas na prática é assim:
+
+Um preset tem cinco comandos, onde o primeiro quer usar a skill `last30days`, o terceiro quer usar `ui-master`, e os outros três não precisam de nenhuma skill. Com o design antigo, isso não era possível. Para que diferentes comandos roteassem para diferentes skills, você teria que dividir esses comandos em vários presets, e a configuração inchava rapidamente.
+
+É isso que a proposta `extend-preset-task-multiple-skills-support` visa resolver: permitir que cada comando declare independentemente a skill de que depende, e visualizar essa vinculação na UI.
+
+## Sobre HagiCode
+
+A solução compartilhada neste artigo vem da nossa experiência prática no projeto [HagiCode](https://hagicode.com). HagiCode é um projeto de assistente de código AI, e o sistema preset task é exatamente o ponto de entrada para operações rápidas voltadas ao usuário. Cada alteração discutida abaixo foi otimizada com base em problemas reais que encontramos — afinal, o conhecimento na prática é o verdadeiro aprendizado. O código-fonte do projeto está em [HagiCode-org/site](https://github.com/HagiCode-org/site), se interessado pode dar uma Star lá primeiro.
+
+## Entendendo o problema primeiro: por que não uma tabela de mapeamento
+
+Antes de começar, a solução mais óbvia é: criar uma tabela de mapeamento `commandSkillMappings` separada, armazenando a relação "ID do comando → skill" separadamente. Parece limpo, separação de responsabilidades.
+
+Mas ao pensar mais cuidadosamente, descobrimos que não está certo.
+
+Cada comando em `commands.json` já tem um ID, e a tabela de mapeamento teria que copiar esse ID novamente. Dois arquivos, o mesmo ID, assim que alguém alterar o comando e esquecer de sincronizar a tabela de mapeamento, os dados se desviaram. Este design "separar por separar" tem um custo de manutenção muito maior do que a pequena limpeza que traz. No final, é apenas adicionar problemas desnecessários.
+
+Então escolhemos um caminho mais direto: **colocar o campo opcional `skill` diretamente na definição do comando**. Um comando declara a qual skill está vinculado, mantido próximo, e ninguém fica desconectado.
+
+Por trás desta decisão, há um princípio de design mais importante que vale a pena destacar.
+
+## Núcleo 1: Separação de responsabilidades em duas camadas de dados
+
+Esta é a cognição mais crítica em toda a alteração.
+
+A primeira reação de muitas pessoas é: já que os comandos têm `skill`, ao fazer o requirement check (verificação de permissão de habilidades), não deveríamos escanear o campo `skill` de cada comando?
+
+Não.
+
+Nós deliberadamente separamos isso em duas camadas:
+
+- **Campo `skill` de `commands.json`**: Apenas responsável por declarar a vinculação. Ele informa ao sistema "a qual skill este comando deve estar vinculado", usado para renderizar o prelude do prompt e exibição na UI.
+- **Array `requirements` de `task-preset.json`**: É a enumeração autorizada. É o verdadeiro portão, decide quais habilidades um preset precisa satisfazer para poder executar.
+
+Em outras palavras, `skill` responde "vincular a qual, renderizar o quê", `requirements` responde "se permite executar ou não". Duas coisas, não as misture.
+
+O benefício dessa separação é que a lógica de verificação é naturalmente simples. Como o portão sempre se baseia em `requirements` no nível do preset, deduplicando por `CacheKey`, vários comandos vinculados à mesma skill só serão detectados uma vez, sem detecções repetidas. Skill no nível de comando não introduz nenhuma sobrecarga de detecção adicional.
+
+Este princípio também é a razão fundamental pela qual rejeitamos a solução da tabela de mapeamento — a tabela de mapeamento levaria as pessoas a pensar erroneamente que "vinculação é o portão", misturando as responsabilidades das duas camadas novamente. A esperteza às vezes se volta contra nós mesmos.
+
+## Núcleo 2: Como fica a definição do comando
+
+A definição de comando após a alteração é apenas adicionar um campo opcional `skill` em cima da base original. Tomando o bundled preset `last30days` como exemplo, seu `commands.json` é aproximadamente assim:
+
+```json
+{
+  "$schema": "../../schemas/commands.schema.json",
+  "version": "1.1",
+  "commands": [
+    {
+      "id": "research",
+      "skill": "last30days",
+      "prompt": "调研一下最近30天大家对 {topic} 的真实讨论"
+    },
+    {
+      "id": "summarize",
+      "prompt": "把上面的调研结果整理成一份摘要"
+    }
+  ]
+}
+```
+
+Alguns pontos a observar:
+
+- `version` foi atualizado para `1.1`, e o schema correspondente também adicionou o campo opcional `skill`.
+- O primeiro comando `research` está vinculado à skill `last30days`, e durante a execução roteará para esta habilidade.
+- O segundo comando `summarize` não está vinculado a nenhuma skill, é apenas uma instrução comum, seguindo o caminho padrão.
+- Observe que aqui **não** há nenhum requirement escrito no comando. O verdadeiro portão está em `requirements` de `task-preset.json`:
+
+```json
+{
+  "requirements": [
+    {
+      "key": "last30days",
+      "cacheKey": "skill:last30days"
+    }
+  ]
+}
+```
+
+O `last30days` vinculado ao comando `research` deve aparecer neste `requirements`, caso contrário haverá problemas — é exatamente a restrição rígida discutida na próxima seção. Forçar não funciona.
+
+## Núcleo 3: Validação cruzada no período de carregamento
+
+Apenas declarar a vinculação nos dados não é suficiente, alguém precisa garantir, evitando que "comando vinculado a uma skill, mas não declarada em requirements" vaze para produção.
+
+Essa garantia é `ValidateCommandSkills`. Ele executa uma vez quando o pacote preset é carregado, verificando cada comando um por um para ver se o `skill` pode encontrar o item correspondente em `requirements` no nível do preset. Se não encontrar, considera um pacote inválido, desabilita todo o preset imediatamente, e lança o código de diagnóstico `command-skill-not-in-requirements`.
+
+Por que desabilitar todo o pacote em vez de apenas pular aquele comando? Porque o preset é um todo, os comandos geralmente têm relações de dependência (a saída do anterior alimenta o próximo). Se pular silenciosamente um comando, os comandos seguintes recebem entrada vazia, e o comportamento fica completamente incontrolável. Afinal, o coração humano é difícil de entender, e o código também. É melhor que o usuário veja um erro explícito do que a tarefa ir para o lado misteriosamente no meio do caminho. Neste ponto, não há margem para descuido.
+
+Esta validação é concluída no período de carregamento, ou seja, o problema será descoberto no momento em que o preset é registrado, não arrastado até o usuário clicar "executar" para explodir. Para a experiência do usuário, erro cedo é sempre melhor que erro tarde.
+
+## Núcleo 4: Concatenação idempotente do prelude do prompt
+
+A seguir, é o link mais sutil na cadeia de execução.
+
+Quando um comando está vinculado a uma skill, como `last30days`, antes da execução real, o sistema precisa "concatenar" essa informação de skill antes do comando, formando uma instrução completa de uma única linha para o executor. Este processo é responsável por `CombineCommandSkillPrelude`.
+
+Vamos dar um exemplo específico. O prompt do comando `research` é "调研一下最近30天大家对 {topic} 的真实讨论", vinculado à skill `last30days`, então a instrução final entregue ao executor é aproximadamente:
+
+```
+/last30days 调研一下最近30天大家对 {topic} 的真实讨论
+```
+
+Ou seja, adicionando o prelude `/last30days` antes do prompt. O executor vê este prelude e sabe que precisa mudar o contexto primeiro para a skill `last30days`.
+
+Aqui há um buraco fácil de cair: idempotência.
+
+Por que enfatizar idempotência? Porque em alguns cenários, o próprio prompt pode já ter este prelude de skill (por exemplo, o usuário escreveu metade manualmente, ou copiou de outro lugar). Se o sistema bobamente concatenar novamente, se tornará `/last30days /last30days 调研...`, e o executor reportará erro ou se comportará de forma anormal.
+
+Então `CombineCommandSkillPrelude` detecta antes de concatenar, se o prefixo já existe, não adiciona novamente. Este passo parece insignificante, mas pode bloquear uma classe de bugs muito ocultos.
+
+Vale a pena mencionar que toda essa lógica de injeção de prelude é concluída na camada de definição do preset (`BuildCommandPrelude` em `PresetTaskCatalogProvider`), e o código de criação de sessão em `SessionsController` não precisa ser alterado. Este também é o benefício da separação de responsabilidades — a entrada de execução permanece estável, e a complexidade do roteamento de habilidades é contida dentro da camada de definição.
+
+## Núcleo 5: Como o front-end exibe a vinculação
+
+O back-end organizou o modelo de dados e a cadeia de execução, e o último passo é deixar o usuário "ver" essa vinculação na interface. Afinal, se o usuário não perceber uma funcionalidade, é aproximadamente como se não tivesse sido feita.
+
+O front-end fez três coisas.
+
+**Primeiro, badge no seletor de comandos.** No command-picker, ao lado de cada comando vinculado a uma skill, exibe um pequeno badge, indicando de qual skill depende. O usuário pode ver de relance qual comando é "com habilidade" e qual é comando comum.
+
+**Segundo, bloco de resumo do requirement-check.** O painel tem uma área de resumo dedicada, listando todos os requisitos de skill que o preset atual precisa satisfazer, e qual skill cada comando está vinculado. Os dados deste bloco vêm do mapeamento `commandSkillsByRequirementKey` — agrupando comandos pela requirement key à qual estão vinculados, facilitando para o usuário comparar de relance se "requisito" e "vinculação real" correspondem. Desenhar um tigre sem virar um cão, aproximadamente isso — então a lógica de agregação deve ser direta, não chamativa.
+
+**Terceiro, link direto para instalação com um clique em caso de falha.** Se o requirement-check descobrir que alguma skill não está instalada, o usuário não precisa procurar o documento para encontrar a entrada de instalação. A interface fornece diretamente um botão de link profundo, clique para ir para o processo de instalação correspondente. Este passo comprime a distância entre "descobrir o problema" e "resolver o problema" ao mínimo.
+
+Os tipos do front-end também são muito contidos, o tipo de comando apenas adicionou `skill?: string`, e fez normalização (`|| undefined`), evitando que valores de fronteira como strings vazias causem problemas no julgamento subsequente.
+
+## Prática: cinco passos para completar toda a alteração
+
+Conectando os pontos dispersos anteriores, toda a alteração é realmente cinco passos:
+
+1. **Estender schema**: `commands.schema.json` adiciona o campo opcional `skill`, número da versão atualizado para `1.1`.
+2. **Análise + validação**: `NormalizeCommands` responsável por analisar as definições de comando, `ValidateCommandSkills` faz validação cruzada, a skill do comando deve poder ser encontrada em requirements no nível do preset.
+3. **Injetar prelude**: `BuildCommandPrelude` concatena o prelude `/skill` idempotentemente antes da execução, não precisa alterar `SessionsController`.
+4. **Migrar bundled preset**: Os dois presets embutidos `last30days` e `ui-master` alteram o `commands.json`, complementando o campo `skill` nos comandos correspondentes. A migração apenas altera commands.json, não toca outros arquivos.
+5. **Visualização front-end**: tipos complementam campo, command-picker adiciona badge, requirement-check adiciona bloco de resumo, fornece link direto para instalação com um clique em caso de falha.
+
+Algumas considerações na prática, listadas separadamente:
+
+- **Um comando só pode vincular a uma skill**. Esta é a restrição atual. Se um cenário realmente precisa que um comando acione múltiplas habilidades, a saída de emergência é declarar múltiplas skills em `requirements` no nível do preset, deixando-as coexistir no nível do preset.
+- **Código de diagnóstico de falha de validação** é `command-skill-not-in-requirements`, ao investigar problemas, pesquise diretamente este código.
+- **Normalização front-end** lembre-se de `|| undefined`, não deixe strings vazias se misturarem na lógica de julgamento.
+- **Ao migrar apenas altere commands.json**, mantenha o lado requirements sem alteração, evitando introduzir mudanças inesperadas.
+- **Testes back-end** cobrem três cenários: skill do comando em requirements (passa), não em (desabilita pacote), múltiplos comandos vinculados à mesma skill (deduplicação normal).
+
+## Resumo
+
+Esta alteração de suporte a múltiplas habilidades do preset task, na superfície é apenas adicionar um campo `skill` ao comando, mas por trás traz uma questão de design que vale a pena refletir: **vinculação e portão, devem ser separados ou não?**
+
+Nossa resposta é separar. O campo `skill` só cuida de "vincular a qual, renderizar o quê", `requirements` cuida de "permite executar ou não". Uma vez que essas duas responsabilidades se misturem, seja usando tabela de mapeamento ou outra forma, tornarão a validação subsequente, deduplicação, exibição da UI desconfortáveis. Depois de separar, cada camada fica simples: o portão sempre se baseia em uma enumeração autorizada, a vinculação é mantida próxima e não desvia, a concatenação do prelude é idempotente e controlável, a UI apenas exibe dados já claros.
+
+Olhando para trás, toda a alteração não usou nenhuma tecnologia chique, confiou apenas em separar as responsabilidades claramente, e garantir cada camada que deve garantir. O sistema preset task do HagiCode após este polimento, finalmente pode permitir que cada comando roteie precisamente para a skill que deve ir. No final das contas, as coisas deveriam ser tão simples assim...
+
+## Referências
+
+- [HagiCode-org/site](https://github.com/HagiCode-org/site): código-fonte do projeto, a implementação completa do sistema preset task está aqui.
+- [Site oficial HagiCode](https://hagicode.com): para entender as capacidades gerais do HagiCode.
+- OpenSpec proposal `extend-preset-task-multiple-skills-support`: documento de design original desta alteração, contendo proposal, design e tasks.
+
+<!-- HAGICLAW_PROGRAMMATIC_ENDING -->

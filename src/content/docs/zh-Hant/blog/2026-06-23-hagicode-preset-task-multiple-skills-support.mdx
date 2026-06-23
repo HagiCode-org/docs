@@ -1,0 +1,185 @@
+---
+title: 讓每個命令都能精準路由：HagiCode Preset Task 的多技能支援實戰
+date: 2026-06-23
+tags: [hagicode, preset-task, skill, 架構設計, AI程式碼助手]
+---
+
+## 讓每個命令都能精準路由：HagiCode Preset Task 的多技能支援實戰
+
+> 一個 preset 裡塞了多個命令，卻只能共用一份技能要求？這次改造，讓每條命令都能獨立宣告自己依賴的 skill，並在可視化面板上把這種綁定展示出來——徽標、摘要、一鍵安裝，一氣呵成。
+
+## 背景
+
+先說點背景。
+
+HagiCode 的 preset task 是一套插件化的小工具系統。使用者不必手敲命令，只要在可視化面板裡填幾個欄位，點一下，就能建立一個自動任務會話。每個 preset 本質上是一個目錄，裡面通常長這樣：
+
+- `manifest.json`：preset 的身分資訊
+- `panel.json`：可視化面板的表單定義
+- `commands.json`：實際要執行的命令清單
+- `task-preset.json` 或 `prompts.json`：任務參數和技能要求
+
+這套東西用起來確實方便，可我們很快就撞上了一個彆扭的地方。
+
+早期版本裡，skill 只能在 preset 層級的 `requirements` 陣列裡宣告。什麼意思呢？就是同一個 preset 內的所有命令，共享同一份技能要求罷了。聽起來好像沒啥，可實際用起來是這樣的場景：
+
+一個 preset 裡有五條命令，其中第一條想走 `last30days` 這個 skill，第三條想走 `ui-master`，剩下三條不需要任何 skill。在舊設計下做不到。你想讓不同命令路由到不同 skill，就得把這些命令硬拆成好幾個 preset，配置一下就膨脹了。
+
+這就是提案 `extend-preset-task-multiple-skills-support` 想解決的問題：讓每條命令獨立宣告自己依賴的 skill，並且把這種綁定在 UI 上可視化出來。
+
+## 關於 HagiCode
+
+本文分享的方案，來自我們在 [HagiCode](https://hagicode.com) 專案裡的實踐經驗。HagiCode 是一個 AI 程式碼助手專案，preset task 系統正是它面向使用者的快捷操作入口。下面講的每一處改動，都是我們實際踩坑、實際優化出來的——畢竟紙上得來終覺淺。專案原始碼在 [HagiCode-org/site](https://github.com/HagiCode-org/site)，有興趣的可以先去點個 Star。
+
+## 先把問題想清楚：為什麼不是一張映射表
+
+動手之前，最容易想到的方案是：再開一張 `commandSkillMappings` 映射表，把「命令 ID → skill」的關係單獨存起來。聽起來很乾淨，職責分離嘛。
+
+可仔細一琢磨就發現不對勁。
+
+`commands.json` 裡每條命令已經有一個 ID，映射表裡又得把這個 ID 抄一遍。兩份檔案、同一個 ID，只要哪天有人改了命令忘了同步映射表，資料就漂移了。這種「為了分離而分離」的設計，後期維護成本遠大於它帶來的那點整潔感。到頭來，只是徒增煩惱而已。
+
+所以我們最終選了一條更直接的路：**把可選的 `skill` 欄位直接放到命令定義上**。一條命令自己宣告自己綁哪個 skill，就近維護，誰也不會跟誰失聯。
+
+這個決定背後，還有一條更重要的設計原則，值得單獨拎出來說。
+
+## 核心一：兩層資料職責分離
+
+這是整個改造裡最關鍵的一個認知。
+
+很多人第一反應是：既然命令上有了 `skill`，那做 requirement check（技能門禁檢查）的時候，是不是應該去掃每個命令的 `skill` 欄位？
+
+不是。
+
+我們刻意把這件事拆成了兩層：
+
+- **`commands.json` 的 `skill` 欄位**：只負責宣告綁定。它告訴系統「這條命令要綁哪個 skill」，用於渲染 prompt 前導和 UI 展示。
+- **`task-preset.json` 的 `requirements` 陣列**：才是權威枚舉。它是真正的門禁，決定一個 preset 需要滿足哪些技能才能執行。
+
+換句話說，`skill` 回答的是「綁哪個、渲染什麼」，`requirements` 回答的是「到底允不允許跑」。兩件事，別混在一起。
+
+這麼分的好處，是 check 邏輯天然簡單。因為門禁始終基於 preset 層的 `requirements`，按 `CacheKey` 去重，多條命令綁同一個 skill 也只會探測一次，不會重複打點。命令級 skill 不引入任何額外的探測開銷。
+
+這條原則，也是我們否決映射表方案的根本原因——映射表會讓人誤以為「綁定即門禁」，把兩層職責又攪回去了。聰明反被聰明誤，不過如此。
+
+## 核心二：命令定義長什麼樣
+
+改造後的命令定義，就是在原來的基礎上多了一個可選的 `skill` 欄位。以 `last30days` 這個 bundled preset 為例，它的 `commands.json` 大致長這樣：
+
+```json
+{
+  "$schema": "../../schemas/commands.schema.json",
+  "version": "1.1",
+  "commands": [
+    {
+      "id": "research",
+      "skill": "last30days",
+      "prompt": "調研一下最近30天大家對 {topic} 的真實討論"
+    },
+    {
+      "id": "summarize",
+      "prompt": "把上面的調研結果整理成一份摘要"
+    }
+  ]
+}
+```
+
+幾個要點說明：
+
+- `version` 升到了 `1.1`，對應的 schema 也加了可選 `skill` 欄位。
+- 第一條命令 `research` 綁了 `last30days` skill，執行時會路由到這個技能。
+- 第二條命令 `summarize` 沒綁 skill，它只是一條普通指令，走預設路徑。
+- 注意這裡**沒有**在命令裡寫任何 requirement。真正的門禁，在 `task-preset.json` 的 `requirements` 裡：
+
+```json
+{
+  "requirements": [
+    {
+      "key": "last30days",
+      "cacheKey": "skill:last30days"
+    }
+  ]
+}
+```
+
+`research` 命令綁的 `last30days` 必須出現在這份 `requirements` 裡，否則就出問題了——這正是下一節要講的硬約束。強扭的瓜不甜。
+
+## 核心三：載入期的交叉校驗
+
+光在資料上宣告綁定還不夠，得有人兜底，防止「命令綁了一個 skill，可 requirements 裡压根沒宣告」這種孤兒綁定溜到線上。
+
+這個兜底就是 `ValidateCommandSkills`。它在 preset 套件載入的時候跑一遍，逐條檢查每個命令的 `skill` 是否都能在 preset 層的 `requirements` 裡找到對應項。找不到，就判定為非法套件，直接禁用整個 preset，並拋出診斷碼 `command-skill-not-in-requirements`。
+
+為什麼要禁用整個套件，而不是只跳過那條命令？因為 preset 是一個整體，命令之間往往有依賴關係（前一條的輸出餵給下一條）。如果悄悄跳過一條，後面的命令拿到空輸入，行為就完全不可控了。畢竟人心隔肚皮，程式碼也隔肚皮。寧可讓使用者看到明確的報錯，也不要讓任務在半路上莫名其妙地跑歪。這一點，馬虎不得。
+
+這個校驗是在載入期完成的，也就是說問題在 preset 註冊的那一刻就會被發現，不會拖到使用者真正點「執行」才暴雷。對使用者體驗來說，早報錯永遠好過晚報錯。
+
+## 核心四：prompt 前導的冪等拼接
+
+接下來，是執行鏈路上最微妙的一環。
+
+當一條命令綁了 skill，比如 `last30days`，系統在真正執行前，要把這個 skill 資訊「拼」到命令前面，形成一個完整的單行指令交給執行器。這個過程由 `CombineCommandSkillPrelude` 負責。
+
+舉個具體的例子。`research` 命令的 prompt 是「調研一下最近30天大家對 {topic} 的真實討論」，綁的 skill 是 `last30days`，那麼最終交給執行器的指令大致是：
+
+```
+/last30days 調研一下最近30天大家對 {topic} 的真實討論
+```
+
+也就是在 prompt 前面加了 `/last30days` 這個前導。執行器看到這個前導，就知道要先把上下文切到 `last30days` 這個 skill 上。
+
+這裡有個容易踩的坑：冪等性。
+
+為什麼要強調冪等？因為有些場景下，prompt 本身可能已經帶了這個 skill 前導（比如使用者手動寫了一半，或者從別的地方拷過來的）。如果系統傻乎乎地再拼一次，就會變成 `/last30days /last30days 調研...`，執行器要麼報錯要麼行為異常。
+
+所以 `CombineCommandSkillPrelude` 在拼接前會先檢測一下，如果字首已經存在，就不重複加。這一步看似不起眼，可能擋掉一類很隱蔽的 bug。
+
+值得一提的是，這整套前導注入邏輯都在 preset 定義層（`PresetTaskCatalogProvider` 裡的 `BuildCommandPrelude`）完成，`SessionsController` 這邊的會話建立程式碼完全不用動。這也是職責分離帶來的好處——執行入口保持穩定，技能路由的複雜度被收斂在定義層內部。
+
+## 核心五：前端怎麼把綁定展示出來
+
+後端把資料模型和執行鏈路都理順了，最後一步，是讓使用者在介面上能「看見」這種綁定。畢竟一個功能如果使用者感知不到，那約等於沒做。
+
+前端這邊做了三件事。
+
+**第一，命令選擇器上加徽標。** 在 command-picker 裡，每條綁了 skill 的命令旁邊會顯示一個小徽標，標明它依賴哪個 skill。使用者掃一眼就知道哪條命令是「帶技能」的，哪條是普通命令。
+
+**第二，requirement-check 摘要區塊。** 面板上有一個專門的摘要區域，列出當前 preset 需要滿足的所有 skill 要求，以及每條命令分別綁了哪個。這個區塊的資料來源於 `commandSkillsByRequirementKey` 這個映射——把命令按它綁的 requirement key 分組聚合，方便使用者一眼對照「要求」和「實際綁定」是不是對得上。畫虎不成反類犬，大概就是這樣——所以聚合邏輯要做得直給，別花俏。
+
+**第三，失敗時的一鍵安裝深鏈。** 如果 requirement check 發現某個 skill 沒裝，使用者不必自己去翻文件找安裝入口。介面直接給出一個深鏈按鈕，點一下跳到對應的安裝流程。這一步把「發現問題」和「解決問題」之間的距離壓到了最短。
+
+前端型別這邊也很克制，命令型別只是加了一個 `skill?: string`，並且做了歸一化處理（`|| undefined`），避免空字串這種邊界值在後續判斷裡惹麻煩。
+
+## 實踐：五步走完整套改造
+
+把前面零零碎碎的點串起來，整套改造其實就是五步：
+
+1. **擴展 schema**：`commands.schema.json` 加上可選 `skill` 欄位，版本號升到 `1.1`。
+2. **解析 + 校驗**：`NormalizeCommands` 負責解析命令定義，`ValidateCommandSkills` 做交叉校驗，命令 skill 必須能在 preset 層 requirements 裡找到。
+3. **注入前導**：`BuildCommandPrelude` 在執行前把 `/skill` 前導冪等地拼到命令前，不需要改動 `SessionsController`。
+4. **遷移 bundled preset**：`last30days` 和 `ui-master` 這兩個內建 preset 的 `commands.json` 改一下，給相應命令補上 `skill` 欄位。遷移只動 commands.json，不碰其他檔案。
+5. **前端可視化**：型別補欄位、command-picker 加徽標、requirement-check 加摘要區塊、失敗時給一鍵安裝深鏈。
+
+幾條實踐中的注意事項，單獨列一下：
+
+- **一條命令只能綁一個 skill**。這是當前的約束。如果一個場景真的需要一條命令觸發多個技能，逃生艙是在 preset 層的 `requirements` 裡宣告多個 skill，讓它們在 preset 層級共存。
+- **校驗失敗的診斷碼**是 `command-skill-not-in-requirements`，排查問題時直接搜這個碼。
+- **前端歸一化**記得 `|| undefined`，別讓空串混進判斷邏輯。
+- **遷移時只動 commands.json**，requirements 那邊保持不動，避免引入意外變更。
+- **後端測試**覆蓋三類場景：命令 skill 在 requirements 裡（通過）、不在（禁用套件）、多條命令綁同一 skill（去重正常）。
+
+## 總結
+
+這次 preset task 的多技能支援改造，表面上只是給命令加了個 `skill` 欄位，可它背後牽出的是一個挺值得琢磨的設計問題：**綁定和門禁，到底該不該分開？**
+
+我們的答案是分開。`skill` 欄位只管「綁哪個、渲染什麼」，`requirements` 才管「允不允許跑」。這兩層職責一旦攪在一起，無論是用映射表還是別的什麼形式，都會讓後續的校驗、去重、UI 展示變得彆扭。分開之後，每層都簡單了：門禁永遠基於一份權威枚舉，綁定就近維護不會漂移，前導拼接冪等可控，UI 只是把已經清晰的資料展示出來。
+
+回頭看，整個改造沒有用什麼花俏的技術，靠的就是把職責切乾淨，然後把每一層該兜的底兜住。HagiCode 的 preset task 系統經過這輪打磨，總算能讓每條命令都精準路由到它該去的 skill 了。說到底，事情本來就該這麼簡單……
+
+## 參考資料
+
+- [HagiCode-org/site](https://github.com/HagiCode-org/site)：專案原始碼，preset task 系統的完整實作都在這裡。
+- [HagiCode 官網](https://hagicode.com)：了解 HagiCode 的整體能力。
+- OpenSpec 提案 `extend-preset-task-multiple-skills-support`：本次改造的原始設計文件，包含 proposal、design 和 tasks。
+
+<!-- HAGICLAW_PROGRAMMATIC_ENDING -->

@@ -1,0 +1,185 @@
+---
+title: Precise Routing for Every Command: HagiCode Preset Task Multi-Skill Support in Practice
+date: 2026-06-23
+tags: [hagicode, preset-task, skill, Architecture Design, AI Coding Assistant]
+---
+
+## Precise Routing for Every Command: HagiCode Preset Task Multi-Skill Support in Practice
+
+> A preset stuffed with multiple commands, but only able to share a single set of skill requirements? This refactor enables each command to independently declare its dependent skill, and visualizes this binding in the panel—badges, summaries, one-click installation, all in one go.
+
+## Background
+
+Let's start with some background.
+
+HagiCode's preset task is a plugin-based small tool system. Users don't need to manually type commands—just fill in a few fields in the visual panel and click once to create an automated task session. Each preset is essentially a directory, usually structured like this:
+
+- `manifest.json`: The preset's identity information
+- `panel.json`: Form definitions for the visual panel
+- `commands.json`: The list of commands to actually execute
+- `task-preset.json` or `prompts.json`: Task parameters and skill requirements
+
+This system is indeed convenient to use, but we quickly ran into an awkward limitation.
+
+In early versions, skills could only be declared in the preset-level `requirements` array. What does this mean? All commands within the same preset share a single set of skill requirements. This might sound fine on paper, but in practice it creates scenarios like this:
+
+A preset contains five commands. The first one wants to route through the `last30days` skill, the third one wants to use `ui-master`, and the remaining three don't need any skill. This wasn't possible with the old design. If you wanted different commands to route to different skills, you'd have to split these commands into multiple presets, and the configuration would bloat up quickly.
+
+This is the problem that the proposal `extend-preset-task-multiple-skills-support` aims to solve: enable each command to independently declare its dependent skill, and visualize this binding in the UI.
+
+## About HagiCode
+
+The solution shared in this article comes from our practical experience in the [HagiCode](https://hagicode.com) project. HagiCode is an AI coding assistant project, and the preset task system is precisely its user-facing quick operation entry. Every change mentioned below is something we actually encountered and optimized in practice—after all, true understanding comes from hands-on experience. The project source code is at [HagiCode-org/site](https://github.com/HagiCode-org/site)—if you're interested, feel free to star it first.
+
+## Think Through the Problem Clearly First: Why Not a Mapping Table
+
+Before diving in, the easiest solution to think of is: add another `commandSkillMappings` mapping table to store the "command ID → skill" relationship separately. Sounds clean—separation of concerns, right?
+
+But upon closer inspection, you realize it's not quite right.
+
+Each command in `commands.json` already has an ID, and the mapping table would have to copy that ID again. Two files, same ID—if someone changes a command one day and forgets to sync the mapping table, the data drifts. This kind of "separation for the sake of separation" design has maintenance costs far exceeding the tidiness it brings. In the end, it just adds unnecessary trouble.
+
+So we ultimately chose a more direct path: **add an optional `skill` field directly to the command definition**. Each command declares which skill it binds to itself, maintaining proximity—no one gets out of sync.
+
+Behind this decision lies an even more important design principle, worth highlighting separately.
+
+## Core One: Separation of Two Layers of Data Responsibilities
+
+This is the most critical insight throughout this refactor.
+
+Many people's first reaction is: since commands have a `skill` field now, shouldn't we scan each command's `skill` field when doing requirement checks (skill gate checks)?
+
+No.
+
+We deliberately split this into two layers:
+
+- **The `skill` field in `commands.json`**: Only responsible for declaring bindings. It tells the system "which skill this command binds to," used for rendering prompt preambles and UI display.
+- **The `requirements` array in `task-preset.json`**: This is the authoritative enumeration. It's the real gate, determining which skills a preset must satisfy to run.
+
+In other words, `skill` answers "which one to bind, what to render," while `requirements` answers "whether it's actually allowed to run." Two different things—don't mix them together.
+
+The benefit of this separation is that the check logic is naturally simple. Because the gate is always based on the preset-level `requirements`, deduplicated by `CacheKey`, multiple commands binding to the same skill will only be probed once without repeated checks. Command-level skills introduce no additional probing overhead.
+
+This principle is also the fundamental reason we rejected the mapping table solution—a mapping table would lead people to mistakenly think "binding equals gate," mixing the two layers of responsibilities back together. Too clever by half, as they say.
+
+## Core Two: What Does the Command Definition Look Like?
+
+The refactored command definition simply adds an optional `skill` field to the original structure. Taking the `last30days` bundled preset as an example, its `commands.json` looks roughly like this:
+
+```json
+{
+  "$schema": "../../schemas/commands.schema.json",
+  "version": "1.1",
+  "commands": [
+    {
+      "id": "research",
+      "skill": "last30days",
+      "prompt": "调研一下最近30天大家对 {topic} 的真实讨论"
+    },
+    {
+      "id": "summarize",
+      "prompt": "把上面的调研结果整理成一份摘要"
+    }
+  ]
+}
+```
+
+A few key points:
+
+- `version` is upgraded to `1.1`, and the corresponding schema also adds the optional `skill` field.
+- The first command `research` binds to the `last30days` skill, and will route to this skill during execution.
+- The second command `summarize` doesn't bind to any skill—it's just a normal command that takes the default path.
+- Note that there's **no** requirement written in the command. The real gate is in `task-preset.json`'s `requirements`:
+
+```json
+{
+  "requirements": [
+    {
+      "key": "last30days",
+      "cacheKey": "skill:last30days"
+    }
+  ]
+}
+```
+
+The `last30days` bound by the `research` command must appear in this `requirements` list, otherwise there's a problem—which is exactly the hard constraint discussed in the next section. Forced love is sweet to none.
+
+## Core Three: Cross-Validation During Loading
+
+Simply declaring bindings in the data isn't enough—someone needs to provide a safety net to prevent "orphan bindings" like "a command binds to a skill that's never declared in requirements" from making it to production.
+
+This safety net is `ValidateCommandSkills`. It runs once when the preset package is loaded, checking each command's `skill` one by one to see if it can find a corresponding entry in the preset-level `requirements`. If not found, it's judged as an invalid package, the entire preset is disabled, and the diagnostic code `command-skill-not-in-requirements` is thrown.
+
+Why disable the entire package instead of just skipping that command? Because a preset is a whole—commands often have dependencies (the output of one feeds into the next). If you silently skip one, subsequent commands receive empty input, and their behavior becomes completely unpredictable. After all, you can judge a man's heart but not his face—and the same goes for code. Better to let users see explicit errors than have tasks go haywire halfway through. This point cannot be sloppy.
+
+This validation is completed during the loading phase, meaning problems are discovered the moment the preset is registered, not dragged out until users actually click "run" before blowing up. For user experience, early errors are always better than late errors.
+
+## Core Four: Idempotent Concatenation of Prompt Preambles
+
+Next is the most subtle link in the execution chain.
+
+When a command binds to a skill, like `last30days`, the system needs to "splice" this skill information in front of the command before actually executing it, forming a complete single-line instruction to hand to the executor. This process is handled by `CombineCommandSkillPrelude`.
+
+Let's look at a specific example. The `research` command's prompt is "调研一下最近30天大家对 {topic} 的真实讨论", and its bound skill is `last30days`. The final instruction handed to the executor is roughly:
+
+```
+/last30days 调研一下最近30天大家对 {topic} 的真实讨论
+```
+
+That is, the preamble `/last30days` is added in front of the prompt. When the executor sees this preamble, it knows to first switch the context to the `last30days` skill.
+
+There's an easy pitfall here: idempotency.
+
+Why emphasize idempotency? Because in some scenarios, the prompt itself might already carry this skill preamble (for example, if a user manually wrote it halfway or copied it from somewhere else). If the system foolishly splices it again, it becomes `/last30days /last30days 调研...`, and the executor either errors out or behaves abnormally.
+
+So `CombineCommandSkillPrelude` checks before splicing—if the prefix already exists, it doesn't add it again. This step seems insignificant, but it can block a class of very subtle bugs.
+
+It's worth mentioning that this entire preamble injection logic is completed at the preset definition layer (`BuildCommandPrelude` in `PresetTaskCatalogProvider`), and the session creation code on the `SessionsController` side doesn't need to change at all. This is another benefit of separation of concerns—the execution entry remains stable, and the complexity of skill routing is contained within the definition layer.
+
+## Core Five: How the Frontend Displays Bindings
+
+With the backend data model and execution chain sorted out, the final step is to let users "see" this binding in the interface. After all, if users can't perceive a feature, it's as good as not being done.
+
+The frontend does three things.
+
+**First, add badges to the command selector.** In the command-picker, a small badge appears next to each command that binds to a skill, indicating which skill it depends on. Users can tell at a glance which commands are "skill-enabled" and which are normal commands.
+
+**Second, a requirement-check summary section.** The panel has a dedicated summary area listing all skill requirements that the current preset needs to satisfy, and which skill each command binds to. The data for this section comes from the `commandSkillsByRequirementKey` mapping—aggregating commands by their bound requirement key, making it easy for users to compare "requirements" with "actual bindings" at a glance. Drawing a tiger and ending up with a dog—that's what happens if the aggregation logic isn't straightforward—so keep it simple, not fancy.
+
+**Third, one-click installation deep link on failure.** If the requirement check finds that a skill isn't installed, users don't need to dig through documentation to find the installation entry themselves. The interface directly provides a deep link button—click once to jump to the corresponding installation flow. This step compresses the distance between "discovering a problem" and "solving a problem" to the minimum.
+
+The frontend types are also quite restrained—command types just add a `skill?: string`, and normalization is applied (`|| undefined`) to avoid boundary values like empty strings causing trouble in subsequent judgments.
+
+## Practice: Five Steps to Complete the Refactor
+
+Connecting all the scattered points from before, the entire refactor is essentially five steps:
+
+1. **Extend schema**: Add an optional `skill` field to `commands.schema.json`, and bump the version number to `1.1`.
+2. **Parse + validate**: `NormalizeCommands` is responsible for parsing command definitions, `ValidateCommandSkills` does cross-validation—command skills must be found in the preset-level requirements.
+3. **Inject preamble**: `BuildCommandPrelude` idempotently splices the `/skill` preamble before the command before execution, no changes needed to `SessionsController`.
+4. **Migrate bundled presets**: Modify the `commands.json` of two built-in presets, `last30days` and `ui-master`, to add the `skill` field to corresponding commands. Migration only touches commands.json, doesn't touch other files.
+5. **Frontend visualization**: Add fields to types, add badges to command-picker, add summary section to requirement-check, provide one-click installation deep link on failure.
+
+A few notes from practice, listed separately:
+
+- **One command can only bind to one skill**. This is the current constraint. If a scenario really needs one command to trigger multiple skills, the escape hatch is to declare multiple skills in the preset-level `requirements`, letting them coexist at the preset level.
+- **The diagnostic code for validation failure** is `command-skill-not-in-requirements`—search this code directly when troubleshooting.
+- **Remember frontend normalization** `|| undefined`, don't let empty strings mix into judgment logic.
+- **When migrating, only modify commands.json**, keep requirements unchanged to avoid introducing unexpected changes.
+- **Backend testing** covers three scenarios: command skill in requirements (passes), not in requirements (disable package), multiple commands binding to same skill (deduplication works).
+
+## Summary
+
+This multi-skill support refactor for preset tasks appears to just add a `skill` field to commands, but it raises a design question worth pondering: **should binding and gating be separated?**
+
+Our answer is yes. The `skill` field only cares about "which one to bind, what to render," while `requirements` cares about "whether it's allowed to run." Once these two layers of responsibilities are mixed together—whether using a mapping table or some other form—subsequent validation, deduplication, and UI display become awkward. After separation, each layer becomes simple: the gate is always based on one authoritative enumeration, bindings are maintained nearby without drifting, preamble concatenation is idempotent and controllable, and the UI just displays already clear data.
+
+Looking back, the entire refactor didn't use any fancy technology—it relied on cleanly separating responsibilities and providing proper safety nets at each layer. After this round of polishing, HagiCode's preset task system can finally route each command precisely to the skill it should go to. After all, things should be this simple...
+
+## References
+
+- [HagiCode-org/site](https://github.com/HagiCode-org/site): Project source code, the complete implementation of the preset task system is here.
+- [HagiCode Official Website](https://hagicode.com): Learn about HagiCode's overall capabilities.
+- OpenSpec proposal `extend-preset-task-multiple-skills-support`: The original design document for this refactor, containing proposal, design, and tasks.
+
+<!-- HAGICLAW_PROGRAMMATIC_ENDING -->
