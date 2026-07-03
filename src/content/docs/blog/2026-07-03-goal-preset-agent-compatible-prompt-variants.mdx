@@ -1,0 +1,315 @@
+---
+title: 让所有 Agent 都会 /goal：HagiCode 持续工作预设的兼容扩展设计
+date: 2026-07-03
+tags: [AI Agent, 持续工作, 提示变体, 任务预设, HagiCode]
+---
+
+## 让所有 Agent 都会 `/goal`：HagiCode 持续工作预设的兼容扩展设计
+
+## 引言
+
+给 AI Agent 派一个「持续工作」的任务，理想状态是这样的：你写下一个目标，选好可以动的仓库，点一下提交，Agent 就朝着这个目标一路推进，中途不追问、不跑题、不越界改别的仓库。
+
+在 HagiCode 里，这个能力有个专门的入口——`goal` 预设任务，命令表面是 `/goal`。问题在于：**不是所有 Agent 都认识 `/goal`。** Claude 和 Codex 有原生的持续工作命令语义，`/goal` 递过去它们能直接接住；而其它 CLI（Gemini、Copilot、iFlow、OpenCode 等）根本没有这个斜杠命令，把 `/goal ...` 原样塞过去，轻则被当成无效命令，重则被逐字执行踩坑。
+
+一开始最省事的做法是：干脆只让 `goal` 跑在 Claude / Codex 上，其它 Agent 一律拒绝。但这等于把大半个 Agent 矩阵挡在门外。本文讲的就是我们怎么把这条路走通——**用「Agent 感知」的提示变体（prompt variants），让原生支持的 Agent 走原生命令，不支持的 Agent 走兜底提示，行为对齐、体验一致。**
+
+内容基于 `repos/hagitask` 里的 `goal` 预设包和 `repos/hagicode-core` 的后端解析实现。
+
+## 背景
+
+### `goal` 是什么
+
+`goal` 是一个内置的任务预设插件包，位于 `repos/hagitask/presets/goal/`。它的 `manifest.json` 声明了插件身份、图标、本地化包和前后端资产：
+
+```jsonc
+{
+  "taskPresetId": "goal",
+  "version": "1.0.0",
+  "icon": "flag",
+  "kind": "custom-executor",
+  "status": "experimental",
+  "entrypoints": { "menuSurface": "session-create", "drawerId": "goal" },
+  "ui": { "panel": "./frontend/panel.json", "commands": "./frontend/commands.json" },
+  "backend": {
+    "taskPreset": "./backend/task-preset.json",
+    "prompts": "./backend/prompts.json"
+  }
+}
+```
+
+它的定位是「持续工作模式」：用户填一个目标说明（`goalDescription`），可选地圈定可写 / 只读仓库范围，然后由后端组装成一次非交互的 auto-task 运行。前端面板 `panel.json` 里的关键字段是：
+
+- `goalCommandIds`：命令选择器，内置只有一个 `/goal`；
+- `goalDescription`：必填的目标说明；
+- `targetRepositories`：仓库访问选择器，区分 read / write。
+
+### `/goal` 从哪来
+
+命令表面定义在 `frontend/commands.json` 里，核心是一行 `preludeTemplate`：
+
+```jsonc
+{
+  "commands": [
+    {
+      "id": "goal",
+      "label": "goal",
+      "preludeTemplate": "/goal {goalDescription}"
+    }
+  ]
+}
+```
+
+也就是说，最终发给 Agent 的提示，会在正文前面拼一行 `/goal <目标说明>`。对 Claude / Codex，这一行就是它们认识的命令；对别的 Agent，这一行就是个需要「被翻译」的东西。整篇文章的适配难点，正是这一行 `/goal ...` 在不同 Agent 上的含义分裂。
+
+## 分析
+
+### 单 locale 模板撑不住了
+
+HagiTask 早期的提示包（prompt package）是**只按语言分文件**的：`prompts.json` 里每个 locale 声明一套 `systemTemplate` + `userTemplate`，后端 `PresetTaskCatalogProvider` 把它们读进 `PromptPackage.Locales`，运行时按请求语言选一套渲染。
+
+这个模型对「执行指令与 Agent 无关」的预设够用。但 `goal` 不是这样：
+
+- Claude / Codex：可以直接依赖原生 `/goal` 命令表面；
+- 其它 Agent：需要一段更啰嗦、显式教它「怎么进入持续工作模式」的提示，还得告诉它别把 `/goal ...` 当命令执行。
+
+同一个 locale 下要出现两种截然不同的指令，只按语言分文件就不够了。我们需要在语言之外再引入一个维度：**Agent 家族**。
+
+### 拒绝执行不是好方案
+
+最初 `goal` 的 `requirements` 把 Agent 限死在 `["claude", "codex"]`，其它 Agent 直接判不兼容。这在产品上有两个坏处：
+
+1. 用户在英雄（hero）选择面板里，兼容英雄被过滤得很少，容易「无雄可选」；
+2. 明明很多 Agent 有能力完成持续工作，只是没有原生 `/goal` 而已，一刀切拒绝浪费了它们的能力。
+
+所以真正要解决的问题不是「谁能跑」，而是「**同一个目标，如何按 Agent 能力给出不同但等价的执行指令**」。答案是：把 Agent 感知的差异下沉到提示层，用变体 + 兜底解决，而不是在准入层拦人。
+
+## 解决
+
+### 变体选择器：agent × language
+
+新的提示包合同在 `prompts.json` 里引入 `variants`，用 `selectors` 声明匹配维度，用 `entries` 声明每个变体的匹配规则和模板文件：
+
+```jsonc
+{
+  "version": "1.1.0",
+  "templateEngine": "handlebars",
+  "variants": {
+    "selectors": ["agent", "language"],
+    "entries": [
+      {
+        "id": "native-zh-cn",
+        "match": { "agent": ["claude", "codex"], "language": ["zh-CN"] },
+        "systemTemplate": "./templates/zh-CN/native.system.md",
+        "userTemplate": "./templates/zh-CN/native.user.hbs"
+      },
+      {
+        "id": "fallback-zh-cn",
+        "match": { "language": ["zh-CN"] },
+        "systemTemplate": "./templates/zh-CN/fallback.system.md",
+        "userTemplate": "./templates/zh-CN/fallback.user.hbs"
+      }
+      // ... native-en-us / fallback-en-us 同理
+    ],
+    "fallback": {
+      "id": "fallback-default",
+      "systemTemplate": "./templates/en-US/fallback.system.md",
+      "userTemplate": "./templates/en-US/fallback.user.hbs"
+    }
+  }
+}
+```
+
+三个层次的兜底，逐级放宽：
+
+1. **native 变体**：`match` 同时约束 `agent`（claude/codex）和 `language`，只有原生 Agent 命中；
+2. **fallback 变体**：`match` **只约束 `language`，不约束 `agent`**，于是任何 Agent 都能命中——这是给「没有原生 `/goal`」的 Agent 兜底的；
+3. **fallback-default**：连语言都匹配不上时的最终保底。
+
+顺序很关键：`entries` 是按声明顺序遍历的，native 排在 fallback 前面。所以 claude/codex 会先命中 native；其它 Agent 走到 fallback 语言变体。
+
+### 两套模板：原生 vs 兜底
+
+同一个目标，两套 system 提示的差别就在对 `/goal` 那一行的态度。
+
+原生模板（`templates/zh-CN/native.system.md`）：
+
+```text
+你是 `goal` task preset plugin 的内置执行提示。
+
+本次运行必须使用 `/goal` 作为持续工作模式的命令表面。把提供的项目路径与仓库范围视为权威工作边界。
+
+这次运行处于非交互环境。不要追问用户；当合理假设可以继续推进时，直接继续并把这些假设明确写在响应里。
+```
+
+兜底模板（`templates/zh-CN/fallback.system.md`）：
+
+```text
+你是 `goal` task preset plugin 的兜底执行提示。
+
+当前 agent 可能不支持原生 `/goal` 命令。如果提示前面出现了 `/goal ...` 这一行，把它视为预设附带的目标元数据，不要把它当成必须逐字执行的斜杠命令。
+
+请以持续工作模式完成任务，并把提供的项目路径与仓库范围视为权威工作边界。
+
+这次运行处于非交互环境。不要追问用户；当合理假设可以继续推进时，直接继续并把这些假设明确写在响应里。
+```
+
+核心那句话就是兜底策略的灵魂：**「如果提示前面出现了 `/goal ...` 这一行，把它视为预设附带的目标元数据，不要把它当成必须逐字执行的斜杠命令。」** 前面 `preludeTemplate` 拼进去的那行 `/goal <目标>`，在原生 Agent 眼里是命令，在兜底 Agent 眼里被显式降级成「元数据 / 目标标记」，从而用普通的提示跟随（prompt following）复现同样的持续工作行为。
+
+user 模板（`.hbs`）也分两套，兜底那套多了「路由说明」段落，明确告诉 Agent 这次被路由到了不依赖原生 `/goal` 的分支，并要求「不要依赖原生 `/goal` 支持；改用普通提示跟随方式完成同样的持续工作行为」。
+
+### 后端：一次解析定生死
+
+变体匹配在后端 `PCode.Application/Services/PresetTaskCatalogProvider.cs` 的 `ResolvePromptSelection` 里完成。它先解析 locale，再把 language、agent 装进一个选择器字典，按顺序找第一个匹配的变体：
+
+```csharp
+public PresetTaskResolvedPromptSelection ResolvePromptSelection(string? locale, string? agentFamily)
+{
+    var resolvedLocale = ResolvePromptLocale(locale);
+    if (!PromptPackage.UsesVariants)
+    {
+        // 旧的仅按 locale 分文件的预设，走遗留路径，保持向后兼容
+        var legacyTemplate = PromptPackage.Locales[resolvedLocale];
+        return new PresetTaskResolvedPromptSelection(
+            resolvedLocale, NormalizeAgentFamily(agentFamily), null, false,
+            "legacy-locales", legacyTemplate);
+    }
+
+    var normalizedAgentFamily = NormalizeAgentFamily(agentFamily);
+    var selectorInputs = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+    {
+        [PresetTaskPromptSelectorNames.Language] = resolvedLocale,
+    };
+    if (!string.IsNullOrWhiteSpace(normalizedAgentFamily))
+    {
+        selectorInputs[PresetTaskPromptSelectorNames.Agent] = normalizedAgentFamily!;
+    }
+
+    foreach (var variant in PromptPackage.Variants)
+    {
+        if (!VariantMatches(variant, selectorInputs)) continue;
+        return new PresetTaskResolvedPromptSelection(
+            resolvedLocale, normalizedAgentFamily, variant.Id, false, "variants", variant.Template);
+    }
+
+    // 没有变体命中：落到显式声明的 fallback 变体
+    return new PresetTaskResolvedPromptSelection(
+        resolvedLocale, normalizedAgentFamily, PromptPackage.FallbackVariant?.Id, true,
+        "variants", PromptPackage.FallbackVariant?.Template ?? PromptPackage.Locales[resolvedLocale]);
+}
+```
+
+匹配规则 `VariantMatches` 很朴素——**变体声明了哪些 selector，运行时就都得命中**；没声明的维度不约束：
+
+```csharp
+private static bool VariantMatches(
+    PresetTaskPromptVariantDefinition variant,
+    IReadOnlyDictionary<string, string> selectorInputs)
+{
+    foreach (var selector in variant.Match)
+    {
+        if (!selectorInputs.TryGetValue(selector.Key, out var runtimeValue))
+            return false;
+        if (!selector.Value.Contains(runtimeValue, StringComparer.OrdinalIgnoreCase))
+            return false;
+    }
+    return true;
+}
+```
+
+这就解释了为什么 fallback 变体只写 `language` 就能兜住所有 Agent：它根本没约束 `agent` 维度，任何 Agent 的 language 一致就命中。而 native 变体多约束了一个 `agent`，只有 claude/codex 能满足。
+
+Agent 家族怎么来的？运行时从选中的英雄执行器类型映射，见 `PresetTaskRequirementModels.cs`：
+
+```csharp
+public static string? Resolve(AIProviderType? executorType) => executorType switch
+{
+    AIProviderType.ClaudeCodeCli => Claude,
+    AIProviderType.CodexCli      => Codex,
+    AIProviderType.GitHubCopilot => Copilot,
+    AIProviderType.IFlowCli      => Iflow,
+    AIProviderType.OpenCodeCli   => Opencode,
+    // ... gemini / kimi / qoder / kiro / hermes / codebuddy / pi ...
+    _ => null,
+};
+```
+
+`SessionsController.PresetTasks.cs` 在创建会话时先拿到英雄，再 `PresetTaskAgentFamilies.Resolve(hero.ExecutorType)` 得到家族名，喂给 `ResolvePromptSelection`。选中变体后，`RenderPrompt` 会用 Handlebars 渲染模板，并把 `preludeTemplate` 生成的 `/goal <目标>` 拼到最前面：
+
+```csharp
+var renderedPrompt = prompt.FillTemplate(normalizedContext);
+var commandPrelude = BuildCommandPrelude(normalizedContext); // -> "/goal <goalDescription>"
+return string.IsNullOrWhiteSpace(commandPrelude)
+    ? renderedPrompt
+    : $"{commandPrelude}\n\n{renderedPrompt}";
+```
+
+### 准入放宽：从 allowlist 到 `any`
+
+有了兜底提示，`goal` 就没必要再把非原生 Agent 拒之门外了。`backend/task-preset.json` 的 `requirements` 从 `["claude","codex"]` 放宽成 `any`：
+
+```jsonc
+{
+  "taskKey": "goal",
+  "requirements": [ { "type": "agent", "name": "any" } ],
+  "inputBindings": [
+    { "input": "goalCommandIds",  "promptParameter": "goalCommandIds",  "required": true },
+    { "input": "goalDescription", "promptParameter": "goalDescription", "required": true },
+    { "input": "targetScopeMarkdown", "promptParameter": "targetScopeMarkdown", "producer": "frontend-computed" }
+  ]
+}
+```
+
+准入层放开、差异下沉到提示层——这是整个方案的关键取舍：**兼容性不再是「能不能跑」的开关，而是「用哪套提示跑」的路由。**
+
+## 实践
+
+### 端到端一次运行是怎样的
+
+1. 用户在 `goal` 抽屉里填目标说明、选仓库范围、选英雄，提交；
+2. 后端按选中英雄的执行器类型解析出 agent 家族（如 `claude` / `gemini`）；
+3. `ResolvePromptSelection(locale, agentFamily)` 按 `agent × language` 找变体：
+   - claude/codex + zh-CN → `native-zh-cn`；
+   - gemini + zh-CN → native 不命中，落到 `fallback-zh-cn`；
+4. `RenderPrompt` 渲染选中模板，并在最前面拼 `/goal <目标说明>`；
+5. 原生 Agent 把首行当命令执行；兜底 Agent 按 system 提示把首行当元数据，用普通提示跟随复现持续工作。
+
+### 给自己的预设加 Agent 感知
+
+如果你要给一个新预设做同样的适配，套路是固定的：
+
+1. 在 `prompts.json` 里用 `variants` 替代 `locales`，`selectors` 里加上 `agent`；
+2. native 变体 `match` 同时写 `agent` 和 `language`；兜底变体只写 `language`；
+3. 再声明一个顶层 `variants.fallback` 作为最终保底（schema 要求 variants 模式必须有 fallback）；
+4. 后端不用改——`ResolvePromptSelection` / `VariantMatches` 是通用的；
+5. 若准入不该限制，就把 `requirements` 的 agent 设为 `any`。
+
+### 几个容易踩的坑
+
+- **变体顺序即优先级。** native 必须排在 fallback 前，否则只约束 language 的 fallback 会先把所有 Agent 抢走，claude/codex 永远走不到原生分支。
+- **兜底提示必须显式「降级」`/goal` 那行。** 前缀 `/goal ...` 是无条件拼上去的（由 `preludeTemplate` 决定），所以兜底 system 提示里那句「把它当元数据、别逐字执行」不能省，否则非原生 Agent 可能把它当无效命令处理。
+- **非交互约束要写进每套模板。** `goal` 是排队执行的 auto-task，模板里反复强调「不要用 AskUserQuestion、不要追问、用合理假设继续并写明」，就是防止 Agent 在无人值守时卡在等待输入。
+- **仓库边界靠提示约束，不是靠沙箱。** 模板明确要求「仅在显式选择为可写的仓库内修改，只读仓库当补充上下文」。这属于提示层的软约束，选仓库范围时要认真填。
+- **向后兼容有免费午餐。** 老预设不写 `variants`、只写 `locales` 时，`UsesVariants` 为 false，直接走 `legacy-locales` 路径，完全不受影响，不用为了新模型改存量预设。
+
+## 总结
+
+「如果 Agent 原生不支持 `goal`，我们怎么扩展来实现」——答案不是给每个 Agent 写死一堆分支，而是把差异建模成 `agent × language` 的提示变体：
+
+- 原生支持的 Agent（Claude / Codex）走 native 变体，直接用 `/goal` 命令表面；
+- 不支持的 Agent 走 fallback 变体，把 `/goal ...` 显式降级为目标元数据，用普通提示跟随复现同样的持续工作行为；
+- 匹配靠「变体声明哪些 selector 就必须命中哪些」的通用规则 + 逐级兜底，后端一次解析定型；
+- 准入从 allowlist 放宽到 `any`，兼容性从「能不能跑」变成「用哪套提示跑」。
+
+这套设计的价值不只在 `goal` 一个预设上：`agent × language` 的选择器 + 兜底模型是通用的，任何需要「按 Agent 能力给不同指令」的预设都能复用，而且对老预设零打扰。
+
+{/* HAGICLAW_PROGRAMMATIC_ENDING */}
+
+## 参考资料
+
+- 预设包：`repos/hagitask/presets/goal/`（`manifest.json`、`backend/task-preset.json`、`backend/prompts.json`、`backend/templates/{en-US,zh-CN}/{native,fallback}.*`、`frontend/commands.json`、`frontend/panel.json`）
+- 提示包 schema：`repos/hagitask/schemas/task-preset-plugin/prompt-package.schema.json`
+- 后端变体解析：`repos/hagicode-core/src/PCode.Application/Services/PresetTaskCatalogProvider.cs`（`ResolvePromptSelection` / `VariantMatches` / `RenderPrompt` / `BuildCommandPrelude`）
+- Agent 家族映射：`repos/hagicode-core/src/PCode.Application/Services/PresetTaskRequirementModels.cs`（`PresetTaskAgentFamilies.Resolve`）
+- 会话创建：`repos/hagicode-core/src/PCode.HttpApi/Controllers/SessionsController.PresetTasks.cs`
+- OpenSpec 能力与提案：`openspec/specs/goal-preset-task/spec.md`、`openspec/changes/archive/2026-06-23-preset-task-agent-requirement-support/`、`openspec/changes/archive/2026-06-26-support-agent-language-prompt-selection-in-hagitask/`
