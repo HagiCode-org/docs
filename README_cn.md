@@ -122,27 +122,27 @@ npm run report:blog-translation
 
 `npm run report:translation` 会生成组合报表 `.tmp/translation-report.json`，并同时刷新 `.tmp/docs-translation-report.json` 与 `.tmp/blog-translation-report.json`。组合报表会按语言汇总中文基线文档页和博客 slug 的覆盖率，以及缺失、重复和高相似度问题。
 
-### Claude CLI 自动补翻译
+### Pi CLI 自动补翻译
 
-如果你想直接基于 zh-CN 原文，用本地 Claude CLI 自动补齐缺失翻译，可以运行：
+如果你想直接基于 zh-CN 原文，用本地 Pi CLI 自动补齐缺失翻译，可以运行：
 
 ```bash
-npm run translate:missing:claude
+npm run translate:missing:pi
 ```
 
 默认只处理报表里仍然是 **missing** 的条目。如果还想把那些和 zh-CN 原文完全重复的翻译文件也重写一遍，可以运行：
 
 ```bash
-npm run translate:missing:claude -- --include-duplicates
+npm run translate:missing:pi -- --include-duplicates
 ```
 
 常用筛选方式：
 
 ```bash
-npm run translate:missing:claude -- --surface blog --locales en-US,ja-JP --limit 5 --dry-run
+npm run translate:missing:pi -- --surface blog --locales en-US,ja-JP --limit 5 --dry-run
 ```
 
-这个流程调用本地 `claude` CLI，直接根据仓库里的 Markdown/MDX 原文进行翻译，不依赖额外的机器翻译 API。脚本会把文档翻译写到 `src/content/translations/docs/<locale>/...`；博客翻译目前按现有博客报表布局写到 `src/content/docs/<locale>/blog/...`。
+这个流程调用本地 `pi` CLI，直接根据仓库里的 Markdown/MDX 原文进行翻译，不依赖额外的机器翻译 API。默认模型是 `gh/gpt-codex-5.3`（可通过 `--model` 或 `PI_MODEL` 覆盖）。脚本会把文档翻译写到 `src/content/translations/docs/<locale>/...`；博客翻译目前按现有博客报表布局写到 `src/content/docs/<locale>/blog/...`。
 
 ## 截图分析工作流
 

@@ -123,27 +123,27 @@ npm run report:blog-translation
 
 `npm run report:translation` writes a combined summary to `.tmp/translation-report.json` and refreshes the per-surface JSON reports in `.tmp/docs-translation-report.json` and `.tmp/blog-translation-report.json`. The combined output shows per-locale coverage for baseline Chinese docs pages and blog slugs, plus missing, duplicate, and high-similarity findings.
 
-### Claude CLI translation autofill
+### Pi CLI translation autofill
 
-To fill missing translations directly from the zh-CN source content with the local Claude CLI, run:
+To fill missing translations directly from the zh-CN source content with the local Pi CLI, run:
 
 ```bash
-npm run translate:missing:claude
+npm run translate:missing:pi
 ```
 
 Default behavior only creates files for entries that are still **missing** in the translation reports. To also rewrite files that are flagged as exact duplicates of the zh-CN baseline, run:
 
 ```bash
-npm run translate:missing:claude -- --include-duplicates
+npm run translate:missing:pi -- --include-duplicates
 ```
 
 Useful filters:
 
 ```bash
-npm run translate:missing:claude -- --surface blog --locales en-US,ja-JP --limit 5 --dry-run
+npm run translate:missing:pi -- --surface blog --locales en-US,ja-JP --limit 5 --dry-run
 ```
 
-This workflow calls the local `claude` CLI and asks it to translate Markdown/MDX directly from the repository source files. It does not use a separate machine-translation API. The script writes docs translations to `src/content/translations/docs/<locale>/...`; blog translations currently follow the blog report layout under `src/content/docs/<locale>/blog/...`.
+This workflow calls local `pi` CLI and asks it to translate Markdown/MDX directly from repository source files. It does not use separate machine-translation API. Default model is `gh/gpt-codex-5.3` (override with `--model` or `PI_MODEL`). Script writes docs translations to `src/content/translations/docs/<locale>/...`; blog translations currently follow blog report layout under `src/content/docs/<locale>/blog/...`.
 
 ## Screenshot analysis workflow
 
