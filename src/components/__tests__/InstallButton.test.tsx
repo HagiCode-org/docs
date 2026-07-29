@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { AssetType, CpuArchitecture } from '@shared/desktop';
 import type { DesktopVersionData } from '@shared/version-manager';
+import { groupAssetsByPlatform } from '@shared/desktop-utils';
 import * as steamStoreLink from '@shared/steam-store-link';
 import * as versionManager from '@shared/version-manager';
 import InstallButton, { filterSupportedPlatformGroups } from '../InstallButton';
@@ -84,6 +85,38 @@ function createVersionData(overrides: Partial<DesktopVersionData> = {}): Desktop
     ...overrides,
   };
 }
+const unsignedVersion = {
+  version: 'v0.1.77',
+  assets: [
+    {
+      name: 'Hagicode.Desktop-0.1.77-arm64-unsigned.dmg',
+      path: 'v0.1.77/Hagicode.Desktop-0.1.77-arm64-unsigned.dmg',
+      size: 265383481,
+      lastModified: null,
+    },
+    {
+      name: 'Hagicode.Desktop-unsigned.msix',
+      path: 'v0.1.77/Hagicode.Desktop-unsigned.msix',
+      size: 1048576,
+      lastModified: null,
+    },
+    {
+      name: 'Hagicode.Desktop.0.1.77-unsigned.exe',
+      path: 'v0.1.77/Hagicode.Desktop.0.1.77-unsigned.exe',
+      size: 1048576,
+      lastModified: null,
+    },
+    {
+      name: 'Hagicode.Desktop.Setup.0.1.77-unsigned.exe',
+      path: 'v0.1.77/Hagicode.Desktop.Setup.0.1.77-unsigned.exe',
+      size: 1048576,
+      lastModified: null,
+    },
+  ],
+};
+
+const unsignedPlatformGroups = groupAssetsByPlatform(unsignedVersion.assets);
+
 
 describe('InstallButton runtime states', () => {
   const assignMock = vi.fn();
@@ -137,6 +170,18 @@ describe('InstallButton runtime states', () => {
     );
   });
 
+  it('keeps v0.1.77 unsigned desktop assets in platform groups', () => {
+    expect(unsignedPlatformGroups.map((group) => group.platform)).toEqual(['macos', 'windows']);
+    expect(unsignedPlatformGroups[0]?.downloads.map((download) => download.filename)).toEqual([
+      'Hagicode.Desktop-0.1.77-arm64-unsigned.dmg',
+    ]);
+    expect(unsignedPlatformGroups[1]?.downloads.map((download) => download.filename)).toEqual([
+      'Hagicode.Desktop.Setup.0.1.77-unsigned.exe',
+      'Hagicode.Desktop-unsigned.msix',
+      'Hagicode.Desktop.0.1.77-unsigned.exe',
+    ]);
+  });
+
   it('promotes Microsoft Store as the primary Windows CTA and hides duplicate shortcuts', async () => {
     window.history.replaceState({}, '', '/?os=windows');
     vi.mocked(versionManager.getDesktopVersionData).mockResolvedValue(
@@ -164,6 +209,7 @@ describe('InstallButton runtime states', () => {
                 },
               ],
             },
+
           ],
         },
         channels: {
