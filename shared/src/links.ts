@@ -206,7 +206,7 @@ function localizeAbsoluteUrl(input: string, locale?: string): string {
 
     const url = new URL(input);
 
-    if (url.hostname === 'hagicode.com') {
+    if (url.hostname === 'www.hagicode.com') {
         url.pathname = getLocalizedSitePath(url.pathname, locale);
         return url.toString();
     }
@@ -234,8 +234,8 @@ export const SITE_LINKS = {
 
     /** 官方营销站点 */
     website: {
-        dev: 'https://hagicode.com/', // 使用生产 URL（跨仓库链接）
-        prod: 'https://hagicode.com/',
+        dev: 'https://www.hagicode.com/', // 使用生产 URL（跨仓库链接）
+        prod: 'https://www.hagicode.com/',
         external: false,
     } as LinkConfig,
 
@@ -276,8 +276,8 @@ export const SITE_LINKS = {
 
     /** 桌面应用下载页 */
     desktop: {
-        dev: 'https://hagicode.com/desktop/', // 使用生产 URL（跨仓库链接）
-        prod: 'https://hagicode.com/desktop/',
+        dev: 'https://www.hagicode.com/desktop/', // 使用生产 URL（跨仓库链接）
+        prod: 'https://www.hagicode.com/desktop/',
         external: false,
     } as LinkConfig,
 
@@ -290,15 +290,15 @@ export const SITE_LINKS = {
 
     /** 容器部署落地页 */
     container: {
-        dev: 'https://hagicode.com/container/', // 使用生产 URL（跨仓库链接）
-        prod: 'https://hagicode.com/container/',
+        dev: 'https://www.hagicode.com/container/', // 使用生产 URL（跨仓库链接）
+        prod: 'https://www.hagicode.com/container/',
         external: false,
     } as LinkConfig,
 
     /** 官方 About 页面 */
     about: {
-        dev: 'https://hagicode.com/about/',
-        prod: 'https://hagicode.com/about/',
+        dev: 'https://www.hagicode.com/about/',
+        prod: 'https://www.hagicode.com/about/',
         external: false,
     } as LinkConfig,
 

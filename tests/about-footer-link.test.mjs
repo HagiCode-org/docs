@@ -17,7 +17,7 @@ test('docs link registry keeps a canonical about entry that points to the site-o
 
   assert.match(
     linksSource,
-    /about:\s*\{\s*dev:\s*'https:\/\/hagicode\.com\/about\/',\s*prod:\s*'https:\/\/hagicode\.com\/about\/'/s,
+    /about:\s*\{\s*dev:\s*'https:\/\/www\.hagicode\.com\/about\/',\s*prod:\s*'https:\/\/www\.hagicode\.com\/about\/'/s,
   );
   assert.equal(linksSource.includes('repos/site'), false);
 });
@@ -27,7 +27,7 @@ test('docs footer exposes the local about link entry without importing the site 
 
   assert.match(footerSource, /import DocsPromoteInfoBanner from '\.\/DocsPromoteInfoBanner\.astro';/);
   assert.match(footerSource, /<DocsPromoteInfoBanner locale=\{Astro\.locals\?\.starlightRoute\?\.locale\} \/>/);
-  assert.match(footerSource, /const aboutLink = getLink\('about'\);/);
+  assert.match(footerSource, /const aboutLink = getLinkWithLocale\('about', docsLocale\);/);
   assert.match(footerSource, /const relatedSiteLinks = resolveDocsFooterSiteLinks/);
   assert.match(footerSource, /const footerCopy = getDocsFooterCopy\(currentRouteLocale\);/);
   assert.match(footerSource, /<h3 class="unified-footer-section-title">\{footerCopy\.sections\.ecosystemSites\}<\/h3>/);
@@ -43,7 +43,7 @@ test('docs header navigation reuses the shared about link registry and keeps dis
 
   assert.match(navigationSource, /href:\s*getLink\('about'\)/);
   assert.match(navigationSource, /linkKey:\s*'about'/);
-  assert.equal(navigationSource.includes('https://hagicode.com/about/'), false);
+  assert.equal(navigationSource.includes('https://www.hagicode.com/about/'), false);
   assert.match(footerSource, /const discordLink = getLink\('discord'\);/);
   assert.match(
     footerSource,
