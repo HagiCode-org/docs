@@ -45,5 +45,5 @@ npm run verify:blog
 ## References
 
 - `README.md`
-- `illustration-management.md`
+- `DESIGN.md`
 - `scripts/`
