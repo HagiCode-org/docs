@@ -26,6 +26,8 @@ describe('AI disclosure layout', () => {
   it('supports both filtered and unfiltered notice rendering', () => {
     expect(disclosureNotices).toContain("filter?: 'author' | 'translation'");
     expect(disclosureNotices).toContain('filter ? notices.filter((notice) => notice.kind === filter) : notices');
+    expect(disclosureNotices).toContain("data-ai-disclosure-filter='translation'");
+    expect(disclosureNotices).toContain('margin-top: 1.25rem');
   });
 
   it('keeps translation suppression and source-link resolution in the shared builder', () => {
