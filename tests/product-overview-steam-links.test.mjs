@@ -6,42 +6,41 @@ import { fileURLToPath } from 'node:url';
 
 const docsRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-const BASE_STEAM_URL = 'https://store.steampowered.com/app/4625540/Hagicode/';
 const TURBO_ENGINE_STEAM_URL = 'https://store.steampowered.com/app/4635480/Hagicode__Turbo_Engine/';
-const HAGICODE_PLUS_BUNDLE_URL = 'https://store.steampowered.com/bundle/73989/Hagicode_Plus/';
+const OVERVIEW_LOCALES = ['en-US', 'zh-Hant', 'fr-FR', 'de-DE', 'es-ES', 'ja-JP', 'ko-KR', 'pt-BR', 'ru-RU'];
 
 function resolveDocsPath(relativePath) {
   return path.join(docsRoot, relativePath);
-}
-
-function countOccurrences(source, value) {
-  return source.split(value).length - 1;
 }
 
 function readSteamUrls(source) {
   return source.match(/https:\/\/store\.steampowered\.com\/app\/\d+\/[A-Za-z_]+\/?/g) ?? [];
 }
 
-test('product overview pages keep the generic Steam entry on the base app while routing Hagicode Plus to the bundle page', async () => {
-  const [zhSource, enSource] = await Promise.all([
+test('product overview pages guide readers to current installation and pricing details without Steam purchase links', async () => {
+  const sources = await Promise.all([
     readFile(resolveDocsPath('src/content/docs/product-overview.mdx'), 'utf8'),
-    readFile(resolveDocsPath('src/content/translations/docs/en-US/product-overview.mdx'), 'utf8'),
+    ...OVERVIEW_LOCALES.map((locale) =>
+      readFile(resolveDocsPath(`src/content/translations/docs/${locale}/product-overview.mdx`), 'utf8')),
   ]);
 
-  for (const source of [zhSource, enSource]) {
-    assert.equal(countOccurrences(source, BASE_STEAM_URL), 3);
-    assert.equal(countOccurrences(source, TURBO_ENGINE_STEAM_URL), 1);
-    assert.equal(countOccurrences(source, HAGICODE_PLUS_BUNDLE_URL), 1);
+  for (const [index, source] of sources.entries()) {
+    const localePrefix = index === 0 ? '' : `/${OVERVIEW_LOCALES[index - 1]}`;
+    assert.doesNotMatch(source, /https:\/\/store\.steampowered\.com\//);
+    assert.match(source, new RegExp(`href="${localePrefix}/installation/?"`));
+    assert.ok(source.includes(`${localePrefix}/dlc/turbo-engine-dlc`));
+    assert.ok(source.includes(`${localePrefix}/faq/steam-distribution-status`));
   }
 });
 
 test('product overview pages do not embed product artwork or standalone preview sections', async () => {
-  const [zhSource, enSource] = await Promise.all([
+  const sources = await Promise.all([
     readFile(resolveDocsPath('src/content/docs/product-overview.mdx'), 'utf8'),
-    readFile(resolveDocsPath('src/content/translations/docs/en-US/product-overview.mdx'), 'utf8'),
+    ...OVERVIEW_LOCALES.map((locale) =>
+      readFile(resolveDocsPath(`src/content/translations/docs/${locale}/product-overview.mdx`), 'utf8')),
   ]);
 
-  for (const source of [zhSource, enSource]) {
+  for (const source of sources) {
     assert.doesNotMatch(source, /SteamProductArtwork/);
     assert.doesNotMatch(source, /steamProducts\['hagicode-plus'\]/);
     assert.doesNotMatch(source, /steamProducts\['turbo-engine'\]/);
