@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 
 import {
   resolveDocsMicrosoftStoreBadgeLanguage,
@@ -26,6 +26,16 @@ export default function MicrosoftStoreBadge({
   badgeClassName,
   badgeAttributes,
 }: MicrosoftStoreBadgeProps) {
+  useEffect(() => {
+    const src = 'https://get.microsoft.com/badge/ms-store-badge.bundled.js';
+    if (!document.querySelector(`script[src="${src}"]`)) {
+      const script = document.createElement('script');
+      script.type = 'module';
+      script.src = src;
+      document.head.appendChild(script);
+    }
+  }, []);
+
   return (
     <span className={className}>
       {React.createElement('ms-store-badge', {

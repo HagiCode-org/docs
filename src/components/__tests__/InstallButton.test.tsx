@@ -10,10 +10,18 @@ import { groupAssetsByPlatform } from '@shared/desktop-utils';
 import * as steamStoreLink from '@shared/steam-store-link';
 import * as versionManager from '@shared/version-manager';
 import InstallButton, { filterSupportedPlatformGroups } from '../InstallButton';
+import MicrosoftStoreBadge from '../MicrosoftStoreBadge';
 
 const fallbackUrl = 'https://index.hagicode.com/desktop/history/';
 const windowsStoreUrl = 'https://apps.microsoft.com/detail/9N3PM0N3SVDW';
 const fallbackSteamUrl = 'https://store.steampowered.com/app/4625540/Hagicode/';
+
+it('loads the Microsoft Store badge script only when a badge is rendered', () => {
+  const src = 'https://get.microsoft.com/badge/ms-store-badge.bundled.js';
+  render(<><MicrosoftStoreBadge /><MicrosoftStoreBadge /></>);
+  expect(document.querySelectorAll(`script[src="${src}"]`)).toHaveLength(1);
+  document.querySelector(`script[src="${src}"]`)?.remove();
+});
 vi.mock('@shared/version-manager', async () => {
   const actual = await vi.importActual<typeof import('@shared/version-manager')>('@shared/version-manager');
   return {
