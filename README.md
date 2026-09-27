@@ -111,6 +111,14 @@ hagi18n manages docs UI strings, blog plugin UI labels, Starlight locale metadat
 
 When adding or updating localized docs, keep the canonical doc key identical to the baseline file path and use canonical locale directory names such as `en-US`, `ja-JP`, or `zh-Hant`.
 
+### Shared Starlight presentation
+
+Hagilight 0.2.2 owns the Starlight header, footer, language chooser, reading-width control, AI disclosures, article promotion, and 404 recovery. Docs maps its generated locale routes and labels onto Hagilight's locale catalog by `lang`, preserving the `root` Chinese route and `/en-US/` path. Docs also keeps the localized promotion fallback and `PageFrame` composition, site metadata and analytics, AI frontmatter defaults, and blog-specific metadata, ads, CTA, and image lightbox.
+
+Documentation pages show Hagilight's article promotion by default. Set `hagicodePromotion: false` in frontmatter to opt out. Blog posts opt out by default to avoid competing with blog promotions; set `hagicodePromotion: true` to enable the article promotion on an individual post. Existing `isAITranslation`, `isAIAuthor`, `hideAd`, and `hideCta` frontmatter controls remain supported.
+
+After building, `npm run verify:hagilight-build` checks localized navigation, preference migration, shared shell composition, blog and release-note content, 404 recovery, and standalone redirects.
+
 ### Translation coverage reports
 
 Use these commands to see which docs pages, blog posts, or locales are still untranslated:
