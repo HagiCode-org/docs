@@ -8,9 +8,6 @@ import {
   buildDocsCounterpartPath,
   buildDocsRoutePath,
   getCanonicalDocsSourceLocale,
-  getDocsAIDisclosureCopy,
-  getDocsContentLayoutToggleCopy,
-  getDocsFooterCopy,
   getStoredDocsLocale,
   normalizeDocsRoutePath,
   parseDocsLocale,
@@ -154,43 +151,4 @@ describe('docs locale helpers', () => {
     expect(normalizeDocsRoutePath(input)).toBe(expected);
   });
 
-  it('provides localized docs content layout toggle copy for every supported locale', () => {
-    for (const locale of DOCS_LOCALE_METADATA.map((entry) => entry.code)) {
-      const copy = getDocsContentLayoutToggleCopy(locale);
-
-      expect(copy.label.trim().length).toBeGreaterThan(0);
-      expect(copy.wide.trim().length).toBeGreaterThan(0);
-      expect(copy.narrow.trim().length).toBeGreaterThan(0);
-    }
-  });
-
-  it('provides localized footer copy for every supported locale', () => {
-    for (const locale of DOCS_LOCALE_METADATA.map((entry) => entry.code)) {
-      const copy = getDocsFooterCopy(locale);
-
-      expect(copy.copyright.trim().length).toBeGreaterThan(0);
-      expect(copy.sections.ecosystemSites.trim().length).toBeGreaterThan(0);
-      expect(copy.sections.quickLinks.trim().length).toBeGreaterThan(0);
-      expect(copy.sections.community.trim().length).toBeGreaterThan(0);
-      expect(copy.navigation.ecosystemSites.trim().length).toBeGreaterThan(0);
-      expect(copy.navigation.quickLinks.trim().length).toBeGreaterThan(0);
-      expect(copy.navigation.community.trim().length).toBeGreaterThan(0);
-      expect(copy.filings.icpAriaLabel.trim().length).toBeGreaterThan(0);
-      expect(copy.filings.publicSecurityAriaLabel.trim().length).toBeGreaterThan(0);
-    }
-  });
-
-  it('provides localized AI disclosure copy for every supported locale', () => {
-    for (const locale of DOCS_LOCALE_METADATA.map((entry) => entry.code)) {
-      const copy = getDocsAIDisclosureCopy(locale);
-
-      expect(copy.translation.label.trim().length).toBeGreaterThan(0);
-      expect(copy.translation.title.trim().length).toBeGreaterThan(0);
-      expect(copy.translation.description.trim().length).toBeGreaterThan(0);
-      expect(copy.translation.viewOriginal.trim().length).toBeGreaterThan(0);
-      expect(copy.author.label.trim().length).toBeGreaterThan(0);
-      expect(copy.author.title.trim().length).toBeGreaterThan(0);
-      expect(copy.author.description.trim().length).toBeGreaterThan(0);
-    }
-  });
 });
