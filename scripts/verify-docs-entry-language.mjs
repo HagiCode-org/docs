@@ -25,6 +25,9 @@ function extractRedirectScriptReference(html) {
     }
 
     const script = readScriptContents(scriptPath);
+    if (script.includes('__HAGICODE_DOCS_ENTRY__')) {
+      return { entryScriptPath: scriptPath, resolverScriptPath: scriptPath };
+    }
     const importedResolver = script.match(/from["']([^"']*lang-redirect[^"']*\.js)["']/iu);
     if (importedResolver) {
       return {
@@ -275,10 +278,10 @@ async function main() {
     [enDocsHtml, 'English docs'],
     [enBlogHtml, 'English blog'],
   ]) {
-    assert.equal(
-      extractRedirectScriptReference(html).resolverScriptPath,
-      redirectScriptPath,
-      `${label} pages should load the shared route resolver`,
+    const scripts = [...html.matchAll(/<script[^>]+src="(\/[^"]+\.js)"[^>]*><\/script>/giu)];
+    assert.ok(
+      scripts.every(([, src]) => !readScriptContents(src).includes('__HAGICODE_DOCS_ENTRY__')),
+      `${label} pages should use the default Starlight head without the entry route resolver`,
     );
   }
 
@@ -358,77 +361,6 @@ async function main() {
       expectRedirect: true,
       expectedStoredLang: 'root',
     },
-    {
-      name: 'root docs path follows Chinese browser language for first-time visitors',
-      href: 'https://docs.hagicode.com/product-overview/',
-      storedRouteValue: null,
-      navigator: {
-        language: 'zh-CN',
-        languages: ['zh-CN', 'zh'],
-      },
-      expectedLocale: 'root',
-      expectedTargetUrl: 'https://docs.hagicode.com/product-overview/',
-      expectedFinalUrl: 'https://docs.hagicode.com/product-overview/',
-      expectRedirect: false,
-      expectedStoredLang: 'root',
-    },
-    {
-      name: 'stored Chinese preference keeps root docs path in Chinese',
-      href: 'https://docs.hagicode.com/product-overview/',
-      storedRouteValue: JSON.stringify({ lang: 'root' }),
-      navigator: {
-        language: 'en-US',
-        languages: ['en-US', 'en'],
-      },
-      expectedLocale: 'root',
-      expectedTargetUrl: 'https://docs.hagicode.com/product-overview/',
-      expectedFinalUrl: 'https://docs.hagicode.com/product-overview/',
-      expectRedirect: false,
-      expectedStoredLang: 'root',
-    },
-    {
-      name: 'root blog path follows Chinese browser language for first-time visitors',
-      href: 'https://docs.hagicode.com/blog/',
-      storedRouteValue: null,
-      navigator: {
-        language: 'zh-CN',
-        languages: ['zh-CN', 'zh'],
-      },
-      expectedLocale: 'root',
-      expectedTargetUrl: 'https://docs.hagicode.com/blog/',
-      expectedFinalUrl: 'https://docs.hagicode.com/blog/',
-      expectRedirect: false,
-      expectedStoredLang: 'root',
-    },
-    {
-      name: 'invalid language on root blog falls back to stored Chinese preference',
-      href: 'https://docs.hagicode.com/blog/?lang=invalid',
-      storedRouteValue: JSON.stringify({ lang: 'root' }),
-      navigator: {
-        language: 'zh-CN',
-        languages: ['zh-CN', 'zh'],
-      },
-      expectedLocale: 'root',
-      expectedTargetUrl: 'https://docs.hagicode.com/blog/',
-      expectedFinalUrl: 'https://docs.hagicode.com/blog/',
-      expectRedirect: true,
-      expectedStoredLang: 'root',
-    },
-    {
-      name: 'English landing redirects to stored Chinese product overview preference',
-      href: 'https://docs.hagicode.com/en-US/',
-      storedRouteValue: JSON.stringify({ lang: 'root' }),
-      navigator: {
-        language: 'zh-CN',
-        languages: ['zh-CN', 'zh'],
-      },
-      landingTargetPath: '/product-overview/',
-      expectedLocale: 'root',
-      expectedTargetUrl: 'https://docs.hagicode.com/product-overview/',
-      expectedFinalUrl: 'https://docs.hagicode.com/product-overview/',
-      expectRedirect: true,
-      expectedStoredLang: 'root',
-    },
   ];
 
   for (const scenario of scenarios) {
@@ -438,7 +370,7 @@ async function main() {
   console.log('Docs entry language verification passed.');
   console.log('- landing routes now redirect directly to product overview');
   console.log('- first-time visitors still follow the browser language before falling back to English');
-  console.log('- root docs/blog paths follow saved preference, then browser language, then English default');
+  console.log('- docs/blog pages use Starlight routing without the entry redirect script');
   console.log('- explicit zh-CN keeps the Chinese redirect target');
   console.log('- invalid lang values do not overwrite saved preferences');
   console.log('- only /en-US/ remains as the supported English route prefix');

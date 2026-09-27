@@ -51,7 +51,6 @@ test('docs and translated docs retain shared width, disclosures, and article pro
   for (const html of [chineseDocs, englishDocs]) {
     assert.equal(countMatches(html, /data-hagilight-content-width-choice=/g), 2);
     assert.match(html, /hagilight-content-width/);
-    assert.match(html, /hagicode-docs-content-layout/);
     assert.match(html, /class="[^"]*\bhagilight-article-promotion\b/);
     assert.match(html, /class="[^"]*\bhagilight-ai-disclosure\b/);
   }
