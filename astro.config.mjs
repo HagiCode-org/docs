@@ -102,12 +102,6 @@ export default defineConfig({
       'import.meta.env.PROD': JSON.stringify(
         resolvedNodeEnv === 'production'
       ),
-      "import.meta.env.VITE_CLARITY_PROJECT_ID": JSON.stringify(
-        process.env.VITE_CLARITY_PROJECT_ID || "",
-      ),
-      "import.meta.env.VITE_CLARITY_DEBUG": JSON.stringify(
-        process.env.VITE_CLARITY_DEBUG || "",
-      ),
     },
   },
   integrations: [
@@ -132,7 +126,6 @@ export default defineConfig({
         },
       ],
       components: {
-        Head: "./src/components/StarlightHead.astro",
         EditLink: "./src/components/StarlightEditLink.astro",
         PageTitle: "./src/components/StarlightPageTitle.astro",
         TableOfContents: "./src/components/StarlightTableOfContents.astro",
