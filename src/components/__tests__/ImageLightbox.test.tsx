@@ -69,7 +69,7 @@ function renderSubject() {
 }
 
 async function openLightbox(layout: 'wide' | 'narrow') {
-  document.documentElement.setAttribute('data-docs-content-layout', layout);
+  document.documentElement.setAttribute('data-hagilight-content-width', layout);
 
   const image = renderSubject();
 
@@ -88,7 +88,7 @@ describe('ImageLightbox default zoom behavior', () => {
   beforeEach(() => {
     lightboxMockState.changeZoom.mockReset();
     document.body.innerHTML = '';
-    document.documentElement.removeAttribute('data-docs-content-layout');
+    document.documentElement.removeAttribute('data-hagilight-content-width');
 
     vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
       callback(0);
@@ -100,7 +100,7 @@ describe('ImageLightbox default zoom behavior', () => {
   afterEach(() => {
     cleanup();
     vi.unstubAllGlobals();
-    document.documentElement.removeAttribute('data-docs-content-layout');
+    document.documentElement.removeAttribute('data-hagilight-content-width');
   });
 
   it('does not apply the extra default zoom in wide layout', async () => {

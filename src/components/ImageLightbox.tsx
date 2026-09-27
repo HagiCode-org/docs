@@ -23,11 +23,6 @@ import 'yet-another-react-lightbox/styles.css';
 import 'yet-another-react-lightbox/plugins/captions.css';
 import 'yet-another-react-lightbox/plugins/counter.css';
 
-import {
-  DOCS_CONTENT_LAYOUT_ATTRIBUTE,
-  DOCS_CONTENT_LAYOUT_WIDE,
-} from '../lib/docs-content-layout.mjs';
-
 interface Slide {
   src: string;
   alt: string;
@@ -51,6 +46,7 @@ interface ImageLightboxProps {
 const DEFAULT_CONTENT_SELECTOR = 'article, .sl-markdown-content, [role="main"]';
 const LIGHTBOX_ROOT_CLASS = 'docs-image-lightbox';
 const INTERACTIVE_IMAGE_ATTRIBUTE = 'data-docs-lightbox-trigger';
+const CONTENT_WIDTH_ATTRIBUTE = 'data-hagilight-content-width';
 const INTERACTIVE_IMAGE_CSS = `
   img[${INTERACTIVE_IMAGE_ATTRIBUTE}='true'] {
     cursor: pointer;
@@ -154,7 +150,7 @@ function containsRelevantImageNode(node: Node): boolean {
 }
 
 function isWideDocsContentLayout(root: Element | null = document.documentElement): boolean {
-  return root?.getAttribute(DOCS_CONTENT_LAYOUT_ATTRIBUTE) === DOCS_CONTENT_LAYOUT_WIDE;
+  return root?.getAttribute(CONTENT_WIDTH_ATTRIBUTE) === 'wide';
 }
 
 function useImageDetection(options: DetectionOptions = {}): Slide[] {

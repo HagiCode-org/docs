@@ -4,8 +4,14 @@
  * 使用共享链接库管理站点间跳转和公共链接
  * 支持中英文双语显示
  */
-import { getLink, getLinkRel, getLinkTarget, getLinkWithLocale, type PublicLinkKey } from '@shared/links';
-import { buildDocsRoutePath, resolveDocsLocale, type DocsLocale } from '@/lib/i18n';
+import {
+  getLink,
+  getLinkRel,
+  getLinkTarget,
+  getLinkWithLocale,
+  type PublicLinkKey,
+} from '../../shared/src/links';
+import { buildDocsRoutePath, resolveDocsLocale, type DocsLocale } from '../lib/i18n';
 
 /**
  * 导航链接接口

@@ -46,12 +46,12 @@ function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-function hasLabelText(html, label) {
+function hasLinkText(html, href, label) {
   const pattern = new RegExp(
-    `<span[^>]*class=["'][^"']*\\blabel\\b[^"']*["'][^>]*>\\s*${escapeRegExp(label)}\\s*<\\/span>`,
-    'i'
+    `<a\\b(?=[^>]*\\bhref=["']${escapeRegExp(href)}["'])[^>]*>([\\s\\S]*?)<\\/a>`,
+    'gi'
   );
-  return pattern.test(html);
+  return Array.from(html.matchAll(pattern)).some((match) => normalizeText(match[1]) === label);
 }
 
 function hasUnresolvedBlogI18nKey(html) {
@@ -95,7 +95,7 @@ function verifyNavigation() {
 
   runCheck('zh_blog_label', zhRoute, () => {
     assert(
-      hasLabelText(zhBlogIndex, '博客'),
+      hasLinkText(zhBlogIndex, '/blog/', '博客'),
       'Chinese blog index is missing localized Blog label "博客".',
       zhRoute
     );
@@ -103,7 +103,7 @@ function verifyNavigation() {
 
   runCheck('en_blog_label', enRoute, () => {
     assert(
-      hasLabelText(enBlogIndex, 'Blog'),
+      hasLinkText(enBlogIndex, '/en-US/blog/', 'Blog'),
       'English blog index is missing localized Blog label "Blog".',
       enRoute
     );

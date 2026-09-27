@@ -9,15 +9,19 @@ import {
   stripLeadingSlash,
   stripTrailingSlash,
 } from '../../../node_modules/starlight-blog/libs/path.ts';
-import { remarkStarlightBlog } from '../../../node_modules/starlight-blog/libs/remark.ts';
-import { vitePluginStarlightBlogConfig } from '../../../node_modules/starlight-blog/libs/vite.ts';
+import { applyMarkdownPlugin } from '../../../node_modules/starlight-blog/libs/processor.ts';
+import { vitePluginStarlightBlog } from '../../../node_modules/starlight-blog/libs/vite.ts';
 import { Translations } from '../../../node_modules/starlight-blog/translations.ts';
 
 const LOCAL_MIDDLEWARE = './src/integrations/starlight-blog-no-tags/middleware.mjs';
 const LOCAL_ROUTES_BASE = './src/integrations/starlight-blog-no-tags/routes';
 
 export default function starlightBlogPlugin(userConfig) {
-  const config = validateConfig(userConfig);
+  const configs = validateConfig(userConfig);
+  const config = configs[0];
+  if (!config) {
+    throw new Error('The Docs blog integration requires at least one starlight-blog configuration.');
+  }
 
   return {
     name: 'starlight-blog-no-tags',
@@ -107,23 +111,13 @@ export default function starlightBlogPlugin(userConfig) {
               }
 
               updateConfig({
-                markdown: {
-                  remarkPlugins: [[remarkStarlightBlog]],
-                },
                 vite: {
                   plugins: [
-                    vitePluginStarlightBlogConfig(config, {
-                      description: starlightConfig.description,
-                      rootDir: astroConfig.root.pathname,
-                      site: astroConfig.site,
-                      srcDir: astroConfig.srcDir.pathname,
-                      title: starlightConfig.title,
-                      titleDelimiter: starlightConfig.titleDelimiter,
-                      trailingSlash: astroConfig.trailingSlash,
-                    }),
+                    vitePluginStarlightBlog(configs, starlightConfig, astroConfig),
                   ],
                 },
               });
+              applyMarkdownPlugin(astroConfig.markdown.processor);
             },
           },
         });

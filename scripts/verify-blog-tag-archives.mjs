@@ -30,20 +30,35 @@ function runCheck(name, route, fn) {
   }
 }
 
-function verifyNoTagDirectory(relativePath) {
+function verifyTagIndex(relativePath) {
   const fullPath = path.join(distDir, relativePath);
 
-  runCheck('tag_archive_directory_removed', relativePath, () => {
-    assert(!fs.existsSync(fullPath), relativePath, `Tag archive output should not exist: ${relativePath}`);
+  runCheck('tag_index_rendered', relativePath, () => {
+    const html = readDistFile(path.posix.join(relativePath, 'index.html'));
+    assert(html.includes('tag-directory'), relativePath, `Tag directory is missing from ${relativePath}.`);
+    assert(html.includes('tag-section'), relativePath, `Tag sections are missing from ${relativePath}.`);
+  });
+
+  runCheck('per_tag_archive_routes_removed', relativePath, () => {
+    assert(
+      !fs.readdirSync(fullPath, { withFileTypes: true }).some((entry) => entry.isDirectory()),
+      relativePath,
+      `Per-tag archive directories should not exist under ${relativePath}.`,
+    );
   });
 }
 
-function verifyNoTagLinks(route) {
+function verifyTagIndexLinks(route, expectedPrefix) {
   const html = readDistFile(route);
+  const tagLinks = [...html.matchAll(/href="([^"]*\/blog\/tags\/[^"]*)"/gu)].map((match) => match[1]);
 
-  runCheck('tag_links_removed', route, () => {
-    assert(!html.includes('/blog/tags/'), route, `Deprecated tag route link still rendered in ${route}.`);
-    assert(!html.includes('/en-US/blog/tags/'), route, `Deprecated English tag route link still rendered in ${route}.`);
+  runCheck('tag_links_target_index_anchors', route, () => {
+    assert(tagLinks.length > 0, route, `No tag-index links rendered in ${route}.`);
+    assert(
+      tagLinks.every((href) => href.startsWith(expectedPrefix) && href.includes('/blog/tags/#')),
+      route,
+      `Tag links should target localized index anchors in ${route}.`,
+    );
   });
 }
 
@@ -72,10 +87,10 @@ function main() {
     throw new Error(`dist directory not found: ${distDir}. Run \`npm run build\` first.`);
   }
 
-  verifyNoTagDirectory(path.posix.join('blog', 'tags'));
-  verifyNoTagDirectory(path.posix.join('en-US', 'blog', 'tags'));
-  verifyNoTagLinks(path.posix.join('blog', 'index.html'));
-  verifyNoTagLinks(path.posix.join('en-US', 'blog', 'index.html'));
+  verifyTagIndex(path.posix.join('blog', 'tags'));
+  verifyTagIndex(path.posix.join('en-US', 'blog', 'tags'));
+  verifyTagIndexLinks(path.posix.join('blog', 'index.html'), '/blog/tags/#');
+  verifyTagIndexLinks(path.posix.join('en-US', 'blog', 'index.html'), '/en-US/blog/tags/#');
   printSummaryAndExit();
 }
 

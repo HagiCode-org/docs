@@ -17,11 +17,34 @@ export type { BlogRssScope };
 
 type BlogEntry = Awaited<ReturnType<typeof getCollection<'docs'>>>[number];
 
+function toRssBlogPostInput(entry: BlogEntry): RssBlogPostInput | undefined {
+  const { data } = entry;
+  if (typeof data.title !== 'string') return undefined;
+
+  return {
+    id: entry.id,
+    data: {
+      title: data.title,
+      ...(data.date instanceof Date ? { date: data.date } : {}),
+      ...(typeof data.excerpt === 'string' ? { excerpt: data.excerpt } : {}),
+      ...(typeof data.description === 'string' ? { description: data.description } : {}),
+      ...(Array.isArray(data.tags) && data.tags.every((tag) => typeof tag === 'string')
+        ? { tags: data.tags }
+        : {}),
+      ...(typeof data.language === 'string' ? { language: data.language } : {}),
+    },
+  };
+}
+
 export async function getBlogRssResponse(context: APIContext, scope: BlogRssScope = 'all') {
   const blog = await getCollection('docs');
   const metadata = getFeedMetadata(scope);
   const site = context.site?.toString() || DEFAULT_SITE;
-  const posts = filterAndSortBlogRssPosts(blog as RssBlogPostInput[], scope);
+  const rssBlogPosts = blog.flatMap((entry) => {
+    const post = toRssBlogPostInput(entry);
+    return post ? [post] : [];
+  });
+  const posts = filterAndSortBlogRssPosts(rssBlogPosts, scope);
 
   return rss({
     title: metadata.title,

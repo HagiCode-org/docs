@@ -1,11 +1,12 @@
 import type { GetStaticPathsResult } from 'astro'
 import { slug } from 'github-slugger'
 import starlightConfig from 'virtual:starlight/user-config'
-import config from 'virtual:starlight-blog/config'
 
 import { DefaultLocale, type Locale } from '../../../../node_modules/starlight-blog/libs/i18n.ts'
 import { getPathWithLocale } from '../../../../node_modules/starlight-blog/libs/page.ts'
-import { getBlogEntries, type StarlightBlogEntry } from './content'
+import { getBlogConfig, getBlogEntries, type StarlightBlogEntry } from './content'
+
+const config = getBlogConfig()
 
 export async function getAllTags(locale: Locale): Promise<StarlightBlogEntryTags> {
   const entries = await getBlogEntries(locale)

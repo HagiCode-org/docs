@@ -1,5 +1,5 @@
-import footerSitesSnapshot from '@/data/footer-sites.snapshot.json';
-import { getLinkWithLocale } from '@shared/links';
+import footerSitesSnapshot from '../data/footer-sites.snapshot.json';
+import { getLinkWithLocale } from '../../shared/src/links';
 import { DOCS_ROUTE_TO_SOURCE_LOCALE, parseDocsLocale } from './i18n';
 
 interface FooterCatalogLink {
@@ -33,6 +33,27 @@ const DEFAULT_RELATED_SITE_ORDER = [
 ] as const;
 
 const CURRENT_SITE_ID = 'hagicode-docs';
+
+export function getDocsFooterRelatedSites() {
+  const snapshotById = new Map<string, FooterSnapshotEntry>(
+    footerSitesSnapshot.entries.map((entry) => [entry.id, entry as FooterSnapshotEntry]),
+  );
+
+  return DEFAULT_RELATED_SITE_ORDER.flatMap((siteId) => {
+    const entry = snapshotById.get(siteId);
+    if (!entry || entry.id === CURRENT_SITE_ID) {
+      return [];
+    }
+
+    return [{
+      id: entry.id,
+      name: entry.title,
+      description: entry.description,
+      url: entry.url,
+      ...(entry.id === 'hagicode-main' ? { supportsLocalePath: true } : {}),
+    }];
+  });
+}
 
 function normalizeUrl(url: string) {
   const normalized = new URL(url);
@@ -81,16 +102,8 @@ export function resolveDocsFooterSiteLinks(
   const resolvedLocale = resolveDocsFooterLocale(locale);
   const localIds = new Set(localLinks.flatMap((link) => (link.siteId ? [link.siteId] : [])));
   const localUrls = new Set(localLinks.map((link) => normalizeUrl(link.href)));
-  const snapshotById = new Map<string, FooterSnapshotEntry>(
-    footerSitesSnapshot.entries.map((entry) => [entry.id, entry as FooterSnapshotEntry]),
-  );
 
-  return DEFAULT_RELATED_SITE_ORDER.flatMap((siteId) => {
-    const entry = snapshotById.get(siteId);
-    if (!entry || entry.id === CURRENT_SITE_ID) {
-      return [];
-    }
-
+  return getDocsFooterRelatedSites().flatMap((entry) => {
     if (localIds.has(entry.id) || localUrls.has(normalizeUrl(entry.url))) {
       return [];
     }
@@ -98,8 +111,8 @@ export function resolveDocsFooterSiteLinks(
     return [
       {
         siteId: entry.id,
-        title: resolveLocalizedField(entry.title, resolvedLocale),
-        description: resolveLocalizedField(entry.description, resolvedLocale),
+        title: resolveLocalizedField(entry.name, resolvedLocale),
+        description: resolveLocalizedField(entry.description ?? '', resolvedLocale),
         href: entry.id === 'hagicode-main' ? getLinkWithLocale('website', routeLocale) : entry.url,
       },
     ];

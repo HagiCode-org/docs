@@ -6,6 +6,8 @@ import mdx from "@astrojs/mdx";
 import partytown from "@astrojs/partytown";
 import robotsTxt from "astro-robots-txt";
 import react from "@astrojs/react";
+import hagilight from "@hagicode/hagilight-starlight";
+import { locales as HAGILIGHT_LOCALES } from "@hagicode/hagilight-starlight/locales";
 
 import cachedLinkValidator from "./src/integrations/link-check-result-cache.js";
 import { rehypePagefindOptimize } from "./src/integrations/rehype-pagefind-optimize.mjs";
@@ -21,6 +23,18 @@ import {
 import rehypeExternalLinks from "rehype-external-links";
 
 const DEFAULT_DOCS_UI = DOCS_LOCALE_RESOURCES["zh-CN"].starlight;
+const HAGILIGHT_LOCALES_BY_LANG = new Map(
+  Object.values(HAGILIGHT_LOCALES).map((locale) => [locale.lang, locale]),
+);
+const DOCS_LOCALE_CONFIG = Object.fromEntries(
+  Object.entries(DOCS_LOCALES).map(([routeLocale, locale]) => {
+    const sharedLocale = HAGILIGHT_LOCALES_BY_LANG.get(locale.lang);
+    if (!sharedLocale) {
+      throw new Error(`Hagilight does not define Docs locale "${locale.lang}".`);
+    }
+    return [routeLocale, { ...sharedLocale, ...locale }];
+  }),
+);
 
 const BLOG_PLUGIN_CONFIG = {
   rss: false,
@@ -73,7 +87,7 @@ export default defineConfig({
           rel: ["noopener", "noreferrer"],
         },
       ],
-      [rehypePagefindOptimize],
+      [rehypePagefindOptimize, {}],
     ],
   },
   // 配置 Vite 环境变量
@@ -94,19 +108,6 @@ export default defineConfig({
       "import.meta.env.VITE_CLARITY_DEBUG": JSON.stringify(
         process.env.VITE_CLARITY_DEBUG || "",
       ),
-      // Baidu Analytics - Disabled, migrated to 51LA
-      // "import.meta.env.VITE_BAIDU_ANALYTICS_ID": JSON.stringify(
-      //   process.env.BAIDU_ANALYTICS_ID || "",
-      // ),
-      // "import.meta.env.VITE_BAIDU_ANALYTICS_DEBUG": JSON.stringify(
-      //   process.env.BAIDU_ANALYTICS_DEBUG || "",
-      // ),
-      "import.meta.env.VITE_51LA_ID": JSON.stringify(
-        process.env.LI_51LA_ID || "L6b88a5yK4h2Xnci",
-      ),
-      "import.meta.env.VITE_51LA_DEBUG": JSON.stringify(
-        process.env.LI_51LA_DEBUG || "",
-      ),
     },
   },
   integrations: [
@@ -122,7 +123,7 @@ export default defineConfig({
       // i18n configuration - Use the desktop-aligned locale catalog.
       // Keep Chinese on / and English on /en-US/.
       defaultLocale: "root",
-      locales: DOCS_LOCALES,
+      locales: DOCS_LOCALE_CONFIG,
       social: [
         {
           icon: "github",
@@ -132,13 +133,11 @@ export default defineConfig({
       ],
       components: {
         Head: "./src/components/StarlightHead.astro",
-        Header: "./src/components/StarlightHeader.astro",
-        Footer: "./src/components/StarlightFooter.astro",
         EditLink: "./src/components/StarlightEditLink.astro",
         PageTitle: "./src/components/StarlightPageTitle.astro",
-        LanguageSelect: "./src/components/StarlightLanguageSelect.astro",
         TableOfContents: "./src/components/StarlightTableOfContents.astro",
-        MarkdownContent: './src/components/MarkdownContent.astro',
+        MarkdownContent: "./src/components/MarkdownContent.astro",
+        PageFrame: "./src/components/DocsPageFrame.astro",
       },
       sidebar: DOCS_SIDEBAR,
       customCss: ["./src/styles/starlight-override.css"],
@@ -146,6 +145,22 @@ export default defineConfig({
         baseUrl: "https://github.com/HagiCode-org/docs/edit/main/",
       },
       plugins: [
+        hagilight({
+          links: {
+            siteId: "hagicode-docs",
+            siteUrl: "https://docs.hagicode.com/",
+          },
+          aiDisclosures: {
+            isAITranslation: true,
+            isAIAuthor: true,
+            sourceLocale: "root",
+          },
+          contentComponents: {
+            pageTitle: false,
+            markdownContent: false,
+          },
+          promoto: { enabled: false },
+        }),
         {
           name: "docs-blog-zhcn-i18n-compat",
           hooks: {

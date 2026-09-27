@@ -4,10 +4,11 @@ import { fileURLToPath } from 'node:url';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { clearPromotionDocumentCache } from './docs-promote-banner';
+import { clearPromotionDocumentCache } from './promotions';
 import {
   getRenderableBlogPromotions,
   loadBlogPromotions,
+  resolveBlogPostVisibility,
   resolveBlogAdProps,
   type ActivePromotion,
 } from './blog-promotions';
@@ -207,6 +208,16 @@ describe('blog promotions', () => {
       hideAd: true,
       locale: 'en',
       promotions: [],
+    });
+  });
+
+  it('keeps hideAd and hideCta frontmatter flags independent', () => {
+    expect(resolveBlogPostVisibility()).toEqual({ hideAd: false, hideCta: false });
+    expect(resolveBlogPostVisibility({ hideAd: true })).toEqual({ hideAd: true, hideCta: false });
+    expect(resolveBlogPostVisibility({ hideCta: true })).toEqual({ hideAd: false, hideCta: true });
+    expect(resolveBlogPostVisibility({ hideAd: true, hideCta: true })).toEqual({
+      hideAd: true,
+      hideCta: true,
     });
   });
 

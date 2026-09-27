@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
-import vm from 'node:vm';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { DOCS_LOCALE_SELECTOR_OPTIONS } from '../src/i18n/generated/docs-locale-resources.mjs';
 
@@ -14,10 +14,34 @@ async function readDistFile(relativePath) {
   return readFile(path.join(distDir, relativePath), 'utf8');
 }
 
-function extractRedirectScriptPath(html) {
-  const match = html.match(/<script[^>]+src="([^"]*lang-redirect[^"]*\.js)"[^>]*><\/script>/iu);
-  assert.ok(match, 'built HTML should reference a hashed lang-redirect script');
-  return match[1];
+function extractRedirectScriptReference(html) {
+  const scriptPaths = [...html.matchAll(/<script[^>]+src="([^"]+\.js)"[^>]*><\/script>/giu)]
+    .map((match) => match[1]);
+
+  for (const scriptPath of scriptPaths) {
+    if (!scriptPath.startsWith('/')) continue;
+    if (scriptPath.includes('lang-redirect')) {
+      return { entryScriptPath: scriptPath, resolverScriptPath: scriptPath };
+    }
+
+    const script = readScriptContents(scriptPath);
+    const importedResolver = script.match(/from["']([^"']*lang-redirect[^"']*\.js)["']/iu);
+    if (importedResolver) {
+      return {
+        entryScriptPath: scriptPath,
+        resolverScriptPath: new URL(
+          importedResolver[1],
+          `https://docs.hagicode.com${scriptPath}`,
+        ).pathname,
+      };
+    }
+  }
+
+  assert.fail('built HTML should reference a hashed language-resolver module');
+}
+
+function readScriptContents(scriptPath) {
+  return readFileSync(path.join(distDir, scriptPath.replace(/^\//u, '')), 'utf8');
 }
 
 function assertIncludes(haystack, needle, message) {
@@ -117,8 +141,30 @@ function createMockWindow(
   };
 }
 
+async function loadResolverApi(entryScriptPath) {
+  const mock = createMockWindow('https://docs.hagicode.com/', null);
+  const entryUrl = pathToFileURL(
+    path.join(distDir, entryScriptPath.replace(/^\//u, '')),
+  );
+  const previousWindow = globalThis.window;
+  globalThis.window = mock.window;
+
+  try {
+    await import(entryUrl.href);
+  } finally {
+    if (previousWindow === undefined) {
+      delete globalThis.window;
+    } else {
+      globalThis.window = previousWindow;
+    }
+  }
+
+  assert.ok(mock.window.__HAGICODE_DOCS_ENTRY__, 'built resolver should expose its API');
+  return mock.window.__HAGICODE_DOCS_ENTRY__;
+}
+
 function evaluateEntryScript(
-  scriptContent,
+  resolverApi,
   href,
   storedRouteValue = null,
   navigatorConfig = {},
@@ -130,26 +176,19 @@ function evaluateEntryScript(
     navigatorConfig,
     landingTargetPath,
   );
-  const context = vm.createContext({
-    URL,
-    console,
-    document: mock.window.document,
-    window: mock.window,
-  });
-
-  vm.runInContext(scriptContent, context, { filename: 'lang-redirect.js' });
+  const lastResolution = resolverApi.applyEntryRouting(mock.window);
 
   return {
-    api: mock.window.__HAGICODE_DOCS_ENTRY__,
+    api: { lastResolution },
     redirects: mock.redirects,
     localStorage: mock.localStorage.dump(),
     finalUrl: mock.getCurrentUrl(),
   };
 }
 
-function verifyScenario(scriptContent, scenario) {
+function verifyScenario(resolverApi, scenario) {
   const result = evaluateEntryScript(
-    scriptContent,
+    resolverApi,
     scenario.href,
     scenario.storedRouteValue,
     scenario.navigator,
@@ -176,14 +215,20 @@ async function main() {
     readDistFile('index.html'),
     readDistFile(path.join('en-US', 'index.html')),
   ]);
-  const redirectScriptPath = extractRedirectScriptPath(rootHtml);
-  const redirectScript = await readDistFile(redirectScriptPath.replace(/^\//u, ''));
+  const redirectReference = extractRedirectScriptReference(rootHtml);
+  const redirectScriptPath = redirectReference.resolverScriptPath;
+  await readDistFile(redirectScriptPath.replace(/^\//u, ''));
+  const resolverApi = await loadResolverApi(redirectReference.entryScriptPath);
 
   assertIncludes(rootHtml, 'name="hagicode-docs-default-entry" content="en-US"', 'root landing should advertise the English default entry');
   assertIncludes(rootHtml, '<html lang="zh-CN"', 'root landing should keep Chinese metadata');
   assertIncludes(rootHtml, 'name="hagicode-docs-landing-target" content="/product-overview/"', 'root landing should point directly to the product overview route');
   assertIncludes(rootHtml, 'http-equiv="refresh"', 'root landing should expose a non-JS redirect fallback');
-  assertIncludes(rootHtml, redirectScriptPath, 'root landing should load the entry route resolver');
+  assert.equal(
+    extractRedirectScriptReference(rootHtml).resolverScriptPath,
+    redirectScriptPath,
+    'root landing should load the entry route resolver',
+  );
 
   assertIncludes(enHtml, '<html lang="en-US"', 'English landing should expose English metadata');
   assertIncludes(enHtml, 'http-equiv="refresh"', 'English landing should expose a non-JS redirect fallback');
@@ -224,10 +269,18 @@ async function main() {
     readDistFile(path.join('en-US', 'blog', 'index.html')),
   ]);
 
-  assertIncludes(rootDocsHtml, redirectScriptPath, 'root docs pages should load the shared route resolver');
-  assertIncludes(rootBlogHtml, redirectScriptPath, 'root blog pages should load the shared route resolver');
-  assertIncludes(enDocsHtml, redirectScriptPath, 'English docs pages should load the shared route resolver');
-  assertIncludes(enBlogHtml, redirectScriptPath, 'English blog pages should load the shared route resolver');
+  for (const [html, label] of [
+    [rootDocsHtml, 'root docs'],
+    [rootBlogHtml, 'root blog'],
+    [enDocsHtml, 'English docs'],
+    [enBlogHtml, 'English blog'],
+  ]) {
+    assert.equal(
+      extractRedirectScriptReference(html).resolverScriptPath,
+      redirectScriptPath,
+      `${label} pages should load the shared route resolver`,
+    );
+  }
 
   const scenarios = [
     {
@@ -379,7 +432,7 @@ async function main() {
   ];
 
   for (const scenario of scenarios) {
-    verifyScenario(redirectScript, scenario);
+    verifyScenario(resolverApi, scenario);
   }
 
   console.log('Docs entry language verification passed.');
