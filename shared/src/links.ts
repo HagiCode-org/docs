@@ -194,11 +194,6 @@ function getLocalizedDocsPath(pathname: string, locale?: string): string {
     return `/${docsLocale}${normalizedPath}`;
 }
 
-function getLocalizedDocsRssPath(locale?: string): string {
-    const resolvedLocale = resolveSiteLocale(locale) ?? DOCS_ROUTE_TO_SITE_LOCALE[resolveDocsRouteLocale(locale) ?? DOCS_DEFAULT_ROUTE_LOCALE];
-    return resolvedLocale.startsWith('zh') ? '/blog/rss.zh-CN.xml' : '/blog/rss.en-US.xml';
-}
-
 function localizeAbsoluteUrl(input: string, locale?: string): string {
     if (!locale) {
         return input;
@@ -212,9 +207,7 @@ function localizeAbsoluteUrl(input: string, locale?: string): string {
     }
 
     if (url.hostname === 'docs.hagicode.com' || url.port === '31265') {
-        url.pathname = url.pathname.includes('/blog/rss.')
-            ? getLocalizedDocsRssPath(locale)
-            : getLocalizedDocsPath(url.pathname, locale);
+        url.pathname = getLocalizedDocsPath(url.pathname, locale);
         return url.toString();
     }
 
@@ -299,13 +292,6 @@ export const SITE_LINKS = {
     about: {
         dev: 'https://www.hagicode.com/about/',
         prod: 'https://www.hagicode.com/about/',
-        external: false,
-    } as LinkConfig,
-
-    /** 博客 RSS 订阅（相对于文档站点） */
-    rss: {
-        dev: 'http://localhost:31265/blog/rss.zh-CN.xml',
-        prod: 'https://docs.hagicode.com/blog/rss.zh-CN.xml',
         external: false,
     } as LinkConfig,
 

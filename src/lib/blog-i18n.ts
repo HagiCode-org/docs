@@ -15,8 +15,6 @@ export const BLOG_LANGUAGE_CODES = [
 
 export type BlogLanguageCode = (typeof BLOG_LANGUAGE_CODES)[number];
 export type BlogRouteLocale = 'root' | 'en-US' | Exclude<BlogLanguageCode, 'zh-CN' | 'en-US'>;
-export type BlogRssScope = BlogLanguageCode | 'all';
-
 export type BlogLanguageOption = {
   code: BlogLanguageCode;
   routeLocale: BlogRouteLocale;
@@ -25,7 +23,6 @@ export type BlogLanguageOption = {
   nativeName: string;
   shortLabel: string;
   fallbackCodes: readonly BlogLanguageCode[];
-  rssPath: string;
 };
 
 export const BLOG_LANGUAGE_OPTIONS: readonly BlogLanguageOption[] = [
@@ -37,7 +34,6 @@ export const BLOG_LANGUAGE_OPTIONS: readonly BlogLanguageOption[] = [
     nativeName: '简体中文',
     shortLabel: '中',
     fallbackCodes: ['en-US'],
-    rssPath: '/blog/rss.zh-CN.xml',
   },
   {
     code: 'zh-Hant',
@@ -47,7 +43,6 @@ export const BLOG_LANGUAGE_OPTIONS: readonly BlogLanguageOption[] = [
     nativeName: '繁體中文',
     shortLabel: '繁',
     fallbackCodes: ['zh-CN', 'en-US'],
-    rssPath: '/blog/rss.zh-Hant.xml',
   },
   {
     code: 'en-US',
@@ -57,7 +52,6 @@ export const BLOG_LANGUAGE_OPTIONS: readonly BlogLanguageOption[] = [
     nativeName: 'English',
     shortLabel: 'EN',
     fallbackCodes: ['en-US'],
-    rssPath: '/blog/rss.en-US.xml',
   },
   {
     code: 'ja-JP',
@@ -67,7 +61,6 @@ export const BLOG_LANGUAGE_OPTIONS: readonly BlogLanguageOption[] = [
     nativeName: '日本語',
     shortLabel: '日',
     fallbackCodes: ['en-US'],
-    rssPath: '/blog/rss.ja-JP.xml',
   },
   {
     code: 'ko-KR',
@@ -77,7 +70,6 @@ export const BLOG_LANGUAGE_OPTIONS: readonly BlogLanguageOption[] = [
     nativeName: '한국어',
     shortLabel: '한',
     fallbackCodes: ['en-US'],
-    rssPath: '/blog/rss.ko-KR.xml',
   },
   {
     code: 'de-DE',
@@ -87,7 +79,6 @@ export const BLOG_LANGUAGE_OPTIONS: readonly BlogLanguageOption[] = [
     nativeName: 'Deutsch',
     shortLabel: 'DE',
     fallbackCodes: ['en-US'],
-    rssPath: '/blog/rss.de-DE.xml',
   },
   {
     code: 'fr-FR',
@@ -97,7 +88,6 @@ export const BLOG_LANGUAGE_OPTIONS: readonly BlogLanguageOption[] = [
     nativeName: 'Français',
     shortLabel: 'FR',
     fallbackCodes: ['en-US'],
-    rssPath: '/blog/rss.fr-FR.xml',
   },
   {
     code: 'es-ES',
@@ -107,7 +97,6 @@ export const BLOG_LANGUAGE_OPTIONS: readonly BlogLanguageOption[] = [
     nativeName: 'Español',
     shortLabel: 'ES',
     fallbackCodes: ['en-US'],
-    rssPath: '/blog/rss.es-ES.xml',
   },
   {
     code: 'pt-BR',
@@ -117,7 +106,6 @@ export const BLOG_LANGUAGE_OPTIONS: readonly BlogLanguageOption[] = [
     nativeName: 'Português (Brasil)',
     shortLabel: 'PT',
     fallbackCodes: ['en-US'],
-    rssPath: '/blog/rss.pt-BR.xml',
   },
   {
     code: 'ru-RU',
@@ -127,7 +115,6 @@ export const BLOG_LANGUAGE_OPTIONS: readonly BlogLanguageOption[] = [
     nativeName: 'Русский',
     shortLabel: 'RU',
     fallbackCodes: ['en-US'],
-    rssPath: '/blog/rss.ru-RU.xml',
   },
 ];
 
@@ -309,15 +296,4 @@ export function deriveBlogLanguageFromContentId(id: string): BlogLanguageCode {
   }
 
   return 'zh-CN';
-}
-
-export function getAllBlogRssLinks() {
-  return [
-    { scope: 'all' as const, label: 'All languages', path: '/blog/rss.xml' },
-    ...BLOG_LANGUAGE_OPTIONS.map((language) => ({
-      scope: language.code,
-      label: language.nativeName,
-      path: language.rssPath,
-    })),
-  ];
 }

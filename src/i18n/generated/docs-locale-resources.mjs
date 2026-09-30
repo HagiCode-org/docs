@@ -27,26 +27,6 @@ const runtime = {
           "starlightBlog.sidebar.rss": "RSS",
           "starlightBlog.tags.count_one": "{{count}} post tagged \"{{tag}}\"",
           "starlightBlog.tags.count_other": "{{count}} posts tagged \"{{tag}}\""
-        },
-        "rss": {
-          "subscribeTitle": "RSS subscriptions",
-          "allLanguages": "Alle Sprachen RSS",
-          "currentLanguage": "Deutsch RSS",
-          "languageSection": "Language",
-          "feedSection": "RSS",
-          "allLanguagesUrlLabel": "Alle Sprachen RSS",
-          "languageFeeds": {
-            "zh-CN": "简体中文 RSS",
-            "en-US": "English RSS",
-            "zh-Hant": "繁體中文 RSS",
-            "ja-JP": "日本語 RSS",
-            "ko-KR": "한국어 RSS",
-            "de-DE": "Deutsch RSS",
-            "fr-FR": "Français RSS",
-            "es-ES": "Español (España) RSS",
-            "pt-BR": "Português (Brasil) RSS",
-            "ru-RU": "Русский RSS"
-          }
         }
       },
       "common": {
@@ -226,26 +206,6 @@ const runtime = {
           "starlightBlog.sidebar.rss": "RSS",
           "starlightBlog.tags.count_one": "{{count}} post tagged \"{{tag}}\"",
           "starlightBlog.tags.count_other": "{{count}} posts tagged \"{{tag}}\""
-        },
-        "rss": {
-          "subscribeTitle": "RSS subscriptions",
-          "allLanguages": "All languages RSS",
-          "currentLanguage": "English RSS",
-          "languageSection": "Language",
-          "feedSection": "RSS",
-          "allLanguagesUrlLabel": "All languages RSS",
-          "languageFeeds": {
-            "zh-CN": "简体中文 RSS",
-            "en-US": "English RSS",
-            "zh-Hant": "繁體中文 RSS",
-            "ja-JP": "日本語 RSS",
-            "ko-KR": "한국어 RSS",
-            "de-DE": "Deutsch RSS",
-            "fr-FR": "Français RSS",
-            "es-ES": "Español (España) RSS",
-            "pt-BR": "Português (Brasil) RSS",
-            "ru-RU": "Русский RSS"
-          }
         }
       },
       "common": {
@@ -425,26 +385,6 @@ const runtime = {
           "starlightBlog.sidebar.rss": "RSS",
           "starlightBlog.tags.count_one": "{{count}} post tagged \"{{tag}}\"",
           "starlightBlog.tags.count_other": "{{count}} posts tagged \"{{tag}}\""
-        },
-        "rss": {
-          "subscribeTitle": "RSS subscriptions",
-          "allLanguages": "RSS de todos los idiomas",
-          "currentLanguage": "Español (España) RSS",
-          "languageSection": "Language",
-          "feedSection": "RSS",
-          "allLanguagesUrlLabel": "RSS de todos los idiomas",
-          "languageFeeds": {
-            "zh-CN": "简体中文 RSS",
-            "en-US": "English RSS",
-            "zh-Hant": "繁體中文 RSS",
-            "ja-JP": "日本語 RSS",
-            "ko-KR": "한국어 RSS",
-            "de-DE": "Deutsch RSS",
-            "fr-FR": "Français RSS",
-            "es-ES": "Español (España) RSS",
-            "pt-BR": "Português (Brasil) RSS",
-            "ru-RU": "Русский RSS"
-          }
         }
       },
       "common": {
@@ -624,26 +564,6 @@ const runtime = {
           "starlightBlog.sidebar.rss": "RSS",
           "starlightBlog.tags.count_one": "{{count}} post tagged \"{{tag}}\"",
           "starlightBlog.tags.count_other": "{{count}} posts tagged \"{{tag}}\""
-        },
-        "rss": {
-          "subscribeTitle": "RSS subscriptions",
-          "allLanguages": "RSS toutes langues",
-          "currentLanguage": "Français RSS",
-          "languageSection": "Language",
-          "feedSection": "RSS",
-          "allLanguagesUrlLabel": "RSS toutes langues",
-          "languageFeeds": {
-            "zh-CN": "简体中文 RSS",
-            "en-US": "English RSS",
-            "zh-Hant": "繁體中文 RSS",
-            "ja-JP": "日本語 RSS",
-            "ko-KR": "한국어 RSS",
-            "de-DE": "Deutsch RSS",
-            "fr-FR": "Français RSS",
-            "es-ES": "Español (España) RSS",
-            "pt-BR": "Português (Brasil) RSS",
-            "ru-RU": "Русский RSS"
-          }
         }
       },
       "common": {
@@ -823,26 +743,6 @@ const runtime = {
           "starlightBlog.sidebar.rss": "RSS",
           "starlightBlog.tags.count_one": "{{count}} post tagged \"{{tag}}\"",
           "starlightBlog.tags.count_other": "{{count}} posts tagged \"{{tag}}\""
-        },
-        "rss": {
-          "subscribeTitle": "RSS subscriptions",
-          "allLanguages": "すべての言語 RSS",
-          "currentLanguage": "日本語 RSS",
-          "languageSection": "Language",
-          "feedSection": "RSS",
-          "allLanguagesUrlLabel": "すべての言語 RSS",
-          "languageFeeds": {
-            "zh-CN": "简体中文 RSS",
-            "en-US": "English RSS",
-            "zh-Hant": "繁體中文 RSS",
-            "ja-JP": "日本語 RSS",
-            "ko-KR": "한국어 RSS",
-            "de-DE": "Deutsch RSS",
-            "fr-FR": "Français RSS",
-            "es-ES": "Español (España) RSS",
-            "pt-BR": "Português (Brasil) RSS",
-            "ru-RU": "Русский RSS"
-          }
         }
       },
       "common": {
@@ -1022,26 +922,6 @@ const runtime = {
           "starlightBlog.sidebar.rss": "RSS",
           "starlightBlog.tags.count_one": "{{count}} post tagged \"{{tag}}\"",
           "starlightBlog.tags.count_other": "{{count}} posts tagged \"{{tag}}\""
-        },
-        "rss": {
-          "subscribeTitle": "RSS subscriptions",
-          "allLanguages": "모든 언어 RSS",
-          "currentLanguage": "한국어 RSS",
-          "languageSection": "Language",
-          "feedSection": "RSS",
-          "allLanguagesUrlLabel": "모든 언어 RSS",
-          "languageFeeds": {
-            "zh-CN": "简体中文 RSS",
-            "en-US": "English RSS",
-            "zh-Hant": "繁體中文 RSS",
-            "ja-JP": "日本語 RSS",
-            "ko-KR": "한국어 RSS",
-            "de-DE": "Deutsch RSS",
-            "fr-FR": "Français RSS",
-            "es-ES": "Español (España) RSS",
-            "pt-BR": "Português (Brasil) RSS",
-            "ru-RU": "Русский RSS"
-          }
         }
       },
       "common": {
@@ -1221,26 +1101,6 @@ const runtime = {
           "starlightBlog.sidebar.rss": "RSS",
           "starlightBlog.tags.count_one": "{{count}} post tagged \"{{tag}}\"",
           "starlightBlog.tags.count_other": "{{count}} posts tagged \"{{tag}}\""
-        },
-        "rss": {
-          "subscribeTitle": "RSS subscriptions",
-          "allLanguages": "RSS de todos os idiomas",
-          "currentLanguage": "Português (Brasil) RSS",
-          "languageSection": "Language",
-          "feedSection": "RSS",
-          "allLanguagesUrlLabel": "RSS de todos os idiomas",
-          "languageFeeds": {
-            "zh-CN": "简体中文 RSS",
-            "en-US": "English RSS",
-            "zh-Hant": "繁體中文 RSS",
-            "ja-JP": "日本語 RSS",
-            "ko-KR": "한국어 RSS",
-            "de-DE": "Deutsch RSS",
-            "fr-FR": "Français RSS",
-            "es-ES": "Español (España) RSS",
-            "pt-BR": "Português (Brasil) RSS",
-            "ru-RU": "Русский RSS"
-          }
         }
       },
       "common": {
@@ -1420,26 +1280,6 @@ const runtime = {
           "starlightBlog.sidebar.rss": "RSS",
           "starlightBlog.tags.count_one": "{{count}} post tagged \"{{tag}}\"",
           "starlightBlog.tags.count_other": "{{count}} posts tagged \"{{tag}}\""
-        },
-        "rss": {
-          "subscribeTitle": "RSS subscriptions",
-          "allLanguages": "RSS всех языков",
-          "currentLanguage": "Русский RSS",
-          "languageSection": "Language",
-          "feedSection": "RSS",
-          "allLanguagesUrlLabel": "RSS всех языков",
-          "languageFeeds": {
-            "zh-CN": "简体中文 RSS",
-            "en-US": "English RSS",
-            "zh-Hant": "繁體中文 RSS",
-            "ja-JP": "日本語 RSS",
-            "ko-KR": "한국어 RSS",
-            "de-DE": "Deutsch RSS",
-            "fr-FR": "Français RSS",
-            "es-ES": "Español (España) RSS",
-            "pt-BR": "Português (Brasil) RSS",
-            "ru-RU": "Русский RSS"
-          }
         }
       },
       "common": {
@@ -1619,26 +1459,6 @@ const runtime = {
           "starlightBlog.sidebar.rss": "RSS",
           "starlightBlog.tags.count_one": "{{count}} 篇包含标签 \"{{tag}}\" 的文章",
           "starlightBlog.tags.count_other": "{{count}} 篇包含标签 \"{{tag}}\" 的文章"
-        },
-        "rss": {
-          "subscribeTitle": "RSS 订阅",
-          "allLanguages": "全部语言 RSS",
-          "currentLanguage": "简体中文 RSS",
-          "languageSection": "语言",
-          "feedSection": "RSS",
-          "allLanguagesUrlLabel": "全部语言 RSS",
-          "languageFeeds": {
-            "zh-CN": "简体中文 RSS",
-            "en-US": "English RSS",
-            "zh-Hant": "繁體中文 RSS",
-            "ja-JP": "日本語 RSS",
-            "ko-KR": "한국어 RSS",
-            "de-DE": "Deutsch RSS",
-            "fr-FR": "Français RSS",
-            "es-ES": "Español (España) RSS",
-            "pt-BR": "Português (Brasil) RSS",
-            "ru-RU": "Русский RSS"
-          }
         }
       },
       "common": {
@@ -1818,26 +1638,6 @@ const runtime = {
           "starlightBlog.sidebar.rss": "RSS",
           "starlightBlog.tags.count_one": "{{count}} post tagged \"{{tag}}\"",
           "starlightBlog.tags.count_other": "{{count}} posts tagged \"{{tag}}\""
-        },
-        "rss": {
-          "subscribeTitle": "RSS subscriptions",
-          "allLanguages": "全部語言 RSS",
-          "currentLanguage": "繁體中文 RSS",
-          "languageSection": "Language",
-          "feedSection": "RSS",
-          "allLanguagesUrlLabel": "全部語言 RSS",
-          "languageFeeds": {
-            "zh-CN": "简体中文 RSS",
-            "en-US": "English RSS",
-            "zh-Hant": "繁體中文 RSS",
-            "ja-JP": "日本語 RSS",
-            "ko-KR": "한국어 RSS",
-            "de-DE": "Deutsch RSS",
-            "fr-FR": "Français RSS",
-            "es-ES": "Español (España) RSS",
-            "pt-BR": "Português (Brasil) RSS",
-            "ru-RU": "Русский RSS"
-          }
         }
       },
       "common": {
@@ -2116,48 +1916,6 @@ const runtime = {
       "direction": "ltr"
     }
   ],
-  "blogPluginTitle": {
-    "root": "博客",
-    "zh-CN": "博客",
-    "zh-cn": "博客",
-    "en-US": "Blog",
-    "en-us": "Blog",
-    "zh-Hant": "網誌",
-    "zh-hant": "網誌",
-    "ja-JP": "ブログ",
-    "ja-jp": "ブログ",
-    "ko-KR": "블로그",
-    "ko-kr": "블로그",
-    "de-DE": "Blog",
-    "de-de": "Blog",
-    "fr-FR": "Blog",
-    "fr-fr": "Blog",
-    "es-ES": "Blog",
-    "es-es": "Blog",
-    "pt-BR": "Blog",
-    "pt-br": "Blog",
-    "ru-RU": "Блог",
-    "ru-ru": "Блог",
-    "zh": "博客",
-    "zh-Hans": "博客",
-    "zh-hans": "博客",
-    "zh-SG": "博客",
-    "zh-sg": "博客",
-    "en": "Blog",
-    "zh-TW": "網誌",
-    "zh-tw": "網誌",
-    "zh-HK": "網誌",
-    "zh-hk": "網誌",
-    "zh-MO": "網誌",
-    "zh-mo": "網誌",
-    "ja": "ブログ",
-    "ko": "블로그",
-    "de": "Blog",
-    "fr": "Blog",
-    "es": "Blog",
-    "pt": "Blog",
-    "ru": "Блог"
-  },
   "blogUiTranslations": {
     "root": {
       "starlightBlog.authors.count_one": "{{count}} 篇文章 by {{author}}",
@@ -3045,7 +2803,6 @@ const runtime = {
 export const DOCS_LOCALE_RESOURCES = runtime.resources;
 export const DOCS_LOCALES = runtime.docsLocales;
 export const DOCS_LOCALE_SELECTOR_OPTIONS = runtime.localeSelectorOptions;
-export const BLOG_PLUGIN_TITLE = runtime.blogPluginTitle;
 export const BLOG_UI_TRANSLATIONS = runtime.blogUiTranslations;
 export const BLOG_UI_TRANSLATIONS_ZH_CN = runtime.blogUiTranslations['zh-CN'];
 export default runtime;

@@ -7,7 +7,6 @@ import {
   buildBlogRoutePath,
   getBlogLanguageOption,
   getBlogRouteLocale,
-  getAllBlogRssLinks,
   normalizeBlogLanguageCode,
 } from './blog-i18n';
 
@@ -64,13 +63,7 @@ describe('blog desktop-language helpers', () => {
     expect(getBlogRouteLocale('en-US')).toBe('en-US');
     expect(getBlogRouteLocale('fr-FR')).toBe('fr-FR');
     expect(getBlogLanguageOption('zh-Hant')?.fallbackCodes).toEqual(['zh-CN', 'en-US']);
-    expect(getBlogLanguageOption('en-US')?.rssPath).toBe('/blog/rss.en-US.xml');
     expect(getBlogLanguageOption('unknown')).toBeNull();
-    expect(getAllBlogRssLinks()[0]).toEqual({
-      scope: 'all',
-      label: 'All languages',
-      path: '/blog/rss.xml',
-    });
   });
 
   it.each([
