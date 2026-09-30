@@ -19,6 +19,7 @@ Run commands from `repos/docs/`.
 ## Key Commands
 
 Run from `repos/docs/`. Most commands chain `prepare:docs-runtime` first so generated locale resources and the assembled content tree exist before Astro or TypeScript run.
+For a no-build first pass, use `npm run test:fast`; it prepares the docs runtime and runs TypeScript checking only, so it does not validate rendered pages or production output. Use the full build commands for release and CI verification.
 
 ```bash
 npm install
@@ -26,6 +27,7 @@ npm run dev
 npm run build
 npm run build:ci
 npm run preview
+npm run test:fast
 npm run typecheck
 npm run verify:blog
 ```
