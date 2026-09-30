@@ -88,3 +88,12 @@ test('standalone locale redirects preserve targets and inject analytics at most 
   assert.equal(countMatches(englishRedirect, /googletagmanager\.com\/gtag\/js/g), 1);
   assert.ok(countMatches(standaloneGo, /googletagmanager\.com\/gtag\/js/g) <= 1);
 });
+
+test('shared discovery publishes the default robots policy and sitemap index', () => {
+  const robots = readRoute('robots.txt');
+  const sitemap = readRoute('sitemap-index.xml');
+
+  assert.match(robots, /User-agent: \*\nAllow: \//u);
+  assert.match(robots, /Sitemap: https:\/\/docs\.hagicode\.com\/sitemap-index\.xml/u);
+  assert.match(sitemap, /https:\/\/docs\.hagicode\.com\/sitemap-0\.xml/u);
+});

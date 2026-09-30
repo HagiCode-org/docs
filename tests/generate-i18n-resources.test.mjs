@@ -149,7 +149,6 @@ test('generates deterministic docs runtime resources from YAML namespaces', asyn
   assert.equal(generatedModule.DOCS_LOCALES.root.label, '简体中文');
   assert.equal(generatedModule.DOCS_LOCALES['en-US'].lang, 'en-US');
   assert.equal(generatedModule.DOCS_LOCALES['ja-JP'].label, '日本語');
-  assert.equal(generatedModule.BLOG_PLUGIN_TITLE.root, '博客');
   assert.deepEqual(Object.keys(generatedModule.DOCS_LOCALE_RESOURCES).sort(), [...docsLocaleCodes].sort());
   assert.equal(generatedModule.DOCS_LOCALE_SELECTOR_OPTIONS.length, localeDefinitions.length);
   assert.equal(generatedModule.DOCS_LOCALE_SELECTOR_OPTIONS.find((locale) => locale.code === 'es-ES')?.label, 'Español');

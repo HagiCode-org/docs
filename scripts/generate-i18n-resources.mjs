@@ -298,7 +298,6 @@ function buildRuntimeResources(resources) {
       htmlLang: locale.htmlLang,
       direction: locale.direction,
     })),
-    blogPluginTitle: buildResourceAliasMap(resources, routeLocales, (localeResources) => localeResources.blog.plugin.title),
     blogUiTranslations: buildResourceAliasMap(resources, routeLocales, (localeResources) => localeResources.blog.ui),
   };
 }
@@ -313,7 +312,6 @@ const runtime = ${json};
 export const DOCS_LOCALE_RESOURCES = runtime.resources;
 export const DOCS_LOCALES = runtime.docsLocales;
 export const DOCS_LOCALE_SELECTOR_OPTIONS = runtime.localeSelectorOptions;
-export const BLOG_PLUGIN_TITLE = runtime.blogPluginTitle;
 export const BLOG_UI_TRANSLATIONS = runtime.blogUiTranslations;
 export const BLOG_UI_TRANSLATIONS_ZH_CN = runtime.blogUiTranslations['zh-CN'];
 export default runtime;

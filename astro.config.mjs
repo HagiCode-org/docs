@@ -4,16 +4,15 @@ import starlightBlog from "./src/integrations/starlight-blog-no-tags/index.mjs";
 import sitemap from "@astrojs/sitemap";
 import mdx from "@astrojs/mdx";
 import partytown from "@astrojs/partytown";
-import robotsTxt from "astro-robots-txt";
 import react from "@astrojs/react";
 import hagilight from "@hagicode/hagilight-starlight";
 import { locales as HAGILIGHT_LOCALES } from "@hagicode/hagilight-starlight/locales";
+import { hagilight as hagilightDiscovery } from "@hagicode/hagilight/integration";
 
 import cachedLinkValidator from "./src/integrations/link-check-result-cache.js";
 import { rehypePagefindOptimize } from "./src/integrations/rehype-pagefind-optimize.mjs";
 import { DOCS_SIDEBAR } from "./src/config/sidebar.ts";
 import {
-  BLOG_PLUGIN_TITLE,
   BLOG_UI_TRANSLATIONS,
   DOCS_LOCALE_RESOURCES,
   DOCS_LOCALES,
@@ -35,13 +34,6 @@ const DOCS_LOCALE_CONFIG = Object.fromEntries(
     return [routeLocale, { ...sharedLocale, ...locale }];
   }),
 );
-
-const BLOG_PLUGIN_CONFIG = {
-  rss: false,
-  postCount: 20,
-  prefix: "blog",
-  title: BLOG_PLUGIN_TITLE,
-};
 
 const docsLinkCheckCacheTtlHours = Number.parseInt(
   process.env.DOCS_LINK_CHECK_CACHE_TTL_HOURS ?? "48",
@@ -105,11 +97,6 @@ export default defineConfig({
     },
   },
   integrations: [
-    // robots.txt 配置 - 使用 astro-robots-txt 插件
-    robotsTxt({
-      sitemap: "https://docs.hagicode.com/sitemap-index.xml",
-    }),
-
     starlight({
       title: DEFAULT_DOCS_UI.site.title,
       description: DEFAULT_DOCS_UI.site.description,
@@ -143,7 +130,6 @@ export default defineConfig({
             siteId: "hagicode-docs",
             siteUrl: "https://docs.hagicode.com/",
           },
-          rss: { includeDocs: true, includeBlog: true },
           aiDisclosures: {
             isAITranslation: true,
             isAIAuthor: true,
@@ -166,10 +152,11 @@ export default defineConfig({
             "config:setup": () => {},
           },
         },
-        starlightBlog(BLOG_PLUGIN_CONFIG),
+        starlightBlog(),
       ],
     }),
     sitemap(),
+    hagilightDiscovery(),
     partytown(),
     react(),
     ...(docsEnableLinkCheck
