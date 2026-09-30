@@ -10,7 +10,7 @@ The docs site is where users learn the platform: product overviews, installation
 
 ## RSS feeds
 
-The Starlight feed at `/rss.xml` covers eligible documentation and blog articles; `/rss.en.xml` is its English alias and `/rss.<locale>.xml` serves each configured language. Blog-only subscriptions remain available at `/blog/rss.xml` (all supported blog languages), `/blog/rss.en.xml`, `/blog/rss.en-US.xml`, and `/blog/rss.<locale>.xml`. Blog feeds use the shared RSS renderer and channel-level language metadata; per-item `<language>` extensions are not emitted.
+Hagilight Starlight generates localized feeds from documentation content using its default configuration. Starlight Blog generates its standard `/blog/rss.xml` feed; the site does not define custom RSS item selection or language-specific blog feed routes.
 
 ## What the site covers
 
@@ -117,7 +117,7 @@ When adding or updating localized docs, keep the canonical doc key identical to 
 
 ### Shared Starlight presentation
 
-Hagilight 0.3.1 owns the Starlight header, footer, language chooser, reading-width control, AI disclosures, article promotion, and 404 recovery. Docs maps its generated locale routes and labels onto Hagilight's locale catalog by `lang`, preserving the `root` Chinese route and `/en-US/` path. Docs also keeps the localized promotion fallback and `PageFrame` composition, site metadata and analytics, AI frontmatter defaults, and blog-specific metadata, ads, CTA, and image lightbox.
+Hagilight 0.4.0 owns the Starlight header, footer, language chooser, reading-width control, AI disclosures, article promotion, and 404 recovery. Docs maps its generated locale routes and labels onto Hagilight's locale catalog by `lang`, preserving the `root` Chinese route and `/en-US/` path. Docs also keeps the localized promotion fallback and `PageFrame` composition, site metadata and analytics, AI frontmatter defaults, and blog-specific metadata, ads, CTA, and image lightbox.
 
 Documentation pages show Hagilight's article promotion by default. Set `hagicodePromotion: false` in frontmatter to opt out. Blog posts opt out by default to avoid competing with blog promotions; set `hagicodePromotion: true` to enable the article promotion on an individual post. Existing `isAITranslation`, `isAIAuthor`, `hideAd`, and `hideCta` frontmatter controls remain supported.
 
