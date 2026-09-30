@@ -5,6 +5,7 @@ import { defineCollection, z } from 'astro:content';
 import { glob } from 'astro/loaders';
 import { docsSchema } from '@astrojs/starlight/schema';
 import { articlePromotionSchema } from '@hagicode/hagilight-starlight/article-promotion-schema';
+import { rssSchema } from '@hagicode/hagilight-starlight/rss-schema';
 import { slug as githubSlug } from 'github-slugger';
 import { blogSchema } from 'starlight-blog/schema'
 import {
@@ -57,6 +58,7 @@ export const collections = {
 			extend: (context) => extendWithAIDisclosureFlags(
         blogSchema(context).extend({
           ...articlePromotionSchema.shape,
+          ...rssSchema.shape,
           /** 隐藏博客文章中的广告区域 */
           hideAd: z.boolean().optional(),
           /** 隐藏博客文章末尾固定的转化回收 CTA（Microsoft Store + 定价页） */

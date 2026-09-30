@@ -67,7 +67,7 @@ export function getFeedMetadata(scope: BlogRssScope) {
     return {
       title: 'Hagicode Docs | Blog',
       description: 'Hagicode project documentation blog posts in every supported language',
-      language: 'all',
+      language: 'und',
     };
   }
 

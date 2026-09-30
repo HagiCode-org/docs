@@ -62,7 +62,7 @@ describe('blog RSS helpers', () => {
     ).toThrow(/Unsupported blog language "xx-XX"/);
   });
 
-  it('filters posts by desktop language scope and preserves normalized item language', () => {
+  it('filters posts by desktop language scope and preserves normalized language for selection', () => {
     const posts = [
       createPost('blog/2026-04-01-root', '2026-04-01T00:00:00.000Z'),
       createPost('zh-Hant/blog/2026-04-02-zht', '2026-04-02T00:00:00.000Z'),
@@ -115,7 +115,7 @@ describe('blog RSS helpers', () => {
     expect(getFeedMetadata('all')).toEqual({
       title: 'Hagicode Docs | Blog',
       description: 'Hagicode project documentation blog posts in every supported language',
-      language: 'all',
+      language: 'und',
     });
 
     expect(getFeedMetadata('zh-CN')).toEqual({

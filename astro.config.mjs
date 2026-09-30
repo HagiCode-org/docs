@@ -143,6 +143,7 @@ export default defineConfig({
             siteId: "hagicode-docs",
             siteUrl: "https://docs.hagicode.com/",
           },
+          rss: { includeDocs: true, includeBlog: true },
           aiDisclosures: {
             isAITranslation: true,
             isAIAuthor: true,
