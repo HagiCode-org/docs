@@ -152,7 +152,26 @@ export default defineConfig({
             "config:setup": () => {},
           },
         },
-        starlightBlog(),
+        starlightBlog({
+          // Localize the blog title per language. starlight-blog only localizes
+          // when `title` is a lang-keyed record; the default string "Blog" would
+          // render untranslated on every locale (e.g. zh-CN showed "Blog" instead
+          // of "博客"), failing verify:blog-sidebar-i18n. Every locale must be
+          // listed explicitly because getBlogTitle falls back to the default
+          // language (zh-CN) when a key is missing.
+          title: {
+            'zh-CN': '博客',
+            'en-US': 'Blog',
+            'zh-Hant': '部落格',
+            'ja-JP': 'ブログ',
+            'ko-KR': '블로그',
+            'de-DE': 'Blog',
+            'fr-FR': 'Blog',
+            'es-ES': 'Blog',
+            'pt-BR': 'Blog',
+            'ru-RU': 'Блог',
+          },
+        }),
       ],
     }),
     sitemap(),
