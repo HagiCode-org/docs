@@ -35,6 +35,61 @@ function assertSharedShell(html, fallbackId) {
   assert.ok(countMatches(html, /clarity\.ms\/tag/g) <= 1);
 }
 
+// Reads the Hagilight analytics tags (`data-ga-*`) that built HTML carries.
+function readGaTags(html) {
+  return [...html.matchAll(/<[a-z][^>]*\bdata-ga-category="([^"]*)"[^>]*>/gi)].map((match) => {
+    const attribute = (name) => match[0].match(new RegExp(`\\bdata-ga-${name}="([^"]*)"`))?.[1];
+    return {
+      category: match[1],
+      label: attribute('label'),
+      location: attribute('location'),
+    };
+  });
+}
+
+function hasGaTag(html, expected) {
+  return readGaTags(html).some((tag) => Object.entries(expected).every(([key, value]) => tag[key] === value));
+}
+
+test('root and localized pages tag the shared header and footer links with Hagilight labels', () => {
+  const pages = [
+    readRoute('blog/index.html'),
+    readRoute('en-US/blog/index.html'),
+    readRoute('product-overview/index.html'),
+    readRoute('en-US/product-overview/index.html'),
+  ];
+
+  for (const html of pages) {
+    assert.ok(hasGaTag(html, { category: 'navigation', label: 'blog', location: 'header' }));
+    assert.ok(hasGaTag(html, { category: 'download', label: 'downloadClient', location: 'footer' }));
+    assert.ok(readGaTags(html).length > 0);
+    for (const tag of readGaTags(html)) {
+      assert.ok(['download', 'navigation', 'community', 'promotion'].includes(tag.category));
+      assert.ok(tag.label?.trim());
+      assert.ok(tag.location?.trim());
+    }
+  }
+});
+
+test('production pages initialize Google Analytics once and the 404 page not at all', () => {
+  const production = [
+    readRoute('blog/index.html'),
+    readRoute('en-US/blog/index.html'),
+    readRoute('product-overview/index.html'),
+    readRoute('index.html'),
+    readRoute('en-US/index.html'),
+  ];
+
+  for (const html of production) {
+    assert.equal(countMatches(html, /googletagmanager\.com\/gtag\/js/g), 1);
+    assert.equal(countMatches(html, /gtag\('config'/g), 1);
+  }
+
+  const notFound = readRoute('404.html');
+  assert.equal(countMatches(notFound, /googletagmanager\.com\/gtag\/js/g), 0);
+  assert.equal(countMatches(notFound, /gtag\('config'/g), 0);
+});
+
 test('root and localized blog navigation use the Hagilight header links', () => {
   const chineseBlog = readRoute('blog/index.html');
   const englishBlog = readRoute('en-US/blog/index.html');
