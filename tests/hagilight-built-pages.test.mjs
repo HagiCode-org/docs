@@ -14,10 +14,11 @@ function countMatches(value, expression) {
   return [...value.matchAll(expression)].length;
 }
 
+// Hagilight header links use absolute docs-site URLs, so allow an optional origin prefix.
 function hasLinkText(html, href, label) {
   const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const links = new RegExp(
-    `<a\\b(?=[^>]*\\bhref=["']${escapeRegExp(href)}["'])[^>]*>([\\s\\S]*?)<\\/a>`,
+    `<a\\b(?=[^>]*\\bhref=["'](?:https?://[^"'/]+)?${escapeRegExp(href)}["'])[^>]*>([\\s\\S]*?)<\\/a>`,
     'gi',
   );
   return [...html.matchAll(links)].some((match) => match[1].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim() === label);

@@ -38,6 +38,11 @@ function extractByClass(html, className) {
   return values;
 }
 
+function extractByTag(html, tagName) {
+  const pattern = new RegExp(`<${tagName}\\b[^>]*>([\\s\\S]*?)<\\/${tagName}>`, 'gi');
+  return Array.from(html.matchAll(pattern), (match) => normalizeText(match[1]));
+}
+
 function hasNonEmptyText(values) {
   return values.some((value) => value.length > 0);
 }
@@ -46,12 +51,19 @@ function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+// The header "Blog" link comes from the hagilight site-link catalog with an absolute
+// docs-site URL, so accept the path both as a relative href and with an origin prefix.
 function hasLinkText(html, href, label) {
   const pattern = new RegExp(
-    `<a\\b(?=[^>]*\\bhref=["']${escapeRegExp(href)}["'])[^>]*>([\\s\\S]*?)<\\/a>`,
+    `<a\\b(?=[^>]*\\bhref=["'](?:https?://[^"'/]+)?${escapeRegExp(href)}["'])[^>]*>([\\s\\S]*?)<\\/a>`,
     'gi'
   );
   return Array.from(html.matchAll(pattern)).some((match) => normalizeText(match[1]) === label);
+}
+
+// starlight-blog renders its localized `title` option as the blog index page heading.
+function hasHeadingText(html, label) {
+  return extractByTag(html, 'h1').includes(label);
 }
 
 function hasUnresolvedBlogI18nKey(html) {
@@ -105,6 +117,22 @@ function verifyNavigation() {
     assert(
       hasLinkText(enBlogIndex, '/en-US/blog/', 'Blog'),
       'English blog index is missing localized Blog label "Blog".',
+      enRoute
+    );
+  });
+
+  runCheck('zh_blog_title', zhRoute, () => {
+    assert(
+      hasHeadingText(zhBlogIndex, '博客'),
+      'Chinese blog index heading is not the localized blog title "博客".',
+      zhRoute
+    );
+  });
+
+  runCheck('en_blog_title', enRoute, () => {
+    assert(
+      hasHeadingText(enBlogIndex, 'Blog'),
+      'English blog index heading is not the localized blog title "Blog".',
       enRoute
     );
   });
