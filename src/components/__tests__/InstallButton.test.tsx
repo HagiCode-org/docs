@@ -2,14 +2,15 @@
 
 import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { installGaEventTracking } from '@hagicode/hagilight-core/analytics-events';
 import { AssetType, CpuArchitecture } from '@shared/desktop';
 import type { DesktopVersionData } from '@shared/version-manager';
 import { groupAssetsByPlatform } from '@shared/desktop-utils';
 import * as steamStoreLink from '@shared/steam-store-link';
 import * as versionManager from '@shared/version-manager';
-import InstallButton, { filterSupportedPlatformGroups } from '../InstallButton';
+import InstallButton, { filterSupportedPlatformGroups, getDesktopDownloadGaLabel } from '../InstallButton';
 import MicrosoftStoreBadge from '../MicrosoftStoreBadge';
 
 const fallbackUrl = 'https://index.hagicode.com/desktop/history/';
@@ -22,6 +23,15 @@ it('loads the Microsoft Store badge script only when a badge is rendered', () =>
   expect(document.querySelectorAll(`script[src="${src}"]`)).toHaveLength(1);
   document.querySelector(`script[src="${src}"]`)?.remove();
 });
+const features = vi.hoisted(() => ({ steam: false }));
+
+vi.mock('@/config/features', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/config/features')>()),
+  get FEATURE_SITE_STEAM_ENABLED() {
+    return features.steam;
+  },
+}));
+
 vi.mock('@shared/version-manager', async () => {
   const actual = await vi.importActual<typeof import('@shared/version-manager')>('@shared/version-manager');
   return {
@@ -770,5 +780,202 @@ describe('InstallButton runtime states', () => {
 
     await new Promise((resolve) => setTimeout(resolve, 1300));
     expect(assignMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('getDesktopDownloadGaLabel', () => {
+  it.each([
+    [AssetType.WindowsSetup, 'downloadDesktopWindows'],
+    [AssetType.WindowsPortable, 'downloadDesktopWindows'],
+    [AssetType.WindowsMsix, 'downloadDesktopWindows'],
+    [AssetType.WindowsStore, 'downloadDesktopWindows'],
+    [AssetType.MacOSApple, 'downloadDesktopMacOS'],
+    [AssetType.MacOSIntel, 'downloadDesktopMacOS'],
+    [AssetType.LinuxAppImage, 'downloadDesktopLinux'],
+    [AssetType.LinuxArm64AppImage, 'downloadDesktopLinux'],
+    [AssetType.LinuxTarball, 'downloadDesktopLinux'],
+    [AssetType.LinuxArm64Tarball, 'downloadDesktopLinux'],
+  ])('maps %s to %s', (assetType, label) => {
+    expect(getDesktopDownloadGaLabel(assetType)).toBe(label);
+  });
+
+  it.each([AssetType.Source, AssetType.Unknown, 'something-new', '', null, undefined])(
+    'falls back to the generic label for %s',
+    (assetType) => {
+      expect(getDesktopDownloadGaLabel(assetType)).toBe('downloadDesktop');
+    },
+  );
+});
+
+describe('InstallButton Google Analytics events', () => {
+  const gtag = vi.fn();
+  const containerUrl = 'https://www.hagicode.com/container/';
+
+  beforeAll(() => {
+    installGaEventTracking(document, () => gtag);
+    // jsdom does not implement navigation; keep link clicks from logging errors.
+    document.addEventListener('click', (event) => event.preventDefault());
+  });
+
+  beforeEach(() => {
+    gtag.mockClear();
+    features.steam = false;
+    vi.mocked(versionManager.getDesktopVersionData).mockReset();
+    vi.mocked(versionManager.clearDesktopVersionCache).mockReset();
+    window.history.replaceState({}, '', '/');
+  });
+
+  afterEach(() => {
+    cleanup();
+    features.steam = false;
+  });
+
+  function createSourcedVersionData(): DesktopVersionData {
+    const asset = {
+      name: 'Hagicode.Desktop.Setup.1.2.4.exe',
+      path: 'v1.2.4/Hagicode.Desktop.Setup.1.2.4.exe',
+      size: 1048576,
+      lastModified: null,
+      torrentUrl: 'v1.2.4/Hagicode.Desktop.Setup.1.2.4.exe.torrent',
+      downloadSources: [
+        {
+          kind: 'official' as const,
+          label: 'Official Download',
+          url: 'https://desktop.dl.hagicode.com/v1.2.4/Hagicode.Desktop.Setup.1.2.4.exe',
+          primary: true,
+        },
+        {
+          kind: 'github-release' as const,
+          label: 'GitHub Release',
+          url: 'https://github.com/HagiCode-org/releases/download/v1.2.4/Hagicode.Desktop.Setup.1.2.4.exe',
+        },
+      ],
+    };
+    const latest = { version: 'v1.2.4', assets: [asset] };
+
+    return createVersionData({
+      latest,
+      channels: {
+        stable: { latest, all: [] },
+        beta: { latest: null, all: [] },
+      },
+    });
+  }
+
+  function expectOneEvent(
+    action: 'download_click' | 'link_click',
+    params: { category: string; label: string; url: string },
+  ) {
+    expect(gtag).toHaveBeenCalledTimes(1);
+    expect(gtag).toHaveBeenCalledWith('event', action, {
+      event_category: params.category,
+      event_label: params.label,
+      link_location: 'docs_install_button',
+      link_url: params.url,
+      transport_type: 'beacon',
+    });
+    gtag.mockClear();
+  }
+
+  it('reports one download event per platform installer click and none for the dropdown toggle', async () => {
+    vi.mocked(versionManager.getDesktopVersionData).mockResolvedValue(createSourcedVersionData());
+
+    render(<InstallButton variant="full" locale="en" />);
+
+    const primary = await screen.findByRole('link', { name: /China/i });
+    fireEvent.click(primary);
+    expectOneEvent('download_click', {
+      category: 'download',
+      label: 'downloadDesktopWindows',
+      url: primary.getAttribute('href') as string,
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Select Other Version' }));
+    expect(gtag).not.toHaveBeenCalled();
+
+    for (const name of ['China', 'GitHub', /Torrent/i]) {
+      const item = await screen.findByRole('menuitem', { name });
+      fireEvent.click(item);
+      expectOneEvent('download_click', {
+        category: 'download',
+        label: 'downloadDesktopWindows',
+        url: item.getAttribute('href') as string,
+      });
+      if (!screen.queryByRole('menu')) {
+        fireEvent.click(screen.getByRole('button', { name: 'Select Other Version' }));
+      }
+    }
+  });
+
+  it('reports the container deployment link as navigation from the dropdown', async () => {
+    vi.mocked(versionManager.getDesktopVersionData).mockResolvedValue(createSourcedVersionData());
+
+    render(<InstallButton variant="full" locale="en" />);
+
+    await screen.findByRole('link', { name: /China/i });
+    fireEvent.click(screen.getByRole('button', { name: 'Select Other Version' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: /Container Deployment/i }));
+
+    expectOneEvent('link_click', { category: 'navigation', label: 'dockerCompose', url: containerUrl });
+  });
+
+  it('reports the primary Microsoft Store link on Windows', async () => {
+    window.history.replaceState({}, '', '/?os=windows');
+    vi.mocked(versionManager.getDesktopVersionData).mockResolvedValue(createSourcedVersionData());
+
+    render(<InstallButton variant="compact" locale="en" />);
+
+    fireEvent.click(await screen.findByRole('link', { name: 'Install Hagicode Desktop from Microsoft Store' }));
+
+    expectOneEvent('download_click', { category: 'download', label: 'microsoftStore', url: windowsStoreUrl });
+  });
+
+  it('reports the Microsoft Store badge shortcut once through its host element', async () => {
+    vi.mocked(versionManager.getDesktopVersionData).mockResolvedValue(createSourcedVersionData());
+
+    const { container } = render(<InstallButton variant="compact" locale="en" />);
+
+    await screen.findByRole('link', { name: /China/i });
+    const badge = container.querySelector('ms-store-badge[data-windows-store-entry="docs-header-install"]');
+    expect(badge).not.toBeNull();
+    fireEvent.click(badge as Element);
+
+    expectOneEvent('download_click', { category: 'download', label: 'microsoftStore', url: windowsStoreUrl });
+  });
+
+  it('reports the Steam shortcut as a download once', async () => {
+    features.steam = true;
+    vi.mocked(versionManager.getDesktopVersionData).mockResolvedValue(createSourcedVersionData());
+
+    render(<InstallButton variant="compact" locale="en" />);
+
+    fireEvent.click(await screen.findByRole('link', { name: 'Open Hagicode on Steam' }));
+
+    expectOneEvent('download_click', { category: 'download', label: 'openSteamStore', url: fallbackSteamUrl });
+  });
+
+  it('sends nothing for the retry and version history controls', async () => {
+    vi.mocked(versionManager.getDesktopVersionData).mockResolvedValue(
+      createVersionData({
+        latest: null,
+        channels: {
+          stable: { latest: null, all: [] },
+          beta: { latest: null, all: [] },
+        },
+        source: null,
+        status: 'fatal',
+        error: 'Failed to load desktop versions',
+        fallbackTarget: fallbackUrl,
+        failedAttemptSummary: 'primary=down',
+      }),
+    );
+
+    render(<InstallButton variant="compact" locale="en" />);
+
+    await screen.findByRole('alert');
+    fireEvent.click(screen.getByRole('link', { name: 'Open version history' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+
+    expect(gtag).not.toHaveBeenCalled();
   });
 });

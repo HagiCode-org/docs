@@ -35,6 +35,7 @@ import type {
   DesktopVersionData,
   DesktopVersionState,
 } from '@shared/version-manager';
+import { gaEventAttributes } from '@hagicode/hagilight-core/analytics-events';
 import { getLink, getLinkWithLocale } from '@shared/links';
 import { getFallbackSteamStoreLink, loadSteamStoreLink } from '@shared/steam-store-link';
 import { FEATURE_MAC_DOWNLOAD_ENABLED, FEATURE_SITE_STEAM_ENABLED } from '@/config/features';
@@ -103,6 +104,16 @@ function SteamIcon({ className }: { className?: string }) {
 }
 
 const WINDOWS_STORE_URL = 'https://apps.microsoft.com/detail/9N3PM0N3SVDW';
+const GA_INSTALL_LOCATION = 'docs_install_button';
+
+/** Stable Google Analytics label for a desktop installer, shared with the Website's `downloadDesktop*` labels. */
+export function getDesktopDownloadGaLabel(assetType: AssetType | string | null | undefined): string {
+  const type = String(assetType ?? '');
+  if (type.startsWith('windows-')) return 'downloadDesktopWindows';
+  if (type.startsWith('macos-')) return 'downloadDesktopMacOS';
+  if (type.startsWith('linux-')) return 'downloadDesktopLinux';
+  return 'downloadDesktop';
+}
 
 interface InstallButtonProps {
   variant?: 'full' | 'compact';
@@ -626,6 +637,12 @@ export default function InstallButton({
           className="dropdown-item"
           role="menuitem"
           onClick={handleLinkClick}
+          {...gaEventAttributes({
+            category: 'navigation',
+            label: 'dockerCompose',
+            location: GA_INSTALL_LOCATION,
+            url: containerLink,
+          })}
         >
           <span className="dropdown-item-text-block">
             <span className="dropdown-item-label">{t.macContainerCta}</span>
@@ -650,6 +667,12 @@ export default function InstallButton({
             href={WINDOWS_STORE_URL}
             className="btn-download-main"
             aria-label={t.windowsStoreAriaLabel}
+            {...gaEventAttributes({
+              category: 'download',
+              label: 'microsoftStore',
+              location: GA_INSTALL_LOCATION,
+              url: WINDOWS_STORE_URL,
+            })}
           >
             <svg className="download-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
               <path
@@ -712,6 +735,12 @@ export default function InstallButton({
                   href={action.url}
                   className={buttonClassName}
                   aria-label={`${t.installHagicodeDesktop} (${label})`}
+                  {...gaEventAttributes({
+                    category: 'download',
+                    label: getDesktopDownloadGaLabel(primaryTarget.option?.assetType),
+                    location: GA_INSTALL_LOCATION,
+                    url: action.url,
+                  })}
                 >
                   <svg className="download-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
                     <path
@@ -736,7 +765,15 @@ export default function InstallButton({
             aria-label={windowsStoreShortcutAriaLabel}
             className={`ms-store-badge-slot ms-store-badge-slot--${variant}`}
             badgeClassName="ms-store-badge-element"
-            badgeAttributes={{ 'data-windows-store-entry': 'docs-header-install' }}
+            badgeAttributes={{
+              'data-windows-store-entry': 'docs-header-install',
+              ...gaEventAttributes({
+                category: 'download',
+                label: 'microsoftStore',
+                location: GA_INSTALL_LOCATION,
+                url: WINDOWS_STORE_URL,
+              }),
+            }}
           />
         )}
 
@@ -748,6 +785,12 @@ export default function InstallButton({
             rel="noopener noreferrer"
             aria-label={steamShortcutAriaLabel}
             data-steam-entry="docs-header-install"
+            {...gaEventAttributes({
+              category: 'download',
+              label: 'openSteamStore',
+              location: GA_INSTALL_LOCATION,
+              url: steamStoreLink.href,
+            })}
           >
             <SteamIcon className="download-icon" />
             <span className="btn-text">{steamShortcutLabel}</span>
@@ -865,6 +908,12 @@ export default function InstallButton({
                                     role="menuitem"
                                     download
                                     onClick={handleLinkClick}
+                                    {...gaEventAttributes({
+                                      category: 'download',
+                                      label: getDesktopDownloadGaLabel(option.assetType),
+                                      location: GA_INSTALL_LOCATION,
+                                      url: action?.url ?? option.url,
+                                    })}
                                   >
                                     <span>{label}</span>
                                   </a>
@@ -877,6 +926,12 @@ export default function InstallButton({
                                     role="menuitem"
                                     download
                                     onClick={handleLinkClick}
+                                    {...gaEventAttributes({
+                                      category: 'download',
+                                      label: getDesktopDownloadGaLabel(option.assetType),
+                                      location: GA_INSTALL_LOCATION,
+                                      url: action.url,
+                                    })}
                                   >
                                     <span>{getDownloadActionLabel(action.kind, locale)}</span>
                                   </a>
@@ -900,6 +955,12 @@ export default function InstallButton({
                         className="dropdown-item dropdown-item-docker"
                         role="menuitem"
                         onClick={handleLinkClick}
+                        {...gaEventAttributes({
+                          category: 'navigation',
+                          label: 'dockerCompose',
+                          location: GA_INSTALL_LOCATION,
+                          url: containerLink,
+                        })}
                       >
                         <svg className="docker-icon" viewBox="0 0 24 24" fill="currentColor">
                           <path d="M13.983 11.078h2.119a.186.186 0 00.186-.185V9.006a.186.186 0 00-.186-.186h-2.119a.185.185 0 00-.185.185v1.888c0 .102.083.185.185.185m-2.954-5.43h2.118a.186.186 0 00.186-.186V3.574a.186.186 0 00-.186-.185h-2.118a.185.185 0 00-.185.185v1.888c0 .102.082.185.185.186m0 2.716h2.118a.187.187 0 00.186-.186V6.29a.186.186 0 00-.186-.185h-2.118a.185.185 0 00-.185.185v1.887c0 .102.082.185.185.186m-2.93 0h2.12a.186.186 0 00.184-.186V6.29a.185.185 0 00-.185-.185H8.1a.185.185 0 00-.185.185v1.887c0 .102.083.185.185.186m-2.964 0h2.119a.186.186 0 00.185-.186V6.29a.185.185 0 00-.185-.185H5.136a.186.186 0 00-.186.185v1.887c0 .102.084.185.186.186m5.893 2.715h2.118a.186.186 0 00.186-.185V9.006a.186.186 0 00-.186-.186h-2.118a.185.185 0 00-.185.185v1.888c0 .102.082.185.185.185m-2.93 0h2.12a.185.185 0 00.184-.185V9.006a.185.185 0 00-.184-.186h-2.12a.185.185 0 00-.184.185v1.888c0 .102.083.185.185.185m-2.964 0h2.119a.185.185 0 00.185-.185V9.006a.185.185 0 00-.185-.186h-2.12a.186.186 0 00-.185.186v1.887c0 .102.084.185.186.185m-2.92 0h2.12a.185.185 0 00.184-.185V9.006a.185.185 0 00-.184-.186h-2.12a.185.185 0 00-.184.185v1.888c0 .102.082.185.185.185M23.763 9.89c-.065-.051-.672-.51-1.954-.51-.338.001-.676.03-1.01.087-.248-1.7-1.653-2.53-1.716-2.566l-.344-.199-.226.327c-.284.438-.49.922-.612 1.43-.23.97-.09 1.882.403 2.661-.595.332-1.55.413-1.744.42H.751a.751.751 0 00-.75.748 11.376 11.376 0 00.692 4.062c.545 1.428 1.355 2.48 2.41 3.124 1.18.723 3.1 1.137 5.275 1.137.983.003 1.963-.086 2.93-.266a12.248 12.248 0 003.823-1.389c.98-.567 1.86-1.288 2.61-2.136 1.252-1.418 1.998-2.997 2.553-4.4h.221c1.372 0 2.215-.549 2.68-1.009.309-.293.55-.65.707-1.046l.098-.288z" />
