@@ -102,6 +102,7 @@ npm run verify:docs-translation
 - Preserve frontmatter, heading structure, internal links, and verification-script expectations.
 - Use repo scripts for content materialization, translation, release notes, and screenshot workflows instead of editing generated output directly.
 - Keep docs-specific concerns here; broader product marketing belongs in `repos/site`.
+- Tag new calls to action for Google Analytics with `gaEventAttributes()` and follow the "Analytics events" notes in `README.md`.
 
 ## References
 

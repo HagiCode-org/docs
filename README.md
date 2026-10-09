@@ -121,7 +121,18 @@ Hagilight 0.5.0 owns the Starlight header, footer, language chooser, reading-wid
 
 Documentation pages show Hagilight's article promotion by default. Set `hagicodePromotion: false` in frontmatter to opt out. Blog posts opt out by default to avoid competing with blog promotions; set `hagicodePromotion: true` to enable the article promotion on an individual post. Existing `isAITranslation`, `isAIAuthor`, `hideAd`, and `hideCta` frontmatter controls remain supported.
 
-After building, `npm run verify:hagilight-build` checks localized navigation, preference migration, shared shell composition, blog and release-note content, 404 recovery, and standalone redirects.
+After building, `npm run verify:hagilight-build` checks localized navigation, preference migration, shared shell composition, blog and release-note content, 404 recovery, standalone redirects, and the Google Analytics tags (`tests/ga-event-tags.test.mjs`).
+
+### Analytics events
+
+Hagilight 0.6.1 installs one click listener per page (through `@hagicode/hagilight-core/GoogleAnalytics`) and tags the shared header, footer, article promotion, and promotion banner links. Docs tags its own calls to action with `gaEventAttributes()` from `@hagicode/hagilight-core/analytics-events`, spread onto the existing anchor; Docs has no tracker of its own.
+
+- Labels are stable ids, never localized text. Reuse the shared Hagilight label when the link has the same purpose (`microsoftStore`, `dockerCompose`, `productOverview`, ...).
+- Docs-owned locations: `docs_install_button`, `blog_cta`, `blog_header_ad`, `blog_footer_ad`, `article_cta`. The label tables and the full rules are in the mono-root `docs/google-analytics-integration-reference.md`.
+- Do not tag the sidebar, table of contents, edit links, language chooser, search, or plain in-content links; `tests/ga-event-tags.test.mjs` fails if they carry `data-ga-*`.
+- A link reports through the delegated listener only, so do not add a second `gtag('event', …)` call for the same click.
+
+Hagilight 0.6.1 also changes the Starlight theme picker: "Default" now renders the Forest theme, so first-time visitors (and visitors who never picked a theme) see Forest. Explicit choices are kept, and the old `hagilight-theme-random` value is ignored.
 
 ### Translation coverage reports
 
