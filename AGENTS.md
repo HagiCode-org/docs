@@ -58,7 +58,6 @@ npm run test:release-notes
 
 ```bash
 npm run sync:articles-snapshot   # structured article snapshot for *-vs-hagicode FAQ routes
-npm run sync:footer-sites
 npm run sync:tips-snapshot
 ```
 

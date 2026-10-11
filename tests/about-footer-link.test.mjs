@@ -28,7 +28,6 @@ test('docs footer exposes the local about link entry without importing the site 
   assert.match(footerSource, /import DocsPromoteInfoBanner from '\.\/DocsPromoteInfoBanner\.astro';/);
   assert.match(footerSource, /<DocsPromoteInfoBanner locale=\{Astro\.locals\?\.starlightRoute\?\.locale\} \/>/);
   assert.match(footerSource, /const aboutLink = getLinkWithLocale\('about', docsLocale\);/);
-  assert.match(footerSource, /const relatedSiteLinks = resolveDocsFooterSiteLinks/);
   assert.match(footerSource, /const footerCopy = getDocsFooterCopy\(currentRouteLocale\);/);
   assert.match(footerSource, /<h3 class="unified-footer-section-title">\{footerCopy\.sections\.ecosystemSites\}<\/h3>/);
   assert.match(footerSource, /<span class="unified-footer-link-title">\{link\.title\}<\/span>/);
@@ -53,19 +52,5 @@ test('docs header navigation reuses the shared about link registry and keeps dis
   assert.match(
     footerSource,
     /<a href=\{steamLink\} class="unified-footer-link" target="_blank" rel="noopener noreferrer">\{getFooterLinkLabel\('steam'\)\}<\/a>/,
-  );
-});
-
-test('docs snapshot artifact stays aligned with the canonical sites catalog for footer destinations', async () => {
-  const canonical = JSON.parse(
-    await readFile(path.join(monorepoRoot, 'repos/index/src/data/public/sites.json'), 'utf8'),
-  );
-  const bundled = JSON.parse(
-    await readFile(resolveDocsPath('src/data/footer-sites.snapshot.json'), 'utf8'),
-  );
-
-  assert.deepEqual(
-    bundled.entries.map((entry) => ({ id: entry.id, url: entry.url })),
-    canonical.entries.map((entry) => ({ id: entry.id, url: entry.url })),
   );
 });
