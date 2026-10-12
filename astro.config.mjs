@@ -139,6 +139,7 @@ export default defineConfig({
             pageTitle: false,
             markdownContent: false,
           },
+          contentImages: { enabled: true },
           promoto: { enabled: false },
         }),
         {
