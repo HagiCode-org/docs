@@ -123,6 +123,10 @@ Documentation pages show Hagilight's article promotion by default. Set `hagicode
 
 After building, `npm run verify:hagilight-build` checks localized navigation, preference migration, shared shell composition, blog and release-note content, 404 recovery, standalone redirects, and the Google Analytics tags (`tests/ga-event-tags.test.mjs`).
 
+### Article image delivery
+
+Body images that use a relative path into `src/content/docs/img/` are optimized by Hagilight's content-image plugin (`contentImages` in `astro.config.mjs`). Plain `.md` pages get AVIF and WebP `<picture>` sources, and `.mdx` pages keep Astro's WebP output. `npm run verify:docs-image-references` audits the content read-only and exits with status 1 on any site-root (`/article-images/...`) or remote body image. `npm run test:docs-image-references` covers the audit, and `npm run verify:hagilight-build` checks the built AVIF and WebP output.
+
 ### Analytics events
 
 Hagilight 0.6.1 installs one click listener per page (through `@hagicode/hagilight-core/GoogleAnalytics`) and tags the shared header, footer, article promotion, and promotion banner links. Docs tags its own calls to action with `gaEventAttributes()` from `@hagicode/hagilight-core/analytics-events`, spread onto the existing anchor; Docs has no tracker of its own.

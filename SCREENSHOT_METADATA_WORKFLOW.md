@@ -37,14 +37,14 @@ The `screenshot-management-optimization` change uses this existing workflow to a
   - `src/content/docs/quick-start/create-first-project.mdx`
   - `src/content/docs/quick-start/proposal-session.mdx`
   - `src/content/docs/installation/desktop.mdx`
-  - `src/content/docs/guides/ai-compose-commit.mdx`
+  - `src/content/docs/guides/ai-compose-commit.md`
   - `src/content/docs/guides/monospecs.mdx`
   - `src/content/translations/docs/en-US/quick-start/create-first-project.mdx`
   - `src/content/translations/docs/en-US/quick-start/proposal-session.mdx`
   - `src/content/translations/docs/en-US/installation/desktop.mdx`
-  - `src/content/translations/docs/en-US/guides/ai-compose-commit.mdx`
+  - `src/content/translations/docs/en-US/guides/ai-compose-commit.md`
 - Known exception recorded during inventory:
-  - Historical inventory found one missing legacy source, `img/ai-compose-commit/✓ 处理完成.png`; `src/content/translations/docs/en-US/guides/ai-compose-commit.mdx` was switched to text-only confirmation instead of keeping a broken image reference
+  - Historical inventory found one missing legacy source, `img/ai-compose-commit/✓ 处理完成.png`; `src/content/translations/docs/en-US/guides/ai-compose-commit.md` was switched to text-only confirmation instead of keeping a broken image reference
 - Explicitly out of scope for this backlog pass:
   - `src/content/docs/img/product-overview/**` illustrations, which are managed as static documentation artwork rather than screenshot assets
 
@@ -365,6 +365,23 @@ From a docs file such as `src/content/docs/quick-start/create-first-project.mdx`
 ```
 
 The helper at `src/utils/screenshot-manifest.js` can also resolve manifest entries into Markdown-ready paths.
+
+## Article Image Optimization
+
+Hagilight 0.9.0 optimizes local body images that use a relative path, through `contentImages` in `astro.config.mjs`. Keep references relative as shown above. Site-root paths such as `/article-images/...` and remote URLs are not processed.
+
+- Plain `.md` pages wrap each local image in `<picture>` with an AVIF source, a WebP source, and the `<img>`.
+- `.mdx` pages are not wrapped. Their images keep Astro's single WebP `<img>`. A page can move to `.md` only when it has no imports, exports, or components.
+- Gallery images rendered by the article promotion keep their AVIF, WebP, and JPEG chain.
+
+Check references without building:
+
+```bash
+npm run verify:docs-image-references
+npm run test:docs-image-references
+```
+
+The audit is read-only and is not part of `build` or `build:ci`. It exits with status 1 and prints the file and line of any site-root or remote body image, and it lists which pages are picture-eligible and which are MDX-only.
 
 ## Metadata Fields to Review
 
