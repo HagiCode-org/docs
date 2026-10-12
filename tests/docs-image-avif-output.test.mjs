@@ -90,9 +90,17 @@ for (const { route, bodyImages: expected } of ARTICLE_CASES) {
   });
 }
 
-test('guides/skills keeps MDX body images unwrapped with lazy and async loading', () => {
+test('guides/skills wraps each MDX body image in AVIF then WebP sources with lazy and async loading', () => {
   const html = readRoute('guides/skills');
-  assert.equal(bodyPictures(html).length, 0);
+  const pictures = bodyPictures(html);
+  assert.equal(pictures.length, 5);
+
+  for (const block of pictures) {
+    assert.deepEqual(sourcesOf(block).map((source) => attribute(source, 'type')), ['image/avif', 'image/webp']);
+    const img = block.match(/<img\b[^>]*>/i)[0];
+    assert.equal(attribute(img, 'loading'), 'lazy');
+    assert.equal(attribute(img, 'decoding'), 'async');
+  }
 
   const images = bodyImages(html);
   assert.equal(images.length, 5);
