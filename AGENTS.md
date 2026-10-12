@@ -68,6 +68,13 @@ npm run screenshots:scan-metadata
 npm run screenshots:sync
 ```
 
+### Article images
+
+```bash
+npm run verify:docs-image-references   # read-only audit of body image references
+npm run test:docs-image-references
+```
+
 ### Tests
 
 ```bash
