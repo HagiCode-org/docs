@@ -62,7 +62,7 @@ const CASES = [
     minLength: 36,
   },
   {
-    file: 'src/content/docs/guides/ai-compose-commit.mdx',
+    file: 'src/content/docs/guides/ai-compose-commit.md',
     type: 'frontmatter',
     minLength: 36,
   },
