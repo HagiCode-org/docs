@@ -5,14 +5,14 @@ import { readFile } from 'node:fs/promises';
 
 const docsRoot = path.resolve(import.meta.dirname, '..');
 const zhWizardSetupPath = path.join(docsRoot, 'src', 'content', 'docs', 'quick-start', 'wizard-setup.mdx');
-const enWizardSetupPath = path.join(docsRoot, 'src', 'content', 'docs', 'en', 'quick-start', 'wizard-setup.mdx');
+const enWizardSetupPath = path.join(docsRoot, 'src', 'content', 'translations', 'docs', 'en-US', 'quick-start', 'wizard-setup.mdx');
 const manifestPath = path.join(docsRoot, 'src', 'content', 'docs', 'img', 'screenshots', 'manifest.json');
-const expectedManagedIds = [
-  'quick-start/wizard-setup/guide1-language-theme',
-  'quick-start/wizard-setup/guide2-dependency-check',
-  'quick-start/wizard-setup/guide3-default-agent-cli-model'
-];
+const managedScreenshotPattern = /img\/screenshots\/(quick-start\/wizard-setup\/[^/\s)]+)\/original\.png/gu;
 
+// The wizard pages describe the current 4-step wizard. The managed screenshots under
+// quick-start/wizard-setup were captured from the retired 3-stage wizard and are
+// intentionally not referenced until they are re-captured. Any reference that is added
+// back must still point at a managed, manifest-registered screenshot.
 test('wizard setup pages only reference managed screenshot paths', async () => {
   const [zhPage, enPage] = await Promise.all([
     readFile(zhWizardSetupPath, 'utf8'),
@@ -21,21 +21,28 @@ test('wizard setup pages only reference managed screenshot paths', async () => {
 
   assert.doesNotMatch(zhPage, /\/wizard-staging\//, 'Chinese wizard setup page should not reference /wizard-staging/.');
   assert.doesNotMatch(enPage, /\/wizard-staging\//, 'English wizard setup page should not reference /wizard-staging/.');
-
-  assert.match(zhPage, /\.\.\/img\/screenshots\/quick-start\/wizard-setup\/guide1-language-theme\/original\.png/);
-  assert.match(zhPage, /\.\.\/img\/screenshots\/quick-start\/wizard-setup\/guide2-dependency-check\/original\.png/);
-  assert.match(zhPage, /\.\.\/img\/screenshots\/quick-start\/wizard-setup\/guide3-default-agent-cli-model\/original\.png/);
-
-  assert.match(enPage, /\.\.\/\.\.\/img\/screenshots\/quick-start\/wizard-setup\/guide1-language-theme\/original\.png/);
-  assert.match(enPage, /\.\.\/\.\.\/img\/screenshots\/quick-start\/wizard-setup\/guide2-dependency-check\/original\.png/);
-  assert.match(enPage, /\.\.\/\.\.\/img\/screenshots\/quick-start\/wizard-setup\/guide3-default-agent-cli-model\/original\.png/);
 });
 
-test('wizard setup managed screenshots are registered in the manifest', async () => {
-  const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
-  const manifestIds = new Set((manifest.items ?? []).map((item) => item.id));
+test('wizard setup screenshot references are registered in the manifest', async () => {
+  const [zhPage, enPage, manifestSource] = await Promise.all([
+    readFile(zhWizardSetupPath, 'utf8'),
+    readFile(enWizardSetupPath, 'utf8'),
+    readFile(manifestPath, 'utf8')
+  ]);
+  const manifestIds = new Set((JSON.parse(manifestSource).items ?? []).map((item) => item.id));
 
-  for (const id of expectedManagedIds) {
-    assert.equal(manifestIds.has(id), true, `Expected manifest to include ${id}.`);
+  for (const page of [zhPage, enPage]) {
+    for (const match of page.matchAll(managedScreenshotPattern)) {
+      assert.equal(manifestIds.has(match[1]), true, `Expected manifest to include ${match[1]}.`);
+    }
   }
+});
+
+test('wizard setup pages describe the current 4-step wizard without the retired dependency-check stage', async () => {
+  const zhPage = await readFile(zhWizardSetupPath, 'utf8');
+
+  for (const step of ['基础设置', '设置 Hagicoder', '创建项目', '社区引导']) {
+    assert.match(zhPage, new RegExp(`## 步骤 \\d：${step}`, 'u'), `Expected a step section for ${step}.`);
+  }
+  assert.doesNotMatch(zhPage, /组件检测/u, 'The wizard no longer has a dependency-check stage.');
 });
