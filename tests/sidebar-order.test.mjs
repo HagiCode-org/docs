@@ -81,7 +81,7 @@ test('related software installation stays flattened to direct article links', ()
     relatedSoftwareEntry.items.map((item) => item.slug),
     [
       'related-software-installation/nodejs/installation',
-      'related-software-installation/openspec/setup-openspec',
+      'related-software-installation/openspec/intro-openspec',
       'related-software-installation/ai-agent-cli',
       'related-software-installation/omniroute',
     ],
@@ -98,7 +98,7 @@ test('related software installation direct links provide locale-specific labels'
     (item) => 'slug' in item && item.slug === 'related-software-installation/nodejs/installation',
   );
   const openSpecEntry = relatedSoftwareEntry.items.find(
-    (item) => 'slug' in item && item.slug === 'related-software-installation/openspec/setup-openspec',
+    (item) => 'slug' in item && item.slug === 'related-software-installation/openspec/intro-openspec',
   );
   const aiAgentCliEntry = relatedSoftwareEntry.items.find(
     (item) => 'slug' in item && item.slug === 'related-software-installation/ai-agent-cli',
@@ -111,14 +111,15 @@ test('related software installation direct links provide locale-specific labels'
   assert.equal(nodeJsEntry?.translations?.['en-US'], 'Installing Node.js');
   assert.equal(nodeJsEntry?.translations?.['ja-JP'], 'Node.jsのインストール');
 
-  assert.equal(openSpecEntry?.translations?.['en-US'], 'Install OpenSpec');
-  assert.equal(openSpecEntry?.translations?.['zh-Hant'], '安裝 OpenSpec');
+  assert.equal(openSpecEntry?.label, 'OpenSpec 介绍');
+  assert.equal(openSpecEntry?.translations?.['en-US'], 'Introduction to OpenSpec');
+  assert.equal(openSpecEntry?.translations?.['zh-Hant'], 'OpenSpec 介紹');
 
   assert.equal(aiAgentCliEntry?.translations?.['en-US'], 'AI Agent CLI Installation');
   assert.equal(aiAgentCliEntry?.translations?.['ko-KR'], 'AI 에이전트 CLI 설치');
 
-  assert.equal(omniRouteEntry?.translations?.['en-US'], 'OmniRoute Local Installation and Startup Validation');
-  assert.equal(omniRouteEntry?.translations?.['fr-FR'], "Installation locale et validation du démarrage d'OmniRoute");
+  assert.equal(omniRouteEntry?.translations?.['en-US'], 'OmniRoute Documentation');
+  assert.equal(omniRouteEntry?.translations?.['fr-FR'], 'Documentation OmniRoute');
 });
 
 test('faq sidebar includes structured article pages generated from the remote snapshot', () => {
