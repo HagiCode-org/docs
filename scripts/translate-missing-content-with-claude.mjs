@@ -399,8 +399,9 @@ export function buildClaudePrompt(job, sourceContent) {
 }
 
 export function buildClaudeArgs(prompt, options = {}) {
+  // Note: `--bare` is intentionally not used. It reads only ANTHROPIC_API_KEY and ignores the
+  // OAuth/keychain login, so a subscription-logged-in Claude CLI fails with "Not logged in".
   const args = [
-    '--bare',
     '--print',
     '--output-format',
     'text',

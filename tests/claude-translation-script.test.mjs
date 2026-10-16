@@ -106,17 +106,17 @@ test('buildClaudeArgs keeps print mode deterministic', () => {
   });
 
   assert.deepEqual(args.slice(0, 6), [
-    '--bare',
     '--print',
     '--output-format',
     'text',
     '--no-session-persistence',
     '--model',
+    'sonnet',
   ]);
-  assert.equal(args[6], 'sonnet');
-  assert.equal(args[7], '--agent');
-  assert.equal(args[8], 'translator');
+  assert.equal(args[6], '--agent');
+  assert.equal(args[7], 'translator');
   assert.equal(args.at(-1), 'translate me');
+  assert.equal(args.includes('--bare'), false);
 });
 
 test('sanitizeClaudeOutput strips a top-level fenced block', () => {
