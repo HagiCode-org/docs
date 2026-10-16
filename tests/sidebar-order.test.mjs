@@ -20,6 +20,30 @@ test('release-notes entry stays immediately before DLC with localized labels int
   assert.equal(DOCS_SIDEBAR[0]?.link, '/product-overview');
 });
 
+test('user guide section follows quick start and lists its module pages in order', () => {
+  const quickStartIndex = DOCS_SIDEBAR.findIndex((entry) => entry.label === '快速开始');
+  const userGuideIndex = DOCS_SIDEBAR.findIndex((entry) => entry.label === '使用说明');
+  const userGuideEntry = DOCS_SIDEBAR[userGuideIndex];
+
+  assert.ok(quickStartIndex >= 0);
+  assert.equal(userGuideIndex, quickStartIndex + 1);
+  assert.equal(userGuideEntry?.translations?.['en-US'], 'User Guide');
+  assert.ok(Array.isArray(userGuideEntry?.items));
+  assert.deepEqual(
+    userGuideEntry.items.map((item) => item.slug),
+    [
+      'user-guide',
+      'user-guide/projects',
+      'user-guide/sessions',
+      'user-guide/agents',
+      'user-guide/skills-and-hagitask',
+      'user-guide/vault',
+      'user-guide/settings',
+      'user-guide/status-bar-and-progress',
+    ],
+  );
+});
+
 test('legal docs are exposed as a docs library section before release notes', () => {
   const legalEntry = DOCS_SIDEBAR.find((entry) => entry.label === '法律文档');
   const releaseNotesIndex = DOCS_SIDEBAR.findIndex((entry) => entry.link === '/release-notes');
