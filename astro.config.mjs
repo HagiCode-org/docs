@@ -95,6 +95,11 @@ export default defineConfig({
         resolvedNodeEnv === 'production'
       ),
     },
+    // Keep core external for the SSR build: it resolves its article data root from import.meta.url,
+    // which would point into dist/ if Vite bundled it.
+    ssr: {
+      external: ['@hagicode/hagilight-core'],
+    },
   },
   integrations: [
     starlight({
