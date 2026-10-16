@@ -56,8 +56,9 @@ npm run test:release-notes
 
 ### Snapshot sync
 
+Comparison article data (`*-vs-hagicode`) is not synced; it comes from the installed `@hagicode/hagilight-core` package.
+
 ```bash
-npm run sync:articles-snapshot   # structured article snapshot for *-vs-hagicode FAQ routes
 npm run sync:tips-snapshot
 ```
 
