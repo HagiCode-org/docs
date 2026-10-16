@@ -9,6 +9,7 @@ import {
   getLinkRel,
   getLinkTarget,
   getLinkWithLocale,
+  getRelForHref,
   type PublicLinkKey,
 } from '../../shared/src/links';
 import { buildDocsRoutePath, resolveDocsLocale, type DocsLocale } from '../lib/i18n';
@@ -146,7 +147,7 @@ export function getLinkAttributes(link: NavLink) {
 
   if (link.external) {
     attributes.target = '_blank';
-    attributes.rel = 'noopener noreferrer';
+    attributes.rel = getRelForHref(link.href);
   }
 
   return attributes;
