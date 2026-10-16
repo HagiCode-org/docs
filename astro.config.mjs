@@ -176,7 +176,7 @@ export default defineConfig({
       ],
     }),
     sitemap(),
-    hagilightDiscovery(),
+    hagilightDiscovery({ llms: { title: "HagiCode Docs", summary: "了解 HagiCode 如何把项目理解、AI 会话、提案执行与知识沉淀串成一条开发流程,并找到适合自己的安装和上手路径。" } }),
     partytown(),
     react(),
     ...(docsEnableLinkCheck
