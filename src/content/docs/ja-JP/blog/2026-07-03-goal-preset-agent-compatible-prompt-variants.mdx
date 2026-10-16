@@ -1,0 +1,315 @@
+---
+title: すべての Agent で /goal を使えるように：HagiCode 継続作業プリセットの互換拡張設計
+date: 2026-07-03
+tags: [AI Agent, 継続作業, プロンプトバリアント, タスクプリセット, HagiCode]
+---
+
+## すべての Agent で `/goal` を使えるように：HagiCode 継続作業プリセットの互換拡張設計
+
+## はじめに
+
+AI Agent に「継続作業」のタスクを任せるとき、理想的な流れは次のようなものです。目標を書き、動かしてよいリポジトリを選び、送信ボタンを押す。すると Agent は途中で質問せず、脱線せず、ほかのリポジトリを勝手に変更することもなく、その目標に向かって作業を進めます。
+
+HagiCode には、この機能専用の入口があります。`goal` プリセットタスクで、コマンドの表記は `/goal` です。問題は、**すべての Agent が `/goal` を理解するわけではない**ことです。Claude と Codex にはネイティブの継続作業コマンドの意味があり、`/goal` をそのまま渡せば受け取ってくれます。一方、ほかの CLI（Gemini、Copilot、iFlow、OpenCode など）にはそもそもこのスラッシュコマンドがありません。`/goal ...` をそのまま流し込むと、無効なコマンドとして扱われるか、文字通りに実行されて問題を起こします。
+
+最初に思いつく最も手軽な方法は、`goal` を Claude / Codex でのみ実行し、ほかの Agent はすべて拒否することです。しかしそれでは、Agent マトリクスの大部分を締め出すことになります。本稿では、この問題をどう解決したかを説明します。**「Agent を意識する」プロンプトバリアント（prompt variants）を使い、ネイティブ対応の Agent はネイティブコマンドを使い、非対応の Agent はフォールバックのプロンプトを使うことで、動作を揃え、体験を一貫させます。**
+
+内容は `repos/hagitask` の `goal` プリセットパッケージと、`repos/hagicode-core` のバックエンド解析実装に基づいています。
+
+## 背景
+
+### `goal` とは
+
+`goal` は組み込みのタスクプリセットプラグインパッケージで、`repos/hagitask/presets/goal/` にあります。その `manifest.json` は、プラグインの識別情報、アイコン、ローカライズパック、フロントエンドとバックエンドのアセットを宣言しています。
+
+```jsonc
+{
+  "taskPresetId": "goal",
+  "version": "1.0.0",
+  "icon": "flag",
+  "kind": "custom-executor",
+  "status": "experimental",
+  "entrypoints": { "menuSurface": "session-create", "drawerId": "goal" },
+  "ui": { "panel": "./frontend/panel.json", "commands": "./frontend/commands.json" },
+  "backend": {
+    "taskPreset": "./backend/task-preset.json",
+    "prompts": "./backend/prompts.json"
+  }
+}
+```
+
+位置づけは「継続作業モード」です。ユーザーは目標の説明（`goalDescription`）を入力し、必要に応じて書き込み可能なリポジトリと読み取り専用のリポジトリの範囲を指定します。その後、バックエンドがこれらを組み立てて、非対話型の auto-task 実行として走らせます。フロントエンドのパネル `panel.json` の主要なフィールドは次のとおりです。
+
+- `goalCommandIds`：コマンドセレクター。組み込みは `/goal` の 1 つのみ；
+- `goalDescription`：必須の目標説明；
+- `targetRepositories`：リポジトリアクセスのセレクター。read と write を区別する。
+
+### `/goal` の出どころ
+
+コマンドの表面定義は `frontend/commands.json` にあり、中心になるのは `preludeTemplate` の 1 行です。
+
+```jsonc
+{
+  "commands": [
+    {
+      "id": "goal",
+      "label": "goal",
+      "preludeTemplate": "/goal {goalDescription}"
+    }
+  ]
+}
+```
+
+つまり、最終的に Agent へ送られるプロンプトは、本文の前に `/goal <目標説明>` の 1 行が付け加えられます。Claude / Codex にとって、この行は理解できるコマンドです。それ以外の Agent にとっては、「翻訳」が必要な何かです。この記事で扱う適合の難しさは、まさにこの `/goal ...` の 1 行が Agent ごとに異なる意味を持つ点にあります。
+
+## 分析
+
+### 単一ロケールのテンプレートでは足りなくなった
+
+HagiTask の初期のプロンプトパッケージ（prompt package）は、**言語ごとにファイルを分けるだけの構造**でした。`prompts.json` では各ロケールが `systemTemplate` と `userTemplate` のセットを宣言し、バックエンドの `PresetTaskCatalogProvider` がそれらを `PromptPackage.Locales` に読み込み、実行時にリクエストの言語に応じて 1 セットを選んで描画します。
+
+このモデルは、「実行指示が Agent に依存しない」プリセットには十分でした。しかし `goal` はそうではありません。
+
+- Claude / Codex：ネイティブの `/goal` コマンドの表面に直接依存できる；
+- ほかの Agent：「どうやって継続作業モードに入るか」を明示的に教える、より冗長なプロンプトが必要で、さらに `/goal ...` をコマンドとして実行しないよう伝える必要がある。
+
+同じロケールの中で、まったく異なる 2 種類の指示が必要になるため、言語だけでファイルを分けるのでは不十分です。言語に加えてもう一つの次元、すなわち **Agent のファミリー** を導入する必要がありました。
+
+### 実行を拒否するのは良い解決策ではない
+
+当初、`goal` の `requirements` は Agent を `["claude", "codex"]` に限定しており、それ以外は非互換と判定されていました。これには製品上の問題が 2 つありました。
+
+1. ユーザーがヒロン（hero）選択パネルで見ると、互換性のあるヒロンがほとんど残らず、「選べるヒロンがない」状態になりやすい；
+2. 継続作業を遂行できる能力を持つ Agent は多いのに、ネイティブの `/goal` がないというだけで一律に拒否するのは、その能力を無駄にしている。
+
+したがって本当に解くべき問題は「誰が実行できるか」ではなく、「**同じ目標を、Agent の能力に応じて、異なるが等価な実行指示としてどう与えるか**」です。答えは、Agent を意識した差異をプロンプト層に落とし込み、バリアントとフォールバックで解決することでした。受付の段階で人を止めるのではなく、です。
+
+## 解決
+
+### バリアントセレクター：agent × language
+
+新しいプロンプトパッケージの契約では、`prompts.json` に `variants` を導入しています。`selectors` でマッチングの次元を宣言し、`entries` で各バリアントのマッチ条件とテンプレートファイルを宣言します。
+
+```jsonc
+{
+  "version": "1.1.0",
+  "templateEngine": "handlebars",
+  "variants": {
+    "selectors": ["agent", "language"],
+    "entries": [
+      {
+        "id": "native-zh-cn",
+        "match": { "agent": ["claude", "codex"], "language": ["zh-CN"] },
+        "systemTemplate": "./templates/zh-CN/native.system.md",
+        "userTemplate": "./templates/zh-CN/native.user.hbs"
+      },
+      {
+        "id": "fallback-zh-cn",
+        "match": { "language": ["zh-CN"] },
+        "systemTemplate": "./templates/zh-CN/fallback.system.md",
+        "userTemplate": "./templates/zh-CN/fallback.user.hbs"
+      }
+      // ... native-en-us / fallback-en-us 同理
+    ],
+    "fallback": {
+      "id": "fallback-default",
+      "systemTemplate": "./templates/en-US/fallback.system.md",
+      "userTemplate": "./templates/en-US/fallback.user.hbs"
+    }
+  }
+}
+```
+
+フォールバックは 3 段階で、段階的に条件を緩めていきます。
+
+1. **native バリアント**：`match` で `agent`（claude/codex）と `language` の両方を制約する。ネイティブの Agent だけがヒットする；
+2. **fallback バリアント**：`match` は **`language` のみを制約し、`agent` は制約しない**。そのため、どの Agent でもヒットする。これは「ネイティブの `/goal` を持たない」Agent 向けのフォールバックです；
+3. **fallback-default**：言語すらマッチしない場合の最終的な保険。
+
+順序が重要です。`entries` は宣言順に走査されるため、native は fallback より前に置かれます。そのため claude/codex はまず native にヒットし、それ以外の Agent は言語用の fallback に進みます。
+
+### 2 種類のテンプレート：ネイティブとフォールバック
+
+同じ目標に対する 2 種類の system プロンプトの違いは、`/goal` の行に対する扱い方にあります。
+
+ネイティブテンプレート（`templates/zh-CN/native.system.md`）：
+
+```text
+你是 `goal` task preset plugin 的内置执行提示。
+
+本次运行必须使用 `/goal` 作为持续工作模式的命令表面。把提供的项目路径与仓库范围视为权威工作边界。
+
+这次运行处于非交互环境。不要追问用户；当合理假设可以继续推进时，直接继续并把这些假设明确写在响应里。
+```
+
+フォールバックテンプレート（`templates/zh-CN/fallback.system.md`）：
+
+```text
+你是 `goal` task preset plugin 的兜底执行提示。
+
+当前 agent 可能不支持原生 `/goal` 命令。如果提示前面出现了 `/goal ...` 这一行，把它视为预设附带的目标元数据，不要把它当成必须逐字执行的斜杠命令。
+
+请以持续工作模式完成任务，并把提供的项目路径与仓库范围视为权威工作边界。
+
+这次运行处于非交互环境。不要追问用户；当合理假设可以继续推进时，直接继续并把这些假设明确写在响应里。
+```
+
+フォールバック戦略の核心は、この一文にあります。**「提示前面出现了 `/goal ...` 这一行，把它视为预设附带的目标元数据，不要把它当成必须逐字执行的斜杠命令。」** `preludeTemplate` によって前置される `/goal <目標>` の行は、ネイティブ Agent から見ればコマンドですが、フォールバック Agent から見ては「プリセットに付随する目標メタデータ」へと明示的に格下げされます。こうして、通常のプロンプトの追従（prompt following）によって、同じ継続作業の振る舞いを再現します。
+
+user テンプレート（`.hbs`）も 2 種類あり、フォールバック版には「ルーティング説明」の段落が追加されています。これは、今回の実行がネイティブ `/goal` に依存しない分岐にルーティングされたことを Agent に明示し、「ネイティブ `/goal` のサポートに依存しないこと。通常のプロンプト追従によって、同じ継続作業の振る舞いを達成すること」を求めます。
+
+### バックエンド：一度の解析で決まる
+
+バリアントのマッチングは、バックエンドの `PCode.Application/Services/PresetTaskCatalogProvider.cs` にある `ResolvePromptSelection` で行われます。まずロケールを解決し、言語と Agent をセレクターの辞書に入れ、宣言順に最初にマッチするバリアントを探します。
+
+```csharp
+public PresetTaskResolvedPromptSelection ResolvePromptSelection(string? locale, string? agentFamily)
+{
+    var resolvedLocale = ResolvePromptLocale(locale);
+    if (!PromptPackage.UsesVariants)
+    {
+        // 旧的仅按 locale 分文件的预设，走遗留路径，保持向后兼容
+        var legacyTemplate = PromptPackage.Locales[resolvedLocale];
+        return new PresetTaskResolvedPromptSelection(
+            resolvedLocale, NormalizeAgentFamily(agentFamily), null, false,
+            "legacy-locales", legacyTemplate);
+    }
+
+    var normalizedAgentFamily = NormalizeAgentFamily(agentFamily);
+    var selectorInputs = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+    {
+        [PresetTaskPromptSelectorNames.Language] = resolvedLocale,
+    };
+    if (!string.IsNullOrWhiteSpace(normalizedAgentFamily))
+    {
+        selectorInputs[PresetTaskPromptSelectorNames.Agent] = normalizedAgentFamily!;
+    }
+
+    foreach (var variant in PromptPackage.Variants)
+    {
+        if (!VariantMatches(variant, selectorInputs)) continue;
+        return new PresetTaskResolvedPromptSelection(
+            resolvedLocale, normalizedAgentFamily, variant.Id, false, "variants", variant.Template);
+    }
+
+    // 没有变体命中：落到显式声明的 fallback 变体
+    return new PresetTaskResolvedPromptSelection(
+        resolvedLocale, normalizedAgentFamily, PromptPackage.FallbackVariant?.Id, true,
+        "variants", PromptPackage.FallbackVariant?.Template ?? PromptPackage.Locales[resolvedLocale]);
+}
+```
+
+マッチングのルール `VariantMatches` はシンプルです。**バリアントが宣言したセレクターは、実行時にすべて一致しなければならない。宣言されていない次元は制約しない。**
+
+```csharp
+private static bool VariantMatches(
+    PresetTaskPromptVariantDefinition variant,
+    IReadOnlyDictionary<string, string> selectorInputs)
+{
+    foreach (var selector in variant.Match)
+    {
+        if (!selectorInputs.TryGetValue(selector.Key, out var runtimeValue))
+            return false;
+        if (!selector.Value.Contains(runtimeValue, StringComparer.OrdinalIgnoreCase))
+            return false;
+    }
+    return true;
+}
+```
+
+これで、fallback バリアントが `language` だけを書けば、すべての Agent を受け止められる理由が分かります。`agent` の次元を制約していないため、言語さえ一致すればどの Agent でもヒットします。一方 native バリアントは `agent` も制約しているため、claude/codex だけが条件を満たします。
+
+Agent のファミリーはどこから来るのか。実行時に、選択されたヒロンの実行器タイプから対応付けられます。`PresetTaskRequirementModels.cs` を参照してください。
+
+```csharp
+public static string? Resolve(AIProviderType? executorType) => executorType switch
+{
+    AIProviderType.ClaudeCodeCli => Claude,
+    AIProviderType.CodexCli      => Codex,
+    AIProviderType.GitHubCopilot => Copilot,
+    AIProviderType.IFlowCli      => Iflow,
+    AIProviderType.OpenCodeCli   => Opencode,
+    // ... gemini / kimi / qoder / kiro / hermes / codebuddy / pi ...
+    _ => null,
+};
+```
+
+`SessionsController.PresetTasks.cs` はセッション作成時にまずヒロンを取得し、`PresetTaskAgentFamilies.Resolve(hero.ExecutorType)` でファミリー名を得て、それを `ResolvePromptSelection` に渡します。バリアントを選択した後、`RenderPrompt` が Handlebars でテンプレートを描画し、`preludeTemplate` から生成された `/goal <目標>` を先頭に付け加えます。
+
+```csharp
+var renderedPrompt = prompt.FillTemplate(normalizedContext);
+var commandPrelude = BuildCommandPrelude(normalizedContext); // -> "/goal <goalDescription>"
+return string.IsNullOrWhiteSpace(commandPrelude)
+    ? renderedPrompt
+    : $"{commandPrelude}\n\n{renderedPrompt}";
+```
+
+### 受付の緩和：allowlist から `any` へ
+
+フォールバックプロンプトがあるため、`goal` はネイティブでない Agent を入口で拒否する必要がなくなりました。`backend/task-preset.json` の `requirements` を `["claude","codex"]` から `any` に緩めています。
+
+```jsonc
+{
+  "taskKey": "goal",
+  "requirements": [ { "type": "agent", "name": "any" } ],
+  "inputBindings": [
+    { "input": "goalCommandIds",  "promptParameter": "goalCommandIds",  "required": true },
+    { "input": "goalDescription", "promptParameter": "goalDescription", "required": true },
+    { "input": "targetScopeMarkdown", "promptParameter": "targetScopeMarkdown", "producer": "frontend-computed" }
+  ]
+}
+```
+
+受付層は開放し、差異はプロンプト層に下ろす。これがこの方式の要となる判断です。**互換性はもはや「実行できるかどうか」のスイッチではなく、「どのプロンプトで実行するか」のルーティングになります。**
+
+## 実践
+
+### エンドツーエンドの 1 回の実行
+
+1. ユーザーが `goal` ドロワーで目標説明を入力し、リポジトリの範囲を選び、ヒロンを選んで送信する；
+2. バックエンドが、選択されたヒロンの実行器タイプから Agent のファミリー（例：`claude` / `gemini`）を解決する；
+3. `ResolvePromptSelection(locale, agentFamily)` が `agent × language` でバリアントを探す：
+   - claude/codex + zh-CN → `native-zh-cn`；
+   - gemini + zh-CN → native はヒットせず、`fallback-zh-cn` に落ちる；
+4. `RenderPrompt` が選ばれたテンプレートを描画し、先頭に `/goal <目標説明>` を付ける；
+5. ネイティブ Agent は先頭行をコマンドとして実行する。フォールバック Agent は system プロンプトに従って先頭行をメタデータとして扱い、通常のプロンプト追従で継続作業を再現する。
+
+### 自分のプリセットに Agent の意識を加える
+
+新しいプリセットに同じ適応を行う場合の手順は決まっています。
+
+1. `prompts.json` で `locales` の代わりに `variants` を使い、`selectors` に `agent` を加える；
+2. native バリアントの `match` には `agent` と `language` を両方書く。fallback バリアントには `language` だけを書く；
+3. トップレベルに `variants.fallback` を宣言し、最終的な保険とする（スキーマでは variants モードに fallback が必須）；
+4. バックエンドの変更は不要。`ResolvePromptSelection` / `VariantMatches` は汎用的な実装である；
+5. 受付で制限すべきでない場合は、`requirements` の agent を `any` にする。
+
+### ハマりやすいポイント
+
+- **バリアントの順序がそのまま優先順位になる。** native は fallback より前に置く必要がある。さもないと、language だけを制約する fallback がすべての Agent を先に取ってしまい、claude/codex がネイティブ分岐に永遠に到達できなくなる。
+- **フォールバックのプロンプトでは、`/goal` の行を明示的に「格下げ」する必要がある。** `/goal ...` の接頭辞は無条件に付加される（`preludeTemplate` が決める）。そのため、フォールバックの system プロンプトにある「メタデータとして扱い、文字通りに実行しない」という一文は省けない。省くと、ネイティブでない Agent がこれを無効なコマンドとして処理してしまうかもしれない。
+- **非対話の制約はすべてのテンプレートに書き込む。** `goal` はキューに入って実行される auto-task なので、テンプレートでは「AskUserQuestion を使わない、質問しない、合理的な前提で続行しその前提を明記する」を繰り返し強調している。これは、無人実行中に Agent が入力待ちで止まるのを防ぐためです。
+- **リポジトリの境界はサンドボックスではなくプロンプトで制約している。** テンプレートでは「明示的に書き込み可能と選ばれたリポジトリの中だけを変更し、読み取り専用のリポジトリは補足的な文脈として扱う」ことを明記している。これはプロンプト層のソフトな制約なので、リポジトリの範囲は慎重に入力する必要がある。
+- **後方互換は無料で得られる。** 古いプリセットが `variants` を書かず、`locales` だけを書いている場合、`UsesVariants` は false になり、そのまま `legacy-locales` のパスを通る。完全に影響を受けない。新しいモデルのために既存のプリセットを変更する必要はない。
+
+## まとめ
+
+「Agent がネイティブに `goal` をサポートしていない場合、どう拡張して実現するか」。その答えは、Agent ごとに分岐をハードコードすることではなく、差異を `agent × language` のプロンプトバリアントとしてモデル化することでした。
+
+- ネイティブに対応する Agent（Claude / Codex）は native バリアントを使い、`/goal` のコマンドの表面をそのまま使う；
+- 対応しない Agent は fallback バリアントを使い、`/goal ...` を目標メタデータへと明示的に格下げして、通常のプロンプト追従で同じ継続作業の振る舞いを再現する；
+- マッチングは「バリアントが宣言したセレクターは必ず一致しなければならない」という汎用ルールと、段階的なフォールバックによる。バックエンドでは一度の解析で確定する；
+- 受付は allowlist から `any` へ緩め、互換性を「実行できるかどうか」から「どのプロンプトで実行するか」へ変えた。
+
+この設計の価値は `goal` 1 つのプリセットに留まりません。`agent × language` のセレクターとフォールバックのモデルは汎用的で、「Agent の能力に応じて異なる指示を与える」必要があるどのプリセットでも再利用でき、古いプリセットにはまったく影響を与えません。
+
+{/* HAGICLAW_PROGRAMMATIC_ENDING */}
+
+## 参考資料
+
+- プリセットパッケージ：`repos/hagitask/presets/goal/`（`manifest.json`、`backend/task-preset.json`、`backend/prompts.json`、`backend/templates/{en-US,zh-CN}/{native,fallback}.*`、`frontend/commands.json`、`frontend/panel.json`）
+- プロンプトパッケージのスキーマ：`repos/hagitask/schemas/task-preset-plugin/prompt-package.schema.json`
+- バックエンドのバリアント解析：`repos/hagicode-core/src/PCode.Application/Services/PresetTaskCatalogProvider.cs`（`ResolvePromptSelection` / `VariantMatches` / `RenderPrompt` / `BuildCommandPrelude`）
+- Agent ファミリーのマッピング：`repos/hagicode-core/src/PCode.Application/Services/PresetTaskRequirementModels.cs`（`PresetTaskAgentFamilies.Resolve`）
+- セッション作成：`repos/hagicode-core/src/PCode.HttpApi/Controllers/SessionsController.PresetTasks.cs`
+- OpenSpec の能力と提案：`openspec/specs/goal-preset-task/spec.md`、`openspec/changes/archive/2026-06-23-preset-task-agent-requirement-support/`、`openspec/changes/archive/2026-06-26-support-agent-language-prompt-selection-in-hagitask/`

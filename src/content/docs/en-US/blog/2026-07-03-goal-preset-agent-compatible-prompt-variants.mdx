@@ -1,0 +1,315 @@
+---
+title: Making Every Agent Understand /goal: A Compatible Extension Design for HagiCode's Continuous Work Preset
+date: 2026-07-03
+tags: [AI Agent, Continuous Work, Prompt Variants, Task Presets, HagiCode]
+---
+
+## Making Every Agent Understand `/goal`: A Compatible Extension Design for HagiCode's Continuous Work Preset
+
+## Introduction
+
+When you give an AI Agent a "continuous work" task, the ideal looks like this: you write a goal, pick the repositories it may change, click submit, and the Agent works toward that goal without stopping to ask questions, drifting off topic, or changing other repositories it shouldn't touch.
+
+In HagiCode, this capability has a dedicated entry point: the `goal` preset task, whose command surface is `/goal`. The problem is that **not every Agent understands `/goal`.** Claude and Codex have native continuous-work command semantics, so they can take `/goal` directly. Other CLIs (Gemini, Copilot, iFlow, OpenCode, and others) have no such slash command. If you send `/goal ...` to them unchanged, they may treat it as an invalid command, or execute it literally and cause problems.
+
+The simplest first approach was to let `goal` run only on Claude and Codex and reject every other Agent. That shuts out most of the Agent matrix. This article describes how we made a better path work: **use Agent-aware prompt variants so that natively supported Agents use the native command, while unsupported Agents use a fallback prompt. The behavior stays aligned and the experience stays consistent.**
+
+The content is based on the `goal` preset package in `repos/hagitask` and the backend parsing implementation in `repos/hagicode-core`.
+
+## Background
+
+### What `goal` is
+
+`goal` is a built-in task preset plugin package located at `repos/hagitask/presets/goal/`. Its `manifest.json` declares the plugin identity, icon, localization bundles, and frontend and backend assets:
+
+```jsonc
+{
+  "taskPresetId": "goal",
+  "version": "1.0.0",
+  "icon": "flag",
+  "kind": "custom-executor",
+  "status": "experimental",
+  "entrypoints": { "menuSurface": "session-create", "drawerId": "goal" },
+  "ui": { "panel": "./frontend/panel.json", "commands": "./frontend/commands.json" },
+  "backend": {
+    "taskPreset": "./backend/task-preset.json",
+    "prompts": "./backend/prompts.json"
+  }
+}
+```
+
+Its purpose is "continuous work mode": the user enters a goal description (`goalDescription`), optionally limits the writable and read-only repository scope, and the backend assembles a single non-interactive auto-task run. The key fields in the frontend panel `panel.json` are:
+
+- `goalCommandIds`: a command selector with one built-in option, `/goal`;
+- `goalDescription`: the required goal description;
+- `targetRepositories`: a repository access selector that distinguishes read and write access.
+
+### Where `/goal` comes from
+
+The command surface is defined in `frontend/commands.json`. The core is a single `preludeTemplate` line:
+
+```jsonc
+{
+  "commands": [
+    {
+      "id": "goal",
+      "label": "goal",
+      "preludeTemplate": "/goal {goalDescription}"
+    }
+  ]
+}
+```
+
+In other words, the prompt sent to the Agent begins with one line, `/goal <goal description>`, before the body. For Claude and Codex, this line is a command they recognize. For other Agents, this line is something that has to be "translated." The main adaptation difficulty in this article is that the meaning of this `/goal ...` line differs across Agents.
+
+## Analysis
+
+### A single locale template is no longer enough
+
+HagiTask's early prompt packages were **split only by language**. In `prompts.json`, each locale declared one `systemTemplate` and one `userTemplate`. The backend `PresetTaskCatalogProvider` loaded them into `PromptPackage.Locales`, and at runtime it selected one set based on the request language.
+
+That model works for presets whose execution instructions do not depend on the Agent. `goal` is different:
+
+- Claude and Codex can rely directly on the native `/goal` command surface.
+- Other Agents need a longer prompt that explicitly tells them how to enter continuous work mode, and also tells them not to execute `/goal ...` as a command.
+
+Within one locale, two very different sets of instructions are needed, so splitting only by language is not enough. We need another dimension besides language: **the Agent family**.
+
+### Rejecting execution is not a good solution
+
+Originally, `goal`'s `requirements` restricted Agents to `["claude", "codex"]`, and every other Agent was marked incompatible. That caused two product problems:
+
+1. In the hero selection panel, very few heroes passed the compatibility filter, so users could end up with no usable hero.
+2. Many Agents are capable of continuous work but lack a native `/goal` command. A blanket rejection wastes their capability.
+
+The real problem is therefore not "who can run it," but "**how to give equivalent but differently phrased execution instructions for the same goal, based on Agent capability.**" The answer is to push Agent-specific differences down into the prompt layer and handle them with variants and a fallback, instead of blocking Agents at the admission layer.
+
+## Solution
+
+### Variant selector: agent × language
+
+The new prompt package contract introduces `variants` in `prompts.json`. It uses `selectors` to declare the matching dimensions and `entries` to declare each variant's match rules and template files:
+
+```jsonc
+{
+  "version": "1.1.0",
+  "templateEngine": "handlebars",
+  "variants": {
+    "selectors": ["agent", "language"],
+    "entries": [
+      {
+        "id": "native-zh-cn",
+        "match": { "agent": ["claude", "codex"], "language": ["zh-CN"] },
+        "systemTemplate": "./templates/zh-CN/native.system.md",
+        "userTemplate": "./templates/zh-CN/native.user.hbs"
+      },
+      {
+        "id": "fallback-zh-cn",
+        "match": { "language": ["zh-CN"] },
+        "systemTemplate": "./templates/zh-CN/fallback.system.md",
+        "userTemplate": "./templates/zh-CN/fallback.user.hbs"
+      }
+      // ... native-en-us / fallback-en-us follow the same pattern
+    ],
+    "fallback": {
+      "id": "fallback-default",
+      "systemTemplate": "./templates/en-US/fallback.system.md",
+      "userTemplate": "./templates/en-US/fallback.user.hbs"
+    }
+  }
+}
+```
+
+There are three fallback levels, each more permissive than the last:
+
+1. **Native variant**: `match` constrains both `agent` (claude/codex) and `language`, so only native Agents match.
+2. **Fallback variant**: `match` constrains **only `language`, not `agent`**, so any Agent can match. This is the fallback for Agents without a native `/goal`.
+3. **fallback-default**: the final safety net when neither the agent nor the language matches.
+
+Order matters. `entries` are evaluated in declaration order, and native comes before fallback. Claude and Codex therefore match native first, while other Agents reach the language-specific fallback variant.
+
+### Two templates: native versus fallback
+
+For the same goal, the two system prompts differ mainly in how they treat the `/goal` line.
+
+Native template (`templates/zh-CN/native.system.md`, shown here in translation):
+
+```text
+You are the built-in execution prompt for the `goal` task preset plugin.
+
+This run must use `/goal` as the command surface for continuous work mode. Treat the provided project path and repository scope as the authoritative work boundary.
+
+This run is non-interactive. Do not ask the user follow-up questions. When a reasonable assumption allows progress, continue and state those assumptions explicitly in the response.
+```
+
+Fallback template (`templates/zh-CN/fallback.system.md`, shown here in translation):
+
+```text
+You are the fallback execution prompt for the `goal` task preset plugin.
+
+The current agent may not support the native `/goal` command. If a `/goal ...` line appears before the prompt, treat it as goal metadata attached to the preset, and do not execute it as a slash command that must be run verbatim.
+
+Complete the task in continuous work mode, and treat the provided project path and repository scope as the authoritative work boundary.
+
+This run is non-interactive. Do not ask the user follow-up questions. When a reasonable assumption allows progress, continue and state those assumptions explicitly in the response.
+```
+
+The key sentence is the core of the fallback strategy: **"If a `/goal ...` line appears before the prompt, treat it as goal metadata attached to the preset, and do not execute it as a slash command that must be run verbatim."** The `/goal <goal>` line that `preludeTemplate` always prepends is a command to native Agents. For fallback Agents, it is explicitly downgraded to "goal metadata / a goal marker." This lets ordinary prompt following reproduce the same continuous work behavior.
+
+The user templates (`.hbs`) also come in two versions. The fallback version adds a "routing note" section that tells the Agent it has been routed to a branch that does not depend on native `/goal` support, and asks it to "not rely on native `/goal` support, and instead complete the same continuous work behavior through ordinary prompt following."
+
+### Backend: parse once, decide the outcome
+
+Variant matching happens in `ResolvePromptSelection` in the backend file `PCode.Application/Services/PresetTaskCatalogProvider.cs`. It first resolves the locale, then places language and agent into a selector dictionary, and finds the first matching variant in order:
+
+```csharp
+public PresetTaskResolvedPromptSelection ResolvePromptSelection(string? locale, string? agentFamily)
+{
+    var resolvedLocale = ResolvePromptLocale(locale);
+    if (!PromptPackage.UsesVariants)
+    {
+        // Legacy presets that are split only by locale use the legacy path to stay backward compatible
+        var legacyTemplate = PromptPackage.Locales[resolvedLocale];
+        return new PresetTaskResolvedPromptSelection(
+            resolvedLocale, NormalizeAgentFamily(agentFamily), null, false,
+            "legacy-locales", legacyTemplate);
+    }
+
+    var normalizedAgentFamily = NormalizeAgentFamily(agentFamily);
+    var selectorInputs = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+    {
+        [PresetTaskPromptSelectorNames.Language] = resolvedLocale,
+    };
+    if (!string.IsNullOrWhiteSpace(normalizedAgentFamily))
+    {
+        selectorInputs[PresetTaskPromptSelectorNames.Agent] = normalizedAgentFamily!;
+    }
+
+    foreach (var variant in PromptPackage.Variants)
+    {
+        if (!VariantMatches(variant, selectorInputs)) continue;
+        return new PresetTaskResolvedPromptSelection(
+            resolvedLocale, normalizedAgentFamily, variant.Id, false, "variants", variant.Template);
+    }
+
+    // No variant matched: fall back to the explicitly declared fallback variant
+    return new PresetTaskResolvedPromptSelection(
+        resolvedLocale, normalizedAgentFamily, PromptPackage.FallbackVariant?.Id, true,
+        "variants", PromptPackage.FallbackVariant?.Template ?? PromptPackage.Locales[resolvedLocale]);
+}
+```
+
+The matching rule `VariantMatches` is simple: **every selector a variant declares must match at runtime.** Dimensions that are not declared do not constrain the match:
+
+```csharp
+private static bool VariantMatches(
+    PresetTaskPromptVariantDefinition variant,
+    IReadOnlyDictionary<string, string> selectorInputs)
+{
+    foreach (var selector in variant.Match)
+    {
+        if (!selectorInputs.TryGetValue(selector.Key, out var runtimeValue))
+            return false;
+        if (!selector.Value.Contains(runtimeValue, StringComparer.OrdinalIgnoreCase))
+            return false;
+    }
+    return true;
+}
+```
+
+This explains why the fallback variant can cover every Agent by declaring only `language`: it does not constrain the `agent` dimension, so any Agent whose language matches will hit it. The native variant also constrains `agent`, so only claude and codex satisfy it.
+
+Where does the Agent family come from? At runtime, it is mapped from the selected hero's executor type, in `PresetTaskRequirementModels.cs`:
+
+```csharp
+public static string? Resolve(AIProviderType? executorType) => executorType switch
+{
+    AIProviderType.ClaudeCodeCli => Claude,
+    AIProviderType.CodexCli      => Codex,
+    AIProviderType.GitHubCopilot => Copilot,
+    AIProviderType.IFlowCli      => Iflow,
+    AIProviderType.OpenCodeCli   => Opencode,
+    // ... gemini / kimi / qoder / kiro / hermes / codebuddy / pi ...
+    _ => null,
+};
+```
+
+When a session is created, `SessionsController.PresetTasks.cs` first gets the hero, then calls `PresetTaskAgentFamilies.Resolve(hero.ExecutorType)` to get the family name and passes it to `ResolvePromptSelection`. After the variant is selected, `RenderPrompt` renders the template with Handlebars and prepends the `/goal <goal>` line generated from `preludeTemplate`:
+
+```csharp
+var renderedPrompt = prompt.FillTemplate(normalizedContext);
+var commandPrelude = BuildCommandPrelude(normalizedContext); // -> "/goal <goalDescription>"
+return string.IsNullOrWhiteSpace(commandPrelude)
+    ? renderedPrompt
+    : $"{commandPrelude}\n\n{renderedPrompt}";
+```
+
+### Admission relaxed: from allowlist to `any`
+
+With a fallback prompt in place, `goal` no longer needs to block non-native Agents. In `backend/task-preset.json`, `requirements` changes from `["claude","codex"]` to `any`:
+
+```jsonc
+{
+  "taskKey": "goal",
+  "requirements": [ { "type": "agent", "name": "any" } ],
+  "inputBindings": [
+    { "input": "goalCommandIds",  "promptParameter": "goalCommandIds",  "required": true },
+    { "input": "goalDescription", "promptParameter": "goalDescription", "required": true },
+    { "input": "targetScopeMarkdown", "promptParameter": "targetScopeMarkdown", "producer": "frontend-computed" }
+  ]
+}
+```
+
+This is the key trade-off in the design. Admission is opened up, and the differences are pushed down into the prompt layer. **Compatibility is no longer a switch for "can it run," but a route for "which prompt set to run with."**
+
+## Practice
+
+### What an end-to-end run looks like
+
+1. The user enters a goal description, selects a repository scope, and chooses a hero in the `goal` drawer, then submits.
+2. The backend resolves the Agent family from the selected hero's executor type, such as `claude` or `gemini`.
+3. `ResolvePromptSelection(locale, agentFamily)` finds a variant by `agent × language`:
+   - claude or codex with zh-CN → `native-zh-cn`;
+   - gemini with zh-CN → native does not match, so it falls through to `fallback-zh-cn`.
+4. `RenderPrompt` renders the selected template and prepends `/goal <goal description>` at the start.
+5. A native Agent runs the first line as a command. A fallback Agent follows the system prompt and treats the first line as metadata, reproducing continuous work through ordinary prompt following.
+
+### Adding Agent awareness to your own preset
+
+To apply the same adaptation to a new preset, the pattern is fixed:
+
+1. In `prompts.json`, replace `locales` with `variants`, and add `agent` to `selectors`.
+2. The native variant's `match` declares both `agent` and `language`. The fallback variant declares only `language`.
+3. Declare a top-level `variants.fallback` as the final safety net. The schema requires a fallback in variants mode.
+4. The backend does not need changes. `ResolvePromptSelection` and `VariantMatches` are generic.
+5. If admission should not be restricted, set the agent requirement in `requirements` to `any`.
+
+### Pitfalls to avoid
+
+- **Variant order is priority.** Native must come before fallback. Otherwise, the fallback variant that constrains only language will claim every Agent first, and claude and codex will never reach the native branch.
+- **The fallback prompt must explicitly downgrade the `/goal` line.** The `/goal ...` prefix is always prepended (determined by `preludeTemplate`). That is why the fallback system prompt must say to treat it as metadata and not execute it verbatim. Otherwise, a non-native Agent may treat it as an invalid command.
+- **Put the non-interactive constraint in every template.** `goal` is a queued auto-task. The templates repeatedly say not to use AskUserQuestion, not to ask follow-up questions, and to continue with reasonable assumptions and state them. This prevents the Agent from stalling while waiting for input in an unattended run.
+- **Repository boundaries are enforced by the prompt, not a sandbox.** The templates explicitly require that changes be made only inside repositories selected as writable, and that read-only repositories be used only as supplementary context. This is a soft constraint at the prompt layer, so repository scope must be filled in carefully.
+- **Backward compatibility comes for free.** When an older preset only has `locales` and no `variants`, `UsesVariants` is false, and it takes the `legacy-locales` path with no impact. Existing presets do not need to be migrated for the new model.
+
+## Summary
+
+The question was how to extend the system when an Agent does not natively support `goal`. The answer is not to hard-code branches for each Agent. Instead, model the differences as prompt variants keyed by `agent × language`:
+
+- Natively supported Agents (Claude and Codex) use the native variant and take the `/goal` command surface directly.
+- Unsupported Agents use the fallback variant. It explicitly downgrades `/goal ...` to goal metadata and reproduces the same continuous work behavior through ordinary prompt following.
+- Matching uses one generic rule, "every selector a variant declares must match," plus level-by-level fallback. The backend resolves the selection once.
+- Admission moves from an allowlist to `any`, so compatibility becomes a question of "which prompt set to run with," not "can it run at all."
+
+The value of this design is not limited to the `goal` preset. The `agent × language` selector and fallback model is general. Any preset that needs to give different instructions based on Agent capability can reuse it, and existing presets are unaffected.
+
+{/* HAGICLAW_PROGRAMMATIC_ENDING */}
+
+## References
+
+- Preset package: `repos/hagitask/presets/goal/` (`manifest.json`, `backend/task-preset.json`, `backend/prompts.json`, `backend/templates/{en-US,zh-CN}/{native,fallback}.*`, `frontend/commands.json`, `frontend/panel.json`)
+- Prompt package schema: `repos/hagitask/schemas/task-preset-plugin/prompt-package.schema.json`
+- Backend variant resolution: `repos/hagicode-core/src/PCode.Application/Services/PresetTaskCatalogProvider.cs` (`ResolvePromptSelection` / `VariantMatches` / `RenderPrompt` / `BuildCommandPrelude`)
+- Agent family mapping: `repos/hagicode-core/src/PCode.Application/Services/PresetTaskRequirementModels.cs` (`PresetTaskAgentFamilies.Resolve`)
+- Session creation: `repos/hagicode-core/src/PCode.HttpApi/Controllers/SessionsController.PresetTasks.cs`
+- OpenSpec capabilities and proposals: `openspec/specs/goal-preset-task/spec.md`, `openspec/changes/archive/2026-06-23-preset-task-agent-requirement-support/`, `openspec/changes/archive/2026-06-26-support-agent-language-prompt-selection-in-hagitask/`

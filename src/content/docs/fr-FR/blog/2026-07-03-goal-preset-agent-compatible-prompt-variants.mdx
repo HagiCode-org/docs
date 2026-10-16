@@ -1,0 +1,315 @@
+---
+title: Faire comprendre `/goal` à tous les Agents : conception d'une extension compatible des préréglages de travail continu de HagiCode
+date: 2026-07-03
+tags: [Agent IA, travail continu, variantes de prompt, préréglage de tâche, HagiCode]
+---
+
+## Faire comprendre `/goal` à tous les Agents : conception d'une extension compatible des préréglages de travail continu de HagiCode
+
+## Introduction
+
+Confier à un Agent IA une tâche de « travail continu » devrait idéalement ressembler à ceci : vous écrivez un objectif, vous choisissez les dépôts modifiables, vous soumettez, et l'Agent avance vers cet objectif jusqu'au bout, sans poser de questions en cours de route, sans s'écarter du sujet et sans modifier d'autres dépôts.
+
+Dans HagiCode, cette capacité a un point d'entrée dédié : la tâche prédéfinie `goal`, dont la commande visible est `/goal`. Le problème est que **tous les Agents ne comprennent pas `/goal`.** Claude et Codex disposent d'une sémantique native de travail continu : ils reçoivent `/goal` et l'exécutent directement. Les autres CLI (Gemini, Copilot, iFlow, OpenCode, etc.) n'ont tout simplement pas cette commande slash. Si on leur transmet `/goal ...` tel quel, ils la traitent au mieux comme une commande invalide, au pire l'exécutent littéralement et posent des problèmes.
+
+La solution la plus simple au départ était de réserver `goal` à Claude et Codex et de refuser les autres Agents. Mais cela revenait à exclure une grande partie de la matrice d'Agents. Cet article décrit comment nous avons résolu le problème : **grâce à des variantes de prompt « sensibles à l'Agent », les Agents qui supportent nativement la commande utilisent la commande native, et ceux qui ne la supportent pas utilisent un prompt de repli. Le comportement reste aligné et l'expérience cohérente.**
+
+Le contenu s'appuie sur le paquet de préréglage `goal` présent dans `repos/hagitask` et sur l'implémentation de l'analyse côté backend dans `repos/hagicode-core`.
+
+## Contexte
+
+### Qu'est-ce que `goal` ?
+
+`goal` est un paquet de préréglage de tâche intégré, situé dans `repos/hagitask/presets/goal/`. Son `manifest.json` déclare l'identité du plugin, son icône, ses paquets de localisation et ses ressources frontend et backend :
+
+```jsonc
+{
+  "taskPresetId": "goal",
+  "version": "1.0.0",
+  "icon": "flag",
+  "kind": "custom-executor",
+  "status": "experimental",
+  "entrypoints": { "menuSurface": "session-create", "drawerId": "goal" },
+  "ui": { "panel": "./frontend/panel.json", "commands": "./frontend/commands.json" },
+  "backend": {
+    "taskPreset": "./backend/task-preset.json",
+    "prompts": "./backend/prompts.json"
+  }
+}
+```
+
+Son rôle est le « mode de travail continu » : l'utilisateur saisit une description d'objectif (`goalDescription`), peut éventuellement délimiter le périmètre des dépôts en écriture ou en lecture seule, puis le backend assemble une exécution automatique non interactive. Les champs clés du panneau frontend `panel.json` sont :
+
+- `goalCommandIds` : le sélecteur de commande, qui ne contient intégrée qu'une seule commande, `/goal` ;
+- `goalDescription` : la description d'objectif, obligatoire ;
+- `targetRepositories` : le sélecteur d'accès aux dépôts, qui distingue lecture et écriture.
+
+### D'où vient `/goal` ?
+
+La surface de commande est définie dans `frontend/commands.json`, dont l'élément central est une ligne `preludeTemplate` :
+
+```jsonc
+{
+  "commands": [
+    {
+      "id": "goal",
+      "label": "goal",
+      "preludeTemplate": "/goal {goalDescription}"
+    }
+  ]
+}
+```
+
+Autrement dit, le prompt finalement envoyé à l'Agent commence par une ligne `/goal <description de l'objectif>`. Pour Claude et Codex, cette ligne est une commande qu'ils comprennent. Pour les autres Agents, cette ligne doit être « traduite ». La difficulté de l'adaptation tient précisément à ce que cette ligne `/goal ...` ne signifie pas la même chose selon l'Agent.
+
+## Analyse
+
+### Un modèle par locale unique ne suffit plus
+
+Dans les premières versions de HagiTask, les paquets de prompts ne se différenciaient **que par la langue** : `prompts.json` déclarait, pour chaque locale, un `systemTemplate` et un `userTemplate`. Le `PresetTaskCatalogProvider` côté backend chargeait ces entrées dans `PromptPackage.Locales`, et le runtime sélectionnait l'un d'eux selon la langue de la requête.
+
+Ce modèle suffit pour les préréglages dont les instructions d'exécution sont indépendantes de l'Agent. Mais ce n'est pas le cas de `goal` :
+
+- Claude / Codex : on peut s'appuyer directement sur la surface de commande native `/goal` ;
+- Les autres Agents : il faut un prompt plus verbeux, qui leur explique explicitement « comment entrer en mode de travail continu » et qui leur demande de ne pas exécuter `/goal ...` comme une commande.
+
+Pour une même locale, deux instructions radicalement différentes doivent coexister. Un découpage par langue ne suffit donc plus. Il faut introduire une dimension supplémentaire : **la famille d'Agent**.
+
+### Refuser l'exécution n'est pas une bonne solution
+
+Au départ, le champ `requirements` de `goal` limitait l'Agent à `["claude", "codex"]`, et les autres Agents étaient déclarés incompatibles. Cela posait deux problèmes produit :
+
+1. Dans le panneau de sélection des héros, le filtre de compatibilité éliminait presque tout, et l'utilisateur pouvait se retrouver « sans héros disponible » ;
+2. Beaucoup d'Agents sont capables de mener un travail continu. Ils n'ont simplement pas la commande native `/goal`. Les rejeter en bloc gaspillait leurs capacités.
+
+Le vrai problème n'est donc pas « qui peut exécuter », mais « **comment, pour un même objectif, fournir des instructions d'exécution différentes mais équivalentes selon les capacités de l'Agent** ». La réponse : faire descendre la différence liée à l'Agent dans la couche des prompts, avec des variantes et un repli, plutôt que de bloquer à l'entrée.
+
+## Solution
+
+### Sélecteur de variantes : agent × langue
+
+Le nouveau contrat du paquet de prompts introduit `variants` dans `prompts.json`. `selectors` déclare les dimensions de correspondance, et `entries` déclare pour chaque variante ses règles de correspondance et ses fichiers de modèle :
+
+```jsonc
+{
+  "version": "1.1.0",
+  "templateEngine": "handlebars",
+  "variants": {
+    "selectors": ["agent", "language"],
+    "entries": [
+      {
+        "id": "native-zh-cn",
+        "match": { "agent": ["claude", "codex"], "language": ["zh-CN"] },
+        "systemTemplate": "./templates/zh-CN/native.system.md",
+        "userTemplate": "./templates/zh-CN/native.user.hbs"
+      },
+      {
+        "id": "fallback-zh-cn",
+        "match": { "language": ["zh-CN"] },
+        "systemTemplate": "./templates/zh-CN/fallback.system.md",
+        "userTemplate": "./templates/zh-CN/fallback.user.hbs"
+      }
+      // ... native-en-us / fallback-en-us 同理
+    ],
+    "fallback": {
+      "id": "fallback-default",
+      "systemTemplate": "./templates/en-US/fallback.system.md",
+      "userTemplate": "./templates/en-US/fallback.user.hbs"
+    }
+  }
+}
+```
+
+Il y a trois niveaux de repli, de plus en plus permissifs :
+
+1. **Variante native** : `match` contraint à la fois `agent` (claude/codex) et `language`, donc seuls les Agents natifs la reçoivent ;
+2. **Variante de repli** : `match` ne contraint **que `language`, pas `agent`**, donc n'importe quel Agent peut la recevoir. Elle sert de repli pour les Agents sans `/goal` natif ;
+3. **fallback-default** : la sécurité finale, lorsque même la langue ne correspond à aucune variante.
+
+L'ordre est déterminant : `entries` est parcouru dans l'ordre de déclaration, et la variante native précède la variante de repli. Claude et Codex tombent donc d'abord sur la variante native ; les autres Agents atteignent la variante de repli selon la langue.
+
+### Deux modèles : natif et repli
+
+Pour un même objectif, les deux prompts système se distinguent par leur attitude face à la ligne `/goal`.
+
+Modèle natif (`templates/zh-CN/native.system.md`) :
+
+```text
+你是 `goal` task preset plugin 的内置执行提示。
+
+本次运行必须使用 `/goal` 作为持续工作模式的命令表面。把提供的项目路径与仓库范围视为权威工作边界。
+
+这次运行处于非交互环境。不要追问用户；当合理假设可以继续推进时，直接继续并把这些假设明确写在响应里。
+```
+
+Modèle de repli (`templates/zh-CN/fallback.system.md`) :
+
+```text
+你是 `goal` task preset plugin 的兜底执行提示。
+
+当前 agent 可能不支持原生 `/goal` 命令。如果提示前面出现了 `/goal ...` 这一行，把它视为预设附带的目标元数据，不要把它当成必须逐字执行的斜杠命令。
+
+请以持续工作模式完成任务，并把提供的项目路径与仓库范围视为权威工作边界。
+
+这次运行处于非交互环境。不要追问用户；当合理假设可以继续推进时，直接继续并把这些假设明确写在响应里。
+```
+
+La phrase centrale qui porte toute la stratégie de repli est la suivante : **« 如果提示前面出现了 `/goal ...` 这一行，把它视为预设附带的目标元数据，不要把它当成必须逐字执行的斜杠命令。 »** (« Si la ligne `/goal ...` apparaît en tête du prompt, considérez-la comme une métadonnée d'objectif fournie par le préréglage, et non comme une commande slash à exécuter littéralement. ») La ligne `/goal <objectif>` ajoutée par `preludeTemplate` est une commande pour un Agent natif, mais elle est explicitement rétrogradée en « métadonnée / marqueur d'objectif » pour un Agent de repli. Le comportement de travail continu est ainsi reproduit par un simple suivi de prompt (prompt following).
+
+Les modèles user (`.hbs`) existent aussi en deux versions. Celle de repli comporte une section « note de routage », qui indique explicitement à l'Agent que la requête a été acheminée vers une branche ne dépendant pas de `/goal` natif, et lui demande de « ne pas compter sur la prise en charge native de `/goal` ; accomplir le même comportement de travail continu par un suivi de prompt ordinaire ».
+
+### Backend : une seule résolution détermine tout
+
+La correspondance des variantes se fait dans `ResolvePromptSelection` du fichier backend `PCode.Application/Services/PresetTaskCatalogProvider.cs`. Elle résout d'abord la locale, puis place la langue et l'Agent dans un dictionnaire de sélecteurs, et retient la première variante qui correspond :
+
+```csharp
+public PresetTaskResolvedPromptSelection ResolvePromptSelection(string? locale, string? agentFamily)
+{
+    var resolvedLocale = ResolvePromptLocale(locale);
+    if (!PromptPackage.UsesVariants)
+    {
+        // 旧的仅按 locale 分文件的预设，走遗留路径，保持向后兼容
+        var legacyTemplate = PromptPackage.Locales[resolvedLocale];
+        return new PresetTaskResolvedPromptSelection(
+            resolvedLocale, NormalizeAgentFamily(agentFamily), null, false,
+            "legacy-locales", legacyTemplate);
+    }
+
+    var normalizedAgentFamily = NormalizeAgentFamily(agentFamily);
+    var selectorInputs = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+    {
+        [PresetTaskPromptSelectorNames.Language] = resolvedLocale,
+    };
+    if (!string.IsNullOrWhiteSpace(normalizedAgentFamily))
+    {
+        selectorInputs[PresetTaskPromptSelectorNames.Agent] = normalizedAgentFamily!;
+    }
+
+    foreach (var variant in PromptPackage.Variants)
+    {
+        if (!VariantMatches(variant, selectorInputs)) continue;
+        return new PresetTaskResolvedPromptSelection(
+            resolvedLocale, normalizedAgentFamily, variant.Id, false, "variants", variant.Template);
+    }
+
+    // 没有变体命中：落到显式声明的 fallback 变体
+    return new PresetTaskResolvedPromptSelection(
+        resolvedLocale, normalizedAgentFamily, PromptPackage.FallbackVariant?.Id, true,
+        "variants", PromptPackage.FallbackVariant?.Template ?? PromptPackage.Locales[resolvedLocale]);
+}
+```
+
+La règle `VariantMatches` est volontairement simple : **chaque sélecteur déclaré par la variante doit correspondre à l'exécution ; un sélecteur non déclaré n'impose aucune contrainte** :
+
+```csharp
+private static bool VariantMatches(
+    PresetTaskPromptVariantDefinition variant,
+    IReadOnlyDictionary<string, string> selectorInputs)
+{
+    foreach (var selector in variant.Match)
+    {
+        if (!selectorInputs.TryGetValue(selector.Key, out var runtimeValue))
+            return false;
+        if (!selector.Value.Contains(runtimeValue, StringComparer.OrdinalIgnoreCase))
+            return false;
+    }
+    return true;
+}
+```
+
+C'est ce qui explique pourquoi la variante de repli, qui ne déclare que `language`, couvre tous les Agents : elle ne contraint pas la dimension `agent`, donc tout Agent dont la langue correspond la reçoit. La variante native, qui ajoute la contrainte `agent`, n'est accessible qu'à claude et codex.
+
+D'où vient la famille d'Agent ? À l'exécution, elle est déduite du type d'exécuteur du héros sélectionné, dans `PresetTaskRequirementModels.cs` :
+
+```csharp
+public static string? Resolve(AIProviderType? executorType) => executorType switch
+{
+    AIProviderType.ClaudeCodeCli => Claude,
+    AIProviderType.CodexCli      => Codex,
+    AIProviderType.GitHubCopilot => Copilot,
+    AIProviderType.IFlowCli      => Iflow,
+    AIProviderType.OpenCodeCli   => Opencode,
+    // ... gemini / kimi / qoder / kiro / hermes / codebuddy / pi ...
+    _ => null,
+};
+```
+
+Lors de la création de session, `SessionsController.PresetTasks.cs` récupère d'abord le héros, puis appelle `PresetTaskAgentFamilies.Resolve(hero.ExecutorType)` pour obtenir le nom de la famille, qu'il transmet à `ResolvePromptSelection`. Une fois la variante choisie, `RenderPrompt` rend le modèle avec Handlebars et place en tête la ligne `/goal <objectif>` générée par `preludeTemplate` :
+
+```csharp
+var renderedPrompt = prompt.FillTemplate(normalizedContext);
+var commandPrelude = BuildCommandPrelude(normalizedContext); // -> "/goal <goalDescription>"
+return string.IsNullOrWhiteSpace(commandPrelude)
+    ? renderedPrompt
+    : $"{commandPrelude}\n\n{renderedPrompt}";
+```
+
+### Assouplir l'admission : de la liste blanche à `any`
+
+Avec un prompt de repli, il n'est plus nécessaire d'exclure les Agents non natifs. Dans `backend/task-preset.json`, `requirements` passe de `["claude","codex"]` à `any` :
+
+```jsonc
+{
+  "taskKey": "goal",
+  "requirements": [ { "type": "agent", "name": "any" } ],
+  "inputBindings": [
+    { "input": "goalCommandIds",  "promptParameter": "goalCommandIds",  "required": true },
+    { "input": "goalDescription", "promptParameter": "goalDescription", "required": true },
+    { "input": "targetScopeMarkdown", "promptParameter": "targetScopeMarkdown", "producer": "frontend-computed" }
+  ]
+}
+```
+
+Ouvrir l'admission et déplacer la différence dans la couche des prompts : c'est le compromis central de cette solution. **La compatibilité n'est plus un interrupteur « peut-il exécuter ? », mais un routage « avec quel prompt exécuter ? ».**
+
+## Pratique
+
+### Déroulement d'une exécution de bout en bout
+
+1. L'utilisateur remplit la description d'objectif dans le tiroir `goal`, choisit le périmètre des dépôts et le héros, puis soumet ;
+2. Le backend déduit la famille d'Agent à partir du type d'exécuteur du héros (par exemple `claude` ou `gemini`) ;
+3. `ResolvePromptSelection(locale, agentFamily)` recherche la variante selon `agent × language` :
+   - claude/codex + zh-CN → `native-zh-cn` ;
+   - gemini + zh-CN → la variante native ne correspond pas, on retombe sur `fallback-zh-cn` ;
+4. `RenderPrompt` rend le modèle sélectionné et place en tête `/goal <description de l'objectif>` ;
+5. Un Agent natif exécute la première ligne comme une commande ; un Agent de repli, guidé par le prompt système, traite cette première ligne comme une métadonnée et reproduit le travail continu par un suivi de prompt ordinaire.
+
+### Ajouter la prise en compte de l'Agent à votre propre préréglage
+
+Si vous voulez appliquer la même adaptation à un nouveau préréglage, la démarche est fixe :
+
+1. Dans `prompts.json`, remplacez `locales` par `variants`, et ajoutez `agent` à `selectors` ;
+2. La variante native déclare à la fois `agent` et `language` dans `match` ; la variante de repli ne déclare que `language` ;
+3. Déclarez aussi un `variants.fallback` au niveau supérieur comme sécurité finale (le schéma exige un fallback en mode variantes) ;
+4. Le backend n'a pas besoin de modification : `ResolvePromptSelection` et `VariantMatches` sont génériques ;
+5. Si l'admission ne doit pas être restreinte, réglez l'agent de `requirements` sur `any`.
+
+### Quelques pièges fréquents
+
+- **L'ordre des variantes fait office de priorité.** La variante native doit précéder la variante de repli. Sinon, la variante qui ne contraint que la langue capte tous les Agents en premier, et claude/codex n'atteignent jamais la branche native.
+- **Le prompt de repli doit explicitement « rétrograder » la ligne `/goal`.** Le préfixe `/goal ...` est ajouté inconditionnellement (il est imposé par `preludeTemplate`). La phrase du prompt système de repli qui le traite comme métadonnée et interdit de l'exécuter littéralement ne doit donc pas être omise, sinon un Agent non natif pourrait la traiter comme une commande invalide.
+- **La contrainte « non interactif » doit figurer dans chaque modèle.** `goal` est une auto-tâche exécutée en file d'attente. Les modèles insistent donc sur « ne pas utiliser AskUserQuestion, ne pas poser de questions, poursuivre avec des hypothèses raisonnables et les expliciter », pour éviter qu'un Agent reste bloqué à attendre une saisie en l'absence d'utilisateur.
+- **Les limites des dépôts reposent sur le prompt, pas sur un bac à sable.** Les modèles exigent explicitement de « ne modifier que les dépôts sélectionnés comme modifiables, et ne considérer les dépôts en lecture seule que comme contexte complémentaire ». Il s'agit d'une contrainte souple, au niveau du prompt : le périmètre des dépôts doit donc être renseigné avec soin.
+- **La rétrocompatibilité est gratuite.** Un ancien préréglage qui ne déclare que `locales`, sans `variants`, a `UsesVariants` à false et suit directement le chemin `legacy-locales`. Il n'est pas affecté, et il n'est pas nécessaire de migrer les préréglages existants pour adopter le nouveau modèle.
+
+## Conclusion
+
+La question « si un Agent ne supporte pas nativement `goal`, comment étendre le système pour y parvenir ? » trouve sa réponse non pas dans l'écriture de branches codées en dur pour chaque Agent, mais dans la modélisation des différences sous forme de variantes de prompt `agent × language` :
+
+- Les Agents qui supportent nativement la commande (Claude / Codex) utilisent la variante native et la surface de commande `/goal` directe ;
+- Les Agents qui ne la supportent pas utilisent la variante de repli, qui rétrograde `/goal ...` en métadonnée d'objectif et reproduit le même travail continu par un suivi de prompt ordinaire ;
+- La correspondance repose sur une règle générique « chaque sélecteur déclaré par la variante doit correspondre », complétée par des replis successifs, et le backend effectue une seule résolution déterministe ;
+- L'admission passe d'une liste blanche à `any` : la compatibilité ne porte plus sur « peut-on exécuter ? », mais sur « avec quel prompt exécuter ? ».
+
+La valeur de cette conception ne se limite pas au préréglage `goal` : le sélecteur `agent × language` et le modèle de repli sont génériques. Tout préréglage qui doit donner des instructions différentes selon les capacités de l'Agent peut les réutiliser, sans perturber les préréglages existants.
+
+{/* HAGICLAW_PROGRAMMATIC_ENDING */}
+
+## Références
+
+- Paquet de préréglage : `repos/hagitask/presets/goal/` (`manifest.json`, `backend/task-preset.json`, `backend/prompts.json`, `backend/templates/{en-US,zh-CN}/{native,fallback}.*`, `frontend/commands.json`, `frontend/panel.json`)
+- Schéma du paquet de prompts : `repos/hagitask/schemas/task-preset-plugin/prompt-package.schema.json`
+- Résolution des variantes côté backend : `repos/hagicode-core/src/PCode.Application/Services/PresetTaskCatalogProvider.cs` (`ResolvePromptSelection` / `VariantMatches` / `RenderPrompt` / `BuildCommandPrelude`)
+- Correspondance des familles d'Agents : `repos/hagicode-core/src/PCode.Application/Services/PresetTaskRequirementModels.cs` (`PresetTaskAgentFamilies.Resolve`)
+- Création de session : `repos/hagicode-core/src/PCode.HttpApi/Controllers/SessionsController.PresetTasks.cs`
+- Capacités et propositions OpenSpec : `openspec/specs/goal-preset-task/spec.md`, `openspec/changes/archive/2026-06-23-preset-task-agent-requirement-support/`, `openspec/changes/archive/2026-06-26-support-agent-language-prompt-selection-in-hagitask/`
