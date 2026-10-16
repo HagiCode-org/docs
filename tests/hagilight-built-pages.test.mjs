@@ -64,7 +64,7 @@ test('root and localized pages tag the shared header and footer links with Hagil
     assert.ok(hasGaTag(html, { category: 'download', label: 'downloadClient', location: 'footer' }));
     assert.ok(readGaTags(html).length > 0);
     for (const tag of readGaTags(html)) {
-      assert.ok(['download', 'navigation', 'community', 'promotion'].includes(tag.category));
+      assert.ok(['download', 'store', 'navigation', 'community', 'promotion'].includes(tag.category));
       assert.ok(tag.label?.trim());
       assert.ok(tag.location?.trim());
     }

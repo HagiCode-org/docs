@@ -14,7 +14,7 @@ const LOCALIZED_BLOG_POST = `en-US/${BLOG_POST}`;
 const DESKTOP_INSTALL_PAGES = ['installation/desktop/index.html', 'en-US/installation/desktop/index.html'];
 const STRUCTURED_ARTICLE = 'en-US/faq/claude-vs-hagicode/index.html';
 
-const CATEGORIES = ['download', 'navigation', 'community', 'promotion'];
+const CATEGORIES = ['download', 'store', 'navigation', 'community', 'promotion'];
 // Components that Docs embeds in article content on purpose; plain in-content links stay untagged.
 const EMBEDDED_CTA_LOCATIONS = ['docs_install_button', 'article_cta'];
 
@@ -124,7 +124,7 @@ test('blog posts tag the Store, pricing, and promotion calls to action', () => {
   const post = readPage(BLOG_POST);
 
   assert.deepEqual(tagsAt(post, 'blog_cta'), [
-    { category: 'download', label: 'microsoftStore', location: 'blog_cta' },
+    { category: 'store', label: 'microsoftStore', location: 'blog_cta' },
     { category: 'navigation', label: 'productOverview', location: 'blog_cta' },
   ]);
 
@@ -200,4 +200,58 @@ test('structured article CTA components tag the primary and secondary slots', ()
     assert.match(source, /location: 'article_cta'/);
     assert.match(source, /category: 'navigation'/);
   }
+});
+
+// Store listings report as `store`. Blog promotion ads that link to a store listing keep the
+// `promotion` category, as the docs spec requires for promotion ads.
+const STORE_HOSTS = ['apps.microsoft.com', 'store.steampowered.com'];
+const PROMOTION_AD_LOCATIONS = ['blog_header_ad', 'blog_footer_ad'];
+
+function targetsOf(node) {
+  return [node.properties?.href, node.properties?.dataGaUrl].filter((value) => typeof value === 'string' && value);
+}
+
+function isStoreHost(url) {
+  try {
+    return STORE_HOSTS.includes(new URL(url).hostname);
+  } catch {
+    return false;
+  }
+}
+
+function assertStoreHostTags(root) {
+  for (const { node } of taggedElements(root)) {
+    const { category, location, label } = tagOf(node);
+    const toStore = targetsOf(node).some(isStoreHost);
+
+    if (toStore) {
+      const promotionAd = category === 'promotion' && PROMOTION_AD_LOCATIONS.includes(location);
+      assert.ok(category === 'store' || promotionAd, `store-host link tagged ${category} (${location}, ${label})`);
+    } else {
+      assert.notEqual(category, 'store', `non-store link tagged store (${location}, ${label})`);
+    }
+  }
+}
+
+test('store-host links carry the store category and no other link does', () => {
+  for (const route of [BLOG_POST, LOCALIZED_BLOG_POST, ...DESKTOP_INSTALL_PAGES, STRUCTURED_ARTICLE]) {
+    assertStoreHostTags(readPage(route));
+  }
+});
+
+test('the store-host guard rejects a mis-tagged link', () => {
+  const misTagged = parser.parse(
+    '<a href="https://apps.microsoft.com/detail/9N3PM0N3SVDW" data-ga-category="download" data-ga-label="microsoftStore" data-ga-location="blog_cta">Store</a>',
+  );
+  assert.throws(() => assertStoreHostTags(misTagged), /store-host link tagged download/);
+
+  const storeOnInstaller = parser.parse(
+    '<a href="https://example.com/setup.exe" data-ga-category="store" data-ga-label="downloadClient" data-ga-location="blog_cta">Setup</a>',
+  );
+  assert.throws(() => assertStoreHostTags(storeOnInstaller), /non-store link tagged store/);
+
+  const promotionAd = parser.parse(
+    '<a href="https://apps.microsoft.com/detail/9N3PM0N3SVDW" data-ga-category="promotion" data-ga-label="desktop-microsoft-store-2026-06-10" data-ga-location="blog_footer_ad">Ad</a>',
+  );
+  assert.doesNotThrow(() => assertStoreHostTags(promotionAd));
 });

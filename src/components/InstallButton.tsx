@@ -668,7 +668,7 @@ export default function InstallButton({
             className="btn-download-main"
             aria-label={t.windowsStoreAriaLabel}
             {...gaEventAttributes({
-              category: 'download',
+              category: 'store',
               label: 'microsoftStore',
               location: GA_INSTALL_LOCATION,
               url: WINDOWS_STORE_URL,
@@ -768,7 +768,7 @@ export default function InstallButton({
             badgeAttributes={{
               'data-windows-store-entry': 'docs-header-install',
               ...gaEventAttributes({
-                category: 'download',
+                category: 'store',
                 label: 'microsoftStore',
                 location: GA_INSTALL_LOCATION,
                 url: WINDOWS_STORE_URL,
@@ -786,7 +786,7 @@ export default function InstallButton({
             aria-label={steamShortcutAriaLabel}
             data-steam-entry="docs-header-install"
             {...gaEventAttributes({
-              category: 'download',
+              category: 'store',
               label: 'openSteamStore',
               location: GA_INSTALL_LOCATION,
               url: steamStoreLink.href,

@@ -863,7 +863,7 @@ describe('InstallButton Google Analytics events', () => {
   }
 
   function expectOneEvent(
-    action: 'download_click' | 'link_click',
+    action: 'download_click' | 'link_click' | 'store_visit',
     params: { category: string; label: string; url: string },
   ) {
     expect(gtag).toHaveBeenCalledTimes(1);
@@ -927,7 +927,7 @@ describe('InstallButton Google Analytics events', () => {
 
     fireEvent.click(await screen.findByRole('link', { name: 'Install Hagicode Desktop from Microsoft Store' }));
 
-    expectOneEvent('download_click', { category: 'download', label: 'microsoftStore', url: windowsStoreUrl });
+    expectOneEvent('store_visit', { category: 'store', label: 'microsoftStore', url: windowsStoreUrl });
   });
 
   it('reports the Microsoft Store badge shortcut once through its host element', async () => {
@@ -940,10 +940,10 @@ describe('InstallButton Google Analytics events', () => {
     expect(badge).not.toBeNull();
     fireEvent.click(badge as Element);
 
-    expectOneEvent('download_click', { category: 'download', label: 'microsoftStore', url: windowsStoreUrl });
+    expectOneEvent('store_visit', { category: 'store', label: 'microsoftStore', url: windowsStoreUrl });
   });
 
-  it('reports the Steam shortcut as a download once', async () => {
+  it('reports the Steam shortcut as a store visit once', async () => {
     features.steam = true;
     vi.mocked(versionManager.getDesktopVersionData).mockResolvedValue(createSourcedVersionData());
 
@@ -951,7 +951,7 @@ describe('InstallButton Google Analytics events', () => {
 
     fireEvent.click(await screen.findByRole('link', { name: 'Open Hagicode on Steam' }));
 
-    expectOneEvent('download_click', { category: 'download', label: 'openSteamStore', url: fallbackSteamUrl });
+    expectOneEvent('store_visit', { category: 'store', label: 'openSteamStore', url: fallbackSteamUrl });
   });
 
   it('sends nothing for the retry and version history controls', async () => {
