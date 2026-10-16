@@ -62,6 +62,26 @@ export default defineConfig({
   },
   // 文档站点部署路径：独立部署在 docs.hagicode.com，使用根路径
   base: getBasePath(),
+  // Retired Docker Compose installation page: old links (blog posts and external references) keep landing on the installation index.
+  redirects: {
+    "/installation/docker-compose": "/installation/",
+    ...Object.fromEntries(
+      [
+        "de-DE",
+        "en-US",
+        "es-ES",
+        "fr-FR",
+        "ja-JP",
+        "ko-KR",
+        "pt-BR",
+        "ru-RU",
+        "zh-Hant",
+      ].map((locale) => [
+        `/${locale}/installation/docker-compose`,
+        `/${locale}/installation/`,
+      ]),
+    ),
+  },
   // 中间件配置 - 暂时禁用，由页面级别处理重定向
   // middleware: './src/middleware.ts',
   markdown: {
