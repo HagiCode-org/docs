@@ -69,7 +69,7 @@ test('DLC stays after release notes and before Bundles in the top-level docs sec
   assert.ok(dlcIndex >= 0);
   assert.equal(dlcIndex, releaseNotesIndex + 1);
   assert.equal(bundlesIndex, dlcIndex + 1);
-  assert.equal(DOCS_SIDEBAR.at(-1)?.label, 'Bundles');
+  assert.equal(DOCS_SIDEBAR.at(-1)?.label, '常见问题');
 });
 
 test('all top-level sidebar groups provide translations for every non-root docs locale', () => {
