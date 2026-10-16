@@ -14,13 +14,11 @@ function resolveDocsPath(relativePath) {
 }
 
 const requiredZhDocsFiles = [
-  'src/content/docs/dlc/all-beauties-pack.mdx',
   'src/content/docs/dlc/turbo-engine-dlc.mdx',
   'src/content/docs/dlc/sponsor-pack.mdx',
 ];
 
 const requiredEnDocsFiles = [
-  'src/content/translations/docs/en-US/dlc/all-beauties-pack.mdx',
   'src/content/translations/docs/en-US/dlc/turbo-engine-dlc.mdx',
   'src/content/translations/docs/en-US/dlc/sponsor-pack.mdx',
 ];
@@ -42,18 +40,22 @@ test('required DLC docs content files exist', async () => {
   ]);
 });
 
+test('All Beauties Pack pages are removed', async () => {
+  await assert.rejects(access(resolveDocsPath('src/content/docs/dlc/all-beauties-pack.mdx')));
+  await assert.rejects(access(resolveDocsPath('src/content/translations/docs/en-US/dlc/all-beauties-pack.mdx')));
+});
+
 test('DLC docs directory no longer requires a standalone overview page', async () => {
   await assert.rejects(access(resolveDocsPath('src/content/docs/dlc/index.mdx')));
 });
 
 test('each DLC detail page uses stronger recommendation copy without overview-page back links or hard-coded pricing', async () => {
-  const [allBeautiesSource, turboSource, sponsorSource] = await Promise.all([
-    readFile(resolveDocsPath('src/content/docs/dlc/all-beauties-pack.mdx'), 'utf8'),
+  const [turboSource, sponsorSource] = await Promise.all([
     readFile(resolveDocsPath('src/content/docs/dlc/turbo-engine-dlc.mdx'), 'utf8'),
     readFile(resolveDocsPath('src/content/docs/dlc/sponsor-pack.mdx'), 'utf8'),
   ]);
 
-  for (const source of [allBeautiesSource, turboSource, sponsorSource]) {
+  for (const source of [turboSource, sponsorSource]) {
     assert.match(source, /值得|推荐|优先购买|支持/);
     assert.doesNotMatch(source, /下一步怎么查看/);
     assert.doesNotMatch(source, /Steam 商店中的 HagiCode 页面/);
@@ -62,32 +64,23 @@ test('each DLC detail page uses stronger recommendation copy without overview-pa
     assert.doesNotMatch(source, /￥|\$[0-9]|¥[0-9]/);
   }
 
-  assert.match(allBeautiesSource, /\]\(\.\.\/turbo-engine-dlc\/\)/);
-  assert.match(allBeautiesSource, /\]\(\.\.\/sponsor-pack\/\)/);
-  assert.match(turboSource, /\]\(\.\.\/all-beauties-pack\/\)/);
   assert.match(turboSource, /\]\(\.\.\/sponsor-pack\/\)/);
   assert.match(sponsorSource, /\]\(\.\.\/turbo-engine-dlc\/\)/);
-  assert.match(sponsorSource, /\]\(\.\.\/all-beauties-pack\/\)/);
 });
 
 test('english DLC detail pages stay in sync with localized sibling links and recommendation-oriented copy', async () => {
-  const [allBeautiesSource, turboSource, sponsorSource] = await Promise.all([
-    readFile(resolveDocsPath('src/content/translations/docs/en-US/dlc/all-beauties-pack.mdx'), 'utf8'),
+  const [turboSource, sponsorSource] = await Promise.all([
     readFile(resolveDocsPath('src/content/translations/docs/en-US/dlc/turbo-engine-dlc.mdx'), 'utf8'),
     readFile(resolveDocsPath('src/content/translations/docs/en-US/dlc/sponsor-pack.mdx'), 'utf8'),
   ]);
 
-  for (const source of [allBeautiesSource, turboSource, sponsorSource]) {
+  for (const source of [turboSource, sponsorSource]) {
     assert.match(source, /worth|recommend|priority|support/i);
     assert.doesNotMatch(source, /DLC overview/i);
     assert.doesNotMatch(source, /\]\(\.\.\/\)/);
     assert.doesNotMatch(source, /￥|\$[0-9]|¥[0-9]/);
   }
 
-  assert.match(allBeautiesSource, /\]\(\.\.\/turbo-engine-dlc\/\)/);
-  assert.match(allBeautiesSource, /\]\(\.\.\/sponsor-pack\/\)/);
-  assert.match(turboSource, /\]\(\.\.\/all-beauties-pack\/\)/);
   assert.match(turboSource, /\]\(\.\.\/sponsor-pack\/\)/);
   assert.match(sponsorSource, /\]\(\.\.\/turbo-engine-dlc\/\)/);
-  assert.match(sponsorSource, /\]\(\.\.\/all-beauties-pack\/\)/);
 });

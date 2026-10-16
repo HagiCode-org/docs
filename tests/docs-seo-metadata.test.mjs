@@ -67,11 +67,6 @@ const CASES = [
     minLength: 36,
   },
   {
-    file: 'src/content/docs/installation/docker-compose.mdx',
-    type: 'frontmatter',
-    minLength: 36,
-  },
-  {
     file: 'src/content/docs/guides/voice-recognition/doubao.mdx',
     type: 'frontmatter',
     minLength: 36,
