@@ -41,11 +41,6 @@ vi.mock('@shared/version-manager', async () => {
   };
 });
 
-vi.mock('@shared/links', () => ({
-  getLink: vi.fn(() => '/container/'),
-  getLinkWithLocale: vi.fn((key: string, locale?: string) => (locale === 'en' ? 'https://www.hagicode.com/container/' : '/container/')),
-}));
-
 vi.mock('@shared/steam-store-link', () => ({
   getFallbackSteamStoreLink: vi.fn(() => ({
     href: fallbackSteamUrl,
@@ -809,7 +804,6 @@ describe('getDesktopDownloadGaLabel', () => {
 
 describe('InstallButton Google Analytics events', () => {
   const gtag = vi.fn();
-  const containerUrl = 'https://www.hagicode.com/container/';
 
   beforeAll(() => {
     installGaEventTracking(document, () => gtag);
@@ -905,18 +899,6 @@ describe('InstallButton Google Analytics events', () => {
         fireEvent.click(screen.getByRole('button', { name: 'Select Other Version' }));
       }
     }
-  });
-
-  it('reports the container deployment link as navigation from the dropdown', async () => {
-    vi.mocked(versionManager.getDesktopVersionData).mockResolvedValue(createSourcedVersionData());
-
-    render(<InstallButton variant="full" locale="en" />);
-
-    await screen.findByRole('link', { name: /China/i });
-    fireEvent.click(screen.getByRole('button', { name: 'Select Other Version' }));
-    fireEvent.click(await screen.findByRole('menuitem', { name: /Container Deployment/i }));
-
-    expectOneEvent('link_click', { category: 'navigation', label: 'dockerCompose', url: containerUrl });
   });
 
   it('reports the primary Microsoft Store link on Windows', async () => {

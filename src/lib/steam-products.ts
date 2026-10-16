@@ -1,6 +1,6 @@
 import { loadPromotions, type NormalizedPromotion, type PromotionImage } from '@/lib/promotions';
 
-export type SteamProductKey = 'hagicode' | 'turbo-engine' | 'all-beauties-pack' | 'sponsor-pack' | 'hagicode-plus';
+export type SteamProductKey = 'hagicode' | 'turbo-engine' | 'sponsor-pack' | 'hagicode-plus';
 
 export interface DocsSteamProduct {
   key: SteamProductKey;
@@ -33,15 +33,6 @@ const fallbackProducts: Record<SteamProductKey, Omit<DocsSteamProduct, 'key' | '
     kind: 'dlc',
     image: null,
   },
-  'all-beauties-pack': {
-    title: 'All Beauties Pack',
-    description: 'Free Steam DLC with additional avatar resources for visual personalization.',
-    ctaLabel: 'View on Steam',
-    href: 'https://store.steampowered.com/app/4625540/Hagicode/',
-    platform: 'Steam',
-    kind: 'dlc',
-    image: null,
-  },
   'sponsor-pack': {
     title: 'Sponsor Pack',
     description: 'Supporter DLC for users who want visible long-term project support rewards.',
@@ -65,7 +56,6 @@ const fallbackProducts: Record<SteamProductKey, Omit<DocsSteamProduct, 'key' | '
 const promotionAliases: Record<SteamProductKey, string[]> = {
   hagicode: ['main-game-steam-ea-2026-04-29', 'main-game-2026-04-29'],
   'turbo-engine': ['hagicode-turbo-engine-dlc'],
-  'all-beauties-pack': [],
   'sponsor-pack': [],
   'hagicode-plus': ['hagicode-plus-bundle'],
 };
@@ -110,7 +100,6 @@ export async function loadDocsSteamProducts(options: {
   return {
     hagicode: resolveSteamProductFromPromotions('hagicode', promotions),
     'turbo-engine': resolveSteamProductFromPromotions('turbo-engine', promotions),
-    'all-beauties-pack': resolveSteamProductFromPromotions('all-beauties-pack', promotions),
     'sponsor-pack': resolveSteamProductFromPromotions('sponsor-pack', promotions),
     'hagicode-plus': resolveSteamProductFromPromotions('hagicode-plus', promotions),
   };

@@ -1,6 +1,6 @@
 /**
  * InstallButton 组件 - 文档站点版本 (React)
- * 支持自动平台检测、下拉菜单选择版本、Docker 版本跳转。
+ * 支持自动平台检测、下拉菜单选择版本。
  * 运行时仅消费 canonical index，并展示加载/可用/失败状态。
  */
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
@@ -36,13 +36,10 @@ import type {
   DesktopVersionState,
 } from '@shared/version-manager';
 import { gaEventAttributes } from '@hagicode/hagilight-core/analytics-events';
-import { getLink, getLinkWithLocale } from '@shared/links';
 import { getFallbackSteamStoreLink, loadSteamStoreLink } from '@shared/steam-store-link';
 import { FEATURE_MAC_DOWNLOAD_ENABLED, FEATURE_SITE_STEAM_ENABLED } from '@/config/features';
 import MicrosoftStoreBadge from './MicrosoftStoreBadge';
 
-const MAC_DOWNLOAD_DISABLED_NOTICE = '建议安装 Docker 版本';
-const MAC_DOWNLOAD_DISABLED_NOTICE_EN = 'Recommended: Install Docker version';
 const PLATFORM_LABELS = {
   windows: 'Windows',
   macos: 'macOS',
@@ -315,9 +312,6 @@ export default function InstallButton({
           selectOtherVersion: 'Select Other Version',
           selectDownloadVersion: 'Select Download Version',
           recommended: 'Recommended',
-          containerDeployment: 'Container Deployment',
-          macInDevelopmentNotice: MAC_DOWNLOAD_DISABLED_NOTICE_EN,
-          macContainerCta: 'Go to Container page',
           unavailable: 'Unavailable',
           retry: 'Retry',
           openVersionHistory: 'Open version history',
@@ -329,8 +323,6 @@ export default function InstallButton({
           currentVersion: 'Version',
           currentDevice: 'Current device',
           defaultTagged: 'Default source tagged',
-          otherPaths: 'Other install paths',
-          containerDescription: 'For servers, self-hosted deployments, or when desktop packages are unavailable.',
         }
       : {
           installNow: '立即安装',
@@ -338,9 +330,6 @@ export default function InstallButton({
           selectOtherVersion: '选择其他版本',
           selectDownloadVersion: '选择下载版本',
           recommended: '⭐推荐',
-          containerDeployment: '容器部署',
-          macInDevelopmentNotice: MAC_DOWNLOAD_DISABLED_NOTICE,
-          macContainerCta: '前往 Container 页面',
           unavailable: '暂不可用',
           retry: '重试',
           openVersionHistory: '打开版本历史页',
@@ -352,12 +341,9 @@ export default function InstallButton({
           currentVersion: '当前版本',
           currentDevice: '当前设备',
           defaultTagged: '默认源已标记',
-          otherPaths: '其他安装路径',
-          containerDescription: '适合服务器、自托管部署，或桌面端安装包暂不可用时使用。',
         };
   }, [locale]);
 
-  const containerLink = useMemo(() => getLinkWithLocale('container', locale), [locale]);
   const steamShortcutLabel = 'Steam';
   const steamShortcutAriaLabel =
     locale === 'en' ? 'Open Hagicode on Steam' : '打开 Hagicode Steam 商店页';
@@ -472,11 +458,6 @@ export default function InstallButton({
   );
   const currentDevicePlatformLabel = currentOS === 'unknown' ? null : PLATFORM_LABELS[currentOS];
 
-  const macPlatform = useMemo(
-    () => allPlatformData.find((platform) => platform.platform === 'macos') || null,
-    [allPlatformData],
-  );
-  const showMacDisabledFirst = !FEATURE_MAC_DOWNLOAD_ENABLED && !!macPlatform && currentOS === 'macos';
 
   const canDownload = !isLoading && !error && !!version && platformData.length > 0;
 
@@ -597,61 +578,6 @@ export default function InstallButton({
   const showDisabledPrimaryButtons = primarySourceButtons.length === 0;
   const primaryButtonsDisabled = isLoading || !canDownload || (!FEATURE_MAC_DOWNLOAD_ENABLED && currentOS === 'macos');
   const showDropdownToggle = canDownload && platformData.length > 0;
-
-  const macDisabledPanel = !FEATURE_MAC_DOWNLOAD_ENABLED && macPlatform ? (
-    <section
-      className={`dropdown-platform-section dropdown-platform-section--macos ${currentOS === 'macos' ? 'dropdown-platform-section-current' : ''}`.trim()}
-      role="group"
-      aria-label={macPlatform.platformLabel}
-    >
-      <div className="dropdown-group-label" role="presentation">
-        <div className="dropdown-group-lead">
-          <span className="platform-icon">{PLATFORM_ICONS[macPlatform.platform]}</span>
-          <div className="dropdown-group-text">
-            <span className="platform-name">{macPlatform.platformLabel}</span>
-            <span className="dropdown-group-meta">{t.macInDevelopmentNotice}</span>
-          </div>
-        </div>
-        <div className="dropdown-group-badges">
-          {currentOS === 'macos' && (
-            <span className="platform-state-badge">{t.currentDevice}</span>
-          )}
-          {version?.version && (
-            <span className="version-tag">{version.version}</span>
-          )}
-        </div>
-      </div>
-      <div className="dropdown-item-stack">
-        <div
-          className="dropdown-item dropdown-item-disabled"
-          role="presentation"
-          aria-disabled="true"
-        >
-          <span className="dropdown-item-text-block">
-            <span className="dropdown-item-label">macOS</span>
-            <span className="dropdown-item-disabled-notice">{t.macInDevelopmentNotice}</span>
-          </span>
-        </div>
-        <a
-          href={containerLink}
-          className="dropdown-item"
-          role="menuitem"
-          onClick={handleLinkClick}
-          {...gaEventAttributes({
-            category: 'navigation',
-            label: 'dockerCompose',
-            location: GA_INSTALL_LOCATION,
-            url: containerLink,
-          })}
-        >
-          <span className="dropdown-item-text-block">
-            <span className="dropdown-item-label">{t.macContainerCta}</span>
-            <span className="dropdown-item-description">{t.containerDescription}</span>
-          </span>
-        </a>
-      </div>
-    </section>
-  ) : null;
 
   return (
     <div
@@ -838,7 +764,6 @@ export default function InstallButton({
                   </div>
                 </div>
                 <div className="dropdown-body">
-                  {showMacDisabledFirst && macDisabledPanel}
                   {orderedPlatformData.map((platformGroup) => (
                     <section
                       key={platformGroup.platform}
@@ -943,40 +868,6 @@ export default function InstallButton({
                       </div>
                     </section>
                   ))}
-                  {!showMacDisabledFirst && macDisabledPanel}
-                  <section className="dropdown-utility-section" role="group" aria-label={t.otherPaths}>
-                    <div className="dropdown-utility-header" role="presentation">
-                      <span className="dropdown-utility-title">{t.otherPaths}</span>
-                      <span className="dropdown-utility-description">{t.containerDescription}</span>
-                    </div>
-                    <div className="dropdown-item-stack">
-                      <a
-                        href={containerLink}
-                        className="dropdown-item dropdown-item-docker"
-                        role="menuitem"
-                        onClick={handleLinkClick}
-                        {...gaEventAttributes({
-                          category: 'navigation',
-                          label: 'dockerCompose',
-                          location: GA_INSTALL_LOCATION,
-                          url: containerLink,
-                        })}
-                      >
-                        <svg className="docker-icon" viewBox="0 0 24 24" fill="currentColor">
-                          <path d="M13.983 11.078h2.119a.186.186 0 00.186-.185V9.006a.186.186 0 00-.186-.186h-2.119a.185.185 0 00-.185.185v1.888c0 .102.083.185.185.185m-2.954-5.43h2.118a.186.186 0 00.186-.186V3.574a.186.186 0 00-.186-.185h-2.118a.185.185 0 00-.185.185v1.888c0 .102.082.185.185.186m0 2.716h2.118a.187.187 0 00.186-.186V6.29a.186.186 0 00-.186-.185h-2.118a.185.185 0 00-.185.185v1.887c0 .102.082.185.185.186m-2.93 0h2.12a.186.186 0 00.184-.186V6.29a.185.185 0 00-.185-.185H8.1a.185.185 0 00-.185.185v1.887c0 .102.083.185.185.186m-2.964 0h2.119a.186.186 0 00.185-.186V6.29a.185.185 0 00-.185-.185H5.136a.186.186 0 00-.186.185v1.887c0 .102.084.185.186.186m5.893 2.715h2.118a.186.186 0 00.186-.185V9.006a.186.186 0 00-.186-.186h-2.118a.185.185 0 00-.185.185v1.888c0 .102.082.185.185.185m-2.93 0h2.12a.185.185 0 00.184-.185V9.006a.185.185 0 00-.184-.186h-2.12a.185.185 0 00-.184.185v1.888c0 .102.083.185.185.185m-2.964 0h2.119a.185.185 0 00.185-.185V9.006a.185.185 0 00-.185-.186h-2.12a.186.186 0 00-.185.186v1.887c0 .102.084.185.186.185m-2.92 0h2.12a.185.185 0 00.184-.185V9.006a.185.185 0 00-.184-.186h-2.12a.185.185 0 00-.184.185v1.888c0 .102.082.185.185.185M23.763 9.89c-.065-.051-.672-.51-1.954-.51-.338.001-.676.03-1.01.087-.248-1.7-1.653-2.53-1.716-2.566l-.344-.199-.226.327c-.284.438-.49.922-.612 1.43-.23.97-.09 1.882.403 2.661-.595.332-1.55.413-1.744.42H.751a.751.751 0 00-.75.748 11.376 11.376 0 00.692 4.062c.545 1.428 1.355 2.48 2.41 3.124 1.18.723 3.1 1.137 5.275 1.137.983.003 1.963-.086 2.93-.266a12.248 12.248 0 003.823-1.389c.98-.567 1.86-1.288 2.61-2.136 1.252-1.418 1.998-2.997 2.553-4.4h.221c1.372 0 2.215-.549 2.68-1.009.309-.293.55-.65.707-1.046l.098-.288z" />
-                        </svg>
-                        <span className="dropdown-item-text-block">
-                          <span className="dropdown-item-label">{t.containerDeployment}</span>
-                          <span className="dropdown-item-description">{t.containerDescription}</span>
-                        </span>
-                        <svg className="external-icon" viewBox="0 0 24 24" fill="none">
-                          <path d="M18 13V19C18 19.5304 17.7893 20.0391 17.4142 20.4142C17.0391 20.7893 16.5304 21 16 21H5C4.46957 21 3.96086 20.7893 3.58579 20.4142C3.21071 20.0391 3 19.5304 3 19V8C3 7.46957 3.21071 6.96086 3.58579 6.58579C3.96086 6.21071 4.46957 6 5 6H11" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-                          <path d="M15 3H21V9" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-                          <path d="M10 14L21 3" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-                        </svg>
-                      </a>
-                    </div>
-                  </section>
                 </div>
               </div>
             )}

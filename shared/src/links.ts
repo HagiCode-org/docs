@@ -274,20 +274,6 @@ export const SITE_LINKS = {
         external: false,
     } as LinkConfig,
 
-    /** Docker Compose 安装指南（相对于文档站点） */
-    dockerCompose: {
-        dev: 'http://localhost:31265/installation/docker-compose/',
-        prod: 'https://docs.hagicode.com/installation/docker-compose/',
-        external: false,
-    } as LinkConfig,
-
-    /** 容器部署落地页 */
-    container: {
-        dev: 'https://www.hagicode.com/container/', // 使用生产 URL（跨仓库链接）
-        prod: 'https://www.hagicode.com/container/',
-        external: false,
-    } as LinkConfig,
-
     /** 官方 About 页面 */
     about: {
         dev: 'https://www.hagicode.com/about/',
@@ -323,14 +309,6 @@ export const GLM_PROMO_LINKS = {
         discount: '10% 优惠',
     },
 
-    /** Docker Compose 部署指南链接 */
-    dockerComposeGuide: {
-        url: '/installation/docker-compose/',
-        label: '查看部署指南',
-        title: 'Docker Compose 部署: 一键部署 Hagicode',
-        description: '一键部署 Hagicode，快速体验 AI 编程助手',
-        isInternal: true,
-    },
 } as const;
 
 /**
@@ -380,20 +358,6 @@ export function getGlmCodingUrl(): string {
  */
 export function getAliyunPromoUrl(): string {
     return ALIYUN_PROMO_LINKS.aistar.url;
-}
-
-/**
- * 获取 Docker Compose 指南链接（带 base 路径）
- * @returns Docker Compose 指南完整 URL
- */
-export function getDockerComposeGuideUrl(): string {
-    const basePath = getDocsBasePath();
-    const path = GLM_PROMO_LINKS.dockerComposeGuide.url;
-    // 确保 base 路径和链接路径正确拼接
-    if (basePath === '/') {
-        return path;
-    }
-    return `${basePath}${path}`.replace(/\/+/g, '/');
 }
 
 /**
