@@ -132,6 +132,7 @@ Body images that use a relative path into `src/content/docs/img/` are optimized 
 Hagilight 0.6.1 installs one click listener per page (through `@hagicode/hagilight-core/GoogleAnalytics`) and tags the shared header, footer, article promotion, and promotion banner links. Docs tags its own calls to action with `gaEventAttributes()` from `@hagicode/hagilight-core/analytics-events`, spread onto the existing anchor; Docs has no tracker of its own.
 
 - Labels are stable ids, never localized text. Reuse the shared Hagilight label when the link has the same purpose (`microsoftStore`, `dockerCompose`, `productOverview`, ...).
+- Vocabulary: `event_category` is one of `download`, `store`, `navigation`, `community`, or `promotion`. Installer links send `download_click` with category `download`. Store listings (`microsoftStore`, `openSteamStore`) send `store_visit` with category `store`. Other tracked links send `link_click`.
 - Docs-owned locations: `docs_install_button`, `blog_cta`, `blog_header_ad`, `blog_footer_ad`, `article_cta`. The label tables and the full rules are in the mono-root `docs/google-analytics-integration-reference.md`.
 - Do not tag the sidebar, table of contents, edit links, language chooser, search, or plain in-content links; `tests/ga-event-tags.test.mjs` fails if they carry `data-ga-*`.
 - A link reports through the delegated listener only, so do not add a second `gtag('event', …)` call for the same click.
