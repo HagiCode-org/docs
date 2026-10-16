@@ -203,7 +203,32 @@ export function getStructuredArticleViewModel(slug, locale = 'zh-CN', options = 
     usedFallback,
     sourcePath,
     sections: detail.sections,
+    faq: detail.faq ?? [],
     toc: detail.sections.map((section) => ({ id: section.id, title: section.title })),
     cta: detail.cta ?? {},
   };
+}
+
+// "OMP CLI vs HagiCode: Features and Comparison" -> "OMP CLI". Titles are English in en-US, which every article has.
+function titleToAgentName(title, slug) {
+  const name = String(title ?? '')
+    .replace(/\s*[-\u2014\u2013]+\s*.*/u, '')
+    .replace(/\s+vs\.?\s+HagiCode.*$/iu, '')
+    .trim();
+
+  return name || slug.replace(/-vs-hagicode$/u, '').replace(/-/gu, ' ');
+}
+
+// The other comparison pages, linked at the end of an article. Hrefs follow the docs FAQ route of the reader's locale.
+export function getRelatedStructuredArticles(currentSlug, locale = 'zh-CN', options = {}) {
+  return listStructuredArticleSlugs(options)
+    .filter((slug) => slug !== currentSlug)
+    .map((slug) => {
+      const { detail } = resolveStructuredArticle(slug, 'en-US', options);
+      return {
+        slug,
+        agentName: titleToAgentName(detail.seo.title, slug),
+        href: localizeDocsHref(`/faq/${slug}/`, locale),
+      };
+    });
 }

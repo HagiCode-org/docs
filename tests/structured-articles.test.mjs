@@ -6,6 +6,7 @@ import test from 'node:test';
 
 import {
   buildArticleLocaleFallbacks,
+  getRelatedStructuredArticles,
   getStructuredArticleViewModel,
   listStructuredArticleSlugs,
   loadStructuredArticleCore,
@@ -202,4 +203,36 @@ test('core loader reports the missing entry point and the minimum core version',
     (error) => /@hagicode\/hagilight-core\/comparison-articles-source/.test(error.message)
       && /0\.9\.7/.test(error.message),
   );
+});
+
+test('view model carries FAQ entries and an article without FAQ gets an empty list', async () => {
+  const articleRoot = await mkdtemp(path.join(os.tmpdir(), 'docs-faq-'));
+  const withFaq = buildDetailFixture({ locale: 'en-US', blocks: [{ id: 'b', type: 'rich-text', content: ['Body'] }] });
+  withFaq.faq = [{ question: 'Is it free?', answer: 'The desktop edition is.' }];
+  await writeArticleFixture(articleRoot, { locale: 'en-US', detail: withFaq });
+  await writeArticleFixture(articleRoot, {
+    locale: 'en-US',
+    slug: 'codex-vs-hagicode',
+    detail: { ...buildDetailFixture({ locale: 'en-US', slug: 'codex-vs-hagicode', blocks: [{ id: 'b', type: 'rich-text', content: ['Body'] }] }), seo: { title: 'Codex CLI vs HagiCode: Features and Comparison', description: 'd' } },
+  });
+
+  assert.deepEqual(getStructuredArticleViewModel('claude-vs-hagicode', 'en-US', { articleRoot }).faq, withFaq.faq);
+  assert.deepEqual(getStructuredArticleViewModel('codex-vs-hagicode', 'en-US', { articleRoot }).faq, []);
+});
+
+test('related articles skip the current one and link to the reader locale FAQ route', async () => {
+  const articleRoot = await mkdtemp(path.join(os.tmpdir(), 'docs-related-'));
+  for (const [slug, title] of [
+    ['claude-vs-hagicode', 'Claude Code vs HagiCode: Features and Comparison'],
+    ['omp-vs-hagicode', 'OMP CLI vs HagiCode: Features and Comparison'],
+  ]) {
+    const detail = buildDetailFixture({ locale: 'en-US', slug, blocks: [{ id: 'b', type: 'rich-text', content: ['Body'] }] });
+    detail.seo.title = title;
+    await writeArticleFixture(articleRoot, { locale: 'en-US', slug, detail });
+  }
+
+  assert.deepEqual(getRelatedStructuredArticles('claude-vs-hagicode', 'ja-JP', { articleRoot }), [
+    { slug: 'omp-vs-hagicode', agentName: 'OMP CLI', href: '/ja-JP/faq/omp-vs-hagicode/' },
+  ]);
+  assert.equal(getRelatedStructuredArticles('claude-vs-hagicode', 'zh-CN', { articleRoot })[0].href, '/faq/omp-vs-hagicode/');
 });
