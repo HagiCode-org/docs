@@ -557,3 +557,15 @@ Validated in this repository:
 Current limitation:
 
 - if you override the temp directory, it still needs to live on a filesystem that permits the import move/rename flow
+
+## User Guide Screenshots (static, not managed)
+
+The pages under `src/content/docs/user-guide/` and `src/content/translations/docs/en-US/user-guide/` use plain PNG files in `src/content/docs/img/user-guide/<module>/`. They are intentionally **not** part of the managed `screenshots:sync` library: they do not need ImgBin analysis, and they are retaken whenever the workbench UI changes.
+
+Capture rules:
+
+- Use the **English** interface (`English` in the header language dialog) and the default **Spring Light** theme, at a `1440x900` viewport. The project rail, wizard, and Settings drawer shots keep that size; header and status bar shots are clipped strips.
+- Run the local stack from the monorepo root with a scrubbed environment so it cannot see another deployment's data: `npm run start:api` (backend on `127.0.0.1:35167`) and `npm run web` (Vite on `37599`). Put the Agent CLI you need (for example `claude`) on that `PATH`, otherwise sessions fail with "Unable to locate the Claude Code executable".
+- Use a throwaway demo repository (a few files and two commits) as the project and a small read-only prompt for the sample session.
+- Never publish real local paths or accounts. Replace visible paths with `/home/user/projects/<name>` before taking the shot, and skip tabs that show account names (Settings → GitHub) or machine layout (Settings → Data Management, HagiTask source paths).
+- Name files `NN-short-description.png` inside the module folder and reference them from the zh-CN source (`../img/user-guide/...`) and the English translation (`../../img/user-guide/...`).
