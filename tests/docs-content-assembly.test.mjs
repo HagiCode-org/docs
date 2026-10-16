@@ -138,7 +138,7 @@ Recovered body.
   });
 });
 
-test('content assembly generates structured article FAQ shells from the snapshot tree', async () => {
+test('content assembly generates structured article FAQ shells from the article root slugs', async () => {
   await withFixture(async (rootDir) => {
     await writeFile(
       rootDir,
@@ -151,70 +151,10 @@ title: 基线文档
 `,
     );
 
+    const articleRoot = path.join(rootDir, 'article-data');
     await writeFile(
       rootDir,
-      'src/data/articles.snapshot/index.json',
-      `${JSON.stringify({
-        schemaVersion: '1.0.0',
-        generatedAt: '2026-06-17T00:00:00.000Z',
-        localeIndexes: [
-          {
-            locale: 'zh-CN',
-            path: '/articles/zh-CN/index.json',
-            updatedAt: '2026-06-17T00:00:00.000Z',
-          },
-          {
-            locale: 'en-US',
-            path: '/articles/en-US/index.json',
-            updatedAt: '2026-06-17T00:00:00.000Z',
-          },
-        ],
-      }, null, 2)}
-`,
-    );
-    await writeFile(
-      rootDir,
-      'src/data/articles.snapshot/zh-CN/index.json',
-      `${JSON.stringify({
-        schemaVersion: '1.0.0',
-        locale: 'zh-CN',
-        generatedAt: '2026-06-17T00:00:00.000Z',
-        articles: [
-          {
-            slug: 'claude-vs-hagicode',
-            category: 'vs-hagicode',
-            path: '/articles/zh-CN/claude-vs-hagicode.json',
-            updatedAt: '2026-06-17T00:00:00.000Z',
-            title: 'Claude Vs HagiCode 中文版',
-            summary: '中文摘要',
-          },
-        ],
-      }, null, 2)}
-`,
-    );
-    await writeFile(
-      rootDir,
-      'src/data/articles.snapshot/en-US/index.json',
-      `${JSON.stringify({
-        schemaVersion: '1.0.0',
-        locale: 'en-US',
-        generatedAt: '2026-06-17T00:00:00.000Z',
-        articles: [
-          {
-            slug: 'claude-vs-hagicode',
-            category: 'vs-hagicode',
-            path: '/articles/en-US/claude-vs-hagicode.json',
-            updatedAt: '2026-06-17T00:00:00.000Z',
-            title: 'Claude Vs HagiCode',
-            summary: 'English summary',
-          },
-        ],
-      }, null, 2)}
-`,
-    );
-    await writeFile(
-      rootDir,
-      'src/data/articles.snapshot/zh-CN/claude-vs-hagicode.json',
+      'article-data/zh-CN/claude-vs-hagicode.json',
       `${JSON.stringify({
         schemaVersion: '1.0.0',
         slug: 'claude-vs-hagicode',
@@ -244,7 +184,7 @@ title: 基线文档
     );
     await writeFile(
       rootDir,
-      'src/data/articles.snapshot/en-US/claude-vs-hagicode.json',
+      'article-data/en-US/claude-vs-hagicode.json',
       `${JSON.stringify({
         schemaVersion: '1.0.0',
         slug: 'claude-vs-hagicode',
@@ -273,7 +213,7 @@ title: 基线文档
 `,
     );
 
-    await materializeDocsContentTree({ docsRoot: rootDir });
+    await materializeDocsContentTree({ docsRoot: rootDir, articleRoot });
 
     const rootShell = await fs.readFile(
       path.join(rootDir, 'src/content/.generated/docs/faq/claude-vs-hagicode.mdx'),
@@ -294,5 +234,25 @@ title: 基线文档
     assert.match(englishShell, /<StructuredArticlePage slug="claude-vs-hagicode" locale="en-US" \/>/u);
     assert.match(japaneseShell, /^title: "Claude Vs HagiCode"$/mu);
     assert.match(japaneseShell, /<StructuredArticlePage slug="claude-vs-hagicode" locale="ja-JP" \/>/u);
+  });
+});
+
+test('content assembly fails when the structured article root is missing', async () => {
+  await withFixture(async (rootDir) => {
+    await writeFile(
+      rootDir,
+      'src/content/docs/guides/example.mdx',
+      `---
+title: 基线文档
+---
+
+内容
+`,
+    );
+
+    await assert.rejects(
+      materializeDocsContentTree({ docsRoot: rootDir, articleRoot: path.join(rootDir, 'missing-article-data') }),
+      /structured article root does not exist/,
+    );
   });
 });

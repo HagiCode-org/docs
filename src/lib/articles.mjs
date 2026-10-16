@@ -1,10 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 
-const LIB_DIR = path.dirname(fileURLToPath(import.meta.url));
-const ARTICLES_SNAPSHOT_ROOT = path.resolve(process.cwd(), 'src', 'data', 'articles.snapshot');
-const SOURCE_ARTICLES_SNAPSHOT_ROOT = path.resolve(LIB_DIR, '..', 'data', 'articles.snapshot');
+export const STRUCTURED_ARTICLE_CORE_MIN_VERSION = '0.9.7';
+const CORE_SOURCE_ENTRY = '@hagicode/hagilight-core/comparison-articles-source';
+const CORE_VALIDATOR_ENTRY = '@hagicode/hagilight-core/comparison-articles';
 
 export const DOCS_ARTICLE_LOCALES = [
   'zh-CN',
@@ -25,21 +24,31 @@ function assert(condition, message) {
   }
 }
 
-function isRecord(value) {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+// Loads the comparison article data root and validator from the installed core package.
+// Older core versions do not export these entry points; the failure names the entry point and the minimum version.
+export async function loadStructuredArticleCore({
+  importSourceEntry = () => import('@hagicode/hagilight-core/comparison-articles-source'),
+  importValidatorEntry = () => import('@hagicode/hagilight-core/comparison-articles'),
+} = {}) {
+  try {
+    const [source, validators] = await Promise.all([importSourceEntry(), importValidatorEntry()]);
+    assert(typeof source.STRUCTURED_ARTICLE_SOURCE_ROOT === 'string', `${CORE_SOURCE_ENTRY} does not export STRUCTURED_ARTICLE_SOURCE_ROOT.`);
+    assert(typeof validators.validateStructuredArticleDetail === 'function', `${CORE_VALIDATOR_ENTRY} does not export validateStructuredArticleDetail.`);
+    return {
+      defaultArticleRoot: source.STRUCTURED_ARTICLE_SOURCE_ROOT,
+      validateStructuredArticleDetail: validators.validateStructuredArticleDetail,
+    };
+  } catch (error) {
+    throw new Error(
+      `Structured articles require ${CORE_SOURCE_ENTRY} from @hagicode/hagilight-core ${STRUCTURED_ARTICLE_CORE_MIN_VERSION} or newer. Update @hagicode/hagilight-core and reinstall. (${error.message})`,
+      { cause: error },
+    );
+  }
 }
 
-function resolveArticlesSnapshotRoot(snapshotRoot) {
-  if (snapshotRoot) {
-    return path.resolve(snapshotRoot);
-  }
-
-  if (fs.existsSync(ARTICLES_SNAPSHOT_ROOT)) {
-    return ARTICLES_SNAPSHOT_ROOT;
-  }
-
-  return SOURCE_ARTICLES_SNAPSHOT_ROOT;
-}
+const structuredArticleCore = await loadStructuredArticleCore();
+const DEFAULT_ARTICLE_ROOT = structuredArticleCore.defaultArticleRoot;
+const validateStructuredArticleDetail = structuredArticleCore.validateStructuredArticleDetail;
 
 function readJsonFile(filePath, fallback = null) {
   if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
@@ -47,136 +56,6 @@ function readJsonFile(filePath, fallback = null) {
   }
 
   return JSON.parse(fs.readFileSync(filePath, 'utf8'));
-}
-
-function assertNonEmptyString(value, fieldName, sourceLabel) {
-  assert(typeof value === 'string' && value.trim().length > 0, `${sourceLabel}: ${fieldName} must be a non-empty string`);
-  return value.trim();
-}
-
-function assertStringArray(value, fieldName, sourceLabel) {
-  assert(Array.isArray(value) && value.length > 0, `${sourceLabel}: ${fieldName} must be a non-empty array`);
-  return value.map((entry, index) => assertNonEmptyString(entry, `${fieldName}[${index}]`, sourceLabel));
-}
-
-function normalizeCtaLink(value, fieldName, sourceLabel) {
-  assert(isRecord(value), `${sourceLabel}: ${fieldName} must be an object`);
-  return {
-    label: assertNonEmptyString(value.label, `${fieldName}.label`, sourceLabel),
-    href: assertNonEmptyString(value.href, `${fieldName}.href`, sourceLabel),
-  };
-}
-
-function normalizeArticleBlock(block, fieldName, sourceLabel) {
-  assert(isRecord(block), `${sourceLabel}: ${fieldName} must be an object`);
-  const id = assertNonEmptyString(block.id, `${fieldName}.id`, sourceLabel);
-  const type = assertNonEmptyString(block.type, `${fieldName}.type`, sourceLabel);
-
-  switch (type) {
-    case 'rich-text':
-      return { id, type, content: assertStringArray(block.content, `${fieldName}.content`, sourceLabel) };
-    case 'bullet-list':
-      return { id, type, items: assertStringArray(block.items, `${fieldName}.items`, sourceLabel) };
-    case 'capability-list':
-      assert(Array.isArray(block.items) && block.items.length > 0, `${sourceLabel}: ${fieldName}.items must be a non-empty array`);
-      return {
-        id,
-        type,
-        items: block.items.map((item, index) => {
-          const itemField = `${fieldName}.items[${index}]`;
-          assert(isRecord(item), `${sourceLabel}: ${itemField} must be an object`);
-          return {
-            id: assertNonEmptyString(item.id, `${itemField}.id`, sourceLabel),
-            title: assertNonEmptyString(item.title, `${itemField}.title`, sourceLabel),
-            content: assertStringArray(item.content, `${itemField}.content`, sourceLabel),
-            ...(item.bullets === undefined ? {} : { bullets: assertStringArray(item.bullets, `${itemField}.bullets`, sourceLabel) }),
-          };
-        }),
-      };
-    case 'comparison-grid':
-      assert(Array.isArray(block.items) && block.items.length > 0, `${sourceLabel}: ${fieldName}.items must be a non-empty array`);
-      return {
-        id,
-        type,
-        items: block.items.map((item, index) => {
-          const itemField = `${fieldName}.items[${index}]`;
-          assert(isRecord(item), `${sourceLabel}: ${itemField} must be an object`);
-          return {
-            id: assertNonEmptyString(item.id, `${itemField}.id`, sourceLabel),
-            label: assertNonEmptyString(item.label, `${itemField}.label`, sourceLabel),
-            agent: assertNonEmptyString(item.agent, `${itemField}.agent`, sourceLabel),
-            hagicode: assertNonEmptyString(item.hagicode, `${itemField}.hagicode`, sourceLabel),
-            ...(item.combinedValue === undefined ? {} : { combinedValue: assertNonEmptyString(item.combinedValue, `${itemField}.combinedValue`, sourceLabel) }),
-          };
-        }),
-      };
-    case 'callout': {
-      const tone = assertNonEmptyString(block.tone, `${fieldName}.tone`, sourceLabel);
-      assert(['info', 'success', 'warning'].includes(tone), `${sourceLabel}: ${fieldName}.tone must be info, success, or warning`);
-      return {
-        id,
-        type,
-        tone,
-        ...(block.title === undefined ? {} : { title: assertNonEmptyString(block.title, `${fieldName}.title`, sourceLabel) }),
-        content: assertStringArray(block.content, `${fieldName}.content`, sourceLabel),
-      };
-    }
-    case 'cta-group':
-      assert(Array.isArray(block.items) && block.items.length > 0, `${sourceLabel}: ${fieldName}.items must be a non-empty array`);
-      return {
-        id,
-        type,
-        items: block.items.map((item, index) => {
-          const itemField = `${fieldName}.items[${index}]`;
-          const normalized = normalizeCtaLink(item, itemField, sourceLabel);
-          const variant = item?.variant;
-          if (variant === undefined) {
-            return normalized;
-          }
-          const variantValue = assertNonEmptyString(variant, `${itemField}.variant`, sourceLabel);
-          assert(['primary', 'secondary'].includes(variantValue), `${sourceLabel}: ${itemField}.variant must be primary or secondary`);
-          return { ...normalized, variant: variantValue };
-        }),
-      };
-    default:
-      throw new Error(`${sourceLabel}: unsupported structured article block type ${type}`);
-  }
-}
-
-function normalizeArticleDetail(payload, sourceLabel) {
-  assert(isRecord(payload), `${sourceLabel}: root must be an object`);
-  assert(Array.isArray(payload.sections) && payload.sections.length > 0, `${sourceLabel}: sections must be a non-empty array`);
-
-  return {
-    schemaVersion: assertNonEmptyString(payload.schemaVersion, 'schemaVersion', sourceLabel),
-    slug: assertNonEmptyString(payload.slug, 'slug', sourceLabel),
-    category: assertNonEmptyString(payload.category, 'category', sourceLabel),
-    locale: assertNonEmptyString(payload.locale, 'locale', sourceLabel),
-    updatedAt: assertNonEmptyString(payload.updatedAt, 'updatedAt', sourceLabel),
-    seo: {
-      title: assertNonEmptyString(payload.seo?.title, 'seo.title', sourceLabel),
-      description: assertNonEmptyString(payload.seo?.description, 'seo.description', sourceLabel),
-    },
-    summary: assertNonEmptyString(payload.summary, 'summary', sourceLabel),
-    sections: payload.sections.map((section, sectionIndex) => {
-      const sectionField = `sections[${sectionIndex}]`;
-      assert(isRecord(section), `${sourceLabel}: ${sectionField} must be an object`);
-      assert(Array.isArray(section.blocks) && section.blocks.length > 0, `${sourceLabel}: ${sectionField}.blocks must be a non-empty array`);
-      return {
-        id: assertNonEmptyString(section.id, `${sectionField}.id`, sourceLabel),
-        title: assertNonEmptyString(section.title, `${sectionField}.title`, sourceLabel),
-        blocks: section.blocks.map((block, blockIndex) => normalizeArticleBlock(block, `${sectionField}.blocks[${blockIndex}]`, sourceLabel)),
-      };
-    }),
-    ...(payload.cta === undefined
-      ? {}
-      : {
-          cta: {
-            ...(payload.cta?.primary === undefined ? {} : { primary: normalizeCtaLink(payload.cta.primary, 'cta.primary', sourceLabel) }),
-            ...(payload.cta?.secondary === undefined ? {} : { secondary: normalizeCtaLink(payload.cta.secondary, 'cta.secondary', sourceLabel) }),
-          },
-        }),
-  };
 }
 
 function canonicalizeLocale(locale) {
@@ -261,37 +140,57 @@ export function localizeDocsHref(href, locale) {
   return `/${resolvedLocale}${href}`;
 }
 
-export function resolveStructuredArticle(slug, locale = 'zh-CN', { snapshotRoot } = {}) {
+// Returns the sorted union of article slugs (`*.json` base names) across the locale directories under articleRoot.
+export function listStructuredArticleSlugs({ articleRoot = DEFAULT_ARTICLE_ROOT } = {}) {
+  const root = path.resolve(articleRoot);
+  assert(fs.existsSync(root), `${root}: structured article root does not exist.`);
+
+  const localeDirectories = fs.readdirSync(root, { withFileTypes: true }).filter((entry) => entry.isDirectory());
+  assert(localeDirectories.length > 0, `${root}: structured article root must contain at least one locale directory.`);
+
+  const slugs = new Set();
+  for (const localeDirectory of localeDirectories) {
+    for (const entry of fs.readdirSync(path.join(root, localeDirectory.name), { withFileTypes: true })) {
+      if (entry.isFile() && entry.name.endsWith('.json')) {
+        slugs.add(entry.name.slice(0, -'.json'.length));
+      }
+    }
+  }
+
+  return [...slugs].sort((left, right) => left.localeCompare(right));
+}
+
+export function resolveStructuredArticle(slug, locale = 'zh-CN', { articleRoot = DEFAULT_ARTICLE_ROOT } = {}) {
   const resolvedLocale = resolveArticleLocale(locale);
-  const snapshotBase = resolveArticlesSnapshotRoot(snapshotRoot);
+  const articleBase = path.resolve(articleRoot);
   const fallbackLocales = buildArticleLocaleFallbacks(resolvedLocale);
 
   for (const candidateLocale of fallbackLocales) {
-    const candidatePath = path.join(snapshotBase, candidateLocale, `${slug}.json`);
+    const candidatePath = path.join(articleBase, candidateLocale, `${slug}.json`);
     const payload = readJsonFile(candidatePath);
     if (!payload) {
       continue;
     }
 
-    const detail = normalizeArticleDetail(payload, candidatePath);
+    const detail = validateStructuredArticleDetail(payload, candidatePath);
     assert(detail.slug === slug, `${candidatePath}: slug must match the requested article slug`);
-    assert(detail.locale === candidateLocale, `${candidatePath}: locale must match the snapshot folder name`);
+    assert(detail.locale === candidateLocale, `${candidatePath}: locale must match the article folder name`);
 
     return {
       requestedLocale: resolvedLocale,
       resolvedLocale: candidateLocale,
       fallbackLocales,
       detail,
-      snapshotPath: candidatePath,
+      sourcePath: candidatePath,
       usedFallback: candidateLocale !== resolvedLocale,
     };
   }
 
-  throw new Error(`Structured article ${slug} could not be resolved from snapshot locales ${fallbackLocales.join(', ')}.`);
+  throw new Error(`Structured article ${slug} could not be resolved from article locales ${fallbackLocales.join(', ')} under ${articleBase}.`);
 }
 
 export function getStructuredArticleViewModel(slug, locale = 'zh-CN', options = {}) {
-  const { requestedLocale, resolvedLocale, detail, snapshotPath, usedFallback } = resolveStructuredArticle(slug, locale, options);
+  const { requestedLocale, resolvedLocale, detail, sourcePath, usedFallback } = resolveStructuredArticle(slug, locale, options);
 
   return {
     slug: detail.slug,
@@ -302,7 +201,7 @@ export function getStructuredArticleViewModel(slug, locale = 'zh-CN', options = 
     requestedLocale,
     resolvedLocale,
     usedFallback,
-    snapshotPath,
+    sourcePath,
     sections: detail.sections,
     toc: detail.sections.map((section) => ({ id: section.id, title: section.title })),
     cta: detail.cta ?? {},

@@ -19,7 +19,7 @@ import {
   normalizeDocRoutePathFromRelativePath,
   toPosixPath,
 } from '../src/lib/docs-content-paths.mjs';
-import { getStructuredArticleViewModel } from '../src/lib/articles.mjs';
+import { getStructuredArticleViewModel, listStructuredArticleSlugs } from '../src/lib/articles.mjs';
 
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const docsRoot = path.resolve(scriptDirectory, '..');
@@ -232,14 +232,6 @@ async function pathExists(targetPath) {
   }
 }
 
-async function readJsonIfPresent(filePath) {
-  if (!await pathExists(filePath)) {
-    return null;
-  }
-
-  return JSON.parse(await readFile(filePath, 'utf8'));
-}
-
 async function copyBaselineTree(currentSource, currentTarget, isTopLevel = false) {
   const entries = await readdir(currentSource, { withFileTypes: true });
 
@@ -424,31 +416,8 @@ function createDocsContentRewriter({
       });
 }
 
-async function materializeStructuredArticleShells({ docsRepoRoot }) {
-  const snapshotRoot = path.join(docsRepoRoot, 'src', 'data', 'articles.snapshot');
-  const rootManifest = await readJsonIfPresent(path.join(snapshotRoot, 'index.json'));
-  if (!rootManifest || !Array.isArray(rootManifest.localeIndexes) || rootManifest.localeIndexes.length === 0) {
-    return { articles: 0, shells: 0 };
-  }
-
-  const articleSlugs = [];
-  const seenSlugs = new Set();
-
-  for (const localeEntry of rootManifest.localeIndexes) {
-    const localeManifest = await readJsonIfPresent(path.join(snapshotRoot, localeEntry.locale, 'index.json'));
-    if (!localeManifest || !Array.isArray(localeManifest.articles)) {
-      continue;
-    }
-
-    for (const article of localeManifest.articles) {
-      if (typeof article?.slug !== 'string' || seenSlugs.has(article.slug)) {
-        continue;
-      }
-
-      seenSlugs.add(article.slug);
-      articleSlugs.push(article.slug);
-    }
-  }
+async function materializeStructuredArticleShells({ docsRepoRoot, articleRoot }) {
+  const articleSlugs = listStructuredArticleSlugs({ articleRoot });
 
   articleSlugs.sort((left, right) => {
     const leftOrder = STRUCTURED_ARTICLE_SIDEBAR_ORDER_BY_SLUG.get(left);
@@ -476,7 +445,7 @@ async function materializeStructuredArticleShells({ docsRepoRoot }) {
     const articleLocale = routeLocale === 'root' ? 'zh-CN' : routeLocale;
 
     for (const [index, slug] of articleSlugs.entries()) {
-      const article = getStructuredArticleViewModel(slug, articleLocale, { snapshotRoot });
+      const article = getStructuredArticleViewModel(slug, articleLocale, { articleRoot });
       const outputPath = path.join(
         docsRepoRoot,
         buildGeneratedContentPath(routeLocale, path.posix.join(STRUCTURED_ARTICLE_FAQ_DIRECTORY, `${slug}.mdx`)),
@@ -571,6 +540,7 @@ export async function materializeDocsContentTree(options = {}) {
 
   const structuredArticleShellResult = await materializeStructuredArticleShells({
     docsRepoRoot,
+    articleRoot: options.articleRoot,
   });
 
   return {

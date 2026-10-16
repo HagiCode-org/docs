@@ -7,13 +7,15 @@ import test from 'node:test';
 import {
   buildArticleLocaleFallbacks,
   getStructuredArticleViewModel,
+  listStructuredArticleSlugs,
+  loadStructuredArticleCore,
   localizeDocsHref,
   resolveStructuredArticle,
   resolveArticleLocale,
 } from '../src/lib/articles.mjs';
 
-async function writeArticleFixture(snapshotRoot, { locale = 'zh-CN', slug = 'claude-vs-hagicode', detail }) {
-  const localeRoot = path.join(snapshotRoot, locale);
+async function writeArticleFixture(articleRoot, { locale = 'zh-CN', slug = 'claude-vs-hagicode', detail }) {
+  const localeRoot = path.join(articleRoot, locale);
   await mkdir(localeRoot, { recursive: true });
   await writeFile(path.join(localeRoot, `${slug}.json`), `${JSON.stringify(detail, null, 2)}\n`, 'utf8');
 }
@@ -59,8 +61,8 @@ test('article locale helpers keep route locale aliases and fallback order stable
 });
 
 test('structured article resolver falls back to another locale when the requested file is missing', async () => {
-  const snapshotRoot = await mkdtemp(path.join(os.tmpdir(), 'docs-structured-articles-'));
-  await writeArticleFixture(snapshotRoot, {
+  const articleRoot = await mkdtemp(path.join(os.tmpdir(), 'docs-structured-articles-'));
+  await writeArticleFixture(articleRoot, {
     locale: 'zh-CN',
     slug: 'codex-vs-hagicode',
     detail: buildDetailFixture({
@@ -70,7 +72,7 @@ test('structured article resolver falls back to another locale when the requeste
     }),
   });
 
-  const resolved = resolveStructuredArticle('codex-vs-hagicode', 'en-US', { snapshotRoot });
+  const resolved = resolveStructuredArticle('codex-vs-hagicode', 'en-US', { articleRoot });
 
   assert.equal(resolved.requestedLocale, 'en-US');
   assert.equal(resolved.resolvedLocale, 'zh-CN');
@@ -78,8 +80,8 @@ test('structured article resolver falls back to another locale when the requeste
 });
 
 test('structured article view model supports the bounded block set', async () => {
-  const snapshotRoot = await mkdtemp(path.join(os.tmpdir(), 'docs-structured-articles-blocks-'));
-  await writeArticleFixture(snapshotRoot, {
+  const articleRoot = await mkdtemp(path.join(os.tmpdir(), 'docs-structured-articles-blocks-'));
+  await writeArticleFixture(articleRoot, {
     locale: 'en-US',
     detail: buildDetailFixture({
       locale: 'en-US',
@@ -94,18 +96,110 @@ test('structured article view model supports the bounded block set', async () =>
     }),
   });
 
-  const article = getStructuredArticleViewModel('claude-vs-hagicode', 'en-US', { snapshotRoot });
+  const article = getStructuredArticleViewModel('claude-vs-hagicode', 'en-US', { articleRoot });
 
   assert.equal(article.sections[0].blocks.length, 6);
   assert.equal(article.sections[0].blocks[3].type, 'comparison-grid');
   assert.equal(article.sections[0].blocks[5].type, 'cta-group');
 });
 
-test('structured article resolver fails when no snapshot file can satisfy the shell slug', async () => {
-  const snapshotRoot = await mkdtemp(path.join(os.tmpdir(), 'docs-structured-articles-missing-'));
+test('structured article resolver fails when no article file can satisfy the shell slug', async () => {
+  const articleRoot = await mkdtemp(path.join(os.tmpdir(), 'docs-structured-articles-missing-'));
 
   await assert.throws(
-    () => resolveStructuredArticle('missing-slug', 'zh-CN', { snapshotRoot }),
+    () => resolveStructuredArticle('missing-slug', 'zh-CN', { articleRoot }),
     /could not be resolved/,
+  );
+});
+
+test('structured article resolver names the file and field path when a file fails core validation', async () => {
+  const articleRoot = await mkdtemp(path.join(os.tmpdir(), 'docs-structured-articles-invalid-'));
+  const invalidDetail = buildDetailFixture({
+    locale: 'zh-CN',
+    slug: 'broken-vs-hagicode',
+    blocks: [{ id: 'copy', type: 'rich-text', content: ['Paragraph'] }],
+  });
+  delete invalidDetail.summary;
+  await writeArticleFixture(articleRoot, { locale: 'zh-CN', slug: 'broken-vs-hagicode', detail: invalidDetail });
+
+  const expectedFile = path.join(articleRoot, 'zh-CN', 'broken-vs-hagicode.json');
+  assert.throws(
+    () => resolveStructuredArticle('broken-vs-hagicode', 'zh-CN', { articleRoot }),
+    (error) => error.message.includes(expectedFile) && error.message.includes('summary'),
+  );
+});
+
+test('structured article resolver rejects a file whose locale or slug does not match its path', async () => {
+  const localeMismatchRoot = await mkdtemp(path.join(os.tmpdir(), 'docs-structured-articles-locale-'));
+  await writeArticleFixture(localeMismatchRoot, {
+    locale: 'zh-CN',
+    slug: 'claude-vs-hagicode',
+    detail: buildDetailFixture({
+      locale: 'en-US',
+      slug: 'claude-vs-hagicode',
+      blocks: [{ id: 'copy', type: 'rich-text', content: ['Paragraph'] }],
+    }),
+  });
+  assert.throws(
+    () => resolveStructuredArticle('claude-vs-hagicode', 'zh-CN', { articleRoot: localeMismatchRoot }),
+    /locale must match the article folder name/,
+  );
+
+  const slugMismatchRoot = await mkdtemp(path.join(os.tmpdir(), 'docs-structured-articles-slug-'));
+  await writeArticleFixture(slugMismatchRoot, {
+    locale: 'en-US',
+    slug: 'claude-vs-hagicode',
+    detail: buildDetailFixture({
+      locale: 'en-US',
+      slug: 'codex-vs-hagicode',
+      blocks: [{ id: 'copy', type: 'rich-text', content: ['Paragraph'] }],
+    }),
+  });
+  assert.throws(
+    () => resolveStructuredArticle('claude-vs-hagicode', 'en-US', { articleRoot: slugMismatchRoot }),
+    /slug must match the requested article slug/,
+  );
+});
+
+test('slug lister returns the sorted union of article file names across locale directories', async () => {
+  const articleRoot = await mkdtemp(path.join(os.tmpdir(), 'docs-structured-articles-slugs-'));
+  await writeArticleFixture(articleRoot, { locale: 'zh-CN', slug: 'codex-vs-hagicode', detail: buildDetailFixture({ locale: 'zh-CN', slug: 'codex-vs-hagicode', blocks: [] }) });
+  await writeArticleFixture(articleRoot, { locale: 'en-US', slug: 'claude-vs-hagicode', detail: buildDetailFixture({ locale: 'en-US', slug: 'claude-vs-hagicode', blocks: [] }) });
+  await writeArticleFixture(articleRoot, { locale: 'en-US', slug: 'codex-vs-hagicode', detail: buildDetailFixture({ locale: 'en-US', slug: 'codex-vs-hagicode', blocks: [] }) });
+  await writeFile(path.join(articleRoot, 'en-US', 'notes.txt'), 'not an article', 'utf8');
+  await writeFile(path.join(articleRoot, 'stray.json'), '{}', 'utf8');
+
+  assert.deepEqual(listStructuredArticleSlugs({ articleRoot }), ['claude-vs-hagicode', 'codex-vs-hagicode']);
+});
+
+test('slug lister fails when the article root has no locale directory', async () => {
+  const articleRoot = await mkdtemp(path.join(os.tmpdir(), 'docs-structured-articles-empty-'));
+  await writeFile(path.join(articleRoot, 'stray.json'), '{}', 'utf8');
+
+  assert.throws(
+    () => listStructuredArticleSlugs({ articleRoot }),
+    /must contain at least one locale directory/,
+  );
+});
+
+test('the default article root is the installed core package data, not a committed snapshot', () => {
+  const slugs = listStructuredArticleSlugs();
+
+  assert.ok(slugs.includes('claude-vs-hagicode'));
+  const article = getStructuredArticleViewModel('claude-vs-hagicode', 'en-US');
+  assert.match(article.sourcePath, /comparison-articles[\\/]en-US[\\/]claude-vs-hagicode\.json$/);
+  assert.equal(article.sourcePath.includes('articles.snapshot'), false);
+});
+
+test('core loader reports the missing entry point and the minimum core version', async () => {
+  const notExported = () => Promise.reject(Object.assign(new Error('Package subpath is not defined by "exports"'), { code: 'ERR_PACKAGE_PATH_NOT_EXPORTED' }));
+
+  await assert.rejects(
+    loadStructuredArticleCore({
+      importSourceEntry: notExported,
+      importValidatorEntry: async () => ({}),
+    }),
+    (error) => /@hagicode\/hagilight-core\/comparison-articles-source/.test(error.message)
+      && /0\.9\.7/.test(error.message),
   );
 });

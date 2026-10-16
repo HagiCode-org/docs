@@ -122,7 +122,7 @@ test('related software installation direct links provide locale-specific labels'
   assert.equal(omniRouteEntry?.translations?.['fr-FR'], 'Documentation OmniRoute');
 });
 
-test('faq sidebar includes structured article pages generated from the remote snapshot', () => {
+test('faq sidebar includes structured article pages generated from the installed core article data', () => {
   const faqEntry = DOCS_SIDEBAR.find((entry) => entry.label === '常见问题');
 
   assert.ok(faqEntry);
@@ -137,13 +137,10 @@ test('faq sidebar includes structured article pages generated from the remote sn
 
   assert.ok(claudeEntry, 'expected faq/claude-vs-hagicode in sidebar');
   assert.ok(codexEntry, 'expected faq/codex-vs-hagicode in sidebar');
-  assert.equal(
-    claudeEntry?.label,
-    'Claude Vs HagiCode —— 为什么 Claude 配合 HagiCode 才能发挥全部实力',
-  );
-  assert.equal(claudeEntry?.translations?.['en-US'], 'Claude Vs HagiCode');
+  assert.equal(claudeEntry?.label, 'Claude Code 对比 HagiCode:功能与差异');
+  assert.equal(claudeEntry?.translations?.['en-US'], 'Claude Code vs HagiCode: Features and Comparison');
   assert.equal(
     codexEntry?.translations?.['en-US'],
-    'Codex Vs HagiCode —— 为什么 OpenAI Codex 配合 HagiCode 才能发挥极速编码的全部实力',
+    'Codex CLI vs HagiCode: Features and Comparison',
   );
 });
