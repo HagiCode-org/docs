@@ -229,11 +229,15 @@ title: 基线文档
     );
 
     assert.match(rootShell, /^title: "Claude Vs HagiCode 中文版"$/mu);
-    assert.match(rootShell, /<StructuredArticlePage slug="claude-vs-hagicode" locale="zh-CN" \/>/u);
+    assert.match(rootShell, /<StructuredArticleLead slug="claude-vs-hagicode" locale="zh-CN" \/>/u);
+    assert.match(rootShell, /^## 概述\n\n<StructuredArticleSection slug="claude-vs-hagicode" locale="zh-CN" index=\{0\} \/>$/mu);
+    assert.match(rootShell, /<StructuredArticleFooter slug="claude-vs-hagicode" locale="zh-CN" \/>/u);
+    assert.doesNotMatch(rootShell, /StructuredArticleFaq slug/u);
     assert.match(englishShell, /^description: "English description"$/mu);
-    assert.match(englishShell, /<StructuredArticlePage slug="claude-vs-hagicode" locale="en-US" \/>/u);
+    assert.match(englishShell, /^## Summary$/mu);
+    assert.match(englishShell, /<StructuredArticleSection slug="claude-vs-hagicode" locale="en-US" index=\{0\} \/>/u);
     assert.match(japaneseShell, /^title: "Claude Vs HagiCode"$/mu);
-    assert.match(japaneseShell, /<StructuredArticlePage slug="claude-vs-hagicode" locale="ja-JP" \/>/u);
+    assert.match(japaneseShell, /<StructuredArticleLead slug="claude-vs-hagicode" locale="ja-JP" \/>/u);
   });
 });
 

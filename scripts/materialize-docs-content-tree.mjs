@@ -20,6 +20,7 @@ import {
   toPosixPath,
 } from '../src/lib/docs-content-paths.mjs';
 import { getStructuredArticleViewModel, listStructuredArticleSlugs } from '../src/lib/articles.mjs';
+import { getStructuredArticleCopy } from '../src/lib/structured-article-copy.mjs';
 
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const docsRoot = path.resolve(scriptDirectory, '..');
@@ -45,17 +46,44 @@ function yamlQuote(value) {
   return JSON.stringify(String(value ?? ''));
 }
 
-function buildStructuredArticleShellSource({ slug, locale, title, description, order }) {
-  const componentLocale = locale === 'root' ? 'zh-CN' : locale;
+// Section titles become real Markdown headings so Starlight builds the "On this page" list and anchors from them.
+function escapeMdxHeading(text) {
+  return String(text)
+    .replace(/\\/gu, '\\\\')
+    .replace(/[{}*_`[\]#|~]/gu, (character) => `\\${character}`)
+    .replace(/</gu, '&lt;')
+    .replace(/>/gu, '&gt;')
+    .replace(/&(?!lt;|gt;)/gu, '&amp;');
+}
 
-  return `---\n`
-    + `title: ${yamlQuote(title)}\n`
-    + `description: ${yamlQuote(description)}\n`
-    + 'sidebar:\n'
-    + `  order: ${order}\n`
-    + '---\n\n'
-    + "import StructuredArticlePage from '@/components/StructuredArticlePage.astro';\n\n"
-    + `<StructuredArticlePage slug=${yamlQuote(slug)} locale=${yamlQuote(componentLocale)} />\n`;
+function buildStructuredArticleShellSource({ slug, locale, title, description, order, sectionTitles = [], faqTitle = null }) {
+  const componentLocale = locale === 'root' ? 'zh-CN' : locale;
+  const props = `slug=${yamlQuote(slug)} locale=${yamlQuote(componentLocale)}`;
+  const parts = [
+    `---\n`
+      + `title: ${yamlQuote(title)}\n`
+      + `description: ${yamlQuote(description)}\n`
+      + 'sidebar:\n'
+      + `  order: ${order}\n`
+      + '---\n\n'
+      + "import StructuredArticleLead from '@/components/StructuredArticleLead.astro';\n"
+      + "import StructuredArticleSection from '@/components/StructuredArticleSection.astro';\n"
+      + "import StructuredArticleFaq from '@/components/StructuredArticleFaq.astro';\n"
+      + "import StructuredArticleFooter from '@/components/StructuredArticleFooter.astro';\n",
+    `<StructuredArticleLead ${props} />\n`,
+  ];
+
+  for (const [index, sectionTitle] of sectionTitles.entries()) {
+    parts.push(`## ${escapeMdxHeading(sectionTitle)}\n\n<StructuredArticleSection ${props} index={${index}} />\n`);
+  }
+
+  if (faqTitle) {
+    parts.push(`## ${escapeMdxHeading(faqTitle)}\n\n<StructuredArticleFaq ${props} />\n`);
+  }
+
+  parts.push(`<StructuredArticleFooter ${props} />\n`);
+
+  return parts.join('\n');
 }
 
 function shouldQuoteFrontmatterValue(value) {
@@ -460,6 +488,8 @@ async function materializeStructuredArticleShells({ docsRepoRoot, articleRoot })
           title: article.title,
           description: article.description,
           order: STRUCTURED_ARTICLE_SIDEBAR_ORDER_BY_SLUG.get(slug) ?? 100 + index,
+          sectionTitles: article.sections.map((section) => section.title),
+          faqTitle: article.faq.length > 0 ? getStructuredArticleCopy(article.requestedLocale).faqTitle : null,
         }),
         'utf8',
       );
