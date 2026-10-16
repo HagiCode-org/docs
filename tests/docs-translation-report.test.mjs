@@ -7,6 +7,7 @@ import test from 'node:test';
 
 import {
   generateDocsTranslationReport,
+  isLocaleWrapperBody,
   main,
   REQUIRED_DOCS_LOCALES,
 } from '../scripts/report-docs-translation-status.mjs';
@@ -198,4 +199,36 @@ test('fail-on-findings exits non-zero when findings remain', async () => {
     assert.equal(process.exitCode, 1);
     process.exitCode = originalExitCode;
   });
+});
+
+test('does not report locale-prop component wrapper pages as duplicates', async () => {
+  await withFixture(async (root) => {
+    const importLine = "import TipsArticle from '@/components/TipsArticle.astro';";
+    const bodyByLocale = Object.fromEntries(
+      REQUIRED_DOCS_LOCALES.map((locale) => [
+        locale.code,
+        `${importLine}\n\n<TipsArticle locale="${locale.routeLocale || locale.code}" />`,
+      ]),
+    );
+    await writeCompleteSet(root, 'faq/wrapper.mdx', bodyByLocale);
+
+    const report = await generateDocsTranslationReport({
+      contentRoot: root,
+      translationRoot: root,
+      reportPath: '.tmp/docs-report.json',
+    });
+
+    const entry = report.entries.find((item) => item.docKey === 'faq/wrapper');
+    assert(entry);
+    assert.equal(entry.duplicateComparisons.length, 0);
+    assert.equal(entry.similarComparisons.length, 0);
+  });
+});
+
+test('isLocaleWrapperBody only matches pure locale-prop component pages', () => {
+  const wrapped = "---\ntitle: x\n---\n\nimport A from '@/a.astro';\n\n<A locale=\"en-US\" />\n";
+  assert.equal(isLocaleWrapperBody(wrapped), true);
+  assert.equal(isLocaleWrapperBody(`${wrapped}\nSome untranslated prose.\n`), false);
+  assert.equal(isLocaleWrapperBody("---\ntitle: x\n---\n\n<A />\n"), false);
+  assert.equal(isLocaleWrapperBody("---\ntitle: x\n---\n\n待定\n"), false);
 });

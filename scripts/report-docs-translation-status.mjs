@@ -171,6 +171,22 @@ function normalizeComparableMarkdown(raw) {
     .toLowerCase();
 }
 
+// A page whose body is only imports plus self-closing components that take a `locale` prop
+// (e.g. `<TipsArticle locale="en-US" />`) renders per-locale content at build time, so its
+// MDX body is identical across locales by design and must not count as an untranslated copy.
+export function isLocaleWrapperBody(raw) {
+  const body = stripFrontmatter(raw)
+    .replace(/^\s*import\s.+$/gmu, '')
+    .trim();
+
+  if (!body) {
+    return false;
+  }
+
+  const withoutComponents = body.replace(/<[A-Z][\w.]*\s[^>]*\blocale=(?:"[^"]*"|'[^']*'|\{[^}]*\})[^>]*\/>/gu, '');
+  return withoutComponents.trim() === '';
+}
+
 function createFingerprint(value) {
   return createHash('sha1').update(value).digest('hex');
 }
@@ -274,6 +290,7 @@ async function readDoc(filePath, rootDirectory) {
     title: typeof frontmatter.title === 'string' ? frontmatter.title : '',
     description: typeof frontmatter.description === 'string' ? frontmatter.description : '',
     normalizedBody,
+    isLocaleWrapper: isLocaleWrapperBody(raw),
     bodyFingerprint: createFingerprint(normalizedBody),
     trigramSet: createTrigramSet(normalizedBody),
     bodyLength: normalizedBody.length,
@@ -405,6 +422,10 @@ export async function generateDocsTranslationReport(options = {}) {
         description: localizedContent.description,
         bodyLength: localizedContent.bodyLength,
       };
+
+      if (baselineContent.isLocaleWrapper && localizedContent.isLocaleWrapper) {
+        continue;
+      }
 
       if (localizedContent.bodyFingerprint === baselineContent.bodyFingerprint) {
         duplicateComparisons.push({
