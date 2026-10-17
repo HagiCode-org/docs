@@ -5,6 +5,7 @@ import { resolveArticleLocale } from './articles.mjs';
 const COPY = {
   "en-US": {
     faqTitle: "Frequently asked questions",
+    chooseWhen: "Choose {name} when",
     relatedTitle: "More comparisons",
     vsLabel: "{agent} vs HagiCode",
     ctaTitle: "Try HagiCode on top of the agent you already use",
@@ -13,6 +14,7 @@ const COPY = {
   },
   "zh-CN": {
     faqTitle: "常见问题",
+    chooseWhen: "这些情况选 {name}",
     relatedTitle: "更多对比",
     vsLabel: "{agent} 对比 HagiCode",
     ctaTitle: "在你已有的 Agent 之上试试 HagiCode",
@@ -21,6 +23,7 @@ const COPY = {
   },
   "zh-Hant": {
     faqTitle: "常見問題",
+    chooseWhen: "這些情況選 {name}",
     relatedTitle: "更多比較",
     vsLabel: "{agent} 對比 HagiCode",
     ctaTitle: "在你既有的 Agent 之上試試 HagiCode",
@@ -29,6 +32,7 @@ const COPY = {
   },
   "ja-JP": {
     faqTitle: "よくある質問",
+    chooseWhen: "{name} が向いている場面",
     relatedTitle: "ほかの比較",
     vsLabel: "{agent} と HagiCode の比較",
     ctaTitle: "今使っているエージェントの上で HagiCode を試す",
@@ -37,6 +41,7 @@ const COPY = {
   },
   "ko-KR": {
     faqTitle: "자주 묻는 질문",
+    chooseWhen: "{name}가 맞는 경우",
     relatedTitle: "다른 비교",
     vsLabel: "{agent} vs HagiCode",
     ctaTitle: "이미 쓰는 에이전트 위에서 HagiCode 사용해 보기",
@@ -45,6 +50,7 @@ const COPY = {
   },
   "de-DE": {
     faqTitle: "Häufige Fragen",
+    chooseWhen: "{name} passt, wenn",
     relatedTitle: "Weitere Vergleiche",
     vsLabel: "{agent} vs. HagiCode",
     ctaTitle: "HagiCode auf dem Agenten testen, den Sie schon nutzen",
@@ -53,6 +59,7 @@ const COPY = {
   },
   "es-ES": {
     faqTitle: "Preguntas frecuentes",
+    chooseWhen: "Elige {name} cuando",
     relatedTitle: "Más comparativas",
     vsLabel: "{agent} vs HagiCode",
     ctaTitle: "Prueba HagiCode sobre el agente que ya usas",
@@ -61,6 +68,7 @@ const COPY = {
   },
   "fr-FR": {
     faqTitle: "Questions fréquentes",
+    chooseWhen: "Choisissez {name} quand",
     relatedTitle: "Autres comparatifs",
     vsLabel: "{agent} vs HagiCode",
     ctaTitle: "Essayez HagiCode au-dessus de l'agent que vous utilisez déjà",
@@ -69,6 +77,7 @@ const COPY = {
   },
   "pt-BR": {
     faqTitle: "Perguntas frequentes",
+    chooseWhen: "Escolha {name} quando",
     relatedTitle: "Mais comparações",
     vsLabel: "{agent} vs HagiCode",
     ctaTitle: "Experimente o HagiCode sobre o agente que você já usa",
@@ -77,6 +86,7 @@ const COPY = {
   },
   "ru-RU": {
     faqTitle: "Частые вопросы",
+    chooseWhen: "Выбирайте {name}, если",
     relatedTitle: "Другие сравнения",
     vsLabel: "{agent} и HagiCode: сравнение",
     ctaTitle: "Попробуйте HagiCode поверх агента, который вы уже используете",
