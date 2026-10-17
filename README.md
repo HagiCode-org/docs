@@ -1,5 +1,8 @@
 # HagiCode Documentation
 
+[![last commit](https://img.shields.io/github/last-commit/HagiCode-org/docs)](https://github.com/HagiCode-org/docs/commits/main)
+[![website](https://img.shields.io/website?url=https%3A%2F%2Fdocs.hagicode.com&label=website)](https://docs.hagicode.com)
+
 [简体中文](./README_cn.md)
 
 This repository contains the standalone HagiCode documentation site built with Astro and Starlight.

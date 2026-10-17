@@ -1,5 +1,8 @@
 # HagiCode Documentation
 
+[![last commit](https://img.shields.io/github/last-commit/HagiCode-org/docs)](https://github.com/HagiCode-org/docs/commits/main)
+[![website](https://img.shields.io/website?url=https%3A%2F%2Fdocs.hagicode.com&label=website)](https://docs.hagicode.com)
+
 [English](./README.md)
 
 本仓库包含基于 Astro 与 Starlight 构建的独立 HagiCode 文档站点。
