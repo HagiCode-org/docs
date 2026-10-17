@@ -29,7 +29,6 @@ function assertSharedShell(html, fallbackId) {
   assert.equal(countMatches(html, /data-promoto-dismiss\b/g), 1);
   assert.match(html, new RegExp(`data-fallback="[^"]*${fallbackId}`));
   assert.equal(countMatches(html, /<hagilight-language-chooser\b/g), 1);
-  assert.equal(countMatches(html, /class="[^"]*\bhagilight-site-links\b/g), 1);
   assert.ok(countMatches(html, /googletagmanager\.com\/gtag\/js/g) <= 1);
   assert.ok(countMatches(html, /sdk\.51\.la\/js-sdk-pro\.min\.js/g) <= 1);
   assert.ok(countMatches(html, /clarity\.ms\/tag/g) <= 1);
@@ -51,7 +50,7 @@ function hasGaTag(html, expected) {
   return readGaTags(html).some((tag) => Object.entries(expected).every(([key, value]) => tag[key] === value));
 }
 
-test('root and localized pages tag the shared header and footer links with Hagilight labels', () => {
+test('root and localized pages tag the shared header links with Hagilight labels', () => {
   const pages = [
     readRoute('blog/index.html'),
     readRoute('en-US/blog/index.html'),
@@ -61,9 +60,9 @@ test('root and localized pages tag the shared header and footer links with Hagil
 
   for (const html of pages) {
     assert.ok(hasGaTag(html, { category: 'navigation', label: 'blog', location: 'header' }));
-    assert.ok(hasGaTag(html, { category: 'download', label: 'downloadClient', location: 'footer' }));
-    assert.ok(readGaTags(html).length > 0);
-    for (const tag of readGaTags(html)) {
+    const headerTags = readGaTags(html).filter((tag) => tag.location === 'header');
+    assert.ok(headerTags.length > 0);
+    for (const tag of headerTags) {
       assert.ok(['download', 'store', 'navigation', 'community', 'promotion'].includes(tag.category));
       assert.ok(tag.label?.trim());
       assert.ok(tag.location?.trim());

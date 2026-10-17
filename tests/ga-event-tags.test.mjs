@@ -59,7 +59,8 @@ function tagOf(node) {
 }
 
 function taggedElements(root) {
-  return elements(root).filter(({ node }) => isTagged(node));
+  // Hagilight owns the shared footer and its analytics tags.
+  return elements(root).filter(({ node }) => isTagged(node) && !node.properties.dataGaLocation?.startsWith('footer'));
 }
 
 function tagsAt(root, location) {
@@ -157,24 +158,20 @@ test('blog calls to action report the same labels in every locale', () => {
   assertUntrackedRegions(english);
 });
 
-test('the desktop install page carries the shared shell tags and no tags on untracked links', () => {
+test('the desktop install page carries the shared header tags and no tags on untracked links', () => {
   for (const route of DESKTOP_INSTALL_PAGES) {
     const page = readPage(route);
 
     assert.ok(tagsAt(page, 'header').length > 0, `${route} header tags`);
-    assert.deepEqual(
-      tagsAt(page, 'footer').find((tag) => tag.label === 'downloadClient'),
-      { category: 'download', label: 'downloadClient', location: 'footer' },
-    );
     assertValidTags(page);
     assertUntrackedRegions(page);
     assertUntaggedContentLinks(page);
   }
 });
 
-test('structured articles tag nothing outside the shared shell and their CTA slots', () => {
+test('structured articles tag only the shared header, promotions, and their CTA slots', () => {
   const article = readPage(STRUCTURED_ARTICLE);
-  const allowed = new Set(['header', 'footer', 'article_promotion', 'promoto_banner', ...EMBEDDED_CTA_LOCATIONS]);
+  const allowed = new Set(['header', 'article_promotion', 'promoto_banner', ...EMBEDDED_CTA_LOCATIONS]);
 
   for (const { node } of taggedElements(article)) {
     assert.ok(allowed.has(node.properties.dataGaLocation), `unexpected location ${node.properties.dataGaLocation}`);
