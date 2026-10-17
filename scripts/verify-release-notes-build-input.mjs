@@ -2,7 +2,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export const RELEASE_NOTES_LOCALES = ['zh-CN', 'en', 'zh-Hant', 'ja-JP', 'ko-KR', 'de-DE', 'fr-FR', 'es-ES', 'pt-BR', 'ru-RU'];
+// Each entry carries one summary string and each detail file one bodyHtml string. The body may only
+// hold the Features and Fixes sections.
+export const RELEASE_NOTES_BODY_SECTIONS = ['Features', 'Fixes'];
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_DOCS_ROOT = path.resolve(SCRIPT_DIR, '..');
@@ -108,20 +110,33 @@ export function verifyReleaseNotesBuildInput(options = {}) {
       continue;
     }
 
-    for (const locale of RELEASE_NOTES_LOCALES) {
-      const summary = entry.summary?.[locale] ?? detailPayload.summary?.[locale];
-      const bodyHtml = detailPayload.bodyHtml?.[locale];
-      const bodyText = cleanHtmlText(bodyHtml);
+    if (isRecord(entry.summary)) {
+      addIssue(issues, `${entryLabel} summary must be a single string, not a per-locale map`);
+    } else if (!hasText(entry.summary)) {
+      addIssue(issues, `${entryLabel} is missing summary`);
+    }
 
-      if (!hasText(summary)) {
-        addIssue(issues, `${entryLabel} is missing ${locale} summary`);
-      }
+    const bodyHtml = detailPayload.bodyHtml;
+    if (isRecord(bodyHtml)) {
+      addIssue(issues, `${entryLabel} bodyHtml must be a single string, not a per-locale map: ${detailPath}`);
+      continue;
+    }
 
-      if (!hasText(bodyHtml)) {
-        addIssue(issues, `${entryLabel} is missing ${locale} bodyHtml in ${detailPath}`);
-      } else if (bodyText.length < 12) {
-        addIssue(issues, `${entryLabel} ${locale} bodyHtml is too short to publish in ${detailPath}`);
-      }
+    if (!hasText(bodyHtml)) {
+      addIssue(issues, `${entryLabel} is missing bodyHtml in ${detailPath}`);
+      continue;
+    }
+
+    const bodyText = cleanHtmlText(bodyHtml);
+    if (bodyText.length < 12) {
+      addIssue(issues, `${entryLabel} bodyHtml is too short to publish in ${detailPath}`);
+    }
+
+    const headingTexts = [...bodyHtml.matchAll(/<h2\b[^>]*>([\s\S]*?)<\/h2>/giu)]
+      .map((match) => cleanHtmlText(match[1]));
+    const unexpectedHeadings = headingTexts.filter((text) => !RELEASE_NOTES_BODY_SECTIONS.includes(text));
+    if (unexpectedHeadings.length > 0) {
+      addIssue(issues, `${entryLabel} bodyHtml contains sections other than Features and Fixes (${unexpectedHeadings.join(', ')}) in ${detailPath}`);
     }
   }
 

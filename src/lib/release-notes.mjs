@@ -131,22 +131,8 @@ function resolveReleaseNotesLandingPath(locale = 'zh-CN') {
   return `/${locale}/release-notes/`;
 }
 
-function pickLocalizedEntry(valueByLocale, locale = 'zh-CN') {
-  if (!valueByLocale || typeof valueByLocale !== 'object') {
-    return '';
-  }
-
-  if (valueByLocale[locale]) {
-    return valueByLocale[locale];
-  }
-
-  if (locale === 'en-US' && valueByLocale.en) {
-    return valueByLocale.en;
-  }
-
-  return valueByLocale.en ?? valueByLocale['zh-CN'] ?? '';
-}
-
+// The synchronized summary and body are single-language (English) for every route. The locale only
+// selects the landing URL and the page chrome from getReleaseNotesLandingCopy.
 export function getReleaseNotesLandingEntries(indexPayload, locale = 'zh-CN', detailEntries = new Map()) {
   const entries = Array.isArray(indexPayload?.entries) ? indexPayload.entries : [];
   const landingPath = resolveReleaseNotesLandingPath(locale);
@@ -158,15 +144,14 @@ export function getReleaseNotesLandingEntries(indexPayload, locale = 'zh-CN', de
     const detailEntry = detailEntries.get(entry.tag)
       ?? detailEntries.get(entry.detailPath ?? '')
       ?? null;
-    const bodyHtml = pickLocalizedEntry(detailEntry?.bodyHtml, locale);
 
     return {
       tag: entry.displayTag ?? entry.tag,
       anchorId: entry.anchorId ?? '',
       anchorHref: entry.anchorId ? `${landingPath}#${entry.anchorId}` : landingPath,
-      releaseDate: entry.releaseDate ?? 'Unknown',
-      summary: pickLocalizedEntry(entry.summary, locale),
-      bodyHtml,
+      releaseDate: typeof entry.releaseDate === 'string' && entry.releaseDate.length > 0 ? entry.releaseDate : null,
+      summary: typeof entry.summary === 'string' ? entry.summary : '',
+      bodyHtml: typeof detailEntry?.bodyHtml === 'string' ? detailEntry.bodyHtml : '',
       repositoryCount,
       totalCommitCount,
     };

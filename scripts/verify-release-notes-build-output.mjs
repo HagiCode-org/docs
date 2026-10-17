@@ -99,8 +99,8 @@ export function verifyReleaseNotesBuildOutput(options = {}) {
 
     const html = fs.readFileSync(artifactPath, 'utf8');
     const pageText = normalizeText(html);
-    const summary = latestEntry.summary?.[locale] ?? detailPayload.summary?.[locale] ?? '';
-    const bodyNeedles = createBodyNeedles(detailPayload.bodyHtml?.[locale]);
+    const summary = typeof latestEntry.summary === 'string' ? latestEntry.summary : '';
+    const bodyNeedles = createBodyNeedles(detailPayload.bodyHtml);
     const keepsSummaryOrBody = hasNeedle(pageText, summary)
       || bodyNeedles.some((needle) => pageText.includes(needle));
 
@@ -109,7 +109,7 @@ export function verifyReleaseNotesBuildOutput(options = {}) {
     }
 
     if (!keepsSummaryOrBody) {
-      addIssue(issues, `${locale} artifact ${artifactPath} is missing localized summary/body for ${versionLabel}`);
+      addIssue(issues, `${locale} artifact ${artifactPath} is missing the synchronized summary/body for ${versionLabel}`);
     }
 
     if (pageText.includes(EMPTY_COPY[locale])) {
