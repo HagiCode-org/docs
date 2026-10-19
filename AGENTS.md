@@ -95,6 +95,10 @@ npm run translate:missing:claude
 npm run verify:docs-translation
 ```
 
+## Deployment
+
+`.github/workflows/docs-deploy-gh-pages.yml` runs `build:ci` on pushes to `main` (or manually) and publishes to gh-pages. `.github/workflows/indexnow.yml` runs `npm run indexnow:submit` daily and on demand. The Azure Static Web Apps workflow is paused (manual dispatch only), and `esa.jsonc` holds the ESA build settings. Do not change deployment config as part of content work.
+
 ## Key Paths
 
 - `src/content/docs/`: documentation and blog content
@@ -106,6 +110,8 @@ npm run verify:docs-translation
 - `src/data/release-notes/`: release-note source data and materialized output
 - `scripts/`: content preparation, verification, and sync tooling
 - `tests/`: script and content workflow tests
+- `shared/`: shared TypeScript sources with their own `package.json`
+- `templates/seo/`, `prompts/`: SEO article templates and prompts used by the SEO article workflow
 
 ## Agent Guidelines
 
@@ -120,4 +126,6 @@ npm run verify:docs-translation
 
 - `README.md`
 - `DESIGN.md`
+- `SEO_ARTICLE_WORKFLOW.md`
+- `SCREENSHOT_METADATA_WORKFLOW.md`
 - `scripts/`
