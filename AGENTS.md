@@ -85,6 +85,7 @@ npm run test:runtime-version-index   # vitest; chains prepare:docs-runtime
 ```
 
 Script and content workflow tests in `tests/` use `node --test` and have per-area `test:*` scripts in `package.json` (for example `test:blog-seo-description`, `test:structured-articles`, `test:tips-snapshot`).
+`test/rss-output.test.mjs` (singular `test/`) checks built RSS feeds in `dist/` and has no npm script; run it with `node --test` after a build. Other read-only gates: `verify:docs-entry-language` (run after a build), `verify:traffic-entry-contract`, `verify:desktop-version-guidance`.
 
 ### Translation reporting
 
