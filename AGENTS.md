@@ -78,6 +78,24 @@ npm run verify:docs-image-references   # read-only audit of body image reference
 npm run test:docs-image-references
 ```
 
+### R2 images
+
+Images from the img-gen R2 library reach Docs only through `r2-images.manifest.json`, the list of adopted images and of surfaces that stay unchanged.
+
+```bash
+npm run import:r2-images                       # download manifest objects into src/assets/r2/, verify, then write
+node ./scripts/import-r2-images.mjs --check    # offline: vendored files match the manifest
+npm run test:r2-images                         # manifest, files, usage, budgets, built HTML (run npm run build first for the HTML part)
+npm run test:r2-random-image                   # picker: pick, load, error, timeout, save-data, unchanged box
+```
+
+- Every R2 image has a vendored default under `src/assets/r2/` imported through Astro `<Picture>` (AVIF and WebP, width and height, `loading="lazy"` unless it is the first visible image). Never reference an R2 URL or a `public/` path for a default.
+- Only decorative slots may take a random pool. A pool is an explicit list of 12 to 200 keys from one album, each under the slot's byte cap, baked into the `<picture>` as `data-r2-pool`. `src/scripts/r2-random-image.ts` picks one key uniformly per page view, preloads it with `Image()` and swaps it in only if it loads within 3 s. The default stays on error, timeout, save-data or with scripts off. Screenshots and figures a page refers to never get a pool.
+- Adding an image: pick an entry from a published album, audit it (contact sheet, text, brand, privacy) and record the verdict in its `audit` field, add the entry, run `npm run import:r2-images`, then import it in the component and run `npm run test:r2-images`. A surface that takes no image goes in `unchangedSurfaces` with a one-line reason.
+- Meaningful images need alt text in every Docs locale in the hagi18n files; decorative images use empty alt and `aria-hidden="true"`.
+- Do not hot-link `img-gen.hagicode.com` from Markdown, MDX, Astro templates or `public/`. The only R2 requests at runtime are the picker's single pool image, and the only R2 data in static HTML is the pool list.
+- `repos/gallery` and `repos/img-gen` are read-only references for album names, index shape and object keys. Do not edit them or republish R2 objects from here.
+
 ### Tests
 
 ```bash
