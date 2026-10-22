@@ -19,6 +19,8 @@ export interface R2PickEnvironment {
   random?: () => number;
   createImage?: () => HTMLImageElement;
   saveData?: boolean;
+  /** A slot hidden by CSS (display: none) is not picked, so no request is made for it. */
+  isRendered?: (element: Element) => boolean;
 }
 
 /** Uniform pick: every key has the same chance for a random source in [0, 1). */
@@ -76,12 +78,13 @@ export function initR2RandomImages(root: ParentNode = document, environment: R2P
   const random = environment.random ?? Math.random;
   const createImage = environment.createImage ?? (() => new Image());
   const saveData = environment.saveData ?? readSaveData();
+  const isRendered = environment.isRendered ?? ((element: Element) => element.getClientRects().length > 0);
   const slots = [...root.querySelectorAll<HTMLPictureElement>(`picture[${POOL_ATTRIBUTE}]:not([${PICKED_ATTRIBUTE}])`)];
 
   return Promise.all(
     slots.map(async (picture) => {
       picture.setAttribute(PICKED_ATTRIBUTE, '');
-      if (saveData) return;
+      if (saveData || !isRendered(picture)) return;
       const key = pickKey(parsePool(picture.getAttribute(POOL_ATTRIBUTE)), random);
       const img = picture.querySelector('img');
       if (!key || !img) return;

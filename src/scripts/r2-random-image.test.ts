@@ -91,6 +91,8 @@ describe('initR2RandomImages in the browser', () => {
     vi.spyOn(globalThis, 'fetch').mockImplementation(() => {
       throw new Error('the picker must not call fetch');
     });
+    // jsdom has no layout: report every slot as rendered unless a test says otherwise.
+    vi.spyOn(Element.prototype, 'getClientRects').mockReturnValue([{}] as unknown as DOMRectList);
   });
 
   afterEach(() => {
@@ -181,6 +183,16 @@ describe('initR2RandomImages in the browser', () => {
     await initR2RandomImages(document, { random: () => 0, createImage, saveData: false });
 
     expect(created).toHaveLength(1);
+  });
+
+  it('makes no request for a slot that CSS hides at this width', async () => {
+    vi.spyOn(Element.prototype, 'getClientRects').mockReturnValue([] as unknown as DOMRectList);
+    const picture = renderSlot();
+    const { created, createImage } = fakeImages();
+    await initR2RandomImages(document, { random: () => 0, createImage, saveData: false });
+
+    expect(created).toHaveLength(0);
+    expect(picture.querySelector('source')).not.toBeNull();
   });
 
   it('uses the origin given by the environment for the request', async () => {
