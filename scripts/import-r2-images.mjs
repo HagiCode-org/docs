@@ -20,6 +20,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const DEFAULT_MANIFEST_PATH = path.join(ROOT, 'r2-images.manifest.json');
 export const VENDOR_DIR = 'src/assets/r2/';
+/** Albums this repository may vendor from; any other album is refused before a download starts. */
+export const ALLOWED_ALBUMS = ['cat-head-gallery'];
 const FETCH_TIMEOUT_MS = 30_000;
 
 /** Reads the boxes between start and end of an ISOBMFF buffer. */
@@ -167,6 +169,9 @@ export function validateEntryShape(entry) {
     if (!normalized.startsWith(VENDOR_DIR) || normalized.includes('..')) {
       problems.push(`${entry.id}: file must sit under ${VENDOR_DIR}`);
     }
+  }
+  if (!ALLOWED_ALBUMS.includes(entry.album)) {
+    problems.push(`${entry.id}: album ${entry.album} is not on the allowlist (${ALLOWED_ALBUMS.join(', ')})`);
   }
   if (typeof entry.objectKey === 'string' && !entry.objectKey.startsWith(`${entry.album}/`)) {
     problems.push(`${entry.id}: objectKey must start with ${entry.album}/`);

@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { R2_IMAGE_ORIGIN, R2_PICK_TIMEOUT_MS, initR2RandomImages, parsePool, pickKey } from './r2-random-image';
 
-const POOL = ['hero-avatars/alpha-01.avif', 'hero-avatars/beta-02.avif', 'hero-avatars/gamma-03.avif'];
+const POOL = ['cat-head-gallery/alpha-01.avif', 'cat-head-gallery/beta-02.avif', 'cat-head-gallery/gamma-03.avif'];
 
 /** Seeded generator (mulberry32) so the uniform-pick test is deterministic. */
 function seededRandom(seed: number): () => number {
@@ -57,7 +57,7 @@ describe('pickKey', () => {
   });
 
   it('picks each entry with equal probability within tolerance', () => {
-    const keys = Array.from({ length: 46 }, (_, index) => `hero-avatars/key-${index}.avif`);
+    const keys = Array.from({ length: 46 }, (_, index) => `cat-head-gallery/key-${index}.avif`);
     const random = seededRandom(20261021);
     const counts = new Map<string, number>(keys.map((key) => [key, 0]));
     const draws = 46_000;

@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { transformSync } from 'esbuild';
 
 import {
+  ALLOWED_ALBUMS,
   VENDOR_DIR,
   validateEntryShape,
   verifyLocalFile,
@@ -55,6 +56,15 @@ test('manifest has a schema version, budgets and well-formed entries', () => {
   assert.deepEqual(entries.flatMap(validateEntryShape), []);
   assert.equal(new Set(entries.map((entry) => entry.id)).size, entries.length, 'entry ids are unique');
   assert.equal(new Set(entries.map((entry) => entry.file)).size, entries.length, 'files are unique');
+});
+
+test('every entry names an allow-listed album and is vendored under that album folder', () => {
+  assert.deepEqual(ALLOWED_ALBUMS, ['cat-head-gallery'], 'the allowlist is the one album this change uses');
+  for (const entry of entries) {
+    assert.ok(ALLOWED_ALBUMS.includes(entry.album), `${entry.id}: album ${entry.album} is not allow-listed`);
+    assert.equal(entry.file, `${VENDOR_DIR}${entry.album}/${entry.objectKey.slice(entry.album.length + 1)}`, `${entry.id}: file must mirror the objectKey under the album folder`);
+    assert.equal(entry.pool?.album ?? entry.album, entry.album, `${entry.id}: pool album must be allow-listed`);
+  }
 });
 
 test('every manifest entry matches its vendored file in bytes, hash, dimensions and AVIF brand', async () => {
