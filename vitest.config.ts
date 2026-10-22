@@ -14,6 +14,7 @@ export default defineConfig({
       'shared/src/**/*.test.ts',
       'src/components/**/*.test.tsx',
       'src/lib/**/*.test.ts',
+      'src/scripts/**/*.test.ts',
     ],
     environment: 'node',
   },
