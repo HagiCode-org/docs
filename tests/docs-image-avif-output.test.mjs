@@ -111,7 +111,10 @@ test('guides/skills wraps each MDX body image in AVIF then WebP sources with laz
 });
 
 test('non-blog gallery on guides/skills still emits AVIF, WebP and JPEG', () => {
-  const gallery = pictureBlocks(readRoute('guides/skills')).filter((block) => !BODY_CLASS_PATTERN.test(block));
+  // The Hagilight footer brand avatar is a WebP-only <picture> owned by the footer, not by the showcase gallery.
+  const gallery = pictureBlocks(readRoute('guides/skills')).filter(
+    (block) => !BODY_CLASS_PATTERN.test(block) && !/\bhagilight-brand__avatar\b/.test(block),
+  );
   assert.ok(gallery.length >= 1, 'the showcase gallery renders at least one picture');
 
   for (const block of gallery) {

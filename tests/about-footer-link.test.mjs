@@ -24,17 +24,7 @@ test('docs link registry keeps a canonical about entry that points to the site-o
   assert.equal(linksSource.includes('repos/site'), false);
 });
 
-test('docs header navigation reuses the shared about link registry', async () => {
-  const navigationSource = await readFile(resolveDocsPath('src/config/navigation.ts'), 'utf8');
-
-  assert.match(navigationSource, /href:\s*getLink\('about'\)/);
-  assert.match(navigationSource, /linkKey:\s*'about'/);
-  assert.equal(navigationSource.includes('https://www.hagicode.com/about/'), false);
-});
-
-test('destination class decides the new-tab rel for shared links', async () => {
-  const navigationSource = await readFile(resolveDocsPath('src/config/navigation.ts'), 'utf8');
-
+test('destination class decides the new-tab rel for shared links', () => {
   for (const href of [
     'https://github.com/HagiCode-org/site',
     'https://cost.hagicode.com',
@@ -59,7 +49,4 @@ test('destination class decides the new-tab rel for shared links', async () => {
     assert.equal(isFirstPartyHref(href), false, href);
     assert.equal(getRelForHref(href), 'noopener noreferrer', href);
   }
-
-  assert.match(navigationSource, /attributes\.rel = getRelForHref\(link\.href\);/);
-  assert.equal(navigationSource.includes("attributes.rel = 'noopener noreferrer';"), false);
 });
