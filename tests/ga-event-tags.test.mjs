@@ -9,7 +9,7 @@ import { rehype } from 'rehype';
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const distDir = path.join(rootDir, 'dist');
 
-const BLOG_POST = 'blog/2026-01-22-github-issues-集成/index.html';
+const BLOG_POST = 'blog/2026-06-10-how-to-integrate-and-use-impeccable/index.html';
 const LOCALIZED_BLOG_POST = `en-US/${BLOG_POST}`;
 const DESKTOP_INSTALL_PAGES = ['installation/desktop/index.html', 'en-US/installation/desktop/index.html'];
 const STRUCTURED_ARTICLE = 'en-US/faq/claude-vs-hagicode/index.html';

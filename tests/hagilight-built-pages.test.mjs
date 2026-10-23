@@ -115,7 +115,7 @@ test('docs and translated docs retain shared width, disclosures, and article pro
 });
 
 test('blog, release-notes, and 404 pages keep one shared shell and their local content', () => {
-  const blogPost = readRoute('blog/2026-01-22-github-issues-集成/index.html');
+  const blogPost = readRoute('blog/2026-06-10-how-to-integrate-and-use-impeccable/index.html');
   const releaseNotes = readRoute('release-notes/index.html');
   const notFound = readRoute('404.html');
 

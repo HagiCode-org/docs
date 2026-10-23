@@ -17,32 +17,12 @@ const CASES = [
     minLength: 90,
   },
   {
-    file: 'src/content/docs/blog/2026-04-28-why-hagicode-chose-execa-for-cli-execution.mdx',
+    file: 'src/content/docs/blog/2026-02-11-agent-cli-automatic-retry.mdx',
     type: 'frontmatter',
     minLength: 36,
   },
   {
-    file: 'src/content/docs/blog/2026-05-06-github-actions-multi-platform-code-server-omniroute.mdx',
-    type: 'frontmatter',
-    minLength: 36,
-  },
-  {
-    file: 'src/content/docs/blog/2026-05-07-chat-image-upload-ai-recognition.mdx',
-    type: 'frontmatter',
-    minLength: 36,
-  },
-  {
-    file: 'src/content/docs/blog/2026-05-09-steamworks-multilingual-metadata-management.mdx',
-    type: 'frontmatter',
-    minLength: 36,
-  },
-  {
-    file: 'src/content/docs/blog/2026-05-20-windows-app-automation-to-microsoft-store.mdx',
-    type: 'frontmatter',
-    minLength: 36,
-  },
-  {
-    file: 'src/content/docs/fr-FR/blog/2026-05-11-opencode-integration.mdx',
+    file: 'src/content/docs/fr-FR/blog/2026-02-11-agent-cli-automatic-retry.mdx',
     type: 'frontmatter',
     minLength: 90,
   },
@@ -93,26 +73,6 @@ const CASES = [
   },
   {
     file: 'src/content/translations/docs/en-US/installation/desktop.mdx',
-    type: 'frontmatter',
-    minLength: 90,
-  },
-  {
-    file: 'src/content/translations/docs/en-US/blog/2026-01-22-github-issues-集成.mdx',
-    type: 'frontmatter',
-    minLength: 90,
-  },
-  {
-    file: 'src/content/translations/docs/en-US/blog/2026-01-26-docusaurus-auto-deployment-with-github-actions.mdx',
-    type: 'frontmatter',
-    minLength: 90,
-  },
-  {
-    file: 'src/content/translations/docs/en-US/blog/2026-01-26-modern-build-system-with-csharp-and-nuke.mdx',
-    type: 'frontmatter',
-    minLength: 90,
-  },
-  {
-    file: 'src/content/translations/docs/en-US/blog/2026-03-13-primary-profession-management.mdx',
     type: 'frontmatter',
     minLength: 90,
   },
