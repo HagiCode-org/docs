@@ -1,0 +1,1 @@
+import{n as e}from"./random-image.C5ihATaS.js";e(document);
