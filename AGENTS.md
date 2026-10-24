@@ -115,6 +115,16 @@ npm run translate:missing:claude
 npm run verify:docs-translation
 ```
 
+Blog translation and SEO helpers:
+
+```bash
+npm run report:blog-translation
+npm run verify:blog-i18n                 # blog i18n build check; `build:verify-blog-i18n` builds first
+npm run verify:blog-translation-quality  # add :ci to fail on findings
+npm run sync:blog-seo-descriptions       # dry-run; use :write to apply
+npm run indexnow:dry-run                 # preview the IndexNow submission
+```
+
 ## Deployment
 
 `.github/workflows/docs-deploy-gh-pages.yml` runs `build:ci` on pushes to `main` (or manually) and publishes to gh-pages, then warms the deployed domains with `scripts/warm-deployment-domains.mjs`. `.github/workflows/indexnow.yml` runs `npm run indexnow:submit` daily and on demand. The Azure Static Web Apps workflow is paused (manual dispatch only), and `esa.jsonc` holds the ESA build settings. Do not change deployment config as part of content work.
@@ -140,7 +150,7 @@ npm run verify:docs-translation
 - Preserve frontmatter, heading structure, internal links, and verification-script expectations.
 - Use repo scripts for content materialization, translation, release notes, and screenshot workflows instead of editing generated output directly.
 - Keep docs-specific concerns here; broader product marketing belongs in `repos/site`.
-- Tag new calls to action for Google Analytics with `gaEventAttributes()` and follow the "Analytics events" notes in `README.md`.
+- Tag new calls to action for Google Analytics with `gaEventAttributes()`.
 
 ## References
 
