@@ -57,7 +57,7 @@ function assertWebp(bytes, url) {
 }
 
 const ARTICLE_CASES = [
-  { route: 'guides/ai-compose-commit', bodyImages: 3 },
+  { route: 'guides/ai-compose-commit', bodyImages: 2 },
   { route: 'en-US/guides/ai-compose-commit', bodyImages: 2 },
 ];
 
