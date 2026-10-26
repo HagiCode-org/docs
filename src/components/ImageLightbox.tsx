@@ -46,6 +46,7 @@ interface ImageLightboxProps {
 const DEFAULT_CONTENT_SELECTOR = 'article, .sl-markdown-content, [role="main"]';
 const LIGHTBOX_ROOT_CLASS = 'docs-image-lightbox';
 const INTERACTIVE_IMAGE_ATTRIBUTE = 'data-docs-lightbox-trigger';
+const FULL_SOURCE_ATTRIBUTE = 'data-lightbox-src';
 const CONTENT_WIDTH_ATTRIBUTE = 'data-hagilight-content-width';
 const INTERACTIVE_IMAGE_CSS = `
   img[${INTERACTIVE_IMAGE_ATTRIBUTE}='true'] {
@@ -141,6 +142,26 @@ function areSlidesEqual(previousSlides: Slide[], nextSlides: Slide[]): boolean {
   return true;
 }
 
+/** The file shown in the lightbox: an explicit full-size source if the image declares one, else what the browser loaded. */
+function getSlideSource(img: HTMLImageElement): string {
+  const fullSource = img.getAttribute(FULL_SOURCE_ATTRIBUTE);
+
+  return fullSource ? new URL(fullSource, window.location.href).href : img.currentSrc || img.src;
+}
+
+function getSlideSize(img: HTMLImageElement): { width?: number; height?: number } {
+  if (img.hasAttribute(FULL_SOURCE_ATTRIBUTE)) {
+    const width = Number(img.getAttribute('data-lightbox-width'));
+    const height = Number(img.getAttribute('data-lightbox-height'));
+
+    if (width > 0 && height > 0) {
+      return { width, height };
+    }
+  }
+
+  return { width: img.naturalWidth || img.width || undefined, height: img.naturalHeight || img.height || undefined };
+}
+
 function containsRelevantImageNode(node: Node): boolean {
   if (node instanceof HTMLImageElement) {
     return true;
@@ -164,7 +185,7 @@ function useImageDetection(options: DetectionOptions = {}): Slide[] {
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const extractImageMetadata = useCallback((img: HTMLImageElement): Slide | null => {
-    const src = img.currentSrc || img.src;
+    const src = getSlideSource(img);
     const alt = img.alt || '';
 
     if (!src || src === window.location.href) {
@@ -179,8 +200,7 @@ function useImageDetection(options: DetectionOptions = {}): Slide[] {
       src,
       alt,
       title: img.title || alt,
-      width: img.naturalWidth || img.width || undefined,
-      height: img.naturalHeight || img.height || undefined,
+      ...getSlideSize(img),
     };
   }, [excludeDecorative]);
 
@@ -250,7 +270,7 @@ function useImageDetection(options: DetectionOptions = {}): Slide[] {
         childList: true,
         subtree: true,
         attributes: true,
-        attributeFilter: ['src', 'alt', 'title', 'role'],
+        attributeFilter: ['src', 'alt', 'title', 'role', FULL_SOURCE_ATTRIBUTE],
       });
     });
 
@@ -290,7 +310,7 @@ export default function ImageLightbox({
 
     document.querySelectorAll(contentSelector ?? DEFAULT_CONTENT_SELECTOR).forEach((area) => {
       area.querySelectorAll('img').forEach((img) => {
-        const slideIndex = slideIndexBySrc.get(img.currentSrc || img.src);
+        const slideIndex = slideIndexBySrc.get(getSlideSource(img));
 
         if (slideIndex === undefined) {
           return;
@@ -321,7 +341,7 @@ export default function ImageLightbox({
     }
 
     const openLightboxFromImage = (img: HTMLImageElement) => {
-      const slideIndex = slideIndexBySrc.get(img.currentSrc || img.src);
+      const slideIndex = slideIndexBySrc.get(getSlideSource(img));
 
       if (slideIndex === undefined) {
         return;
@@ -347,7 +367,7 @@ export default function ImageLightbox({
         return null;
       }
 
-      return slideIndexBySrc.has(image.currentSrc || image.src) ? image : null;
+      return slideIndexBySrc.has(getSlideSource(image)) ? image : null;
     };
 
     const handleClick = (event: Event) => {

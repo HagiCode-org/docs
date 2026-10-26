@@ -37,7 +37,7 @@ vi.mock('yet-another-react-lightbox', async () => {
         return null;
       }
 
-      return React.createElement('div', { 'data-testid': 'mock-lightbox' });
+      return React.createElement('div', { 'data-testid': 'mock-lightbox', 'data-slides': JSON.stringify(props.slides) });
     },
   };
 });
@@ -115,5 +115,37 @@ describe('ImageLightbox default zoom behavior', () => {
     await waitFor(() => {
       expect(lightboxMockState.changeZoom).toHaveBeenCalledWith(2);
     });
+  });
+
+  it('opens the declared full-size source instead of the srcset candidate the browser picked', async () => {
+    render(
+      <div>
+        <article>
+          <img
+            src="/_astro/small.avif"
+            data-lightbox-src="/_astro/full.avif"
+            data-lightbox-width="1920"
+            data-lightbox-height="1080"
+            alt="Task flow screenshot"
+          />
+        </article>
+        <ImageLightbox />
+      </div>,
+    );
+
+    const image = document.querySelector('article img') as HTMLImageElement;
+
+    await waitFor(() => {
+      expect(image).toHaveAttribute('role', 'button');
+    });
+
+    fireEvent.click(image);
+
+    const lightbox = await screen.findByTestId('mock-lightbox');
+    const [slide] = JSON.parse(lightbox.getAttribute('data-slides') ?? '[]');
+
+    expect(slide.src).toBe(new URL('/_astro/full.avif', window.location.href).href);
+    expect(slide.width).toBe(1920);
+    expect(slide.height).toBe(1080);
   });
 });
