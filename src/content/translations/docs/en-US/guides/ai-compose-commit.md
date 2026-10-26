@@ -1,15 +1,15 @@
 ---
-title: AI Compose Commit Guide
+title: Super Commit Guide
 description: Use AI to intelligently generate Git commit messages, improving commit quality and consistency.
 ---
 
 ## Overview
 
-AI Compose Commit reads the current code changes and generates commit messages in Conventional Commits format. The point is simple: spend less time writing commits while keeping history clearer.
+Super Commit reads the current code changes and generates commit messages in Conventional Commits format. The point is simple: spend less time writing commits while keeping history clearer.
 
-### What is AI Compose Commit?
+### What is Super Commit?
 
-AI Compose Commit analyzes your changes and writes standardized commit messages for them. It trades manual commit writing for a more consistent history.
+Super Commit analyzes your changes and writes standardized commit messages for them. It trades manual commit writing for a more consistent history.
 
 Use it when:
 - Large code changes requiring multiple commits
@@ -19,7 +19,7 @@ Use it when:
 
 ### Main Advantages
 
-| Feature | Traditional Manual Commits | AI Compose Commit |
+| Feature | Traditional Manual Commits | Super Commit |
 |----------|----------------------|------------------|
 | **Commit Quality** | Depends on individual experience | Based on best practices, consistent quality |
 | **Commit Speed** | Requires thought and organization | One-click, instant generation |
@@ -31,32 +31,35 @@ Use it when:
 
 ### Enable Feature
 
-In the HagiCode desktop application, navigate to the project where you want to use AI Compose Commit and enable this feature.
+In the HagiCode desktop application, navigate to the project where you want to use Super Commit and enable this feature.
 
 **Important**: Ensure your project has been added to HagiCode first.
 
 ### Trigger Feature
 
-Locate the "AI Combined Commit" button in the Git operations section.
+Locate the "Super Commit" button in the Git operations section.
 
-![AI Combined Commit Button](../../img/screenshots/ai-compose-commit/trigger-ai-compose-commit-button/original.png)
+![Super Commit Button](../../img/screenshots/product/git-super-commit/original.png)
 
 This button is typically located prominently in the Git operations section, near other version control actions.
 
 **Important Note**: Clicking this button will trigger automatic commit message generation. If you need to roll back or modify commits, use standard Git commands.
 
-### First Use Risk Prompt
+### Confirm Before Running
 
-When using AI Compose Commit for the first time or with unapproved changes, the system will display a confirmation dialog.
+Clicking the button does not start anything immediately. It first opens the Super Commit confirmation drawer, which summarizes how many repositories have changes and lets you review the options for this run.
 
-![Second Confirmation Dialog](../../img/screenshots/ai-compose-commit/second-confirmation-dialog/original.png)
+![Super Commit confirmation drawer](../../img/screenshots/guides/super-commit-confirmation/original.png)
 
-The dialog contains options including:
-- Confirm and start processing
-- Understand risks, no longer show this prompt
-- Checking this option makes subsequent use more convenient
+The drawer contains these options:
+- **Git author profile**: pick a saved Git identity; if none exists yet, create one in Git settings first
+- **Target branch strategy**: keep the current branch, or create a new branch from it (custom name or AI-generated name)
+- **Push to remote after commit**: optional; you can run pull --rebase before the push
+- **Co-Authored-By**: choose how this run is credited
+- **Agent**: choose which Agent performs this commit
+- **Confirm and Start Processing / Cancel**: after you confirm, the job continues in the background and you can close the drawer and keep working
 
-Recommend carefully reading the risk prompt during first use to understand the implications of automatic commits.
+On first use, check the repository scope and branch strategy before you start.
 
 ### View Results
 
@@ -68,7 +71,7 @@ Commit messages have been generated and are ready. You can review them before fi
 
 ### AI Analysis Logic
 
-AI Compose Commit analyzes your code changes through the following process:
+Super Commit analyzes your code changes through the following process:
 
 #### 1. Read Workspace Changes
 
@@ -166,9 +169,9 @@ Traditional Git commits rely on:
 - Time constraints affecting quality
 - Inconsistent formatting across team
 
-### AI Compose Commit
+### Super Commit
 
-AI Compose Commit provides:
+Super Commit provides:
 - **Standardized format**: Always follows Conventional Commits specification
 - **Intelligent analysis**: Understands code context and relationships
 - **Quality consistency**: Maintains professional tone and accuracy
@@ -176,7 +179,7 @@ AI Compose Commit provides:
 
 ### When to Use Each
 
-**Use AI Compose Commit When:**
+**Use Super Commit When:**
 - Large batch changes (multiple files, complex features)
 - Coordinated changes across multiple repositories
 - Need for high-quality, consistent commit messages
@@ -191,7 +194,7 @@ AI Compose Commit provides:
 
 ### monospecs Integration
 
-When managing monospecs-based multi-repository projects, AI Compose Commit provides enhanced capabilities:
+When managing monospecs-based multi-repository projects, Super Commit provides enhanced capabilities:
 
 #### Read monospecs.yaml
 
@@ -216,7 +219,7 @@ Each sub-repository receives independent commits:
 
 ### Co-Authored-By Footer
 
-AI Compose Commit appends the currently effective `Co-Authored-By` trailer to every generated commit. Interactive Git commits and the OpenSpec v1 archive prompt reuse the same resolution rules, so teams only need to maintain one convention.
+Super Commit appends the currently effective `Co-Authored-By` trailer to every generated commit. Interactive Git commits and the OpenSpec v1 archive prompt reuse the same resolution rules, so teams only need to maintain one convention.
 
 The precedence order is fixed:
 
@@ -268,7 +271,7 @@ Operational details:
 
 ### Best Practices
 
-For optimal AI Compose Commit results:
+For optimal Super Commit results:
 
 **1. Keep Changes Focused**
 - Each commit should address a single feature or fix
@@ -299,7 +302,7 @@ For optimal AI Compose Commit results:
 
 ### Limitations
 
-AI Compose Commit has the following usage limitations:
+Super Commit has the following usage limitations:
 
 **1. Network Dependency**
 - Requires active connection to AI service
@@ -318,7 +321,7 @@ AI Compose Commit has the following usage limitations:
 
 **4. First Use Considerations**
 
-When using AI Compose Commit for the first time:
+When using Super Commit for the first time:
 - Start with smaller, safer changes to understand AI behavior
 - Verify generated commits before finalizing
 - Provide clear code comments to improve AI understanding
@@ -328,7 +331,7 @@ When using AI Compose Commit for the first time:
 
 ### Feature Not Available
 
-If you don't see the AI Combined Commit button:
+If you don't see the Super Commit button:
 - Ensure the project is added to HagiCode
 - Refresh the interface
 - Check if this feature is enabled in your version

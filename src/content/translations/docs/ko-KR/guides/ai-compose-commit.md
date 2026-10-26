@@ -1,15 +1,15 @@
 ---
-title: AI Compose 커밋 가이드
+title: Super Commit 가이드
 description: AI를 사용하여 Git 커밋 메시지를 지능적으로 생성하여 커밋 품질과 일관성을 향상합니다.
 ---
 
 ## 개요
 
-AI Compose Commit은 현재 코드 변경 사항을 읽고 기존 커밋 형식으로 커밋 메시지를 생성합니다. 요점은 간단합니다. 기록을 더 명확하게 유지하면서 커밋을 작성하는 데 소요되는 시간을 줄이세요.
+Super Commit은 현재 코드 변경 사항을 읽고 기존 커밋 형식으로 커밋 메시지를 생성합니다. 요점은 간단합니다. 기록을 더 명확하게 유지하면서 커밋을 작성하는 데 소요되는 시간을 줄이세요.
 
-### AI Compose 커밋이란 무엇인가요?
+### Super Commit이란 무엇인가요?
 
-AI Compose Commit은 변경 사항을 분석하고 이에 대한 표준화된 커밋 메시지를 작성합니다. 보다 일관된 기록을 위해 수동 커밋 작성을 교환합니다.
+Super Commit은 변경 사항을 분석하고 이에 대한 표준화된 커밋 메시지를 작성합니다. 보다 일관된 기록을 위해 수동 커밋 작성을 교환합니다.
 
 다음과 같은 경우에 사용하세요:
 - 여러 커밋이 필요한 대규모 코드 변경
@@ -19,7 +19,7 @@ AI Compose Commit은 변경 사항을 분석하고 이에 대한 표준화된 �
 
 ### 주요 장점
 
-| 특징 | 전통적인 수동 커밋 | AI 작성 커밋 |
+| 특징 | 전통적인 수동 커밋 | Super Commit |
 |----------|----------------------|------------------|
 | **품질 약속** | 개인의 경험에 따라 다름 | 모범 사례를 바탕으로 일관된 품질 |
 | **커밋 속도** | 사고와 조직이 필요함 | 원클릭, 즉시 생성 |
@@ -31,32 +31,35 @@ AI Compose Commit은 변경 사항을 분석하고 이에 대한 표준화된 �
 
 ### 기능 활성화
 
-HagiCode 데스크톱 애플리케이션에서 AI Compose Commit을 사용하려는 프로젝트로 이동하여 이 기능을 활성화합니다.
+HagiCode 데스크톱 애플리케이션에서 Super Commit을 사용하려는 프로젝트로 이동하여 이 기능을 활성화합니다.
 
 **중요**: 먼저 프로젝트가 HagiCode에 추가되었는지 확인하세요.
 
 ### 트리거 기능
 
-Git 작업 섹션에서 "AI Combined Commit" 버튼을 찾으세요.
+Git 작업 섹션에서 "Super Commit" 버튼을 찾으세요.
 
-![AI 결합 커밋 버튼](../../img/screenshots/ai-compose-commit/trigger-ai-compose-commit-button/original.png)
+![Super Commit 버튼](../../img/screenshots/product/git-super-commit/original.png)
 
 이 버튼은 일반적으로 Git 작업 섹션의 다른 버전 제어 작업 근처에 눈에 띄게 위치합니다.
 
 **중요 사항**: 이 버튼을 클릭하면 자동 커밋 메시지 생성이 시작됩니다. 커밋을 롤백하거나 수정해야 하는 경우 표준 Git 명령을 사용하세요.
 
-### 최초 사용 위험 프롬프트
+### 실행 전 확인
 
-AI Compose Commit을 처음으로 사용하거나 승인되지 않은 변경 사항이 있는 경우 시스템에 확인 대화 상자가 표시됩니다.
+버튼을 눌러도 바로 실행되지 않습니다. 먼저 Super Commit 확인 서랍이 열려 변경된 저장소 수를 요약하고, 이번 실행의 옵션을 확인할 수 있습니다.
 
-![두 번째 확인 대화 상자](../../img/screenshots/ai-compose-commit/second-confirmation-dialog/original.png)
+![Super Commit 확인 서랍](../../img/screenshots/guides/super-commit-confirmation/original.png)
 
-대화 상자에는 다음을 포함한 옵션이 포함되어 있습니다.
-- 확인 및 처리 시작
-- 위험을 이해하고 더 이상 이 메시지를 표시하지 않습니다.
-- 이 옵션을 선택하면 이후 사용이 더 편리해집니다.
+서랍에는 다음 옵션이 있습니다.
+- **Git 작성자 프로필**: 저장된 Git ID를 선택합니다. 아직 없다면 먼저 Git 설정에서 만드세요
+- **대상 브랜치 전략**: 현재 브랜치를 유지하거나 현재 브랜치에서 새 브랜치를 만듭니다(직접 지정한 이름 또는 AI가 생성한 이름)
+- **커밋 후 원격에 Push**: 선택 사항입니다. Push 전에 pull --rebase를 실행할 수 있습니다
+- **Co-Authored-By**: 이번 실행의 공동 작성자 표기 방식을 선택합니다
+- **Agent**: 이번 커밋을 수행할 Agent를 선택합니다
+- **확인하고 처리 시작 / 취소**: 확인하면 작업이 백그라운드에서 계속되며 서랍을 닫고 작업을 이어갈 수 있습니다
 
-자동 커밋의 의미를 이해하려면 처음 사용하는 동안 위험 프롬프트를 주의 깊게 읽는 것이 좋습니다.
+처음 사용할 때는 저장소 범위와 브랜치 전략을 확인한 뒤 시작하세요.
 
 ### 결과 보기
 
@@ -68,7 +71,7 @@ AI가 처리를 완료하면 성공 알림이 표시됩니다.
 
 ### AI 분석 로직
 
-AI Compose Commit은 다음 프로세스를 통해 코드 변경 사항을 분석합니다.
+Super Commit은 다음 프로세스를 통해 코드 변경 사항을 분석합니다.
 
 #### 1. 작업 공간 변경 사항 읽기
 
@@ -166,9 +169,9 @@ Traditional Git commits rely on:
 - Time constraints affecting quality
 - Inconsistent formatting across team
 
-### AI Compose Commit
+### Super Commit
 
-AI Compose Commit provides:
+Super Commit provides:
 - **Standardized format**: Always follows Conventional Commits specification
 - **Intelligent analysis**: Understands code context and relationships
 - **Quality consistency**: Maintains professional tone and accuracy
@@ -176,7 +179,7 @@ AI Compose Commit provides:
 
 ### When to Use Each
 
-**Use AI Compose Commit When:**
+**Use Super Commit When:**
 - Large batch changes (multiple files, complex features)
 - Coordinated changes across multiple repositories
 - Need for high-quality, consistent commit messages
@@ -191,7 +194,7 @@ AI Compose Commit provides:
 
 ### monospecs Integration
 
-When managing monospecs-based multi-repository projects, AI Compose Commit provides enhanced capabilities:
+When managing monospecs-based multi-repository projects, Super Commit provides enhanced capabilities:
 
 #### Read monospecs.yaml
 
@@ -216,7 +219,7 @@ Each sub-repository receives independent commits:
 
 ### Co-Authored-By Footer
 
-AI Compose Commit appends the currently effective `Co-Authored-By` trailer to every generated commit. Interactive Git commits and the OpenSpec v1 archive prompt reuse the same resolution rules, so teams only need to maintain one convention.
+Super Commit appends the currently effective `Co-Authored-By` trailer to every generated commit. Interactive Git commits and the OpenSpec v1 archive prompt reuse the same resolution rules, so teams only need to maintain one convention.
 
 The precedence order is fixed:
 
@@ -268,7 +271,7 @@ Operational details:
 
 ### Best Practices
 
-For optimal AI Compose Commit results:
+For optimal Super Commit results:
 
 **1. Keep Changes Focused**
 - Each commit should address a single feature or fix
@@ -299,7 +302,7 @@ For optimal AI Compose Commit results:
 
 ### Limitations
 
-AI Compose Commit has the following usage limitations:
+Super Commit has the following usage limitations:
 
 **1. Network Dependency**
 - Requires active connection to AI service
@@ -318,7 +321,7 @@ AI Compose Commit has the following usage limitations:
 
 **4. First Use Considerations**
 
-When using AI Compose Commit for the first time:
+When using Super Commit for the first time:
 - Start with smaller, safer changes to understand AI behavior
 - Verify generated commits before finalizing
 - Provide clear code comments to improve AI understanding
@@ -328,7 +331,7 @@ When using AI Compose Commit for the first time:
 
 ### Feature Not Available
 
-If you don't see the AI Combined Commit button:
+If you don't see the Super Commit button:
 - Ensure the project is added to HagiCode
 - Refresh the interface
 - Check if this feature is enabled in your version

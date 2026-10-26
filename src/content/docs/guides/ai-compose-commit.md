@@ -1,13 +1,13 @@
 ---
-title: AI Compose Commit 使用指南
-description: 了解 AI Compose Commit 的适用场景、触发方式、确认流程与仓库锁定行为，提升 Git 提交信息的一致性与质量。
+title: Super Commit 使用指南
+description: 了解 Super Commit 的适用场景、触发方式、确认流程与使用限制，提升 Git 提交信息的一致性与质量。
 ---
 
 ## 概述
 
-### 什么是 AI Compose Commit
+### 什么是 Super Commit
 
-AI Compose Commit（AI 组合提交）会读取当前代码变更，并按 Conventional Commits 生成提交信息。目标很直接：少花时间写提交，同时让历史更清楚。
+Super Commit 会读取当前代码变更，并按 Conventional Commits 生成提交信息。目标很直接：少花时间写提交，同时让历史更清楚。
 
 这些场景可优先用它：
 - 大量代码变更需要快速提交
@@ -17,7 +17,7 @@ AI Compose Commit（AI 组合提交）会读取当前代码变更，并按 Conve
 
 ### 与传统手动提交的对比
 
-| 特性 | 传统手动提交 | AI Compose Commit |
+| 特性 | 传统手动提交 | Super Commit |
 |------|-------------|-------------------|
 | **提交质量** | 依赖个人经验和习惯，质量参差不齐 | 基于最佳实践自动生成，质量稳定 |
 | **提交速度** | 需要仔细思考和组织语言 | 一键触发，AI 自动分析生成 |
@@ -38,31 +38,35 @@ AI Compose Commit（AI 组合提交）会读取当前代码变更，并按 Conve
 
 ### 触发功能
 
-在 HagiCode 的 Git 标签页中，找到"AI 自动组合提交"按钮并点击。
+在 HagiCode 的 Git 标签页中，找到“超级提交”（Super Commit）按钮并点击。
 
-![AI 组合提交按钮](../img/screenshots/ai-compose-commit/trigger-ai-compose-commit-button/original.png)
+![Super Commit 按钮](../img/screenshots/product/git-super-commit/original.png)
 
 这个按钮位于 Git 操作区域的显著位置，通常在常规提交操作旁边。
 
 **重要提示**：点击此按钮后，系统会自动分析并提交工作区的所有变更。如需回滚，请自行处理。
 
-### 二次确认
+### 启动前确认
 
-首次使用或未同意风险提示时，系统会显示确认对话框。
+点击按钮后不会立刻执行，而是先打开“Super Commit 确认”抽屉，汇总有变更的仓库数量，并让你确认本次运行的选项。
 
-![二次确认对话框](../img/screenshots/ai-compose-commit/second-confirmation-dialog/original.png)
+![Super Commit 确认抽屉](../img/screenshots/guides/super-commit-confirmation/original.png)
 
-对话框中包含以下选项：
-- **确认并开始处理**：同意使用 AI 功能，开始分析变更
-- **了解风险，不再提示此确认对话框**：勾选后，下次将不再显示此确认
+抽屉中包含以下选项：
+- **Git 作者资料**：选择已保存的 Git 身份；还没有资料时，需要先到 Git 设置中创建
+- **目标分支策略**：继续使用当前分支，或基于当前分支新建分支（自定义名称或由 AI 生成名称）
+- **提交后推送到远端**：可选；推送前可先执行 pull --rebase
+- **Co-Authored-By**：选择本次运行的署名方式
+- **执行 Agent**：选择由哪个 Agent 执行本次提交
+- **确认并开始处理 / 取消**：确认后任务在后台继续，可以关闭抽屉继续工作
 
-建议首次使用时仔细阅读风险提示，确认无误后再勾选"不再提示"选项，后续使用会更加便捷。
+建议首次使用时先确认仓库范围和分支策略，再开始处理。
 
 ### 查看结果
 
 AI 处理完成后，会显示"✓ 处理完成"的成功提示。此时提交已经执行完成。
 
-**注意**：AI Compose Commit 会自动执行 Git 提交命令，无需你再手动执行任何 `git commit` 操作。如果需要查看提交结果，可以：
+**注意**：Super Commit 会自动执行 Git 提交命令，无需你再手动执行任何 `git commit` 操作。如果需要查看提交结果，可以：
 
 1. 在 Git 标签页查看生成的提交历史
 2. 在终端使用 `git log` 命令查看详细提交信息
@@ -72,7 +76,7 @@ AI 处理完成后，会显示"✓ 处理完成"的成功提示。此时提交�
 
 ### AI 分析逻辑
 
-AI Compose Commit 通过以下步骤分析你的代码变更：
+Super Commit 通过以下步骤分析你的代码变更：
 
 1. **读取工作区变更**：系统收集所有已修改、新增和删除的文件
 2. **分析文件内容**：AI 深入理解每个文件的变更内容
@@ -113,7 +117,7 @@ Co-Authored-By: HagiCode <noreply@hagicode.com>
 
 ### 子仓库支持
 
-在使用 monospecs 管理的项目中，AI Compose Commit 能够：
+在使用 monospecs 管理的项目中，Super Commit 能够：
 
 1. **读取 .hagicode/monospecs.yaml**：自动识别项目中的所有子仓库配置
 2. **匹配文件路径**：将每个变更文件匹配到对应的子仓库
@@ -128,7 +132,7 @@ Co-Authored-By: HagiCode <noreply@hagicode.com>
 
 ### Co-Authored-By 标签
 
-AI Compose Commit 会为每个生成的提交追加当前生效的 `Co-Authored-By` 标签。交互式 Git 提交和 OpenSpec v1 归档提示词也会复用同一套解析规则，因此团队只需要维护一套配置约定。
+Super Commit 会为每个生成的提交追加当前生效的 `Co-Authored-By` 标签。交互式 Git 提交和 OpenSpec v1 归档提示词也会复用同一套解析规则，因此团队只需要维护一套配置约定。
 
 解析优先级固定如下：
 
@@ -175,17 +179,12 @@ Co-Authored-By: Platform Bot <platform-bot@example.com>
 - 如果消息里已经有其他协作者的 `Co-Authored-By`，当前 AI 署名仍会继续追加
 - 建议团队先约定仓库级署名，再把个人全局配置当成回退值，避免同一仓库同时维护冲突规则
 
-在提交过程中，你会在界面上看到仓库锁定提示，表明系统正在处理提交操作。
-
-![仓库锁定提示](../img/screenshots/ai-compose-commit/repository-lock-during-commit/original.png)
-
-此时请勿进行其他 Git 操作，等待处理完成。
 
 ## 注意事项
 
 ### 使用限制
 
-AI Compose Commit 功能存在以下限制：
+Super Commit 功能存在以下限制：
 
 1. **网络依赖**：需要连接到 AI 服务才能使用，确保网络连接稳定
 2. **文件大小**：对于特别大的文件或大量变更，处理时间可能较长
@@ -205,7 +204,7 @@ AI Compose Commit 功能存在以下限制：
 
 ### 最佳实践
 
-为了获得最佳的 AI 提交效果，建议遵循以下实践：
+为了获得最佳的 Super Commit 效果，建议遵循以下实践：
 
 1. **保持变更专注**：每次提交尽量保持变更的相关性，避免混杂不相关的修改
 2. **清晰的代码注释**：在关键代码中添加注释，帮助 AI 理解你的意图
@@ -224,7 +223,7 @@ AI Compose Commit 功能存在以下限制：
 
 ### FAQ
 
-**Q：AI Compose Commit 会修改我的代码吗？**
+**Q：Super Commit 会修改我的代码吗？**
 
 A：不会。AI 仅分析代码变更并生成提交信息，不会修改任何代码内容。
 
@@ -234,7 +233,7 @@ A：可以。AI 生成提交后，你可以使用 `git commit --amend` 或 `git 
 
 **Q：AI 功能需要付费吗？**
 
-A：AI Compose Commit 是 HagiCode 的免费功能，无需额外付费即可使用。
+A：Super Commit 是 HagiCode 的免费功能，无需额外付费即可使用。
 
 **Q：首次使用需要准备什么？**
 
@@ -248,7 +247,7 @@ A：处理时间取决于变更数量和网络状况。一般情况下的变更�
 
 A：你可以手动修改提交信息，或在下次使用前尝试优化代码的命名和注释，帮助 AI 更好地理解。
 
-**Q：可以使用 AI Compose Commit 提交已暂存的文件吗？**
+**Q：可以使用 Super Commit 提交已暂存的文件吗？**
 
 A：可以。AI 会同时分析已暂存和未暂存的变更，建议在提交前先暂存相关文件以获得更准确的分组结果。
 
