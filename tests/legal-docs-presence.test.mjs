@@ -38,13 +38,17 @@ test('root locale legal docs include required frontmatter and section headings',
   assert.match(privacyPolicy, /^---[\s\S]*title: 隐私政策/m);
   assertFrontmatterValue(privacyPolicy, 'sidebar_label', '隐私政策');
   assertFrontmatterValue(privacyPolicy, 'sidebar_position', '20');
-  assert.match(privacyPolicy, /^生效日期：2026-04-15$/m);
+  assert.match(privacyPolicy, /^生效日期：2026-10-26$/m);
   assert.match(privacyPolicy, /^## 我们收集的信息类型$/m);
   assert.match(privacyPolicy, /^## 数据使用目的$/m);
   assert.match(privacyPolicy, /^## 存储与保留$/m);
   assert.match(privacyPolicy, /^## 用户权利$/m);
   assert.match(privacyPolicy, /^## 联系方式$/m);
   assert.match(privacyPolicy, /support@hagicode\.com/);
+  assert.match(privacyPolicy, /51LA/);
+  assert.match(privacyPolicy, /Google Analytics/);
+  assert.match(privacyPolicy, /PostHog/);
+  assert.match(privacyPolicy, /^## Cookie 与你的选择$/m);
 });
 
 test('english legal docs stay aligned to the localized legal routes and required sections', async () => {
@@ -65,11 +69,15 @@ test('english legal docs stay aligned to the localized legal routes and required
   assert.match(privacyPolicy, /^---[\s\S]*title: Privacy Policy/m);
   assertFrontmatterValue(privacyPolicy, 'sidebar_label', 'Privacy Policy');
   assertFrontmatterValue(privacyPolicy, 'sidebar_position', '20');
-  assert.match(privacyPolicy, /^Effective date: 2026-04-15$/m);
+  assert.match(privacyPolicy, /^Effective date: 2026-10-26$/m);
   assert.match(privacyPolicy, /^## Categories of Information We Collect$/m);
   assert.match(privacyPolicy, /^## Purposes of Use$/m);
   assert.match(privacyPolicy, /^## Storage and Retention$/m);
   assert.match(privacyPolicy, /^## User Rights$/m);
   assert.match(privacyPolicy, /^## Contact$/m);
   assert.match(privacyPolicy, /support@hagicode\.com/);
+  assert.match(privacyPolicy, /51LA/);
+  assert.match(privacyPolicy, /Google Analytics/);
+  assert.match(privacyPolicy, /PostHog/);
+  assert.match(privacyPolicy, /^## Cookies and Your Choices$/m);
 });

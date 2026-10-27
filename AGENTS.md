@@ -125,6 +125,22 @@ npm run sync:blog-seo-descriptions       # dry-run; use :write to apply
 npm run indexnow:dry-run                 # preview the IndexNow submission
 ```
 
+## PostHog Site Events
+
+`src/lib/posthog-events.ts` holds the frozen event table and the capture wrapper that every HagiCode site shares. The wrapper sends nothing when `window.posthog` is missing, when the visitor has opted out, or when `capture` throws. It queues the event while the PostHog stub has not loaded. It keeps only the keys in the event's table row, and only string, finite number or boolean values that match the row's kind (enumerations are exact matches; strings are capped at 128 characters). It never sends URLs, paths, query strings, free text or the hagilight super properties (`site_id`, `site_framework`, `hagilight_version`, `locale`, `page_type`).
+
+Only `src/components/InstallButton.tsx` calls the wrapper.
+
+| Event | Sent when | Properties |
+|-------|-----------|------------|
+| `download_desktop_windows`, `download_desktop_macos`, `download_desktop_linux` | A visitor activates a primary-source download: the China or GitHub button, or the same two links in the version dropdown. The platform is the one the resolved download model belongs to. Torrent links and disabled sources send nothing. | `platform` (`windows`, `macos`, `linux`), `architecture` (`x64`, `arm64`, `unknown`), `asset_type` (the `AssetType` value, for example `linux-appimage`), `source` (`accelerated` or `github`), `app_version` (the index version without a leading `v`) |
+| `open_microsoft_store` | The Windows primary store button (`install_primary`) or the store badge shortcut (`install_shortcut`) is activated. | `source` (`install_primary` or `install_shortcut`) |
+| `open_steam_store` | The Steam shortcut is activated. | `source` (`install_shortcut`) |
+
+Deduplication rule: the install controls carry `gaEventAttributes`, so one click can also produce hagilight's `cta_click`. The business event above is the canonical record of that click. Dashboards must not add these events to `cta_click` counts.
+
+Tests: `src/lib/posthog-events.test.ts` (wrapper rules and the exact allowlisted set for every row) and the `InstallButton PostHog events` block in `src/components/__tests__/InstallButton.test.tsx`.
+
 ## Deployment
 
 `.github/workflows/docs-deploy-gh-pages.yml` runs `build:ci` on pushes to `main` (or manually) and publishes to gh-pages, then warms the deployed domains with `scripts/warm-deployment-domains.mjs`. `.github/workflows/indexnow.yml` runs `npm run indexnow:submit` daily and on demand. The Azure Static Web Apps workflow is paused (manual dispatch only), and `esa.jsonc` holds the ESA build settings. Do not change deployment config as part of content work.
