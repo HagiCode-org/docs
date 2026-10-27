@@ -14,6 +14,8 @@ interface MicrosoftStoreBadgeProps {
   className?: string;
   badgeClassName?: string;
   badgeAttributes?: Record<string, string>;
+  /** Called when a click lands on the badge (the host span wraps the custom element). */
+  onActivate?: () => void;
 }
 
 export default function MicrosoftStoreBadge({
@@ -25,6 +27,7 @@ export default function MicrosoftStoreBadge({
   className,
   badgeClassName,
   badgeAttributes,
+  onActivate,
 }: MicrosoftStoreBadgeProps) {
   useEffect(() => {
     const src = 'https://get.microsoft.com/badge/ms-store-badge.bundled.js';
@@ -37,7 +40,7 @@ export default function MicrosoftStoreBadge({
   }, []);
 
   return (
-    <span className={className}>
+    <span className={className} onClick={onActivate}>
       {React.createElement('ms-store-badge', {
         ...badgeAttributes,
         className: badgeClassName,

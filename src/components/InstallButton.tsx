@@ -7,6 +7,7 @@ import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 
 
 import type {
   AssetType,
+  CpuArchitecture,
   DesktopVersion,
   DownloadAction,
   PlatformGroup,
@@ -38,6 +39,7 @@ import type {
 import { gaEventAttributes } from '@hagicode/hagilight-core/analytics-events';
 import { getFallbackSteamStoreLink, loadSteamStoreLink } from '@shared/steam-store-link';
 import { FEATURE_MAC_DOWNLOAD_ENABLED, FEATURE_SITE_STEAM_ENABLED } from '@/config/features';
+import { captureSiteEvent } from '@/lib/posthog-events';
 import MicrosoftStoreBadge from './MicrosoftStoreBadge';
 
 const PLATFORM_LABELS = {
@@ -47,10 +49,12 @@ const PLATFORM_LABELS = {
 } as const;
 
 interface DownloadOption {
+  platform: 'windows' | 'macos' | 'linux';
   label: string;
   url: string;
   size?: string;
   assetType: AssetType;
+  architecture: CpuArchitecture;
   sourceActions: DownloadAction[];
 }
 
@@ -112,6 +116,31 @@ export function getDesktopDownloadGaLabel(assetType: AssetType | string | null |
   return 'downloadDesktop';
 }
 
+const DOWNLOAD_EVENT_BY_PLATFORM = {
+  windows: 'download_desktop_windows',
+  macos: 'download_desktop_macos',
+  linux: 'download_desktop_linux',
+} as const;
+
+/** Reports one desktop installer activation from the resolved download model; the wrapper filters the properties. */
+function reportDesktopDownload(
+  option: DownloadOption,
+  source: PrimaryDownloadSourceKey,
+  appVersion: string | null,
+): void {
+  if (!appVersion) {
+    return;
+  }
+
+  captureSiteEvent(DOWNLOAD_EVENT_BY_PLATFORM[option.platform], {
+    platform: option.platform,
+    architecture: option.architecture,
+    asset_type: option.assetType,
+    source,
+    app_version: appVersion.replace(/^v/i, ''),
+  });
+}
+
 interface InstallButtonProps {
   variant?: 'full' | 'compact';
   className?: string;
@@ -162,10 +191,12 @@ function convertPlatformGroups(platforms: PlatformGroup[]): PlatformDownloads[] 
     platform: platform.platform,
     platformLabel: PLATFORM_LABELS[platform.platform],
     options: platform.downloads.map((download) => ({
+      platform: platform.platform,
       label: download.filename,
       url: download.url,
       size: download.size,
       assetType: download.assetType,
+      architecture: download.architecture,
       sourceActions: download.sourceActions,
     })),
   }));
@@ -579,6 +610,13 @@ export default function InstallButton({
   const primaryButtonsDisabled = isLoading || !canDownload || (!FEATURE_MAC_DOWNLOAD_ENABLED && currentOS === 'macos');
   const showDropdownToggle = canDownload && platformData.length > 0;
 
+  const handlePrimaryDownloadClick = (source: PrimaryDownloadSourceKey) => {
+    if (primaryButtonsDisabled || !primaryTarget.option) {
+      return;
+    }
+    reportDesktopDownload(primaryTarget.option, source, version?.version ?? null);
+  };
+
   return (
     <div
       ref={wrapperRef}
@@ -593,6 +631,7 @@ export default function InstallButton({
             href={WINDOWS_STORE_URL}
             className="btn-download-main"
             aria-label={t.windowsStoreAriaLabel}
+            onClick={() => captureSiteEvent('open_microsoft_store', { source: 'install_primary' })}
             {...gaEventAttributes({
               category: 'store',
               label: 'microsoftStore',
@@ -661,6 +700,7 @@ export default function InstallButton({
                   href={action.url}
                   className={buttonClassName}
                   aria-label={`${t.installHagicodeDesktop} (${label})`}
+                  onClick={() => handlePrimaryDownloadClick(source)}
                   {...gaEventAttributes({
                     category: 'download',
                     label: getDesktopDownloadGaLabel(primaryTarget.option?.assetType),
@@ -691,6 +731,7 @@ export default function InstallButton({
             aria-label={windowsStoreShortcutAriaLabel}
             className={`ms-store-badge-slot ms-store-badge-slot--${variant}`}
             badgeClassName="ms-store-badge-element"
+            onActivate={() => captureSiteEvent('open_microsoft_store', { source: 'install_shortcut' })}
             badgeAttributes={{
               'data-windows-store-entry': 'docs-header-install',
               ...gaEventAttributes({
@@ -711,6 +752,7 @@ export default function InstallButton({
             rel="noopener noreferrer"
             aria-label={steamShortcutAriaLabel}
             data-steam-entry="docs-header-install"
+            onClick={() => captureSiteEvent('open_steam_store', { source: 'install_shortcut' })}
             {...gaEventAttributes({
               category: 'store',
               label: 'openSteamStore',
@@ -832,7 +874,10 @@ export default function InstallButton({
                                     className="dropdown-source-action"
                                     role="menuitem"
                                     download
-                                    onClick={handleLinkClick}
+                                    onClick={() => {
+                                      reportDesktopDownload(option, source, version?.version ?? null);
+                                      handleLinkClick();
+                                    }}
                                     {...gaEventAttributes({
                                       category: 'download',
                                       label: getDesktopDownloadGaLabel(option.assetType),

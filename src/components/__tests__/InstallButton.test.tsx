@@ -961,3 +961,192 @@ describe('InstallButton Google Analytics events', () => {
     expect(gtag).not.toHaveBeenCalled();
   });
 });
+
+describe('InstallButton PostHog events', () => {
+  const capture = vi.fn();
+  type PostHogWindow = { posthog?: unknown };
+
+  const windowsSetupProps = {
+    platform: 'windows',
+    architecture: 'x64',
+    asset_type: 'windows-setup',
+  };
+
+  beforeEach(() => {
+    capture.mockReset();
+    (window as unknown as PostHogWindow).posthog = {
+      __loaded: true,
+      capture,
+      has_opted_out_capturing: () => false,
+    };
+    vi.mocked(versionManager.getDesktopVersionData).mockReset();
+    vi.mocked(versionManager.clearDesktopVersionCache).mockReset();
+    features.steam = false;
+    window.history.replaceState({}, '', '/');
+  });
+
+  afterEach(() => {
+    cleanup();
+    delete (window as unknown as PostHogWindow).posthog;
+    features.steam = false;
+  });
+
+  function createWindowsVersion(overrides: Partial<DesktopVersionData> = {}): DesktopVersionData {
+    const asset = {
+      name: 'Hagicode.Desktop.Setup.1.2.4.exe',
+      path: 'v1.2.4/Hagicode.Desktop.Setup.1.2.4.exe',
+      size: 1048576,
+      lastModified: null,
+      torrentUrl: 'v1.2.4/Hagicode.Desktop.Setup.1.2.4.exe.torrent',
+      downloadSources: [
+        {
+          kind: 'official' as const,
+          label: 'Official Download',
+          url: 'https://desktop.dl.hagicode.com/v1.2.4/Hagicode.Desktop.Setup.1.2.4.exe',
+          primary: true,
+        },
+        {
+          kind: 'github-release' as const,
+          label: 'GitHub Release',
+          url: 'https://github.com/HagiCode-org/releases/download/v1.2.4/Hagicode.Desktop.Setup.1.2.4.exe',
+        },
+      ],
+    };
+    const latest = { version: 'v1.2.4', assets: [asset] };
+
+    return createVersionData({
+      latest,
+      channels: {
+        stable: { latest, all: [] },
+        beta: { latest: null, all: [] },
+      },
+      ...overrides,
+    });
+  }
+
+  it('reports the accelerated primary download with the resolved model and no URL', async () => {
+    vi.mocked(versionManager.getDesktopVersionData).mockResolvedValue(createWindowsVersion());
+
+    render(<InstallButton variant="full" locale="en" />);
+    fireEvent.click(await screen.findByRole('link', { name: /China/i }));
+
+    expect(capture).toHaveBeenCalledTimes(1);
+    expect(capture).toHaveBeenCalledWith('download_desktop_windows', {
+      ...windowsSetupProps,
+      source: 'accelerated',
+      app_version: '1.2.4',
+    });
+    expect(JSON.stringify(capture.mock.calls)).not.toMatch(/https?:/);
+  });
+
+  it('reports the GitHub dropdown item and sends nothing for the torrent item or the toggle', async () => {
+    vi.mocked(versionManager.getDesktopVersionData).mockResolvedValue(createWindowsVersion());
+
+    render(<InstallButton variant="full" locale="en" />);
+    await screen.findByRole('link', { name: /China/i });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Select Other Version' }));
+    expect(capture).not.toHaveBeenCalled();
+
+    fireEvent.click(await screen.findByRole('menuitem', { name: /Torrent/i }));
+    expect(capture).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Select Other Version' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'GitHub' }));
+
+    expect(capture).toHaveBeenCalledTimes(1);
+    expect(capture).toHaveBeenCalledWith('download_desktop_windows', {
+      ...windowsSetupProps,
+      source: 'github',
+      app_version: '1.2.4',
+    });
+  });
+
+  it.each([
+    ['backup index', { source: 'backup' as const, status: 'degraded' as const }],
+    ['local snapshot', { source: 'local' as const, status: 'local_snapshot' as const }],
+  ])('reports the %s fallback with the source and version actually used', async (_label, overrides) => {
+    vi.mocked(versionManager.getDesktopVersionData).mockResolvedValue(createWindowsVersion(overrides));
+
+    render(<InstallButton variant="full" locale="en" />);
+    fireEvent.click(await screen.findByRole('link', { name: /China/i }));
+
+    expect(capture).toHaveBeenCalledTimes(1);
+    expect(capture).toHaveBeenCalledWith('download_desktop_windows', {
+      ...windowsSetupProps,
+      source: 'accelerated',
+      app_version: '1.2.4',
+    });
+  });
+
+  it('sends nothing for a disabled source', async () => {
+    const emptyLatest = { version: 'v1.2.4', assets: [] };
+    vi.mocked(versionManager.getDesktopVersionData).mockResolvedValue(
+      createVersionData({
+        latest: emptyLatest,
+        channels: {
+          stable: { latest: emptyLatest, all: [] },
+          beta: { latest: null, all: [] },
+        },
+      }),
+    );
+
+    const { container } = render(<InstallButton variant="full" locale="en" />);
+    await waitFor(() => {
+      expect(container.querySelectorAll('button.btn-download-source-disabled').length).toBeGreaterThan(0);
+    });
+
+    for (const button of Array.from(container.querySelectorAll('button.btn-download-source-disabled'))) {
+      fireEvent.click(button);
+    }
+
+    expect(capture).not.toHaveBeenCalled();
+  });
+
+  it('keeps the primary link navigation and sends nothing when PostHog is missing', async () => {
+    delete (window as unknown as PostHogWindow).posthog;
+    vi.mocked(versionManager.getDesktopVersionData).mockResolvedValue(createWindowsVersion());
+
+    render(<InstallButton variant="full" locale="en" />);
+    const primary = await screen.findByRole('link', { name: /China/i });
+    fireEvent.click(primary);
+
+    expect(primary).toHaveAttribute('href', 'https://desktop.dl.hagicode.com/v1.2.4/Hagicode.Desktop.Setup.1.2.4.exe');
+    expect(capture).not.toHaveBeenCalled();
+  });
+
+  it('reports the Microsoft Store primary button on Windows with no URL', async () => {
+    window.history.replaceState({}, '', '/?os=windows');
+    vi.mocked(versionManager.getDesktopVersionData).mockResolvedValue(createWindowsVersion());
+
+    render(<InstallButton variant="compact" locale="en" />);
+    fireEvent.click(await screen.findByRole('link', { name: 'Install Hagicode Desktop from Microsoft Store' }));
+
+    expect(capture).toHaveBeenCalledTimes(1);
+    expect(capture).toHaveBeenCalledWith('open_microsoft_store', { source: 'install_primary' });
+  });
+
+  it('reports the Microsoft Store badge shortcut through its host element', async () => {
+    vi.mocked(versionManager.getDesktopVersionData).mockResolvedValue(createWindowsVersion());
+
+    const { container } = render(<InstallButton variant="compact" locale="en" />);
+    await screen.findByRole('link', { name: /China/i });
+    const badge = container.querySelector('ms-store-badge[data-windows-store-entry="docs-header-install"]');
+    expect(badge).not.toBeNull();
+    fireEvent.click(badge as Element);
+
+    expect(capture).toHaveBeenCalledTimes(1);
+    expect(capture).toHaveBeenCalledWith('open_microsoft_store', { source: 'install_shortcut' });
+  });
+
+  it('reports the Steam shortcut with no URL', async () => {
+    features.steam = true;
+    vi.mocked(versionManager.getDesktopVersionData).mockResolvedValue(createWindowsVersion());
+
+    render(<InstallButton variant="compact" locale="en" />);
+    fireEvent.click(await screen.findByRole('link', { name: 'Open Hagicode on Steam' }));
+
+    expect(capture).toHaveBeenCalledTimes(1);
+    expect(capture).toHaveBeenCalledWith('open_steam_store', { source: 'install_shortcut' });
+  });
+});
