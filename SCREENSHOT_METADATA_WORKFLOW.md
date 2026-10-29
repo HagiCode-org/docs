@@ -4,7 +4,7 @@ This guide documents the maintainer workflow for importing documentation screens
 
 ## Purpose
 
-Use `npm run screenshots:scan-metadata` when you want to:
+Use `pnpm run screenshots:scan-metadata` when you want to:
 
 - recursively inventory a screenshot folder without moving files
 - capture width, height, timestamps, size, extension, and MIME type in a stable JSON report
@@ -63,6 +63,10 @@ Remaining follow-up items after this backlog pass:
 
 - `src/content/docs/img/product-overview/**` illustrations still use legacy paths by design and remain outside the managed screenshot workflow
 - Retired Desktop installation walkthrough screenshots should not be reintroduced as managed examples unless a published page links to them again
+
+## Retired legacy screenshots
+
+The legacy sets listed in the backlog above (`ai-compose-commit`, `monospecs`, `quick-start/create-project`, the loose `installation/install-desktop` and `install-postgres-windows` files, `article-images`) and the managed `screenshots/{ai-compose-commit,monospecs,shared,skills}` entries were removed in 2026-10 once no page referenced them. Every screenshot a page shows is now English, dark theme and captured from the current UI; the current sets live under `img/user-guide/`, `img/quick-start/`, and `img/screenshots/{guides,installation,product}`. Retake a screenshot, rather than adding a new one, when the UI it shows changes.
 
 ## Preconditions
 
@@ -134,7 +138,7 @@ Keep `screenshot-staging/.gitkeep` committed so the default staging directory ex
 Run this before sync when you only need a quick inventory or when you want to confirm the batch is healthy before ImgBin analysis:
 
 ```bash
-npm run screenshots:scan-metadata -- --input ./screenshot-staging --output ./artifacts/screenshot-report.json
+pnpm run screenshots:scan-metadata --input ./screenshot-staging --output ./artifacts/screenshot-report.json
 ```
 
 Report shape:
@@ -188,7 +192,7 @@ Expected progress log example:
 If `repos/docs/.env` is configured, the sync command now loads it automatically and creates a workspace-local `.tmp` directory when `TMPDIR`, `TMP`, and `TEMP` are not already set:
 
 ```bash
-npm run screenshots:sync
+pnpm run screenshots:sync
 ```
 
 The command resolves ImgBin in this order:
@@ -326,7 +330,7 @@ cp src/content/docs/img/quick-start/create-project/step1-click-new-project-butto
 Run the import:
 
 ```bash
-npm run screenshots:sync
+pnpm run screenshots:sync
 ```
 
 ## Success Criteria
@@ -377,8 +381,8 @@ Hagilight 0.9.0 optimizes local body images that use a relative path, through `c
 Check references without building:
 
 ```bash
-npm run verify:docs-image-references
-npm run test:docs-image-references
+pnpm run verify:docs-image-references
+pnpm run test:docs-image-references
 ```
 
 The audit is read-only and is not part of `build` or `build:ci`. It exits with status 1 and prints the file and line of any site-root or remote body image, and it lists which pages are picture-eligible and which are MDX-only.
@@ -426,37 +430,37 @@ This is the expected path when legacy screenshots were already imported once and
 Show help:
 
 ```bash
-npm run screenshots:sync -- --help
+pnpm run screenshots:sync --help
 ```
 
 Preview without writing:
 
 ```bash
-npm run screenshots:sync -- --dry-run
+pnpm run screenshots:sync --dry-run
 ```
 
 Scan metadata only:
 
 ```bash
-npm run screenshots:scan-metadata -- --input ./screenshot-staging --output ./artifacts/screenshot-report.json
+pnpm run screenshots:scan-metadata --input ./screenshot-staging --output ./artifacts/screenshot-report.json
 ```
 
 Force one category:
 
 ```bash
-npm run screenshots:sync -- --category quick-start
+pnpm run screenshots:sync --category quick-start
 ```
 
 Reindex after import:
 
 ```bash
-npm run screenshots:sync -- --reindex
+pnpm run screenshots:sync --reindex
 ```
 
 Override the analysis context for one run:
 
 ```bash
-npm run screenshots:sync -- --analysis-context-file ./prompts/experimental-context.txt
+pnpm run screenshots:sync --analysis-context-file ./prompts/experimental-context.txt
 ```
 
 ## Troubleshooting
@@ -517,7 +521,7 @@ This usually means the sync command has moved into ImgBin analysis, import, or a
 
 Use this preflight path first:
 
-1. Run `npm run screenshots:scan-metadata -- --input ./screenshot-staging --output ./artifacts/screenshot-report.json`
+1. Run `pnpm run screenshots:scan-metadata --input ./screenshot-staging --output ./artifacts/screenshot-report.json`
 2. Confirm the scan reports the expected file count, dimensions, and timestamps
 3. Fix any corrupted files reported in `failures` before retrying `screenshots:sync`
 4. Re-run `screenshots:sync` only after the scan output looks healthy
