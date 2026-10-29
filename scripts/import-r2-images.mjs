@@ -8,7 +8,7 @@
  * temp file and a rename, so a failed run leaves the vendored files untouched.
  *
  * Usage (from repos/docs):
- *   npm run import:r2-images
+ *   pnpm run import:r2-images
  *   node ./scripts/import-r2-images.mjs --check      # offline: compare files with the manifest
  *   node ./scripts/import-r2-images.mjs --manifest <path> --origin <url>
  */

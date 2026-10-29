@@ -172,7 +172,7 @@ test('fails validation when generated resources are stale', async () => {
 
   await assert.rejects(
     () => verifyGeneratedI18nResources(fixture),
-    /generated\/docs-locale-resources\.mjs is stale; rerun npm run i18n:generate/,
+    /generated\/docs-locale-resources\.mjs is stale; rerun pnpm run i18n:generate/,
   );
 });
 

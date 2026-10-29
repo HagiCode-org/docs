@@ -162,7 +162,7 @@ test('the picker is a dependency-free script of at most 2 KiB minified', async (
 
 test('built pages reference only local renditions for R2 images and the pool lists are allow-listed', async (t) => {
   if (!existsSync(DIST)) {
-    t.skip('dist/ is not built; run npm run build, then this check');
+    t.skip('dist/ is not built; run pnpm run build, then this check');
     return;
   }
   const pages = (await listFiles(DIST)).filter((file) => file.endsWith('.html'));

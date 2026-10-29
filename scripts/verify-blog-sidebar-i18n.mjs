@@ -225,7 +225,7 @@ function printSummaryAndExit() {
 
 function main() {
   if (!fs.existsSync(distDir)) {
-    throw new Error('dist directory not found. Run `npm run build` first.');
+    throw new Error('dist directory not found. Run `pnpm run build` first.');
   }
 
   verifyNavigation();

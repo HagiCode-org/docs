@@ -84,7 +84,7 @@ function printSummaryAndExit() {
 
 function main() {
   if (!fs.existsSync(distDir)) {
-    throw new Error(`dist directory not found: ${distDir}. Run \`npm run build\` first.`);
+    throw new Error(`dist directory not found: ${distDir}. Run \`pnpm run build\` first.`);
   }
 
   verifyTagIndex(path.posix.join('blog', 'tags'));

@@ -340,7 +340,7 @@ export async function verifyGeneratedI18nResources(options = {}) {
   assert.equal(
     actualModule,
     expectedModule,
-    `${relativeToDocsRoot(generatedPath)} is stale; rerun npm run i18n:generate`,
+    `${relativeToDocsRoot(generatedPath)} is stale; rerun pnpm run i18n:generate`,
   );
 
   return {
