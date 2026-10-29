@@ -70,7 +70,11 @@ test('root and localized pages tag the shared header links with Hagilight labels
   }
 });
 
-test('production pages initialize Google Analytics once and the 404 page not at all', () => {
+// Hagilight gates analytics behind consent: a page carries one inert descriptor and gtag.js is only
+// loaded by the consent gate after a grant, so the built HTML must never contain the loader itself.
+const GA_DESCRIPTOR = /data-hagilight-analytics="googleAnalytics"/g;
+
+test('production pages carry one consent-gated Google Analytics descriptor and the 404 page none', () => {
   const production = [
     readRoute('blog/index.html'),
     readRoute('en-US/blog/index.html'),
@@ -80,11 +84,13 @@ test('production pages initialize Google Analytics once and the 404 page not at 
   ];
 
   for (const html of production) {
-    assert.equal(countMatches(html, /googletagmanager\.com\/gtag\/js/g), 1);
-    assert.equal(countMatches(html, /gtag\('config'/g), 1);
+    assert.equal(countMatches(html, GA_DESCRIPTOR), 1);
+    assert.equal(countMatches(html, /googletagmanager\.com\/gtag\/js/g), 0);
+    assert.equal(countMatches(html, /gtag\('config'/g), 0);
   }
 
   const notFound = readRoute('404.html');
+  assert.equal(countMatches(notFound, GA_DESCRIPTOR), 0);
   assert.equal(countMatches(notFound, /googletagmanager\.com\/gtag\/js/g), 0);
   assert.equal(countMatches(notFound, /gtag\('config'/g), 0);
 });
