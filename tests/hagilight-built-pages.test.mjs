@@ -70,23 +70,30 @@ test('root and localized pages tag the shared header links with Hagilight labels
   }
 });
 
-// Hagilight gates analytics behind consent: a page carries one inert descriptor and gtag.js is only
-// loaded by the consent gate after a grant, so the built HTML must never contain the loader itself.
+// Starlight pages (blog, docs) are consent-gated by Hagilight: they carry one inert descriptor and gtag.js is only
+// loaded by the consent gate after a grant, so their built HTML never contains the loader. The hand-written landing
+// pages (`src/pages/index.astro`, `src/pages/[locale]/index.astro`) render <GoogleAnalytics> without `consent`, so
+// they still ship the static loader exactly once.
 const GA_DESCRIPTOR = /data-hagilight-analytics="googleAnalytics"/g;
 
-test('production pages carry one consent-gated Google Analytics descriptor and the 404 page none', () => {
-  const production = [
+test('production pages initialize Google Analytics once, and the 404 page not at all', () => {
+  const consentGated = [
     readRoute('blog/index.html'),
     readRoute('en-US/blog/index.html'),
     readRoute('product-overview/index.html'),
-    readRoute('index.html'),
-    readRoute('en-US/index.html'),
   ];
+  const staticLoader = [readRoute('index.html'), readRoute('en-US/index.html')];
 
-  for (const html of production) {
+  for (const html of consentGated) {
     assert.equal(countMatches(html, GA_DESCRIPTOR), 1);
     assert.equal(countMatches(html, /googletagmanager\.com\/gtag\/js/g), 0);
     assert.equal(countMatches(html, /gtag\('config'/g), 0);
+  }
+
+  for (const html of staticLoader) {
+    assert.equal(countMatches(html, GA_DESCRIPTOR), 0);
+    assert.equal(countMatches(html, /googletagmanager\.com\/gtag\/js/g), 1);
+    assert.equal(countMatches(html, /gtag\('config'/g), 1);
   }
 
   const notFound = readRoute('404.html');
