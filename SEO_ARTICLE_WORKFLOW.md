@@ -225,11 +225,11 @@ Run repository checks before approval.
 Current available verification commands:
 
 ```bash
-npm run sync:blog-seo-descriptions
-npm run sync:blog-seo-descriptions:write
-npm run verify:blog-seo
-npm run verify:blog
-npm run build:verify-blog
+pnpm run sync:blog-seo-descriptions
+pnpm run sync:blog-seo-descriptions:write
+pnpm run verify:blog-seo
+pnpm run verify:blog
+pnpm run build:verify-blog
 ```
 
 Current repo checks validate blog structure, rendering, and SEO description quality. Publication is blocked when `description` is missing, empty after normalization, over the hard limit, or effectively duplicates the title.
