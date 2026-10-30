@@ -7,6 +7,7 @@
 //   /user-guide/agents#创建-agent        -> /<locale>/user-guide/agents#<slug of the translated heading>
 //   ../../installation/windows-store#x   -> unchanged path (still valid under the locale route), fragment mapped
 //   ../img/x.png  ./img/x.png            -> ../../img/x.png  ../img/x.png          (relative assets gain one "../")
+// Locale parameters (locale="zh-CN", { locale: 'zh-CN' }) follow the target locale; the product video uses "en".
 // openspec/omniroute.hagicode.com links switch from /zh-CN/ to /<locale>/. Other http(s)/mailto links, bare "#fragment" links, absolute asset links and anything inside code are left alone.
 // Cross-document fragments are mapped by heading position (same index in the source and the translation).
 import fs from 'node:fs';
@@ -110,6 +111,14 @@ export function rewriteDocument(text, ctx) {
       .replace(/(\]\(\s*<?)([^)\s>]*)/gu, (_, pre, t) => pre + rewriteTarget(t, ctx))
       .replace(/(\b(?:href|to|link|src)=)(["'])([^"']+)\2/gu, (_, pre, q, t) => `${pre}${q}${rewriteTarget(t, ctx)}${q}`)
       .replace(/^(\s{0,3}\[[^\]]+\]:\s*<?)(\S+?)(>?(?:\s.*)?)$/u, (_, pre, t, post) => pre + rewriteTarget(t, ctx) + post);
+  // Locale parameters in MDX code are source-language values and must follow the target locale. The product video
+  // component only ships zh-CN and en, so every non-Chinese locale uses "en" there (and for its anchor id).
+  const localize = (segment) =>
+    segment
+      .replace(/(<ProductVideoShowcase\b[^>]*\blocale=)(["'])zh-CN\2/gu, (_, pre, q) => `${pre}${q}en${q}`)
+      .replace(/product-video-showcase-zh-CN/gu, 'product-video-showcase-en')
+      .replace(/(\blocale=)(["'])zh-CN\2/gu, (_, pre, q) => `${pre}${q}${ctx.locale}${q}`)
+      .replace(/(\blocale:\s*)(["'])zh-CN\2/gu, (_, pre, q) => `${pre}${q}${ctx.locale}${q}`);
   const out = lines.map((line) => {
     const f = line.match(FENCE);
     if (open) {
@@ -117,7 +126,7 @@ export function rewriteDocument(text, ctx) {
       return line;
     }
     if (f && !(f[1][0] === '`' && line.slice(f[0].length).includes('`'))) { open = f[1]; return line; }
-    return line.split(/(`+[^`]*`+)/u).map((part, i) => (i % 2 ? part : fix(part))).join('');
+    return line.split(/(`+[^`]*`+)/u).map((part, i) => (i % 2 ? part : localize(fix(part)))).join('');
   });
   return front + out.join('\n');
 }
