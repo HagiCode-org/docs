@@ -91,7 +91,8 @@ export function rewriteTarget(target, ctx) {
     else if (!targetDoc) ctx.warn(`fragment on unknown page ${route}#${frag}`);
     else {
       const m = ctx.mapFragment(targetDoc, frag);
-      if (m == null) ctx.warn(`could not map fragment ${route}#${frag} (heading structure differs)`);
+      if (m === undefined) ctx.warn(`kept fragment ${route}#${frag}: not a heading of the source page (explicit id or component anchor)`);
+      else if (m === null) ctx.warn(`could not map fragment ${route}#${frag}: heading structure of the translated page differs`);
       else mapped = m;
     }
     out += `#${mapped}`;
@@ -134,7 +135,7 @@ export function makeContext({ doc, locale, translatedText, warnings }) {
     mapFragment(targetDoc, frag) {
       const srcSlugs = slugsOf(`${SOURCE_ROOT}/${targetDoc}`);
       const i = srcSlugs.indexOf(frag);
-      if (i === -1) return null; // not a heading of the source page: leave to the caller
+      if (i === -1) return undefined; // not a heading of the source page: keep the fragment
       const tf = `${SITE_ROOT}/${locale}/${targetDoc}`;
       const own = path.join(REPO, 'translations/locales', locale, 'content', targetDoc);
       const file = targetDoc === doc ? null : fs.existsSync(path.join(REPO, tf)) ? tf : fs.existsSync(own) ? path.relative(REPO, own) : null;
