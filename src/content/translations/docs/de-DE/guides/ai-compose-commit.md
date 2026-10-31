@@ -56,7 +56,7 @@ Der Drawer enthält diese Optionen:
 - **Zielbranch-Strategie**: aktuellen Branch behalten oder daraus einen neuen Branch erstellen (eigener Name oder KI-generierter Name)
 - **Nach dem Commit zum Remote pushen**: optional; vor dem Push kann pull --rebase laufen
 - **Co-Authored-By**: legt fest, wie dieser Lauf ausgewiesen wird
-- **Agent**: wählt, welcher Agent diesen Commit ausführt
+- **Agent**: wählt, welcher agent diesen Commit ausführt
 - **Bestätigen und Verarbeitung starten / Abbrechen**: Nach der Bestätigung läuft der Auftrag im Hintergrund weiter; du kannst den Drawer schließen und weiterarbeiten
 
 Prüfe bei der ersten Nutzung Repository-Umfang und Branch-Strategie, bevor du startest.
