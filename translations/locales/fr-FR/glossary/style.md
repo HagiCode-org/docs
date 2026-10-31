@@ -12,3 +12,4 @@
 - 常见英语技术词(Agent, Skill, Provider, Prompt, Session)按站点现有法文页惯例处理:session → session,prompt → prompt;不硬译。
 - 撇号用直引号 '(站点现有法文页多数如此,与 zai/aliyun 页一致),不用弯引号 ’;法文必须带重音符号(é è ê à ç ù 等),旧译文中无重音的页面需重译。
 - 提交(commit):OpenSpec/Git 语境下用 commit/commiter/commité,不用 valider(与 OpenSpec 的 validate 冲突);在 Steam 审核、提案等语境中的 提交 = soumettre。
+- 明显的技术单词保留原文,任何语言都不翻译(人工裁决,2026-10-30):gateway、proxy、endpoint、profile、prompt、fallback、cooldown、dashboard、agent、self-hosted、gate 等通行的工程术语,以及产品名与平台名;完整清单见 `glossary.json` 的 `doNotTranslate`(`origin: human`)。拿不准时,看它是否属于开发者日常直接说英文的词;普通词汇照常翻译。

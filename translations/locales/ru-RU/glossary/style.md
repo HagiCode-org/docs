@@ -9,3 +9,4 @@
 - 产品名与概念词按术语表的 doNotTranslate 保持原写法(产品名写作 MonoSpecs,文件名保持 `monospecs.yaml`);模型名、供应商名保持拉丁字母。
 - Starlight 提示块名保持英文(`:::tip`、`:::note`、`:::caution`、`:::danger`),只翻译方括号里的标题。
 - 常见英语技术词(Agent, Skill, Provider, Prompt, Session)可保留原词或用通行俄译,整站统一;数字与单位之间用空格;不硬译专有名词。
+- 明显的技术单词保留原文,任何语言都不翻译(人工裁决,2026-10-30):gateway、proxy、endpoint、profile、prompt、fallback、cooldown、dashboard、agent、self-hosted、gate 等通行的工程术语,以及产品名与平台名;完整清单见 `glossary.json` 的 `doNotTranslate`(`origin: human`)。拿不准时,看它是否属于开发者日常直接说英文的词;普通词汇照常翻译。

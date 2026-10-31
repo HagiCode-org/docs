@@ -8,3 +8,4 @@
 - 產品名與概念詞按術語表的 doNotTranslate 保持原寫法;產品名寫作 MonoSpecs,檔名 `monospecs.yaml` 不變。
 - 界面按鈕與選單名以 src/i18n/locales/zh-Hant/*.yml 的譯法為準;源文用「」或粗體標出的保持這種強調形式。
 - 重譯時以站點現有繁中譯文為底稿,只改基線變化的部分,沿用原有術語與措辭。
+- 明显的技术单词保留原文,任何语言都不翻译(人工裁决,2026-10-30):gateway、proxy、endpoint、profile、prompt、fallback、cooldown、dashboard、agent、self-hosted、gate 等通行的工程术语,以及产品名与平台名;完整清单见 `glossary.json` 的 `doNotTranslate`(`origin: human`)。拿不准时,看它是否属于开发者日常直接说英文的词;普通词汇照常翻译。

@@ -7,3 +7,4 @@
 - 「」로 강조된 UI 요소 이름과 굵게 표시된 버튼 이름은 강조 형태를 유지하고, 제품 UI 문구는 src/i18n/locales/ko-KR/*.yml 의 기존 번역을 따른다.
 - `Yes`/`No`, `Enabled`/`Disabled` 같은 고정 상태어는 사이트 전체에서 통일한다(용어집에 등록).
 - 제품명과 개념어는 용어집의 doNotTranslate 표기를 유지한다(MonoSpecs 는 항상 이 표기, 파일명은 `monospecs.yaml`).
+- 明显的技术单词保留原文,任何语言都不翻译(人工裁决,2026-10-30):gateway、proxy、endpoint、profile、prompt、fallback、cooldown、dashboard、agent、self-hosted、gate 等通行的工程术语,以及产品名与平台名;完整清单见 `glossary.json` 的 `doNotTranslate`(`origin: human`)。拿不准时,看它是否属于开发者日常直接说英文的词;普通词汇照常翻译。

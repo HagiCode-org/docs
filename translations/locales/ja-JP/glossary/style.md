@@ -9,3 +9,4 @@
 - `Yes`/`No`、`Enabled`/`Disabled` 这类固定状态词在整个站点内统一译法(进术语表)。
 - 产品名与概念词按术语表的 doNotTranslate 保持原写法(MonoSpecs 的文件名仍为 `monospecs.yaml`)。
 - 小节标题固定译法见术语表(下一步=次のステップ、前置条件/先决条件=前提条件)。
+- 明显的技术单词保留原文,任何语言都不翻译(人工裁决,2026-10-30):gateway、proxy、endpoint、profile、prompt、fallback、cooldown、dashboard、agent、self-hosted、gate 等通行的工程术语,以及产品名与平台名;完整清单见 `glossary.json` 的 `doNotTranslate`(`origin: human`)。拿不准时,看它是否属于开发者日常直接说英文的词;普通词汇照常翻译。

@@ -8,3 +8,4 @@
 - `Yes`/`No`、`Enabled`/`Disabled` 这类固定状态词在整个站点内统一译法(进术语表):是/否 → Ja/Nein,启用/禁用 → Aktiviert/Deaktiviert。
 - 产品名与概念词按术语表的 doNotTranslate 保持原写法(产品名写作 MonoSpecs,文件名保持 `monospecs.yaml`)。
 - 德语复合词尽量按行业惯例连写或用连字符(如 Repository-Verwaltung);常见英语技术词(Agent, Skill, Provider, Prompt, Session)保留原词,不硬译。
+- 明显的技术单词保留原文,任何语言都不翻译(人工裁决,2026-10-30):gateway、proxy、endpoint、profile、prompt、fallback、cooldown、dashboard、agent、self-hosted、gate 等通行的工程术语,以及产品名与平台名;完整清单见 `glossary.json` 的 `doNotTranslate`(`origin: human`)。拿不准时,看它是否属于开发者日常直接说英文的词;普通词汇照常翻译。
