@@ -30,7 +30,6 @@ const TIP_CATEGORY_LABELS = {
     claude: 'Claude 使用',
     codex: 'Codex 使用',
     'code-server': 'code-server',
-    omniroute: 'OmniRoute',
     hagipower: 'HagiPower',
   },
   'zh-Hant': {
@@ -42,7 +41,6 @@ const TIP_CATEGORY_LABELS = {
     claude: 'Claude 使用',
     codex: 'Codex 使用',
     'code-server': 'code-server',
-    omniroute: 'OmniRoute',
     hagipower: 'HagiPower',
   },
   'en-US': {
@@ -54,7 +52,6 @@ const TIP_CATEGORY_LABELS = {
     claude: 'Using Claude',
     codex: 'Using Codex',
     'code-server': 'code-server',
-    omniroute: 'OmniRoute',
     hagipower: 'HagiPower',
   },
 };
