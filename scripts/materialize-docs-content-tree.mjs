@@ -39,7 +39,6 @@ const STRUCTURED_ARTICLE_SIDEBAR_ORDER_BY_SLUG = new Map([
   ['qoder-vs-hagicode', 37],
   ['kiro-vs-hagicode', 38],
   ['pi-vs-hagicode', 39],
-  ['reasonix-vs-hagicode', 40],
 ]);
 
 function yamlQuote(value) {
