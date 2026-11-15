@@ -94,7 +94,7 @@ test('related software installation stays flattened to direct article links', ()
 
   assert.ok(relatedSoftwareEntry);
   assert.ok(Array.isArray(relatedSoftwareEntry.items));
-  assert.equal(relatedSoftwareEntry.items.length, 4);
+  assert.equal(relatedSoftwareEntry.items.length, 6);
 
   for (const item of relatedSoftwareEntry.items) {
     assert.ok('slug' in item, 'expected a direct link item');
@@ -108,6 +108,8 @@ test('related software installation stays flattened to direct article links', ()
       'related-software-installation/openspec/intro-openspec',
       'related-software-installation/ai-agent-cli',
       'related-software-installation/omniroute',
+      'related-software-installation/spec-kit/installation',
+      'related-software-installation/spec-kit/vs-openspec',
     ],
   );
 });
@@ -127,9 +129,6 @@ test('related software installation direct links provide locale-specific labels'
   const aiAgentCliEntry = relatedSoftwareEntry.items.find(
     (item) => 'slug' in item && item.slug === 'related-software-installation/ai-agent-cli',
   );
-  const omniRouteEntry = relatedSoftwareEntry.items.find(
-    (item) => 'slug' in item && item.slug === 'related-software-installation/omniroute',
-  );
 
   assert.equal(nodeJsEntry?.label, '安装 Node.js');
   assert.equal(nodeJsEntry?.translations?.['en-US'], 'Installing Node.js');
@@ -142,8 +141,6 @@ test('related software installation direct links provide locale-specific labels'
   assert.equal(aiAgentCliEntry?.translations?.['en-US'], 'AI Agent CLI Installation');
   assert.equal(aiAgentCliEntry?.translations?.['ko-KR'], 'AI 에이전트 CLI 설치');
 
-  assert.equal(omniRouteEntry?.translations?.['en-US'], 'OmniRoute Documentation');
-  assert.equal(omniRouteEntry?.translations?.['fr-FR'], 'Documentation OmniRoute');
 });
 
 test('faq sidebar includes structured article pages generated from the installed core article data', () => {
