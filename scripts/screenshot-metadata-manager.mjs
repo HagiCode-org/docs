@@ -2,7 +2,6 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promises as fs } from 'node:fs';
-import { spawn } from 'node:child_process';
 
 const SCRIPT_FILE = fileURLToPath(import.meta.url);
 const SCRIPT_DIR = path.dirname(SCRIPT_FILE);
@@ -11,24 +10,15 @@ const CONTENT_ROOT = path.join(DOCS_ROOT, 'src', 'content', 'docs');
 const DEFAULT_INPUT_RELATIVE = 'screenshot-staging';
 const DEFAULT_LIBRARY_RELATIVE = path.join('src', 'content', 'docs', 'img', 'screenshots');
 const DEFAULT_MANIFEST_RELATIVE = path.join(DEFAULT_LIBRARY_RELATIVE, 'manifest.json');
-const DEFAULT_ANALYSIS_CONTEXT_RELATIVE = path.join('prompts', 'screenshot-analysis-context.txt');
-const DEFAULT_INSTALLED_IMGBIN_PACKAGE_RELATIVE = path.join('node_modules', '@hagicode', 'imgbin', 'package.json');
-const DEFAULT_IMGBIN_RELATIVE = path.join('..', 'imgbin', 'dist', 'cli.js');
 const DEFAULT_DOTENV_RELATIVE = '.env';
-const DEFAULT_TMP_RELATIVE = '.tmp';
-const DEFAULT_IMGBIN_ANALYSIS_ENV = Object.freeze({
-  IMGBIN_ANALYSIS_PROVIDER: 'codex',
-  IMGBIN_CODEX_MODEL: 'lemon/gpt-5.4',
-  IMGBIN_CODEX_BASE_URL: 'http://localhost:36129/v1'
-});
+// `skipped` marks assets whose metadata was written without an analysis pass (captured or imported as-is).
+const ACCEPTED_RECOGNITION_STATUSES = new Set(['succeeded', 'skipped']);
 const SUPPORTED_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp']);
 const LOG_PREFIX = '[screenshots:sync]';
 
 export function parseCliArgs(argv) {
   const options = {
-    reindex: false,
     dryRun: false,
-    overwrite: true,
     help: false
   };
 
@@ -41,14 +31,6 @@ export function parseCliArgs(argv) {
     }
     if (argument === '--dry-run') {
       options.dryRun = true;
-      continue;
-    }
-    if (argument === '--reindex') {
-      options.reindex = true;
-      continue;
-    }
-    if (argument === '--no-overwrite') {
-      options.overwrite = false;
       continue;
     }
 
@@ -68,27 +50,11 @@ export function parseCliArgs(argv) {
       index += 1;
       continue;
     }
-    if (argument === '--imgbin') {
-      options.imgbinExecutable = requireValue(argument, nextValue);
-      index += 1;
-      continue;
-    }
     if (argument === '--category') {
       options.category = requireValue(argument, nextValue);
       index += 1;
       continue;
     }
-    if (argument === '--analysis-prompt') {
-      options.analysisPromptPath = requireValue(argument, nextValue);
-      index += 1;
-      continue;
-    }
-    if (argument === '--analysis-context-file') {
-      options.analysisContextFilePath = requireValue(argument, nextValue);
-      index += 1;
-      continue;
-    }
-
     throw new Error(`Unknown argument: ${argument}`);
   }
 
@@ -132,65 +98,14 @@ export async function resolveConfig(cliOptions = {}, runtime = {}) {
     assumptions.push(`Using default manifest path: ${toPosixPath(DEFAULT_MANIFEST_RELATIVE)}`);
   }
 
-  const analysisContextSource = cliOptions.analysisContextFilePath
-    ? { value: cliOptions.analysisContextFilePath, reason: '--analysis-context-file' }
-    : env.SCREENSHOT_ANALYSIS_CONTEXT_FILE
-      ? { value: env.SCREENSHOT_ANALYSIS_CONTEXT_FILE, reason: 'SCREENSHOT_ANALYSIS_CONTEXT_FILE' }
-      : { value: DEFAULT_ANALYSIS_CONTEXT_RELATIVE, reason: 'default checked-in analysis context file' };
-  const analysisContextFilePath = resolveFromDocsRoot(docsRoot, analysisContextSource.value);
-  assumptions.push(
-    `Using analysis context file: ${formatDisplayPath(docsRoot, analysisContextFilePath)} (${analysisContextSource.reason})`
-  );
-
-  const defaultImgbinSource = await resolveDefaultImgbinSource(docsRoot);
-  const imgbinSource = cliOptions.imgbinExecutable
-    ? { value: cliOptions.imgbinExecutable, reason: '--imgbin' }
-    : env.IMGBIN_EXECUTABLE
-      ? { value: env.IMGBIN_EXECUTABLE, reason: 'IMGBIN_EXECUTABLE' }
-      : defaultImgbinSource;
-  if (imgbinSource.reason === 'default installed docs imgbin package') {
-    assumptions.push(`Using installed docs imgbin package: ${toPosixPath(path.relative(docsRoot, path.resolve(imgbinSource.value)))}`);
-  } else if (imgbinSource.reason === 'default monorepo imgbin CLI path') {
-    assumptions.push(`Using default imgbin executable: ${toPosixPath(path.relative(docsRoot, path.resolve(imgbinSource.value)))}`);
-  }
-
-  const tempSource = env.TMPDIR
-    ? { value: env.TMPDIR, reason: 'TMPDIR' }
-    : env.TMP
-      ? { value: env.TMP, reason: 'TMP' }
-      : env.TEMP
-        ? { value: env.TEMP, reason: 'TEMP' }
-        : { value: DEFAULT_TMP_RELATIVE, reason: 'default workspace temp directory' };
-  if (tempSource.reason === 'default workspace temp directory') {
-    assumptions.push(`Using workspace temp directory: ${DEFAULT_TMP_RELATIVE}`);
-  }
-
-  const resolvedTempDir = resolveFromDocsRoot(docsRoot, tempSource.value);
   const config = {
     docsRoot,
-    env: {
-      ...env,
-      TMPDIR: env.TMPDIR ?? resolvedTempDir,
-      TMP: env.TMP ?? resolvedTempDir,
-      TEMP: env.TEMP ?? resolvedTempDir
-    },
     assumptions,
     inputDir: resolveFromDocsRoot(docsRoot, inputSource.value),
     libraryRoot: resolveFromDocsRoot(docsRoot, librarySource.value),
     manifestPath: resolveFromDocsRoot(docsRoot, manifestSource.value),
-    analysisContextFilePath,
-    analysisContextFileSource: analysisContextSource.reason,
-    imgbinExecutable: imgbinSource.value,
-    tempDir: resolvedTempDir,
     categoryOverride: cliOptions.category,
-    analysisPromptPath: cliOptions.analysisPromptPath
-      ? resolveFromDocsRoot(docsRoot, cliOptions.analysisPromptPath)
-      : env.SCREENSHOT_ANALYSIS_PROMPT
-        ? resolveFromDocsRoot(docsRoot, env.SCREENSHOT_ANALYSIS_PROMPT)
-        : undefined,
-    dryRun: Boolean(cliOptions.dryRun),
-    reindex: Boolean(cliOptions.reindex),
-    overwrite: cliOptions.overwrite !== false
+    dryRun: Boolean(cliOptions.dryRun)
   };
 
   await validateConfig(config);
@@ -239,7 +154,7 @@ export async function buildScreenshotManifest({ docsRoot = DOCS_ROOT, libraryRoo
     const raw = await fs.readFile(metadataPath, 'utf8');
     const metadata = JSON.parse(raw);
 
-    if ((metadata.status?.recognition ?? 'pending') !== 'succeeded') {
+    if (!ACCEPTED_RECOGNITION_STATUSES.has(metadata.status?.recognition ?? 'pending')) {
       continue;
     }
 
@@ -294,12 +209,6 @@ export async function runScreenshotMetadataManager(cliOptions = {}, runtime = {}
   logSync(logger, `input: ${formatDisplayPath(config.docsRoot, config.inputDir)}`);
   logSync(logger, `library: ${formatDisplayPath(config.docsRoot, config.libraryRoot)}`);
   logSync(logger, `manifest: ${formatDisplayPath(config.docsRoot, config.manifestPath)}`);
-  logSync(logger, `imgbin: ${formatDisplayPath(config.docsRoot, resolveFromDocsRoot(config.docsRoot, config.imgbinExecutable))}`);
-  logSync(logger, `temp: ${formatDisplayPath(config.docsRoot, config.tempDir)}`);
-  logSync(
-    logger,
-    `analysis context: ${formatDisplayPath(config.docsRoot, config.analysisContextFilePath)} (${config.analysisContextFileSource})`
-  );
   const entries = await scanStagedScreenshots(config);
   logSync(logger, `discovered ${entries.length} supported screenshot${entries.length === 1 ? '' : 's'}`);
   const results = [];
@@ -340,17 +249,6 @@ export async function runScreenshotMetadataManager(cliOptions = {}, runtime = {}
     now: runtime.now ?? new Date()
   });
 
-  let reindexResult;
-  const shouldReindexFinalLibrary = !config.dryRun && (config.reindex || results.some((result) => result.success));
-  if (shouldReindexFinalLibrary) {
-    logSync(logger, 'rebuilding ImgBin search index for the managed library');
-    reindexResult = await runImgbinCommand(
-      config,
-      ['search', '--library', config.libraryRoot, '--query', 'docs-screenshot-sync', '--reindex', '--json'],
-      { logger, progress: '[index]', label: 'search reindex' }
-    );
-  }
-
   const failed = results.filter((result) => !result.success);
   logSync(
     logger,
@@ -363,8 +261,7 @@ export async function runScreenshotMetadataManager(cliOptions = {}, runtime = {}
     manifest,
     failedCount: failed.length,
     successCount: results.length - failed.length,
-    exitCode: failed.length > 0 ? 1 : 0,
-    reindexResult
+    exitCode: failed.length > 0 ? 1 : 0
   };
 }
 
@@ -403,7 +300,7 @@ export function formatRunSummary(run) {
 }
 
 export function printHelp() {
-  console.log(`Usage: node ./scripts/screenshot-metadata-manager.mjs [options]\n\nOptions:\n  --input <dir>                 Screenshot staging directory (default: ${DEFAULT_INPUT_RELATIVE})\n  --library-root <dir>          Managed screenshot root (default: ${toPosixPath(DEFAULT_LIBRARY_RELATIVE)})\n  --manifest <path>             Manifest output path (default: ${toPosixPath(DEFAULT_MANIFEST_RELATIVE)})\n  --imgbin <path>               ImgBin executable or CLI entrypoint\n  --category <name>             Force all staged screenshots into one category\n  --analysis-context-file <path> ImgBin analysis context file (env: SCREENSHOT_ANALYSIS_CONTEXT_FILE, default: ${toPosixPath(DEFAULT_ANALYSIS_CONTEXT_RELATIVE)})\n  --analysis-prompt <path>      Custom ImgBin analysis prompt\n  --dry-run                     Preview staging decisions without importing files\n  --reindex                     Rebuild the ImgBin search index after import\n  --no-overwrite                Keep previous recognition fields when refreshing existing assets\n  -h, --help                    Show this help message`);
+  console.log(`Usage: node ./scripts/screenshot-metadata-manager.mjs [options]\n\nOptions:\n  --input <dir>                 Screenshot staging directory (default: ${DEFAULT_INPUT_RELATIVE})\n  --library-root <dir>          Managed screenshot root (default: ${toPosixPath(DEFAULT_LIBRARY_RELATIVE)})\n  --manifest <path>             Manifest output path (default: ${toPosixPath(DEFAULT_MANIFEST_RELATIVE)})\n  --category <name>             Force all staged screenshots into one category\n  --dry-run                     Preview staging decisions without importing files\n  -h, --help                    Show this help message`);
 }
 
 async function processScreenshotEntry(entry, config, context = {}) {
@@ -435,11 +332,6 @@ async function processScreenshotEntry(entry, config, context = {}) {
     }
 
     await refreshOriginalAsset(entry, config);
-    await runImgbinCommand(config, buildAnnotateArgs(entry.targetAssetDir, config, { overwrite: config.overwrite }), {
-      logger,
-      progress,
-      label: 'annotate refresh'
-    });
     await decorateManagedMetadata(entry.targetAssetDir, entry, config);
     await removeStagedSource(entry, config);
     logSync(
@@ -458,143 +350,60 @@ async function processScreenshotEntry(entry, config, context = {}) {
     };
   }
 
-  const tempRoot = await fs.mkdtemp(path.join(config.tempDir, 'docs-screenshot-import-'));
-  try {
-    logSync(logger, `${progress} importing into temporary workspace ${formatDisplayPath(config.docsRoot, tempRoot)}`);
-    await runImgbinCommand(config, buildAnnotateArgs(entry.sourcePath, config, {
-      importTo: tempRoot,
-      slug: entry.slug,
-      title: titleFromSlug(entry.slug)
-    }), {
-      logger,
-      progress,
-      label: 'annotate import'
-    });
-
-    const importedAssetDir = await findSingleManagedAssetDir(tempRoot);
-    await fs.mkdir(path.dirname(entry.targetAssetDir), { recursive: true });
-    await fs.rename(importedAssetDir, entry.targetAssetDir);
-    await decorateManagedMetadata(entry.targetAssetDir, entry, config);
-    await removeStagedSource(entry, config);
-    logSync(
-      logger,
-      `${progress} imported -> ${targetDisplayPath} ` +
-        `(file ${formatDuration(Date.now() - entryStartedAt)}, cumulative ${formatDuration(Date.now() - syncStartedAt)})`
-    );
-
-    return {
-      sourcePath: entry.relativeSourcePath,
-      category: entry.category,
-      slug: entry.slug,
-      success: true,
-      action: 'imported',
-      assetDir: entry.targetAssetDir
-    };
-  } finally {
-    await fs.rm(tempRoot, { recursive: true, force: true });
-  }
-}
-
-function buildAnnotateArgs(assetPath, config, options = {}) {
-  const args = ['annotate', assetPath];
-
-  if (options.importTo) {
-    args.push('--import-to', options.importTo);
-  }
-  if (options.slug) {
-    args.push('--slug', options.slug);
-  }
-  if (options.title) {
-    args.push('--title', options.title);
-  }
-  if (config.analysisContextFilePath) {
-    args.push('--analysis-context-file', config.analysisContextFilePath);
-  }
-  if (config.analysisPromptPath) {
-    args.push('--analysis-prompt', config.analysisPromptPath);
-  }
-  if (options.overwrite) {
-    args.push('--overwrite');
-  }
-
-  return args;
-}
-
-async function runImgbinCommand(config, subcommandArgs, context = {}) {
-  const invocation = await resolveImgbinInvocation(config.imgbinExecutable, config.docsRoot);
-  const command = invocation.command;
-  const args = [...invocation.args, ...subcommandArgs];
-  const logger = context.logger;
-  const progress = context.progress ? `${context.progress} ` : '';
-  const label = context.label ?? subcommandArgs[0] ?? 'imgbin';
-  logSync(logger, `${progress}invoking imgbin ${label}`);
-  const commandStartedAt = Date.now();
-
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
-      cwd: config.docsRoot,
-      env: config.env,
-      stdio: ['ignore', 'pipe', 'pipe']
-    });
-
-    let stdout = '';
-    let stderr = '';
-    let stdoutRemainder = '';
-    let stderrRemainder = '';
-    child.stdout.on('data', (chunk) => {
-      const text = String(chunk);
-      stdout += text;
-      stdoutRemainder = relayChildLines(logger, `${progress}imgbin`, text, stdoutRemainder);
-    });
-    child.stderr.on('data', (chunk) => {
-      const text = String(chunk);
-      stderr += text;
-      stderrRemainder = relayChildLines(logger, `${progress}imgbin stderr`, text, stderrRemainder);
-    });
-    child.on('error', (error) => reject(error));
-    child.on('close', (code) => {
-      flushChildRemainder(logger, `${progress}imgbin`, stdoutRemainder);
-      flushChildRemainder(logger, `${progress}imgbin stderr`, stderrRemainder);
-      if (code === 0) {
-        logSync(logger, `${progress}imgbin ${label} completed in ${formatDuration(Date.now() - commandStartedAt)}`);
-        resolve({ code, stdout, stderr });
-        return;
-      }
-
-      const output = [stderr.trim(), stdout.trim()].filter(Boolean).join('\n');
-      logSync(
-        logger,
-        `${progress}imgbin ${label} failed with exit code ${code} in ${formatDuration(Date.now() - commandStartedAt)}`
-      );
-      reject(new Error(output || `ImgBin command failed with exit code ${code}`));
-    });
-  });
-}
-
-async function resolveImgbinInvocation(imgbinExecutable, docsRoot) {
-  if (!imgbinExecutable) {
-    throw new Error('ImgBin executable is required. Set IMGBIN_EXECUTABLE or pass --imgbin.');
-  }
-
-  const resolvedCandidate = resolveFromDocsRoot(docsRoot, imgbinExecutable);
-  if (resolvedCandidate.endsWith('.js') || resolvedCandidate.endsWith('.mjs') || resolvedCandidate.endsWith('.cjs')) {
-    return {
-      command: process.execPath,
-      args: [resolvedCandidate]
-    };
-  }
-
-  if (resolvedCandidate !== imgbinExecutable) {
-    return {
-      command: resolvedCandidate,
-      args: []
-    };
-  }
+  await importOriginalAsset(entry);
+  await decorateManagedMetadata(entry.targetAssetDir, entry, config);
+  await removeStagedSource(entry, config);
+  logSync(
+    logger,
+    `${progress} imported -> ${targetDisplayPath} ` +
+      `(file ${formatDuration(Date.now() - entryStartedAt)}, cumulative ${formatDuration(Date.now() - syncStartedAt)})`
+  );
 
   return {
-    command: imgbinExecutable,
-    args: []
+    sourcePath: entry.relativeSourcePath,
+    category: entry.category,
+    slug: entry.slug,
+    success: true,
+    action: 'imported',
+    assetDir: entry.targetAssetDir
   };
+}
+
+async function importOriginalAsset(entry) {
+  const extension = path.extname(entry.sourcePath).slice(1).toLowerCase();
+  const originalFilename = `original.${extension}`;
+  const timestamp = new Date().toISOString();
+
+  await fs.mkdir(entry.targetAssetDir, { recursive: true });
+  await fs.copyFile(entry.sourcePath, path.join(entry.targetAssetDir, originalFilename));
+
+  const metadata = {
+    schemaVersion: 2,
+    assetId: entry.slug,
+    slug: entry.slug,
+    title: titleFromSlug(entry.slug),
+    description: '',
+    tags: [],
+    source: {
+      type: 'imported',
+      originalPath: entry.sourcePath
+    },
+    paths: {
+      assetDir: entry.targetAssetDir,
+      original: originalFilename
+    },
+    status: {
+      generation: 'skipped',
+      recognition: 'skipped',
+      thumbnail: 'skipped'
+    },
+    timestamps: {
+      createdAt: timestamp,
+      updatedAt: timestamp
+    }
+  };
+
+  await fs.writeFile(path.join(entry.targetAssetDir, 'metadata.json'), `${JSON.stringify(metadata, null, 2)}\n`, 'utf8');
 }
 
 async function decorateManagedMetadata(assetDir, entry, config) {
@@ -696,26 +505,6 @@ async function validateConfig(config) {
 
   await fs.mkdir(config.libraryRoot, { recursive: true });
   await fs.mkdir(path.dirname(config.manifestPath), { recursive: true });
-  await fs.mkdir(config.tempDir, { recursive: true });
-
-  const analysisContextStats = await safeStat(config.analysisContextFilePath);
-  if (!analysisContextStats?.isFile()) {
-    throw new Error(`Analysis context file not found: ${formatDisplayPath(config.docsRoot, config.analysisContextFilePath)}`);
-  }
-
-  const analysisContextContent = await fs.readFile(config.analysisContextFilePath, 'utf8');
-  if (!analysisContextContent.trim()) {
-    throw new Error(`Analysis context file is empty: ${formatDisplayPath(config.docsRoot, config.analysisContextFilePath)}`);
-  }
-
-  if (config.analysisPromptPath && !(await pathExists(config.analysisPromptPath))) {
-    throw new Error(`Analysis prompt path not found: ${toPosixPath(path.relative(config.docsRoot, config.analysisPromptPath))}`);
-  }
-
-  const executableCandidate = resolveFromDocsRoot(config.docsRoot, config.imgbinExecutable);
-  if (executableCandidate.includes(path.sep) && !(await pathExists(executableCandidate))) {
-    throw new Error(`ImgBin executable not found: ${toPosixPath(path.relative(config.docsRoot, executableCandidate))}`);
-  }
 }
 
 async function collectSupportedFiles(rootDir) {
@@ -766,15 +555,6 @@ function createStagedScreenshot(sourcePath, config) {
     categorySegments,
     baseSlug
   };
-}
-
-async function findSingleManagedAssetDir(rootDir) {
-  const metadataPaths = await findMetadataPaths(rootDir);
-  if (metadataPaths.length !== 1) {
-    throw new Error(`Expected one imported asset under ${rootDir}, found ${metadataPaths.length}.`);
-  }
-
-  return path.dirname(metadataPaths[0]);
 }
 
 async function findMetadataPaths(rootDir) {
@@ -941,30 +721,6 @@ function logSync(writer, message) {
   writer.write(`${LOG_PREFIX} ${message}\n`);
 }
 
-function relayChildLines(writer, label, chunk, remainder) {
-  if (!writer) {
-    return `${remainder}${chunk}`;
-  }
-
-  const combined = `${remainder}${chunk}`;
-  const lines = combined.split(/\r?\n/);
-  const nextRemainder = lines.pop() ?? '';
-
-  for (const line of lines) {
-    if (line.trim()) {
-      logSync(writer, `${label}: ${line}`);
-    }
-  }
-
-  return nextRemainder;
-}
-
-function flushChildRemainder(writer, label, remainder) {
-  if (writer && remainder.trim()) {
-    logSync(writer, `${label}: ${remainder}`);
-  }
-}
-
 async function pathExists(targetPath) {
   try {
     await fs.access(targetPath);
@@ -982,34 +738,10 @@ async function safeStat(targetPath) {
   }
 }
 
-async function resolveDefaultImgbinSource(docsRoot) {
-  const installedPackagePath = path.join(docsRoot, DEFAULT_INSTALLED_IMGBIN_PACKAGE_RELATIVE);
-  if (await pathExists(installedPackagePath)) {
-    const packageRaw = await fs.readFile(installedPackagePath, 'utf8');
-    const packageJson = JSON.parse(packageRaw);
-    const binValue = typeof packageJson.bin === 'string'
-      ? packageJson.bin
-      : packageJson.bin?.imgbin;
-
-    if (binValue) {
-      return {
-        value: path.resolve(path.dirname(installedPackagePath), binValue),
-        reason: 'default installed docs imgbin package'
-      };
-    }
-  }
-
-  return {
-    value: path.join(docsRoot, DEFAULT_IMGBIN_RELATIVE),
-    reason: 'default monorepo imgbin CLI path'
-  };
-}
-
 async function resolveRuntimeEnvironment(docsRoot, baseEnv) {
   const envPath = path.join(docsRoot, DEFAULT_DOTENV_RELATIVE);
   const dotenvValues = await loadDotEnvFile(envPath);
   const env = {
-    ...DEFAULT_IMGBIN_ANALYSIS_ENV,
     ...dotenvValues,
     ...baseEnv
   };
