@@ -14,14 +14,14 @@ Use `pnpm run screenshots:scan-metadata` when you want to:
 Use this workflow when you want to:
 
 - import an existing docs screenshot into the managed screenshot library
-- generate `metadata.json` with ImgBin analysis results
+- write `metadata.json` for each imported screenshot (no analysis pass; fill the fields by hand, see Import Without Analysis)
 - rebuild `src/content/docs/img/screenshots/manifest.json`
 - switch Markdown or MDX content to use managed screenshot paths
 
 In short:
 
 - `screenshots:scan-metadata` = read-only inventory and progress-visible preflight
-- `screenshots:sync` = managed import, analysis, manifest rebuild, and staging cleanup
+- `screenshots:sync` = managed import, metadata, manifest rebuild, and staging cleanup
 
 ## Historical Backlog Scope
 
@@ -57,7 +57,7 @@ Current execution result for `screenshot-management-optimization`:
 - `71` legacy screenshots were imported or refreshed into `src/content/docs/img/screenshots/`
 - `13` Markdown or MDX pages were updated to use managed screenshot paths
 - `src/content/docs/img/screenshots/manifest.json` now contains `71` published screenshot entries
-- All checked `metadata.json` files currently report `status.recognition = succeeded`
+- Assets imported without an analysis pass carry `status.recognition = skipped`, which the manifest accepts (see Metadata Fields to Review)
 
 Remaining follow-up items after this backlog pass:
 
@@ -71,43 +71,30 @@ The legacy sets listed in the backlog above (`ai-compose-commit`, `monospecs`, `
 ## Preconditions
 
 - Run commands from `repos/docs`
-- Ensure `@hagicode/imgbin` is installed in `repos/docs` (recommended), or `repos/imgbin/dist/cli.js` exists as a fallback
-- Ensure the `codex` CLI is installed and available in `PATH`
-- Ensure `repos/docs/.env` contains valid analysis settings
-- Ensure the checked-in ImgBin analysis context file exists at `repos/docs/prompts/screenshot-analysis-context.txt`, unless you plan to override it explicitly
-
-Recommended `repos/docs/.env` keys:
+- No analysis provider or external CLI is needed
+- Optional overrides can go in `repos/docs/.env` or the shell. The defaults apply when unset:
 
 ```bash
-IMGBIN_ANALYSIS_PROVIDER=codex
-IMGBIN_CODEX_MODEL=lemon/gpt-5.4
-IMGBIN_CODEX_BASE_URL=http://localhost:36129/v1
-IMGBIN_ANALYSIS_TIMEOUT_MS=180000
-SCREENSHOT_ANALYSIS_CONTEXT_FILE=./prompts/screenshot-analysis-context.txt
+SCREENSHOT_STAGING_DIR=screenshot-staging
+SCREENSHOT_LIBRARY_ROOT=src/content/docs/img/screenshots
+SCREENSHOT_MANIFEST_PATH=src/content/docs/img/screenshots/manifest.json
 ```
 
-## Analysis Context File Contract
+## Import Without Analysis
 
-`screenshots:sync` always resolves an analysis context file before it launches ImgBin recognition. The precedence is deterministic:
+`screenshots:sync` copies each staged file into the managed library and writes its `metadata.json` itself. Nothing reads the pixels, so no title, description or tags are generated. Each new asset gets:
 
-1. `--analysis-context-file <path>`
-2. `SCREENSHOT_ANALYSIS_CONTEXT_FILE`
-3. the checked-in default `./prompts/screenshot-analysis-context.txt`
+- `title`: derived from the slug, for example `Click New Project Button` for `click-new-project-button`
+- `description` and `tags`: empty
+- `status.generation`, `status.recognition` and `status.thumbnail`: `skipped`
 
-The command validates the resolved file before any import or refresh work begins. If the file is missing or empty after trimming whitespace, the run fails immediately instead of letting ImgBin fail later in the batch.
+Fill the fields in `metadata.json` by hand:
 
-Keep the context file focused on durable screenshot semantics:
+- `manual.title` sets the title
+- `manual.description` sets the description, and the manifest also uses it as the alt text unless `manual.alt` is set
+- the top-level `tags` array holds the tags
 
-- common docs screenshot domains such as installation, settings, sessions, project setup, confirmations, and editor-like panels
-- bilingual UI clues that remain stable across many screenshots
-- evidence-first instructions that tell recognition to trust visible pixels over assumptions
-
-Do not put one-off guidance into the shared context file:
-
-- ticket-specific debugging notes
-- temporary campaign wording or branch-specific UI guesses
-- assumptions that only apply to one screenshot batch
-- model-specific hacks that are likely to become stale
+A later `screenshots:sync` run for the same staged file keeps these manual fields and replaces only `original.*`, the timestamps and the `extra.docsScreenshot` provenance.
 
 ## Directory Layout
 
@@ -135,7 +122,7 @@ Keep `screenshot-staging/.gitkeep` committed so the default staging directory ex
 
 ## Metadata Scan Preflight
 
-Run this before sync when you only need a quick inventory or when you want to confirm the batch is healthy before ImgBin analysis:
+Run this before sync when you only need a quick inventory or when you want to confirm the batch is healthy before the import:
 
 ```bash
 pnpm run screenshots:scan-metadata --input ./screenshot-staging --output ./artifacts/screenshot-report.json
@@ -189,28 +176,13 @@ Expected progress log example:
 
 ## Recommended Command
 
-If `repos/docs/.env` is configured, the sync command now loads it automatically and creates a workspace-local `.tmp` directory when `TMPDIR`, `TMP`, and `TEMP` are not already set:
-
 ```bash
 pnpm run screenshots:sync
 ```
 
-The command resolves ImgBin in this order:
+The command loads `repos/docs/.env` when it exists, imports every supported file under `screenshot-staging/` into the managed library, writes or refreshes each asset's `metadata.json`, and rebuilds `manifest.json`. It starts no external process and creates no temporary workspace.
 
-1. `--imgbin`
-2. `IMGBIN_EXECUTABLE` from `repos/docs/.env` or the shell
-3. installed `repos/docs/node_modules/@hagicode/imgbin`
-4. fallback `../imgbin/dist/cli.js`
-
-The command resolves the analysis context in this order:
-
-1. `--analysis-context-file`
-2. `SCREENSHOT_ANALYSIS_CONTEXT_FILE`
-3. `./prompts/screenshot-analysis-context.txt`
-
-At startup, `screenshots:sync` prints the resolved analysis context file so CI logs can confirm which file was actually used.
-
-After a successful sync, the docs screenshot library also refreshes its ImgBin search index so future `imgbin search` runs can immediately match recognized titles, tags, descriptions, and imported source paths.
+At startup it logs the input, library and manifest paths, so CI logs show which directories were used.
 
 ## Repository Compression Follow-up
 
@@ -270,15 +242,15 @@ These fields are enough for a maintainer to jump from a rendered page back to:
 - the checked-in `metadata.json`
 - the original staging filename recorded by `relativeSourcePath`
 
-### When to use ImgBin search results
+### When to look beyond the checked-in metadata
 
-Use checked-in metadata first. Fall back to existing ImgBin search results only when one of these is true:
+Use the checked-in `title`, `description`, `tags` and `extra.docsScreenshot` fields first. There is no search index any more. Fall back to a text search over the `metadata.json` files only when one of these is true:
 
 - the screenshot title is too generic to decide which page owns it
-- multiple screenshots appear to describe the same feature and you need extra semantic clues
+- multiple screenshots appear to describe the same feature and you need extra clues
 - a maintainer is triaging a screenshot that has not been wired into docs yet
 
-If you use ImgBin search as a fallback, copy the conclusion back into planning notes, the related OpenSpec change, or another checked-in maintainer artifact so the next maintainer does not need to repeat the search.
+If you run a search as a fallback, copy the conclusion back into planning notes, the related OpenSpec change, or another checked-in maintainer artifact so the next maintainer does not need to repeat the search.
 
 ### Example route and section planning
 
@@ -399,7 +371,7 @@ Check these fields in `metadata.json`:
 - `extra.docsScreenshot.category`
 - `extra.docsScreenshot.relativeSourcePath`
 
-`status.recognition` must be `succeeded` for the screenshot to appear in the generated manifest.
+`status.recognition` must be `succeeded` or `skipped` for the screenshot to appear in the generated manifest. `pending`, `failed` or a missing status keeps it out.
 
 For backlog processing, also verify:
 
@@ -451,84 +423,33 @@ Force one category:
 pnpm run screenshots:sync --category quick-start
 ```
 
-Reindex after import:
-
-```bash
-pnpm run screenshots:sync --reindex
-```
-
-Override the analysis context for one run:
-
-```bash
-pnpm run screenshots:sync --analysis-context-file ./prompts/experimental-context.txt
-```
-
 ## Troubleshooting
-
-### `Codex analysis timed out after 60000ms`
-
-Increase the timeout in `repos/docs/.env` or your shell environment:
-
-```bash
-IMGBIN_ANALYSIS_TIMEOUT_MS=180000
-```
-
-### `ImgBin executable not found`
-
-Verify:
-
-- `../imgbin/dist/cli.js` exists
-- or `@hagicode/imgbin` is installed in `repos/docs`
-- or `IMGBIN_EXECUTABLE` points to a valid executable
-
-### `Analysis context file not found` or `Analysis context file is empty`
-
-Verify:
-
-- `repos/docs/prompts/screenshot-analysis-context.txt` exists and is not blank
-- or `SCREENSHOT_ANALYSIS_CONTEXT_FILE` points to a real non-empty file
-- or your `--analysis-context-file` override path is correct
-
-If this is a one-off batch, prefer a CLI override. If the missing file should be the repository default, restore or fix `repos/docs/prompts/screenshot-analysis-context.txt` so CI and local runs stay aligned.
-
-### `Codex analysis model is not configured`
-
-Verify `repos/docs/.env` contains:
-
-- `IMGBIN_ANALYSIS_PROVIDER=codex`
-- `IMGBIN_CODEX_MODEL=lemon/gpt-5.4`
-- `IMGBIN_CODEX_BASE_URL=http://localhost:36129/v1`
-
-### `EXDEV: cross-device link not permitted`
-
-The sync command now auto-creates `.tmp` and exports `TMPDIR` / `TMP` / `TEMP` to that workspace-local directory by default. If you still need to override it, set one of these values in `repos/docs/.env` or your shell:
-
-```bash
-TMPDIR=/custom/workspace/tmp
-```
 
 ### Manifest entry missing
 
 Check `metadata.json`:
 
-- `status.recognition` must be `succeeded`
+- `status.recognition` must be `succeeded` or `skipped`
+- `paths.original` must name an existing `original.*` file in the same directory
 
-Failed recognition results do not enter the manifest.
+Entries with `pending`, `failed` or no `status` are left out of the manifest.
+
+### `Managed asset path already exists without metadata`
+
+The target directory exists but has no `metadata.json`, so the sync refuses to overwrite it. Inspect the directory, restore or remove it, then re-run the batch. The staged file stays in `screenshot-staging/` until its import succeeds.
+
+### `Unknown argument` from `screenshots:sync`
+
+The analysis-era flags `--reindex`, `--analysis-context-file`, `--analysis-prompt`, `--no-overwrite` and the analysis tool executable flag were removed. Drop them from scripts and shell history. The sync accepts `--input`, `--library-root`, `--manifest`, `--category`, `--dry-run` and `--help`.
 
 ### `screenshots:sync` printed startup output but progress feels stalled
 
-This usually means the sync command has moved into ImgBin analysis, import, or another batch step that does not emit per-file logs as frequently as the lightweight scanner.
-
-Use this preflight path first:
+The sync only copies files and writes JSON, so a stall is usually a slow disk or a large file. Use the lightweight preflight first:
 
 1. Run `pnpm run screenshots:scan-metadata --input ./screenshot-staging --output ./artifacts/screenshot-report.json`
 2. Confirm the scan reports the expected file count, dimensions, and timestamps
 3. Fix any corrupted files reported in `failures` before retrying `screenshots:sync`
 4. Re-run `screenshots:sync` only after the scan output looks healthy
-
-The metadata scan command is intentionally the faster, more observable command for confirming that the batch itself is sane; the sync command still owns managed import, AI analysis, and manifest rebuild.
-
-Also check the startup line that reports `analysis context:`. If it points at the wrong file, fix the CLI flag or environment override before retrying.
 
 ### Historical backlog item failed during sync
 
@@ -558,13 +479,11 @@ Validated in this repository:
 - manifest generation
 - Markdown path resolution through the manifest helper
 
-Current limitation:
-
-- if you override the temp directory, it still needs to live on a filesystem that permits the import move/rename flow
+The import path without analysis is covered by `pnpm run test:screenshot-metadata`: first import, refresh that keeps hand-written `manual` fields, dry run, failure on a metadata-less directory, and manifest acceptance of `skipped` assets.
 
 ## User Guide Screenshots (static, not managed)
 
-The pages under `src/content/docs/user-guide/` and `src/content/translations/docs/en-US/user-guide/` use plain PNG files in `src/content/docs/img/user-guide/<module>/`. They are intentionally **not** part of the managed `screenshots:sync` library: they do not need ImgBin analysis, and they are retaken whenever the workbench UI changes.
+The pages under `src/content/docs/user-guide/` and `src/content/translations/docs/en-US/user-guide/` use plain PNG files in `src/content/docs/img/user-guide/<module>/`. They are intentionally **not** part of the managed `screenshots:sync` library: they do not go through `screenshots:sync`, and they are retaken whenever the workbench UI changes.
 
 Capture rules:
 
