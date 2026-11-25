@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promises as fs } from 'node:fs';
+import sharp from 'sharp';
 
 const SCRIPT_FILE = fileURLToPath(import.meta.url);
 const SCRIPT_DIR = path.dirname(SCRIPT_FILE);
@@ -13,7 +14,9 @@ const DEFAULT_MANIFEST_RELATIVE = path.join(DEFAULT_LIBRARY_RELATIVE, 'manifest.
 const DEFAULT_DOTENV_RELATIVE = '.env';
 // `skipped` marks assets whose metadata was written without an analysis pass (captured or imported as-is).
 const ACCEPTED_RECOGNITION_STATUSES = new Set(['succeeded', 'skipped']);
+// Staged inputs may be PNG, JPEG or WebP, but every managed original is written as AVIF (see encodeOriginalAvif).
 const SUPPORTED_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp']);
+const ORIGINAL_FILENAME = 'original.avif';
 const LOG_PREFIX = '[screenshots:sync]';
 
 export function parseCliArgs(argv) {
@@ -369,13 +372,24 @@ async function processScreenshotEntry(entry, config, context = {}) {
   };
 }
 
+// Same encoder settings as the docs image batch: PNG is graphic (quality 70, 4:4:4 keeps text and UI edges sharp),
+// JPEG and WebP are photo (quality 60, 4:2:0). EXIF orientation is applied and metadata is stripped.
+async function encodeOriginalAvif(sourcePath) {
+  const extension = path.extname(sourcePath).toLowerCase();
+  const input = await fs.readFile(sourcePath);
+  const graphic = extension === '.png';
+  return sharp(input, { limitInputPixels: false })
+    .rotate()
+    .avif({ quality: graphic ? 70 : 60, effort: 6, chromaSubsampling: graphic ? '4:4:4' : '4:2:0' })
+    .toBuffer();
+}
+
 async function importOriginalAsset(entry) {
-  const extension = path.extname(entry.sourcePath).slice(1).toLowerCase();
-  const originalFilename = `original.${extension}`;
+  const originalFilename = ORIGINAL_FILENAME;
   const timestamp = new Date().toISOString();
 
   await fs.mkdir(entry.targetAssetDir, { recursive: true });
-  await fs.copyFile(entry.sourcePath, path.join(entry.targetAssetDir, originalFilename));
+  await fs.writeFile(path.join(entry.targetAssetDir, originalFilename), await encodeOriginalAvif(entry.sourcePath));
 
   const metadata = {
     schemaVersion: 2,
@@ -448,14 +462,14 @@ async function refreshOriginalAsset(entry, config) {
   const metadataPath = path.join(entry.targetAssetDir, 'metadata.json');
   const raw = await fs.readFile(metadataPath, 'utf8');
   const metadata = JSON.parse(raw);
-  const extension = path.extname(entry.sourcePath).slice(1).toLowerCase();
-  const nextOriginalFilename = `original.${extension}`;
+  const nextOriginalFilename = ORIGINAL_FILENAME;
+  const encoded = await encodeOriginalAvif(entry.sourcePath);
 
   const files = await fs.readdir(entry.targetAssetDir);
   await Promise.all(files
     .filter((filename) => /^original\./.test(filename) && filename !== nextOriginalFilename)
     .map((filename) => fs.rm(path.join(entry.targetAssetDir, filename), { force: true })));
-  await fs.copyFile(entry.sourcePath, path.join(entry.targetAssetDir, nextOriginalFilename));
+  await fs.writeFile(path.join(entry.targetAssetDir, nextOriginalFilename), encoded);
 
   const nextMetadata = {
     ...metadata,

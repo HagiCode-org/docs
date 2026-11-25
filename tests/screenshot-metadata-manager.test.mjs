@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { promises as fs } from 'node:fs';
+import sharp from 'sharp';
 
 import {
   buildScreenshotManifest,
@@ -218,16 +219,21 @@ test('runScreenshotMetadataManager imports staged files without analysis and ref
 
   const importedMetadata = JSON.parse(await fs.readFile(path.join(assetDir, 'metadata.json'), 'utf8'));
   assert.equal(importedMetadata.status.recognition, 'skipped');
-  assert.equal(importedMetadata.paths.original, 'original.png');
+  assert.equal(importedMetadata.paths.original, 'original.avif');
   assert.equal(importedMetadata.title, 'Success Image');
   assert.equal(importedMetadata.extra.docsScreenshot.relativeSourcePath, 'shared/success-image.png');
-  await fs.access(path.join(assetDir, 'original.png'));
+  await fs.access(path.join(assetDir, 'original.avif'));
+  await assert.rejects(fs.access(path.join(assetDir, 'original.png')));
+  const importedBytes = await fs.readFile(path.join(assetDir, 'original.avif'));
+  assert.equal(importedBytes.subarray(8, 12).toString('latin1'), 'avif', 'managed original must carry an AVIF brand');
 
   // A hand-written title and description must survive a refresh.
   importedMetadata.manual = { title: 'Hand-written title', description: 'Hand-written description.' };
   await fs.writeFile(path.join(assetDir, 'metadata.json'), JSON.stringify(importedMetadata, null, 2));
 
-  const replacementBytes = Buffer.from('replacement-bytes');
+  const replacementBytes = await sharp({
+    create: { width: 3, height: 2, channels: 3, background: '#2060c0' }
+  }).png().toBuffer();
   await writePng(stagedPath, replacementBytes);
 
   const secondRun = await runScreenshotMetadataManager({
@@ -240,7 +246,11 @@ test('runScreenshotMetadataManager imports staged files without analysis and ref
 
   assert.equal(secondRun.exitCode, 0);
   assert.equal(secondRun.results[0].action, 'refreshed-existing');
-  assert.deepEqual(await fs.readFile(path.join(assetDir, 'original.png')), replacementBytes);
+  await assert.rejects(fs.access(path.join(assetDir, 'original.png')));
+  const refreshedOriginal = await sharp(path.join(assetDir, 'original.avif')).metadata();
+  assert.equal(refreshedOriginal.format, 'heif');
+  assert.equal(refreshedOriginal.width, 3);
+  assert.equal(refreshedOriginal.height, 2);
   await assert.rejects(fs.access(stagedPath));
 
   const refreshedMetadata = JSON.parse(await fs.readFile(path.join(assetDir, 'metadata.json'), 'utf8'));

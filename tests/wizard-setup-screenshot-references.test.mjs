@@ -6,17 +6,17 @@ import { readFile } from 'node:fs/promises';
 const docsRoot = path.resolve(import.meta.dirname, '..');
 const zhWizardSetupPath = path.join(docsRoot, 'src', 'content', 'docs', 'quick-start', 'wizard-setup.mdx');
 const enWizardSetupPath = path.join(docsRoot, 'src', 'content', 'translations', 'docs', 'en-US', 'quick-start', 'wizard-setup.mdx');
-const staticScreenshotPattern = /img\/quick-start\/wizard-setup\/([^/\s)]+\.png)/gu;
+const staticScreenshotPattern = /img\/quick-start\/wizard-setup\/([^/\s)]+\.avif)/gu;
 
 // The wizard pages describe the current 4-step wizard and embed static English-interface
 // screenshots from img/quick-start/wizard-setup. Every reference must point at an existing file.
 const expectedScreenshots = [
-  '01-language-theme.png',
-  '02-cli-model.png',
-  '03-connection-test.png',
-  '04-project-form.png',
-  '05-project-summary.png',
-  '06-community.png'
+  '01-language-theme.avif',
+  '02-cli-model.avif',
+  '03-connection-test.avif',
+  '04-project-form.avif',
+  '05-project-summary.avif',
+  '06-community.avif'
 ];
 
 test('wizard setup pages do not reference the retired staging path', async () => {
