@@ -39,7 +39,7 @@ HagiCode デスクトップ アプリケーションで、Super Commit を使用
 
 Git 操作セクションで [Super Commit] ボタンを見つけます。
 
-![Super Commit ボタン](../../img/screenshots/product/git-super-commit/original.png)
+![Super Commit ボタン](../../img/screenshots/product/git-super-commit/original.avif)
 
 このボタンは通常、Git 操作セクションの他のバージョン管理アクションの近くの目立つ場所にあります。
 
@@ -49,7 +49,7 @@ Git 操作セクションで [Super Commit] ボタンを見つけます。
 
 ボタンを押してもすぐには実行されません。まず Super Commit の確認ドロワーが開き、変更のあるリポジトリ数が表示され、この実行のオプションを確認できます。
 
-![Super Commit の確認ドロワー](../../img/screenshots/guides/super-commit-confirmation/original.png)
+![Super Commit の確認ドロワー](../../img/screenshots/guides/super-commit-confirmation/original.avif)
 
 ドロワーには次のオプションがあります。
 - **Git 作成者プロファイル**: 保存済みの Git ID を選びます。まだない場合は、先に Git 設定で作成します

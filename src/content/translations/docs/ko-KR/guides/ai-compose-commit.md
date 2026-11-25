@@ -39,7 +39,7 @@ HagiCode 데스크톱 애플리케이션에서 Super Commit을 사용하려는 �
 
 Git 작업 섹션에서 "Super Commit" 버튼을 찾으세요.
 
-![Super Commit 버튼](../../img/screenshots/product/git-super-commit/original.png)
+![Super Commit 버튼](../../img/screenshots/product/git-super-commit/original.avif)
 
 이 버튼은 일반적으로 Git 작업 섹션의 다른 버전 제어 작업 근처에 눈에 띄게 위치합니다.
 
@@ -49,7 +49,7 @@ Git 작업 섹션에서 "Super Commit" 버튼을 찾으세요.
 
 버튼을 눌러도 바로 실행되지 않습니다. 먼저 Super Commit 확인 서랍이 열려 변경된 저장소 수를 요약하고, 이번 실행의 옵션을 확인할 수 있습니다.
 
-![Super Commit 확인 서랍](../../img/screenshots/guides/super-commit-confirmation/original.png)
+![Super Commit 확인 서랍](../../img/screenshots/guides/super-commit-confirmation/original.avif)
 
 서랍에는 다음 옵션이 있습니다.
 - **Git 작성자 프로필**: 저장된 Git ID를 선택합니다. 아직 없다면 먼저 Git 설정에서 만드세요

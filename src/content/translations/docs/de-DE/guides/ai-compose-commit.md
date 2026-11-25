@@ -39,7 +39,7 @@ Navigieren Sie in der HagiCode-Desktopanwendung zu dem Projekt, in dem Sie Super
 
 Suchen Sie die Schaltfläche „Super Commit“ im Abschnitt „Git-Operationen“.
 
-![Super-Commit-Schaltfläche](../../img/screenshots/product/git-super-commit/original.png)
+![Super-Commit-Schaltfläche](../../img/screenshots/product/git-super-commit/original.avif)
 
 Diese Schaltfläche befindet sich normalerweise gut sichtbar im Abschnitt „Git-Operationen“ neben anderen Versionskontrollaktionen.
 
@@ -49,7 +49,7 @@ Diese Schaltfläche befindet sich normalerweise gut sichtbar im Abschnitt „Git
 
 Ein Klick auf die Schaltfläche startet nichts sofort. Zuerst öffnet sich die Super-Commit-Bestätigung, die zusammenfasst, wie viele Repositories Änderungen haben, und in der du die Optionen für diesen Lauf prüfst.
 
-![Super-Commit-Bestätigungs-Drawer](../../img/screenshots/guides/super-commit-confirmation/original.png)
+![Super-Commit-Bestätigungs-Drawer](../../img/screenshots/guides/super-commit-confirmation/original.avif)
 
 Der Drawer enthält diese Optionen:
 - **Git-Autorenprofil**: Wähle eine gespeicherte Git-Identität; gibt es noch keine, lege zuerst eine in den Git-Einstellungen an

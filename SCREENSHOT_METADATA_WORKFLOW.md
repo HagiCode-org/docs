@@ -96,6 +96,8 @@ Fill the fields in `metadata.json` by hand:
 
 A later `screenshots:sync` run for the same staged file keeps these manual fields and replaces only `original.*`, the timestamps and the `extra.docsScreenshot` provenance.
 
+Managed originals are always AVIF. Staged PNG, JPEG or WebP files are staging inputs only: `screenshots:sync` re-encodes each one to `original.avif` with sharp (PNG as graphic, quality 70 with 4:4:4 chroma; JPEG and WebP as photo, quality 60 with 4:2:0) and records `paths.original: "original.avif"`. The staged file is copied verbatim nowhere, so no `original.png` is written by the sync. Any stale `original.*` file in the asset directory is removed on refresh.
+
 ## Directory Layout
 
 Put screenshots into a staging tree that mirrors the intended docs category:
@@ -110,7 +112,7 @@ repos/docs/
     └── quick-start/
         └── create-project/
             └── step1-click-new-project-button/
-                ├── original.png
+                ├── original.avif
                 └── metadata.json
 ```
 
@@ -222,7 +224,7 @@ When a screenshot batch is already imported, treat the checked-in metadata as th
    - Chinese route, for example `/adventure-team-introduction`
    - English mirror route, for example `/en/adventure-team-introduction`
    - section name that owns each screenshot
-3. Write the MDX page with the managed screenshot path, usually `.../original.png`.
+3. Write the MDX page with the managed screenshot path, usually `.../original.avif`.
 4. Keep the screenshot-to-section mapping in maintainer notes, change artifacts, or planning docs instead of the published page when the public docs should stay reader-focused.
 5. Add related links only after the page body is stable, so navigation changes stay minimal and reviewable.
 
@@ -319,7 +321,7 @@ Completed without failures.
 
 Verify these files exist:
 
-- `src/content/docs/img/screenshots/<category>/<slug>/original.png`
+- `src/content/docs/img/screenshots/<category>/<slug>/original.avif`
 - `src/content/docs/img/screenshots/<category>/<slug>/metadata.json`
 - `src/content/docs/img/screenshots/manifest.json`
 
@@ -332,12 +334,12 @@ After a successful import or refresh:
 
 Manifest entries expose a static image path like:
 
-- `img/screenshots/quick-start/create-project/step1-click-new-project-button/original.png`
+- `img/screenshots/quick-start/create-project/step1-click-new-project-button/original.avif`
 
 From a docs file such as `src/content/docs/quick-start/create-first-project.mdx`, the Markdown relative path is:
 
 ```md
-![Create new project button](../img/screenshots/quick-start/create-project/step1-click-new-project-button/original.png)
+![Create new project button](../img/screenshots/quick-start/create-project/step1-click-new-project-button/original.avif)
 ```
 
 The helper at `src/utils/screenshot-manifest.js` can also resolve manifest entries into Markdown-ready paths.
@@ -491,4 +493,4 @@ Capture rules:
 - Run the local stack from the monorepo root with a scrubbed environment so it cannot see another deployment's data: `npm run start:api` (backend on `127.0.0.1:35167`) and `npm run web` (Vite on `37599`). Put the Agent CLI you need (for example `claude`) on that `PATH`, otherwise sessions fail with "Unable to locate the Claude Code executable".
 - Use a throwaway demo repository (a few files and two commits) as the project and a small read-only prompt for the sample session.
 - Never publish real local paths or accounts. Replace visible paths with `/home/user/projects/<name>` before taking the shot, and skip tabs that show account names (Settings → GitHub) or machine layout (Settings → Data Management, HagiTask source paths).
-- Name files `NN-short-description.png` inside the module folder and reference them from the zh-CN source (`../img/user-guide/...`) and the English translation (`../../img/user-guide/...`).
+- Capture the screenshot as PNG, then convert it to AVIF before committing (graphic settings: quality 70, 4:4:4 chroma, so text and UI edges stay sharp). Name the committed file `NN-short-description.avif` inside the module folder and reference it from the zh-CN source (`../img/user-guide/...`) and the English translation (`../../img/user-guide/...`). The PNG capture is not committed.

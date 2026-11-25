@@ -39,7 +39,7 @@ Dans l'application de bureau HagiCode, accédez au projet dans lequel vous souha
 
 Localisez le bouton « Super Commit » dans la section des opérations Git.
 
-![Bouton Super Commit](../../img/screenshots/product/git-super-commit/original.png)
+![Bouton Super Commit](../../img/screenshots/product/git-super-commit/original.avif)
 
 Ce bouton est généralement situé bien en vue dans la section des opérations Git, à proximité d'autres actions de contrôle de version.
 
@@ -49,7 +49,7 @@ Ce bouton est généralement situé bien en vue dans la section des opérations 
 
 Cliquer sur le bouton ne lance rien immédiatement. Le panneau de confirmation Super Commit s’ouvre d’abord, résume le nombre de dépôts modifiés et vous permet de vérifier les options de cette exécution.
 
-![Panneau de confirmation Super Commit](../../img/screenshots/guides/super-commit-confirmation/original.png)
+![Panneau de confirmation Super Commit](../../img/screenshots/guides/super-commit-confirmation/original.avif)
 
 Le panneau propose ces options :
 - **Profil d’auteur Git** : choisissez une identité Git enregistrée ; s’il n’y en a pas encore, créez-en une d’abord dans les paramètres Git

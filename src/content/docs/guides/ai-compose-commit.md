@@ -40,7 +40,7 @@ Super Commit 会读取当前代码变更，并按 Conventional Commits 生成提
 
 在 HagiCode 的 Git 标签页中，找到“超级提交”（Super Commit）按钮并点击。
 
-![Super Commit 按钮](../img/screenshots/product/git-super-commit/original.png)
+![Super Commit 按钮](../img/screenshots/product/git-super-commit/original.avif)
 
 这个按钮位于 Git 操作区域的显著位置，通常在常规提交操作旁边。
 
@@ -50,7 +50,7 @@ Super Commit 会读取当前代码变更，并按 Conventional Commits 生成提
 
 点击按钮后不会立刻执行，而是先打开“Super Commit 确认”抽屉，汇总有变更的仓库数量，并让你确认本次运行的选项。
 
-![Super Commit 确认抽屉](../img/screenshots/guides/super-commit-confirmation/original.png)
+![Super Commit 确认抽屉](../img/screenshots/guides/super-commit-confirmation/original.avif)
 
 抽屉中包含以下选项：
 - **Git 作者资料**：选择已保存的 Git 身份；还没有资料时，需要先到 Git 设置中创建

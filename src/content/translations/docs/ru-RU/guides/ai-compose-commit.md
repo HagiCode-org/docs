@@ -39,7 +39,7 @@ Super Commit анализирует ваши изменения и записы�
 
 Найдите кнопку «Super Commit» в разделе «Операции Git».
 
-![Кнопка Super Commit](../../img/screenshots/product/git-super-commit/original.png)
+![Кнопка Super Commit](../../img/screenshots/product/git-super-commit/original.avif)
 
 Эта кнопка обычно расположена на видном месте в разделе «Операции Git», рядом с другими действиями по контролю версий.
 
@@ -49,7 +49,7 @@ Super Commit анализирует ваши изменения и записы�
 
 Нажатие кнопки ничего не запускает сразу. Сначала открывается панель подтверждения Super Commit: она показывает, в скольких репозиториях есть изменения, и позволяет проверить параметры этого запуска.
 
-![Панель подтверждения Super Commit](../../img/screenshots/guides/super-commit-confirmation/original.png)
+![Панель подтверждения Super Commit](../../img/screenshots/guides/super-commit-confirmation/original.avif)
 
 В панели доступны следующие параметры:
 - **Профиль автора Git**: выберите сохранённую Git-личность; если её ещё нет, сначала создайте её в настройках Git

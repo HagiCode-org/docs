@@ -39,7 +39,7 @@ Super Commit 會分析您的變更並為其編寫標準化的提交訊息。它�
 
 在Git操作部分找到「超級提交」（Super Commit）按鈕。
 
-![Super Commit 按鈕](../../img/screenshots/product/git-super-commit/original.png)
+![Super Commit 按鈕](../../img/screenshots/product/git-super-commit/original.avif)
 
 此按鈕通常位於 Git 操作部分的顯著位置，靠近其他版本控制操作。
 
@@ -49,7 +49,7 @@ Super Commit 會分析您的變更並為其編寫標準化的提交訊息。它�
 
 按一下按鈕後不會立刻執行，而是先開啟「Super Commit 確認」抽屜，彙總有變更的倉庫數量，並讓你確認本次執行的選項。
 
-![Super Commit 確認抽屜](../../img/screenshots/guides/super-commit-confirmation/original.png)
+![Super Commit 確認抽屜](../../img/screenshots/guides/super-commit-confirmation/original.avif)
 
 抽屜中包含以下選項：
 - **Git 作者資料**：選擇已儲存的 Git 身分；還沒有資料時，需要先到 Git 設定中建立

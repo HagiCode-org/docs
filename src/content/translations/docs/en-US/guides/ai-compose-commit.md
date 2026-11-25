@@ -39,7 +39,7 @@ In the HagiCode desktop application, navigate to the project where you want to u
 
 Locate the "Super Commit" button in the Git operations section.
 
-![Super Commit Button](../../img/screenshots/product/git-super-commit/original.png)
+![Super Commit Button](../../img/screenshots/product/git-super-commit/original.avif)
 
 This button is typically located prominently in the Git operations section, near other version control actions.
 
@@ -49,7 +49,7 @@ This button is typically located prominently in the Git operations section, near
 
 Clicking the button does not start anything immediately. It first opens the Super Commit confirmation drawer, which summarizes how many repositories have changes and lets you review the options for this run.
 
-![Super Commit confirmation drawer](../../img/screenshots/guides/super-commit-confirmation/original.png)
+![Super Commit confirmation drawer](../../img/screenshots/guides/super-commit-confirmation/original.avif)
 
 The drawer contains these options:
 - **Git author profile**: pick a saved Git identity; if none exists yet, create one in Git settings first
